@@ -1,0 +1,128 @@
+name: 数据库适配 / 兼容性问题
+description: 某个数据库、版本、驱动行为、SQL 方言或元数据读取不兼容。
+title: "[Compatibility] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个模板用于收集数据库兼容性细节，例如某个版本连接失败、schema 读取不完整、字段类型显示错误、SQL 方言不支持等。请勿提交真实连接凭据。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认连接信息、网络、账号权限本身可用。
+          required: true
+        - label: 我已隐藏真实主机、用户名、密码、Token 和业务数据。
+          required: true
+
+  - type: dropdown
+    id: database
+    attributes:
+      label: 数据库类型
+      options:
+        - MySQL
+        - PostgreSQL
+        - SQLite
+        - Redis
+        - MongoDB
+        - DuckDB
+        - ClickHouse
+        - SQL Server
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: database-version
+    attributes:
+      label: 数据库版本 / 发行版
+      description: 例如 MariaDB、AWS RDS、Azure SQL、TiDB、兼容 PostgreSQL 的云数据库等也请注明。
+      placeholder: "例如：MariaDB 10.11 / AWS RDS PostgreSQL 15.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scenario
+    attributes:
+      label: 问题场景
+      options:
+        - 测试连接失败
+        - 保存连接失败
+        - SSH 隧道连接失败
+        - 展开数据库 / schema / 表失败
+        - 字段 / 索引 / 外键 / 触发器读取错误
+        - 查询执行错误
+        - 查询结果显示错误
+        - 行内编辑 / 保存错误
+        - Redis key 浏览 / value 显示错误
+        - MongoDB document 浏览 / CRUD 错误
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema
+    attributes:
+      label: 最小表结构 / 数据样例
+      description: 请提供能触发问题的最小结构或数据，务必脱敏。
+      render: sql
+      placeholder: |
+        CREATE TABLE ...
+        INSERT INTO ...
+
+  - type: textarea
+    id: query
+    attributes:
+      label: 触发问题的查询 / 操作
+      description: 如果和 SQL、Redis 命令、MongoDB 查询有关，请贴出最小复现内容。
+      render: sql
+
+  - type: textarea
+    id: error
+    attributes:
+      label: 错误信息
+      description: 粘贴 DBX 弹窗、终端、DevTools 或后端日志里的错误。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 正确行为
+      description: 说明同样操作在数据库 CLI、其他客户端或预期中应该得到什么结果。
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: DBX 版本 / Commit
+      placeholder: "例如：v0.1.0 / main@abcdef1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      multiple: true
+      options:
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows x64
+        - Windows ARM64
+        - Linux x64
+        - Linux ARM64
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 例如数据库部署方式、Docker 镜像、字符集、时区、SSL、代理、VPN、云厂商兼容层等。

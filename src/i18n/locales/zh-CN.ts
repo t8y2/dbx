@@ -36,6 +36,8 @@ export default {
     sshEnable: "通过 SSH 隧道连接",
     sshHost: "SSH 主机",
     sshUser: "SSH 用户",
+    sshPassword: "SSH 密码",
+    sshPasswordPlaceholder: "留空则使用密钥",
     sshKeyPath: "密钥路径",
   },
   editor: {

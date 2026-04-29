@@ -209,7 +209,7 @@ pub async fn connect_db(
     let url = if config.ssh_enabled && !config.ssh_host.is_empty() {
         let local_port = state.tunnels.start_tunnel(
             &id, &config.ssh_host, config.ssh_port,
-            &config.ssh_user, &config.ssh_key_path,
+            &config.ssh_user, &config.ssh_password, &config.ssh_key_path,
             &config.host, config.port,
         ).await?;
         config.connection_url_with_host("127.0.0.1", local_port)

@@ -19,6 +19,7 @@ Thumbs.db
 # GitHub (keep workflows)
 .github/*
 !.github/workflows/
+!.github/ISSUE_TEMPLATE/
 
 # Env
 .env

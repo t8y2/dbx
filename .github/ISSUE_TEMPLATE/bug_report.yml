@@ -1,0 +1,170 @@
+name: 问题反馈
+description: 程序崩溃、连接失败、查询异常、界面显示错误或其他可复现问题。
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量提供可复现的信息，尤其是数据库类型、版本、连接方式和错误日志。涉及敏感信息时请脱敏。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 issues，确认没有重复反馈。
+          required: true
+        - label: 我已尝试使用最新版本或当前 main 分支复现。
+          required: false
+        - label: 我提供的信息中不包含真实密码、Token、私钥或生产数据。
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题模块
+      description: 选择最接近的功能区域。
+      options:
+        - 连接管理
+        - SSH 隧道
+        - 结构浏览
+        - SQL 查询编辑器
+        - 数据表格 / 行内编辑
+        - 数据导出
+        - Redis 浏览器
+        - MongoDB 浏览器
+        - 查询历史
+        - AI 助手
+        - 主题 / 多语言 / 界面
+        - 安装 / 启动 / 打包
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: database
+    attributes:
+      label: 数据库类型
+      description: 如果与数据库无关，请选择“不适用”。
+      multiple: true
+      options:
+        - MySQL
+        - PostgreSQL
+        - SQLite
+        - Redis
+        - MongoDB
+        - DuckDB
+        - ClickHouse
+        - SQL Server
+        - 不适用
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: database-version
+    attributes:
+      label: 数据库版本
+      description: 例如 MySQL 8.0.36、PostgreSQL 16、Redis 7.2、MongoDB 7.0。
+      placeholder: "例如：PostgreSQL 16.2"
+
+  - type: dropdown
+    id: connection-method
+    attributes:
+      label: 连接方式
+      options:
+        - 直连
+        - SSH 隧道
+        - 本地文件 / SQLite
+        - 不适用
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 简洁说明实际发生了什么，以及它为什么不符合预期。
+      placeholder: "例如：连接 PostgreSQL 后展开 schema 时一直 loading，控制台报错 ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请写出从启动 DBX 到出现问题的最短路径。
+      placeholder: |
+        1. 打开 DBX
+        2. 新建 PostgreSQL 连接，填写 ...
+        3. 点击测试连接 / 保存 / 展开表
+        4. 出现 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: "例如：应该正常展开 public schema 并显示表列表。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      placeholder: "例如：界面无响应 / 弹出错误 / 数据显示为空 / 应用崩溃。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: 最小复现 SQL / 数据结构
+      description: 如果问题和查询、表结构、Redis key、MongoDB document 有关，请提供脱敏后的最小样例。
+      render: sql
+      placeholder: |
+        CREATE TABLE demo (...);
+        SELECT ...;
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志 / 截图
+      description: 可粘贴终端、DevTools、Tauri/Rust 日志，或直接拖入截图。
+      render: shell
+      placeholder: "请粘贴错误堆栈、控制台输出或截图。"
+
+  - type: input
+    id: app-version
+    attributes:
+      label: DBX 版本 / Commit
+      description: Release 版本号、安装包版本或 git commit。
+      placeholder: "例如：v0.1.0 / main@abcdef1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      multiple: true
+      options:
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows x64
+        - Windows ARM64
+        - Linux x64
+        - Linux ARM64
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 例如是否使用代理、VPN、Docker 数据库、远程云数据库、特殊字符账号或非默认端口。

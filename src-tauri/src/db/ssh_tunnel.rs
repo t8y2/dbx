@@ -19,13 +19,14 @@ impl TunnelManager {
         ssh_host: &str,
         ssh_port: u16,
         ssh_user: &str,
+        ssh_password: &str,
         ssh_key_path: &str,
         remote_host: &str,
         remote_port: u16,
     ) -> Result<u16, String> {
         let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
 
-        let mut args = vec![
+        let mut ssh_args = vec![
             "-N".to_string(),
             "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
             "-o".to_string(), "ServerAliveInterval=60".to_string(),
@@ -34,20 +35,39 @@ impl TunnelManager {
         ];
 
         if !ssh_key_path.is_empty() {
-            args.push("-i".to_string());
-            args.push(ssh_key_path.to_string());
+            ssh_args.push("-i".to_string());
+            ssh_args.push(ssh_key_path.to_string());
         }
 
-        args.push(format!("{ssh_user}@{ssh_host}"));
+        ssh_args.push(format!("{ssh_user}@{ssh_host}"));
 
-        let child = Command::new("ssh")
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("Failed to start SSH tunnel: {e}"))?;
+        let child = if !ssh_password.is_empty() && ssh_key_path.is_empty() {
+            Command::new("sshpass")
+                .arg("-p").arg(ssh_password)
+                .arg("ssh")
+                .args(&ssh_args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        "SSH password auth requires 'sshpass'. Install it: brew install sshpass (macOS) / apt install sshpass (Linux)".to_string()
+                    } else {
+                        format!("Failed to start SSH tunnel: {e}")
+                    }
+                })?
+        } else {
+            Command::new("ssh")
+                .args(&ssh_args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| format!("Failed to start SSH tunnel: {e}"))?
+        };
 
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
@@ -64,5 +84,4 @@ impl TunnelManager {
             let _ = child.kill().await;
         }
     }
-
 }

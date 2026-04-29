@@ -1,0 +1,113 @@
+name: 功能建议
+description: 提议新功能、交互改进、性能优化或现有功能增强。
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        好的功能建议最好说明使用场景、当前痛点和期望工作流。请尽量避免只写“支持 X”，多给一点上下文会更容易评估和实现。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 issues，确认没有重复建议。
+          required: true
+        - label: 这个建议与 DBX 的数据库管理、查询、浏览、导出或桌面体验有关。
+          required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 建议类型
+      options:
+        - 新数据库支持
+        - 连接管理
+        - SSH 隧道
+        - 结构浏览
+        - SQL 编辑器 / 自动补全
+        - 数据表格 / 编辑体验
+        - 数据导入导出
+        - Redis 功能
+        - MongoDB 功能
+        - 查询历史
+        - AI 助手
+        - 主题 / 多语言 / 界面
+        - 性能优化
+        - 安装 / 打包 / 更新
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: database
+    attributes:
+      label: 相关数据库
+      multiple: true
+      options:
+        - MySQL
+        - PostgreSQL
+        - SQLite
+        - Redis
+        - MongoDB
+        - DuckDB
+        - ClickHouse
+        - SQL Server
+        - 不限数据库
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 当前痛点
+      description: 现在做这件事有什么不方便、不能做或容易出错？
+      placeholder: "例如：每次查询后都要手动复制结果再转成 Markdown，流程比较繁琐。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 描述你希望 DBX 如何支持这个功能。
+      placeholder: "例如：在查询结果右上角增加导出 Markdown 按钮，可选择是否包含表头。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: 期望工作流
+      description: 如果能描述用户操作路径，会更容易落地成产品设计。
+      placeholder: |
+        1. 打开连接
+        2. 执行查询
+        3. 点击 ...
+        4. 得到 ...
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你试过的替代方案
+      description: 例如目前如何绕过、是否使用其他工具完成、有什么缺点。
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考截图 / 产品 / 文档
+      description: 可以拖入截图，或贴出类似功能的链接。
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 需求紧急程度
+      options:
+        - 只是想法，不急
+        - 会明显提升日常使用体验
+        - 当前工作流被阻塞
+    validations:
+      required: true

@@ -39,6 +39,7 @@ const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   ssh_host: "",
   ssh_port: 22,
   ssh_user: "",
+  ssh_password: "",
   ssh_key_path: "",
 });
 
@@ -59,6 +60,7 @@ watch(() => props.editConfig, (config) => {
       ssh_host: config.ssh_host || "",
       ssh_port: config.ssh_port || 22,
       ssh_user: config.ssh_user || "",
+      ssh_password: config.ssh_password || "",
       ssh_key_path: config.ssh_key_path || "",
     };
   } else {
@@ -215,6 +217,10 @@ watch([() => editingId.value, () => open.value], () => {
             <div class="grid grid-cols-4 items-center gap-4">
               <Label class="text-right text-xs">{{ t('connection.sshUser') }}</Label>
               <Input v-model="form.ssh_user" class="col-span-3" placeholder="root" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshPassword') }}</Label>
+              <Input v-model="form.ssh_password" type="password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" />
             </div>
             <div class="grid grid-cols-4 items-center gap-4">
               <Label class="text-right text-xs">{{ t('connection.sshKeyPath') }}</Label>

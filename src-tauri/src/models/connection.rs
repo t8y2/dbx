@@ -19,6 +19,8 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub ssh_user: String,
     #[serde(default)]
+    pub ssh_password: String,
+    #[serde(default)]
     pub ssh_key_path: String,
 }
 

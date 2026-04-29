@@ -1,0 +1,69 @@
+name: 问题咨询 / 讨论
+description: 使用疑问、配置问题、设计讨论或不确定是否为 bug 的反馈。
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        如果你不确定是 bug 还是使用问题，可以先从这里提交。请尽量说明你的目标、当前做法和卡住的位置。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已查看 README 和现有 issues。
+          required: true
+        - label: 我不会在 issue 中提交真实密码、Token、私钥或生产数据。
+          required: true
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: 主题
+      options:
+        - 安装 / 启动
+        - 数据库连接
+        - SSH 隧道
+        - 查询 / SQL
+        - 数据浏览 / 编辑
+        - Redis
+        - MongoDB
+        - 导入导出
+        - AI 助手
+        - 开发 / 构建
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: 你想完成什么？
+      placeholder: "例如：我想通过 SSH 隧道连接内网 PostgreSQL，但不确定应该怎么填写配置。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 你已经尝试了什么？
+      placeholder: "例如：已确认本机 psql 可以连接；DBX 中测试连接提示 ..."
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 相关环境
+      description: 如果和数据库或系统有关，请提供数据库类型、版本、操作系统、DBX 版本等。
+      placeholder: |
+        DBX：
+        操作系统：
+        数据库类型和版本：
+        连接方式：
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图 / 日志
+      description: 可以拖入截图，或粘贴脱敏后的日志。

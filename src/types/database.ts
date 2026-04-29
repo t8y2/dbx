@@ -13,6 +13,7 @@ export interface ConnectionConfig {
   ssh_host?: string;
   ssh_port?: number;
   ssh_user?: string;
+  ssh_password?: string;
   ssh_key_path?: string;
 }
 

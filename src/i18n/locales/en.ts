@@ -36,6 +36,8 @@ export default {
     sshEnable: "Connect via SSH tunnel",
     sshHost: "SSH Host",
     sshUser: "SSH User",
+    sshPassword: "SSH Password",
+    sshPasswordPlaceholder: "Leave empty to use key",
     sshKeyPath: "Key Path",
   },
   editor: {

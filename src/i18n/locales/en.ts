@@ -83,6 +83,7 @@ export default {
     tip: "You can also expand connections on the left and right-click databases or tables for more actions.",
     tipSidebar: "Click a table on the left to view data",
     tipExecute: "to execute query",
+    fileOpened: "Opened {name}",
   },
   common: {
     language: "Language",

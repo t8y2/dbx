@@ -81,6 +81,7 @@ export default {
     shortcuts: "常用操作",
     shortcutsHint: "从这里开始你的下一步。",
     tip: "也可以在左侧展开连接，右键数据库或表查看更多操作。",
+    fileOpened: "已打开 {name}",
   },
   common: {
     language: "语言",

@@ -34,6 +34,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-dialog = "2.7.0"
 tauri-plugin-fs = "2.5.0"
+tauri-plugin-shell = "2"
 redis = { version = "0.32.2", features = ["tokio-comp"] }
 portpicker = "0.1.1"
 duckdb = { version = "1.3.2", features = ["bundled"] }

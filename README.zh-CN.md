@@ -63,6 +63,20 @@ pnpm tauri build
 
 安装包输出在 `src-tauri/target/release/bundle/` 目录。
 
+## 安装
+
+从 [Releases](https://github.com/t8y2/dbx/releases) 页面下载最新版本。
+
+### macOS 说明
+
+DBX 未使用 Apple 开发者证书签名，首次打开时 macOS 会阻止运行。解决方法：
+
+```bash
+xattr -cr /Applications/dbx.app
+```
+
+或者：**系统设置 → 隐私与安全性 → 仍要打开**。
+
 ## 技术栈
 
 | 层级 | 技术 |

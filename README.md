@@ -63,6 +63,20 @@ pnpm tauri build
 
 The installer will be in `src-tauri/target/release/bundle/`.
 
+## Install
+
+Download the latest release from the [Releases](https://github.com/t8y2/dbx/releases) page.
+
+### macOS Note
+
+DBX is not signed with an Apple Developer certificate. On first launch, macOS will block the app. To fix this:
+
+```bash
+xattr -cr /Applications/dbx.app
+```
+
+Or: **System Settings → Privacy & Security → Open Anyway**.
+
 ## Tech Stack
 
 | Layer | Technology |

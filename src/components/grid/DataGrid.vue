@@ -37,6 +37,33 @@ const emit = defineEmits<{
 }>();
 
 const hasData = computed(() => props.result.columns.length > 0);
+
+const columnTypeMap = computed(() => {
+  const map = new Map<string, string>();
+  if (props.tableMeta?.columns) {
+    for (const col of props.tableMeta.columns) {
+      map.set(col.name, shortTypeName(col.data_type));
+    }
+  }
+  return map;
+});
+
+function shortTypeName(t: string): string {
+  const s = t.toLowerCase();
+  if (s === "character varying") return "varchar";
+  if (s === "character") return "char";
+  if (s === "double precision") return "double";
+  if (s === "timestamp without time zone") return "timestamp";
+  if (s === "timestamp with time zone") return "timestamptz";
+  if (s === "time without time zone") return "time";
+  if (s === "time with time zone") return "timetz";
+  if (s === "boolean") return "bool";
+  if (s === "integer") return "int";
+  if (s === "smallint") return "int2";
+  if (s === "bigint") return "int8";
+  if (s === "real") return "float4";
+  return t;
+}
 const contextCell = ref<{ row: number; col: number } | null>(null);
 const sortCol = ref<string | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
@@ -466,6 +493,7 @@ const sqlOneLiner = computed(() => props.sql?.replace(/\s+/g, " ").trim() || "")
                   {{ col }}
                   <ArrowUp v-if="sortCol === col && sortDir === 'asc'" class="w-3 h-3" />
                   <ArrowDown v-else-if="sortCol === col && sortDir === 'desc'" class="w-3 h-3" />
+                  <span v-if="columnTypeMap.get(col)" class="text-[10px] text-muted-foreground font-normal ml-auto">#{{ columnTypeMap.get(col) }}</span>
                 </span>
                 <div
                   class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"

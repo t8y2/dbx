@@ -63,7 +63,7 @@ impl ConnectionConfig {
                 }
             }
             DatabaseType::Mysql => format!(
-                "mysql://{}:{}@{host}:{port}{db_part}",
+                "mysql://{}:{}@{host}:{port}{db_part}?ssl-mode=preferred",
                 self.username, self.password
             ),
             DatabaseType::Postgres => format!(

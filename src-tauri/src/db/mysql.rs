@@ -4,6 +4,23 @@ use std::time::{Duration, Instant};
 
 use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
+fn get_str(row: &MySqlRow, idx: usize) -> String {
+    row.try_get::<String, _>(idx)
+        .or_else(|_| row.try_get::<Vec<u8>, _>(idx).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .unwrap_or_default()
+}
+
+fn get_str_by_name(row: &MySqlRow, name: &str) -> String {
+    row.try_get::<String, _>(name)
+        .or_else(|_| row.try_get::<Vec<u8>, _>(name).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .unwrap_or_default()
+}
+
+fn get_opt_str(row: &MySqlRow, name: &str) -> Option<String> {
+    row.try_get::<Option<String>, _>(name).ok().flatten()
+        .or_else(|| row.try_get::<Option<Vec<u8>>, _>(name).ok().flatten().map(|b| String::from_utf8_lossy(&b).to_string()))
+}
+
 pub async fn connect(url: &str) -> Result<MySqlPool, String> {
     MySqlPoolOptions::new()
         .max_connections(5)
@@ -15,17 +32,12 @@ pub async fn connect(url: &str) -> Result<MySqlPool, String> {
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query("SHOW DATABASES")
+    let rows: Vec<MySqlRow> = sqlx::query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME")
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(rows
-        .iter()
-        .map(|row| DatabaseInfo {
-            name: row.get::<String, _>(0),
-        })
-        .collect())
+    Ok(rows.iter().map(|row| DatabaseInfo { name: get_str(row, 0) }).collect())
 }
 
 pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
@@ -40,8 +52,8 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
     Ok(rows
         .iter()
         .map(|row| TableInfo {
-            name: row.get::<String, _>("TABLE_NAME"),
-            table_type: row.get::<String, _>("TABLE_TYPE"),
+            name: get_str_by_name(row, "TABLE_NAME"),
+            table_type: get_str_by_name(row, "TABLE_TYPE"),
         })
         .collect())
 }
@@ -72,12 +84,12 @@ pub async fn get_columns(
     Ok(rows
         .iter()
         .map(|row| ColumnInfo {
-            name: row.get::<String, _>("COLUMN_NAME"),
-            data_type: row.get::<String, _>("DATA_TYPE"),
-            is_nullable: row.get::<String, _>("IS_NULLABLE") == "YES",
-            column_default: row.get::<Option<String>, _>("COLUMN_DEFAULT"),
+            name: get_str_by_name(row, "COLUMN_NAME"),
+            data_type: get_str_by_name(row, "DATA_TYPE"),
+            is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
+            column_default: get_opt_str(row, "COLUMN_DEFAULT"),
             is_primary_key: row.get::<i32, _>("IS_PK") == 1,
-            extra: row.get::<Option<String>, _>("EXTRA"),
+            extra: get_opt_str(row, "EXTRA"),
         })
         .collect())
 }
@@ -156,9 +168,9 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
     Ok(rows
         .iter()
         .map(|row| {
-            let cols_str: String = row.get("columns");
+            let cols_str = get_str_by_name(row, "columns");
             IndexInfo {
-                name: row.get::<String, _>("INDEX_NAME"),
+                name: get_str_by_name(row, "INDEX_NAME"),
                 columns: cols_str.split(',').map(|s| s.to_string()).collect(),
                 is_unique: row.get::<bool, _>("is_unique"),
                 is_primary: row.get::<bool, _>("is_primary"),
@@ -185,10 +197,10 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
     Ok(rows
         .iter()
         .map(|row| ForeignKeyInfo {
-            name: row.get::<String, _>("CONSTRAINT_NAME"),
-            column: row.get::<String, _>("COLUMN_NAME"),
-            ref_table: row.get::<String, _>("REFERENCED_TABLE_NAME"),
-            ref_column: row.get::<String, _>("REFERENCED_COLUMN_NAME"),
+            name: get_str_by_name(row, "CONSTRAINT_NAME"),
+            column: get_str_by_name(row, "COLUMN_NAME"),
+            ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
+            ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
         })
         .collect())
 }
@@ -209,9 +221,9 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
     Ok(rows
         .iter()
         .map(|row| TriggerInfo {
-            name: row.get::<String, _>("TRIGGER_NAME"),
-            event: row.get::<String, _>("EVENT_MANIPULATION"),
-            timing: row.get::<String, _>("ACTION_TIMING"),
+            name: get_str_by_name(row, "TRIGGER_NAME"),
+            event: get_str_by_name(row, "EVENT_MANIPULATION"),
+            timing: get_str_by_name(row, "ACTION_TIMING"),
         })
         .collect())
 }

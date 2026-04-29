@@ -133,6 +133,7 @@ function onClick() {
   const node = props.node;
   if (node.type === "table" || node.type === "view") {
     openData();
+    toggle();
   } else if (canExpand) {
     toggle();
   }

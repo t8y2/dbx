@@ -42,6 +42,7 @@ const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   ssh_user: "",
   ssh_password: "",
   ssh_key_path: "",
+  ssl: false,
 });
 
 const form = ref(defaultForm());
@@ -64,6 +65,7 @@ watch(() => props.editConfig, (config) => {
       ssh_user: config.ssh_user || "",
       ssh_password: config.ssh_password || "",
       ssh_key_path: config.ssh_key_path || "",
+      ssl: config.ssl || false,
     };
     selectedType.value = config.db_type;
   } else {
@@ -156,20 +158,32 @@ async function testConnection() {
   }
 }
 
-async function save() {
-  if (editingId.value) {
-    const updated: ConnectionConfig = { ...form.value, id: editingId.value };
-    store.updateConnection(updated);
-    open.value = false;
-  } else {
-    const config: ConnectionConfig = { ...form.value, id: crypto.randomUUID() };
-    store.addConnection(config);
-    await store.connect(config);
-    open.value = false;
-  }
+function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
+  selectedType.value = "mysql";
   testResult.value = null;
+}
+
+watch(open, (value) => {
+  if (!value) resetForm();
+});
+
+async function save() {
+  try {
+    if (editingId.value) {
+      const updated: ConnectionConfig = { ...form.value, id: editingId.value };
+      store.updateConnection(updated);
+      store.stopEditing();
+    } else {
+      const config: ConnectionConfig = { ...form.value, id: crypto.randomUUID() };
+      store.addConnection(config);
+      await store.connect(config);
+    }
+    open.value = false;
+  } catch (e) {
+    console.error("[save] error:", e);
+  }
 }
 
 const dialogTitle = ref("");
@@ -239,7 +253,7 @@ watch([() => editingId.value, () => open.value], () => {
           </div>
         </template>
 
-        <!-- Redis: host, port, password -->
+        <!-- Redis: host, port, user, password, ssl -->
         <template v-else-if="form.db_type === 'redis'">
           <div class="grid grid-cols-4 items-center gap-4">
             <Label class="text-right">{{ t('connection.host') }}</Label>
@@ -247,8 +261,19 @@ watch([() => editingId.value, () => open.value], () => {
             <Input v-model.number="form.port" type="number" class="col-span-1" />
           </div>
           <div class="grid grid-cols-4 items-center gap-4">
+            <Label class="text-right">{{ t('connection.user') }}</Label>
+            <Input v-model="form.username" class="col-span-3" placeholder="default" />
+          </div>
+          <div class="grid grid-cols-4 items-center gap-4">
             <Label class="text-right">{{ t('connection.password') }}</Label>
             <Input v-model="form.password" type="password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+          </div>
+          <div class="grid grid-cols-4 items-center gap-4">
+            <Label class="text-right text-xs">SSL/TLS</Label>
+            <div class="col-span-3">
+              <input type="checkbox" v-model="form.ssl" class="mr-2" />
+              <span class="text-xs text-muted-foreground">{{ t('connection.sshEnable') }}</span>
+            </div>
           </div>
         </template>
 

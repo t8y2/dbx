@@ -15,6 +15,7 @@ export interface ConnectionConfig {
   ssh_user?: string;
   ssh_password?: string;
   ssh_key_path?: string;
+  ssl?: boolean;
 }
 
 export interface DatabaseInfo {

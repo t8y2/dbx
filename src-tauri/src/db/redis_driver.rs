@@ -18,10 +18,13 @@ pub struct RedisValue {
 
 pub async fn connect(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = redis::Client::open(url).map_err(|e| format!("Redis connection failed: {e}"))?;
-    client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| format!("Redis connection failed: {e}"))
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_multiplexed_async_connection(),
+    )
+    .await
+    .map_err(|_| "Redis connection timed out (10s)".to_string())?
+    .map_err(|e| format!("Redis connection failed: {e}"))
 }
 
 pub async fn list_databases(con: &mut redis::aio::MultiplexedConnection) -> Result<Vec<u32>, String> {

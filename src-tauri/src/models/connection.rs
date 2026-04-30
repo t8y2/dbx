@@ -23,6 +23,8 @@ pub struct ConnectionConfig {
     pub ssh_password: String,
     #[serde(default)]
     pub ssh_key_path: String,
+    #[serde(default)]
+    pub ssl: bool,
 }
 
 fn default_ssh_port() -> u16 { 22 }
@@ -66,10 +68,13 @@ impl ConnectionConfig {
                 format!("{}?mode=rwc", self.host)
             }
             DatabaseType::Redis => {
-                if self.password.is_empty() {
-                    format!("redis://{host}:{port}/")
+                let scheme = if self.ssl { "rediss" } else { "redis" };
+                if self.username.is_empty() && self.password.is_empty() {
+                    format!("{scheme}://{host}:{port}/")
+                } else if self.username.is_empty() {
+                    format!("{scheme}://:{password}@{host}:{port}/")
                 } else {
-                    format!("redis://:{password}@{host}:{port}/")
+                    format!("{scheme}://{username}:{password}@{host}:{port}/")
                 }
             }
             DatabaseType::Mysql => format!(
@@ -126,6 +131,7 @@ mod tests {
             ssh_user: String::new(),
             ssh_password: String::new(),
             ssh_key_path: String::new(),
+            ssl: false,
         }
     }
 

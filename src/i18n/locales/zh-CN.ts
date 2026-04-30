@@ -125,7 +125,7 @@ export default {
     loading: "加载中...",
   },
   ai: {
-    placeholder: "用自然语言描述你的查询...",
+    placeholder: "描述你想查什么...",
     settings: "AI 设置",
     provider: "提供商",
     run: "执行",
@@ -140,7 +140,8 @@ export default {
     append: "追加到编辑器",
     apply: "应用到编辑器",
     clear: "清空对话",
-    welcome: "输入问题，AI 帮你生成 SQL",
+    welcome: "聊聊你想查什么，我来写 SQL",
+    newChat: "新对话",
     thinking: "思考中...",
     truncated: "上下文已截断",
     contextSummary: "{database} · {tables} 张表",

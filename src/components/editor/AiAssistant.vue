@@ -1,27 +1,32 @@
 <script setup lang="ts">
-import { nextTick, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import {
-  Bot, Copy, Loader2, Replace, Send, Settings,
-  Sparkles, Trash2, X,
+  ArrowUp, Bot, Check, Copy, Database, Loader2, Replace, Server, Settings,
+  Trash2, X,
 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSettingsStore, type AiProvider } from "@/stores/settingsStore";
-import { buildAiContext, extractSql, runAiAction } from "@/lib/ai";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { buildAiContext, runAiStream } from "@/lib/ai";
+import { listDatabases, redisListDatabases, mongoListDatabases } from "@/lib/tauri";
 import type { AiMessage } from "@/lib/tauri";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
+const connectionStore = useConnectionStore();
+const queryStore = useQueryStore();
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -43,6 +48,49 @@ const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
 const showSettings = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
+
+const chatTitle = computed(() => {
+  const first = messages.value.find((m) => m.role === "user");
+  return first ? first.content.slice(0, 30) : t("ai.newChat");
+});
+
+
+const databaseOptions = ref<string[]>([]);
+
+async function loadDatabases() {
+  if (!props.connection) return;
+  try {
+    if (props.connection.db_type === "redis") {
+      const dbs = await redisListDatabases(props.connection.id);
+      databaseOptions.value = dbs.map(String);
+    } else if (props.connection.db_type === "mongodb") {
+      databaseOptions.value = await mongoListDatabases(props.connection.id);
+    } else {
+      const list = await listDatabases(props.connection.id);
+      databaseOptions.value = list.map((d: { name: string }) => d.name);
+    }
+  } catch {
+    databaseOptions.value = [];
+  }
+}
+
+function changeConnection(connectionId: string) {
+  const conn = connectionStore.getConfig(connectionId);
+  if (!conn) return;
+  connectionStore.activeConnectionId = connectionId;
+  const tab = props.tab;
+  if (tab) {
+    queryStore.updateConnection(tab.id, connectionId, conn.database || "");
+  } else {
+    queryStore.createTab(connectionId, conn.database || "");
+  }
+}
+
+function changeDatabase(database: string) {
+  const tab = props.tab;
+  if (!tab) return;
+  queryStore.updateDatabase(tab.id, database);
+}
 
 const tempProvider = ref<AiProvider>(settings.aiConfig.provider);
 const tempApiKey = ref(settings.aiConfig.apiKey);
@@ -101,58 +149,83 @@ async function send() {
   scrollToBottom();
 
   isGenerating.value = true;
+  messages.value.push({ role: "assistant", content: "" });
+  const assistantIdx = messages.value.length - 1;
   try {
     const context = await buildAiContext(props.tab, props.connection);
-    const history: AiMessage[] = messages.value.slice(0, -1).map((m) => ({
+    const history: AiMessage[] = messages.value.slice(0, -2).map((m) => ({
       role: m.role,
       content: m.content,
     }));
-    const result = await runAiAction({
+    await runAiStream({
       config: settings.aiConfig,
       action: "generate",
       instruction: text,
       context,
-    }, history);
-    messages.value.push({ role: "assistant", content: result });
+    }, history, (delta) => {
+      messages.value[assistantIdx].content += delta;
+      scrollToBottom();
+    });
   } catch (e: any) {
-    messages.value.push({ role: "assistant", content: `Error: ${e.message || e}` });
+    messages.value[assistantIdx].content = `Error: ${e.message || e}`;
   } finally {
     isGenerating.value = false;
     scrollToBottom();
   }
 }
 
-function applySql(text: string) {
-  const sql = extractSql(text);
-  if (sql) emit("replaceSql", sql);
+function applySql(code: string) {
+  emit("replaceSql", code);
 }
 
-async function copySql(text: string) {
-  const sql = extractSql(text);
-  if (sql) await navigator.clipboard.writeText(sql);
+const copiedIndex = ref("");
+
+async function copyCode(code: string, key: string) {
+  await navigator.clipboard.writeText(code);
+  copiedIndex.value = key;
+  setTimeout(() => { if (copiedIndex.value === key) copiedIndex.value = ""; }, 2000);
 }
 
 function clearMessages() {
   messages.value = [];
 }
 
-function hasSql(text: string): boolean {
-  return /```(?:sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*[\s\S]*?```/i.test(text);
+interface MessageSegment {
+  type: "text" | "code";
+  content: string;
+  lang?: string;
 }
 
-function formatMessageContent(text: string): string {
+function parseMessage(text: string): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  const regex = /```(sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*([\s\S]*?)```/gi;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: "text", content: text.slice(lastIndex, match.index) });
+    }
+    segments.push({ type: "code", lang: (match[1] || "sql").toUpperCase(), content: match[2].trim() });
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    segments.push({ type: "text", content: text.slice(lastIndex) });
+  }
+  return segments;
+}
+
+function formatInlineText(text: string): string {
   return text
-    .replace(/```(?:sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*([\s\S]*?)```/gi, '<pre class="my-2 rounded bg-black/30 p-2 text-xs overflow-x-auto"><code>$1</code></pre>')
-    .replace(/`([^`]+)`/g, '<code class="rounded bg-black/20 px-1 py-0.5 text-xs">$1</code>')
+    .replace(/`([^`]+)`/g, '<code class="rounded bg-muted px-1.5 py-0.5 text-[11px] font-mono">$1</code>')
     .replace(/\n/g, "<br>");
 }
 </script>
 
 <template>
   <div class="flex h-full flex-col">
-    <div class="flex items-center gap-2 border-b px-3 py-2">
-      <Sparkles class="h-4 w-4 text-primary shrink-0" />
-      <span class="text-sm font-medium flex-1">AI</span>
+    <div class="h-9 flex items-center gap-2 border-b px-3 shrink-0">
+      <Bot class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      <span class="flex-1 truncate text-xs font-medium">{{ chatTitle }}</span>
       <Button variant="ghost" size="icon" class="h-6 w-6" @click="clearMessages" :title="t('ai.clear')">
         <Trash2 class="h-3.5 w-3.5" />
       </Button>
@@ -164,12 +237,12 @@ function formatMessageContent(text: string): string {
       </Button>
     </div>
 
-    <ScrollArea ref="scrollRef" class="flex-1">
+    <div v-if="messages.length === 0" class="flex-1 flex flex-col items-center justify-center text-center text-muted-foreground">
+      <Bot class="h-10 w-10 mb-3 opacity-30" />
+      <p class="text-sm">{{ t('ai.welcome') }}</p>
+    </div>
+    <ScrollArea v-else ref="scrollRef" class="flex-1">
       <div class="flex flex-col gap-3 p-3">
-        <div v-if="messages.length === 0" class="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
-          <Bot class="h-10 w-10 mb-3 opacity-30" />
-          <p class="text-sm">{{ t('ai.welcome') }}</p>
-        </div>
 
         <template v-for="(msg, i) in messages" :key="i">
           <div v-if="msg.role === 'user'" class="flex justify-end">
@@ -179,18 +252,27 @@ function formatMessageContent(text: string): string {
           </div>
 
           <div v-else class="flex flex-col gap-1">
-            <div class="max-w-[95%] rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
-              <div v-html="formatMessageContent(msg.content)" />
-            </div>
-            <div v-if="hasSql(msg.content)" class="flex gap-1">
-              <Button variant="outline" size="xs" class="h-6 text-[10px]" @click="applySql(msg.content)">
-                <Replace class="h-3 w-3" />
-                {{ t('ai.apply') }}
-              </Button>
-              <Button variant="ghost" size="xs" class="h-6 text-[10px]" @click="copySql(msg.content)">
-                <Copy class="h-3 w-3" />
-                {{ t('ai.copySql') }}
-              </Button>
+            <div class="max-w-[95%] text-xs leading-relaxed">
+              <template v-for="(seg, j) in parseMessage(msg.content)" :key="j">
+                <div v-if="seg.type === 'text'" class="rounded-lg bg-muted px-3 py-2">
+                  <span v-html="formatInlineText(seg.content)" />
+                </div>
+                <div v-else class="my-1 rounded-md overflow-hidden bg-zinc-900 dark:bg-zinc-900">
+                  <div class="flex items-center px-3 py-1.5 text-[10px] text-zinc-400 font-medium border-b border-zinc-700/50">
+                    <Database class="h-3 w-3 mr-1.5" />
+                    <span>{{ seg.lang }}</span>
+                    <span class="flex-1" />
+                    <button class="p-0.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                      <Replace class="h-3.5 w-3.5" />
+                    </button>
+                    <button class="p-0.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 ml-1" :title="copiedIndex === `${i}-${j}` ? t('ai.copied') : t('ai.copySql')" @click="copyCode(seg.content, `${i}-${j}`)">
+                      <Check v-if="copiedIndex === `${i}-${j}`" class="h-3.5 w-3.5 text-green-400" />
+                      <Copy v-else class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <pre class="p-3 text-xs leading-relaxed overflow-x-auto text-zinc-100"><code>{{ seg.content }}</code></pre>
+                </div>
+              </template>
             </div>
           </div>
         </template>
@@ -202,18 +284,50 @@ function formatMessageContent(text: string): string {
       </div>
     </ScrollArea>
 
-    <div class="border-t p-2">
-      <div class="flex items-center gap-1.5">
-        <Input
-          v-model="prompt"
-          class="h-7 flex-1 text-xs"
-          :placeholder="t('ai.placeholder')"
-          :disabled="isGenerating"
-          @keydown.enter="send"
-        />
-        <Button variant="default" size="icon" class="h-7 w-7 shrink-0" :disabled="isGenerating || !prompt.trim()" @click="send">
-          <Send class="h-3.5 w-3.5" />
-        </Button>
+    <div class="p-2">
+      <div class="rounded-lg border bg-background px-2 pb-2 pt-1">
+        <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
+          <Server class="h-3 w-3 shrink-0" />
+          <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
+            <SelectTrigger class="h-5 w-auto border-0 rounded-none bg-transparent p-0 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+              <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t('editor.selectConnection') }}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
+                {{ conn.name }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <template v-if="connection">
+            <span class="text-foreground/25">/</span>
+            <Select :model-value="tab?.database || ''" @update:model-value="(v: any) => changeDatabase(v)" @update:open="(open: boolean) => { if (open) loadDatabases() }">
+              <SelectTrigger class="h-5 w-auto border-0 rounded-none bg-transparent p-0 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+                <SelectValue :placeholder="t('editor.selectDatabase')">{{ tab?.database || t('editor.selectDatabase') }}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
+                <SelectItem v-if="!databaseOptions.length && tab?.database" :value="tab.database">{{ tab.database }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </template>
+        </div>
+        <div class="flex items-end gap-1.5">
+          <textarea
+            v-model="prompt"
+            rows="4"
+            class="flex-1 resize-none bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+            :placeholder="t('ai.placeholder')"
+            :disabled="isGenerating"
+            @keydown.enter.exact="send"
+          />
+          <button
+            class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30"
+            :disabled="isGenerating || !prompt.trim()"
+            @click="send"
+          >
+            <ArrowUp class="h-4 w-4" />
+          </button>
+        </div>
       </div>
     </div>
   </div>

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ConnectionConfig,
   DatabaseInfo,
@@ -26,6 +27,31 @@ export interface AiCompletionRequest {
 
 export async function aiComplete(request: AiCompletionRequest): Promise<string> {
   return invoke("ai_complete", { request });
+}
+
+export interface AiStreamChunk {
+  session_id: string;
+  delta: string;
+  done: boolean;
+}
+
+export async function aiStream(
+  sessionId: string,
+  request: AiCompletionRequest,
+  onChunk: (chunk: AiStreamChunk) => void,
+): Promise<void> {
+  const unlisten: UnlistenFn = await listen<AiStreamChunk>("ai-stream-chunk", (event) => {
+    if (event.payload.session_id === sessionId) {
+      onChunk(event.payload);
+      if (event.payload.done) unlisten();
+    }
+  });
+  try {
+    await invoke("ai_stream", { sessionId, request });
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
 }
 
 export async function saveAiConfig(config: AiConfig): Promise<void> {

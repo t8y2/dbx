@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Sparkles, Pin, AlignLeft, CloudDownload } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -56,7 +56,22 @@ const { message: toastMessage, visible: toastVisible, toast } = useToast();
 
 const showConnectionDialog = ref(false);
 const showHistory = ref(false);
-const showAiPanel = ref(false);
+const showAiPanel = ref(localStorage.getItem("dbx-ai-panel-open") !== "false");
+const aiPanelSize = ref(Number(localStorage.getItem("dbx-ai-panel-size")) || 25);
+
+function toggleAiPanel() {
+  showAiPanel.value = !showAiPanel.value;
+  localStorage.setItem("dbx-ai-panel-open", String(showAiPanel.value));
+}
+
+function onAiPanelResized(panes: { size: number }[]) {
+  const aiPane = panes[panes.length - 1];
+  if (aiPane) {
+    aiPanelSize.value = aiPane.size;
+    localStorage.setItem("dbx-ai-panel-size", String(aiPane.size));
+  }
+}
+
 const showUpdateDialog = ref(false);
 const dangerSql = ref("");
 const pendingDangerSql = ref("");
@@ -275,11 +290,11 @@ function onFormatSqlError() {
 }
 
 function newQuery() {
-  if (!connectionStore.activeConnectionId) return;
-  const conn = connectionStore.connections.find(
-    (c) => c.id === connectionStore.activeConnectionId
-  );
+  const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
+  if (!connId) return;
+  const conn = connectionStore.getConfig(connId);
   if (!conn) return;
+  connectionStore.activeConnectionId = connId;
   queryStore.createTab(conn.id, conn.database || "");
 }
 
@@ -633,7 +648,7 @@ async function setupFileDrop() {
 
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-7 w-7" @click="newQuery" :disabled="!connectionStore.activeConnectionId">
+            <Button variant="ghost" size="icon" class="h-7 w-7" @click="newQuery" :disabled="!connectionStore.connections.length">
               <FilePlus2 class="h-4 w-4" />
             </Button>
           </TooltipTrigger>
@@ -663,8 +678,8 @@ async function setupFileDrop() {
 
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-7 w-7" :class="{ 'bg-accent': showAiPanel }" @click="showAiPanel = !showAiPanel">
-              <Sparkles class="h-4 w-4" />
+            <Button variant="ghost" size="icon" class="h-7 w-7" :class="{ 'bg-accent': showAiPanel }" @click="toggleAiPanel">
+              <Bot class="h-4 w-4" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>AI</TooltipContent>
@@ -701,11 +716,11 @@ async function setupFileDrop() {
 
       <!-- Main Content -->
       <div class="flex-1 flex min-h-0">
-      <Splitpanes class="flex-1 min-h-0 min-w-0">
+      <Splitpanes class="flex-1 min-h-0 min-w-0" @resized="onAiPanelResized">
         <!-- Sidebar -->
         <Pane :size="20" :min-size="10" :max-size="40">
           <div class="h-full flex flex-col overflow-hidden">
-            <div class="h-8 flex items-center px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20">
+            <div class="h-9 flex items-center px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20">
               {{ t('sidebar.connections') }}
               <span class="flex-1" />
               <Tooltip>
@@ -735,7 +750,7 @@ async function setupFileDrop() {
         <Pane :size="80">
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
-          <div v-if="queryStore.tabs.length > 0" class="h-8 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0">
+          <div v-if="queryStore.tabs.length > 0" class="h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0">
             <ContextMenu
               v-for="tab in queryStore.tabs"
               :key="tab.id"
@@ -796,62 +811,7 @@ async function setupFileDrop() {
 
           <!-- Editor Panel -->
           <div v-if="activeTab" class="flex flex-col flex-1 min-h-0">
-            <div v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)" class="h-8 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs text-muted-foreground">
-              <Server class="h-3.5 w-3.5 shrink-0" />
-              <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-              <Select
-                :model-value="activeConnectionValue"
-                @update:model-value="changeActiveConnection"
-              >
-                <SelectTrigger class="h-6 w-auto max-w-48 border-0 bg-transparent px-1 text-xs font-medium text-foreground shadow-none focus:ring-0">
-                  <SelectValue :placeholder="t('editor.selectConnection')">
-                    {{ connectionDisplayName(activeConnectionValue) }}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="connection in connectionStore.connections"
-                    :key="connection.id"
-                    :value="connection.id"
-                  >
-                    <div class="flex items-center gap-2">
-                      <span v-if="connection.color" class="h-3.5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color }" />
-                      <span>{{ connection.name }}</span>
-                    </div>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <span class="text-muted-foreground/50">/</span>
-              <span class="shrink-0">{{ connectionDriverLabel(activeConnection) }}</span>
-              <span class="text-muted-foreground/50">/</span>
-              <Select
-                :model-value="activeDatabaseValue"
-                @update:model-value="changeActiveDatabase"
-                @update:open="(open: boolean) => { if (open && activeConnection) loadDatabaseOptions(activeConnection.id).catch(() => {}) }"
-              >
-                <SelectTrigger class="h-6 w-auto max-w-56 border-0 bg-transparent px-1 text-xs shadow-none focus:ring-0">
-                  <SelectValue :placeholder="loadingDatabaseOptions[activeConnection?.id || ''] ? t('common.loading') : t('editor.selectDatabase')">
-                    {{ databaseDisplayName(activeDatabaseValue) }}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="database in activeDatabaseOptions"
-                    :key="database"
-                    :value="database"
-                  >
-                    {{ databaseDisplayName(database) }}
-                  </SelectItem>
-                  <SelectItem v-if="!activeDatabaseOptions.length && activeDatabaseValue" :value="activeDatabaseValue">
-                    {{ databaseDisplayName(activeDatabaseValue) }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <template v-for="item in activeTabContext.slice(2)" :key="item">
-                <span class="text-muted-foreground/50">/</span>
-                <span class="min-w-0 truncate">{{ item }}</span>
-              </template>
-              <span class="flex-1" />
+            <div v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground">
               <div class="flex items-center gap-0.5">
                 <Tooltip>
                   <TooltipTrigger as-child>
@@ -871,7 +831,62 @@ async function setupFileDrop() {
                   <TooltipContent>{{ t('toolbar.formatSql') }}</TooltipContent>
                 </Tooltip>
               </div>
-              <div v-if="activeTab.tableMeta" class="flex min-w-0 items-center gap-1">
+              <span class="flex-1" />
+              <div class="flex items-center gap-2">
+                <div class="flex items-center gap-1">
+                  <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
+                  <Server class="h-3.5 w-3.5 shrink-0" />
+                  <Select
+                    :model-value="activeConnectionValue"
+                    @update:model-value="changeActiveConnection"
+                  >
+                    <SelectTrigger class="h-6 w-auto max-w-48 border-0 bg-transparent px-1 text-xs font-medium text-foreground shadow-none focus:ring-0">
+                      <SelectValue :placeholder="t('editor.selectConnection')">
+                        {{ connectionDisplayName(activeConnectionValue) }}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="connection in connectionStore.connections"
+                        :key="connection.id"
+                        :value="connection.id"
+                      >
+                        <div class="flex items-center gap-2">
+                          <span v-if="connection.color" class="h-3.5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color }" />
+                          <span>{{ connection.name }}</span>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div class="flex items-center gap-1">
+                  <Database class="h-3.5 w-3.5 shrink-0" />
+                  <Select
+                    :model-value="activeDatabaseValue"
+                    @update:model-value="changeActiveDatabase"
+                    @update:open="(open: boolean) => { if (open && activeConnection) loadDatabaseOptions(activeConnection.id).catch(() => {}) }"
+                  >
+                    <SelectTrigger class="h-6 w-auto max-w-56 border-0 bg-transparent px-1 text-xs shadow-none focus:ring-0">
+                      <SelectValue :placeholder="loadingDatabaseOptions[activeConnection?.id || ''] ? t('common.loading') : t('editor.selectDatabase')">
+                        {{ databaseDisplayName(activeDatabaseValue) }}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="database in activeDatabaseOptions"
+                        :key="database"
+                        :value="database"
+                      >
+                        {{ databaseDisplayName(database) }}
+                      </SelectItem>
+                      <SelectItem v-if="!activeDatabaseOptions.length && activeDatabaseValue" :value="activeDatabaseValue">
+                        {{ databaseDisplayName(activeDatabaseValue) }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div v-if="activeTab.tableMeta" class="flex min-w-0 items-center gap-1 ml-2">
                 <Table2 class="h-3.5 w-3.5 shrink-0" />
                 <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t('tree.columns') }}</span>
               </div>
@@ -1015,7 +1030,7 @@ async function setupFileDrop() {
                     <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="showConnectionDialog = true">
                       <Plus class="h-4 w-4" /> {{ t('toolbar.newConnection') }}
                     </button>
-                    <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" :disabled="!connectionStore.activeConnectionId" @click="newQuery">
+                    <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" :disabled="!connectionStore.connections.length" @click="newQuery">
                       <FilePlus2 class="h-4 w-4" /> {{ t('toolbar.newQuery') }}
                     </button>
                     <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="showHistory = true">
@@ -1035,20 +1050,22 @@ async function setupFileDrop() {
           </div>
           </div>
         </Pane>
+
+      <Pane v-if="showAiPanel" :size="aiPanelSize" :min-size="15" :max-size="40">
+        <div class="h-full bg-background">
+          <AiAssistant
+            :tab="activeTab"
+            :connection="activeConnection"
+            @replace-sql="replaceActiveSql"
+            @close="toggleAiPanel"
+          />
+        </div>
+      </Pane>
       </Splitpanes>
 
       <!-- History Panel (fixed width, outside Splitpanes) -->
       <div v-if="showHistory" class="w-72 h-full shrink-0 border-l bg-background">
         <QueryHistory @restore="onHistoryRestore" @close="showHistory = false" />
-      </div>
-
-      <div v-if="showAiPanel" class="w-80 h-full shrink-0 border-l bg-background">
-        <AiAssistant
-          :tab="activeTab"
-          :connection="activeConnection"
-          @replace-sql="replaceActiveSql"
-          @close="showAiPanel = false"
-        />
       </div>
       </div>
 

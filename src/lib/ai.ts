@@ -62,6 +62,38 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
   });
 }
 
+export async function runAiStream(
+  input: AiRequestInput,
+  history: api.AiMessage[] | undefined,
+  onDelta: (delta: string) => void,
+): Promise<void> {
+  const systemPrompt = buildSystemPrompt(input.action, input.context);
+  const userPrompt = [
+    `Action: ${input.action}`,
+    ACTION_INSTRUCTIONS[input.action],
+    "",
+    "User request:",
+    input.instruction.trim() || "(No extra instruction provided.)",
+  ].join("\n");
+
+  const messages: api.AiMessage[] = [
+    ...(history || []),
+    { role: "user", content: userPrompt },
+  ];
+
+  const sessionId = crypto.randomUUID();
+
+  await api.aiStream(sessionId, {
+    config: input.config,
+    systemPrompt,
+    messages,
+    maxTokens: 2400,
+    temperature: 0.15,
+  }, (chunk) => {
+    if (!chunk.done && chunk.delta) onDelta(chunk.delta);
+  });
+}
+
 export function extractSql(text: string): string {
   const fenced = text.match(/```(?:sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*([\s\S]*?)```/i);
   if (fenced?.[1]) return fenced[1].trim();

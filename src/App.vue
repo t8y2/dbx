@@ -774,7 +774,7 @@ async function setupFileDrop() {
                   :class="{ 'bg-background font-medium': tab.id === queryStore.activeTabId }"
                   @click="queryStore.activeTabId = tab.id"
                 >
-                  <span v-if="connectionColor(tab.connectionId)" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) }" />
+                  <span class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) || '#9ca3af' }" />
                   <span class="min-w-0 truncate">{{ tabDisplayTitle(tab) }}</span>
                   <Tooltip>
                     <TooltipTrigger as-child>
@@ -1007,7 +1007,7 @@ async function setupFileDrop() {
                       @click="openConnectionQuery(connection.id)"
                     >
                       <DatabaseIcon :db-type="connectionIconType(connection)" class="h-4 w-4" />
-                      <span v-if="connection.color" class="h-5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color }" />
+                      <span class="h-5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color || '#9ca3af' }" />
                       <div class="min-w-0 flex-1">
                         <div class="truncate text-sm font-medium">{{ connection.name }}</div>
                         <div class="truncate text-xs text-muted-foreground">

@@ -459,7 +459,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     const path = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "dbx-connections.json" });
     if (!path) return;
-    const data = connections.value.map((c) => ({ ...c, password: "" }));
+    const data = connections.value.map((c) => ({ ...c, password: "", ssh_password: "" }));
     await writeTextFile(path, JSON.stringify(data, null, 2));
   }
 

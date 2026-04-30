@@ -149,7 +149,7 @@ pub async fn get_columns(
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
     let rows: Vec<MySqlRow> = sqlx::query(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
          CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK \
          FROM information_schema.COLUMNS c \
          LEFT JOIN information_schema.KEY_COLUMN_USAGE kcu \
@@ -175,6 +175,7 @@ pub async fn get_columns(
             column_default: get_opt_str(row, "COLUMN_DEFAULT"),
             is_primary_key: row.get::<i32, _>("IS_PK") == 1,
             extra: get_opt_str(row, "EXTRA"),
+            comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
         })
         .collect())
 }

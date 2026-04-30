@@ -29,6 +29,7 @@ pub struct ColumnInfo {
     pub column_default: Option<String>,
     pub is_primary_key: bool,
     pub extra: Option<String>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

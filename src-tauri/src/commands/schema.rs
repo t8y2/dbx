@@ -48,7 +48,7 @@ fn duckdb_query_columns(con: &duckdb::Connection, table: &str) -> Result<Vec<db:
             data_type: row.get::<_, String>(1)?,
             is_nullable: row.get::<_, String>(2).unwrap_or_default() == "YES",
             column_default: row.get::<_, Option<String>>(3)?,
-            extra: None,
+            extra: None, comment: None,
         })
     }).map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())

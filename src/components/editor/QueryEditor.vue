@@ -212,5 +212,5 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="editorRef" class="h-full w-full overflow-hidden" />
+  <div ref="editorRef" data-query-editor-root class="h-full w-full overflow-hidden" />
 </template>

@@ -45,6 +45,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import * as api from "@/lib/tauri";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
+import { isCloseTabShortcut, isExecuteSqlShortcut } from "@/lib/keyboardShortcuts";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -508,12 +509,27 @@ function openLatestRelease() {
   open(url);
 }
 
+function isQueryEditorTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest("[data-query-editor-root]");
+}
+
 function handleKeydown(e: KeyboardEvent) {
-  if (e.metaKey && e.key === "w") {
+  if (isCloseTabShortcut(e)) {
     e.preventDefault();
     if (queryStore.activeTabId) {
       queryStore.closeTab(queryStore.activeTabId);
     }
+    return;
+  }
+
+  if (
+    activeTab.value?.mode === "query"
+    && isExecuteSqlShortcut(e)
+    && isQueryEditorTarget(e.target)
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    tryExecute();
   }
 }
 
@@ -521,13 +537,13 @@ onMounted(() => {
   applyTheme();
   connectionStore.initFromDisk();
   settingsStore.initAiConfig();
-  window.addEventListener("keydown", handleKeydown);
+  window.addEventListener("keydown", handleKeydown, true);
   setupFileDrop();
   checkUpdates({ silent: true });
 });
 
 onUnmounted(() => {
-  window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("keydown", handleKeydown, true);
 });
 
 const DB_EXTENSIONS = [".db", ".sqlite", ".sqlite3", ".duckdb"];

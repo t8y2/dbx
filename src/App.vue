@@ -33,6 +33,7 @@ import { setLocale, currentLocale, type Locale } from "@/i18n";
 import { getCurrentWindow, type Theme } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import * as api from "@/lib/tauri";
+import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -44,6 +45,8 @@ const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const showConnectionDialog = ref(false);
 const showHistory = ref(false);
 const dangerSql = ref("");
+const pendingDangerSql = ref("");
+const selectedSql = ref("");
 const showDangerDialog = ref(false);
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
@@ -65,6 +68,16 @@ watch(showConnectionDialog, (v) => {
 const activeTab = computed(() =>
   queryStore.tabs.find((t) => t.id === queryStore.activeTabId)
 );
+
+const executableSql = computed(() => {
+  const tab = activeTab.value;
+  return tab ? resolveExecutableSql(tab.sql, selectedSql.value) : "";
+});
+
+watch(() => queryStore.activeTabId, () => {
+  selectedSql.value = "";
+  pendingDangerSql.value = "";
+});
 
 const activeConnection = computed(() => {
   const tab = activeTab.value;
@@ -191,6 +204,10 @@ function onEditorUpdate(val: string) {
   }
 }
 
+function onEditorSelectionChange(val: string) {
+  selectedSql.value = val;
+}
+
 function newQuery() {
   if (!connectionStore.activeConnectionId) return;
   const conn = connectionStore.connections.find(
@@ -222,24 +239,25 @@ function isDangerousSql(sql: string): boolean {
   return DANGER_RE.test(stripSqlComments(sql));
 }
 
-function tryExecute() {
+function tryExecute(sqlOverride?: string) {
   const tab = activeTab.value;
-  if (!tab || !tab.sql.trim()) return;
-  if (isDangerousSql(tab.sql)) {
-    dangerSql.value = tab.sql;
+  const sql = sqlOverride ?? executableSql.value;
+  if (!tab || !sql.trim()) return;
+  if (isDangerousSql(sql)) {
+    dangerSql.value = sql;
+    pendingDangerSql.value = sql;
     showDangerDialog.value = true;
   } else {
-    doExecute();
+    doExecute(sql);
   }
 }
 
-async function doExecute() {
+async function doExecute(sql = executableSql.value) {
   const tab = activeTab.value;
-  if (!tab) return;
+  if (!tab || !sql.trim()) return;
   const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
-  const sql = tab.sql;
   const start = Date.now();
-  await queryStore.executeCurrentTab();
+  await queryStore.executeCurrentSql(sql);
   const elapsed = Date.now() - start;
   const success = !tab.result?.columns.includes("Error");
   historyStore.add({
@@ -253,7 +271,9 @@ async function doExecute() {
 }
 
 function onDangerConfirm() {
-  doExecute();
+  const sql = pendingDangerSql.value || executableSql.value;
+  pendingDangerSql.value = "";
+  doExecute(sql);
 }
 
 function onHistoryRestore(sql: string) {
@@ -658,7 +678,8 @@ async function setupFileDrop() {
                       class="flex-1"
                       :model-value="activeTab.sql"
                       @update:model-value="onEditorUpdate"
-                      @execute="tryExecute()"
+                      @selection-change="onEditorSelectionChange"
+                      @execute="tryExecute"
                     />
                   </div>
                 </Pane>
@@ -670,7 +691,7 @@ async function setupFileDrop() {
                       @replace-sql="replaceActiveSql"
                       @append-sql="appendActiveSql"
                     />
-                    <DataGrid v-if="activeTab.result" :key="activeTab.id" class="flex-1 min-h-0" :result="activeTab.result" :sql="activeTab.sql" />
+                    <DataGrid v-if="activeTab.result" :key="activeTab.id" class="flex-1 min-h-0" :result="activeTab.result" :sql="activeTab.lastExecutedSql || activeTab.sql" />
                     <div v-else class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
                       {{ t('editor.pressToExecute') }}
                     </div>

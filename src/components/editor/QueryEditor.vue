@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch, shallowRef } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
+import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 
 const props = defineProps<{
   modelValue: string;
@@ -9,7 +10,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
-  execute: [];
+  "selectionChange": [value: string];
+  execute: [sql: string];
 }>();
 
 const editorRef = ref<HTMLDivElement>();
@@ -56,6 +58,15 @@ function zoomOut() {
 
 function resetZoom() {
   setFontSize(DEFAULT_FONT_SIZE);
+}
+
+function selectedSqlFromView(currentView: EditorViewType): string {
+  const selection = currentView.state.selection.main;
+  return currentView.state.sliceDoc(selection.from, selection.to);
+}
+
+function executableSqlFromView(currentView: EditorViewType): string {
+  return resolveExecutableSql(currentView.state.doc.toString(), selectedSqlFromView(currentView));
 }
 
 onMounted(async () => {
@@ -111,7 +122,7 @@ onMounted(async () => {
     {
       key: "Mod-Enter",
       run: () => {
-        emit("execute");
+        if (view.value) emit("execute", executableSqlFromView(view.value));
         return true;
       },
     },
@@ -127,6 +138,9 @@ onMounted(async () => {
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           emit("update:modelValue", update.state.doc.toString());
+        }
+        if (update.selectionSet || update.docChanged) {
+          emit("selectionChange", selectedSqlFromView(update.view));
         }
       }),
       fontSizeTheme.of(fontTheme(EditorView, fontSize.value)),

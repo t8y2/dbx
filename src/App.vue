@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,7 @@ import { setLocale, currentLocale, type Locale } from "@/i18n";
 import { getCurrentWindow, type Theme } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import * as api from "@/lib/tauri";
+import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCloseTabShortcut, isExecuteSqlShortcut } from "@/lib/keyboardShortcuts";
@@ -343,6 +344,11 @@ async function doExecute(sql = executableSql.value) {
     success,
     error: success ? undefined : String(tab.result?.rows?.[0]?.[0] ?? ""),
   });
+}
+
+function cancelActiveExecution() {
+  const tab = activeTab.value;
+  if (tab) void queryStore.cancelTabExecution(tab.id);
 }
 
 function onDangerConfirm() {
@@ -809,12 +815,19 @@ async function setupFileDrop() {
               <div class="flex items-center gap-0.5">
                 <Tooltip>
                   <TooltipTrigger as-child>
-                    <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="activeTab.isExecuting" @click="tryExecute()">
-                      <Loader2 v-if="activeTab.isExecuting" class="h-3.5 w-3.5 animate-spin" />
+                    <Button
+                      :variant="activeTab.isExecuting ? 'destructive' : 'ghost'"
+                      size="icon"
+                      class="h-6 w-6"
+                      :disabled="activeTab.isCancelling || (!activeTab.isExecuting && !executableSql.trim())"
+                      @click="activeTab.isExecuting ? cancelActiveExecution() : tryExecute()"
+                    >
+                      <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
+                      <Square v-else-if="activeTab.isExecuting" class="h-3.5 w-3.5 fill-current" />
                       <Play v-else class="h-3.5 w-3.5" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>{{ t('toolbar.executeShortcut') }}</TooltipContent>
+                  <TooltipContent>{{ activeTab.isExecuting ? t('toolbar.stopQuery') : t('toolbar.executeShortcut') }}</TooltipContent>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger as-child>
@@ -908,6 +921,12 @@ async function setupFileDrop() {
                 <Pane :size="60" :min-size="20">
                   <div class="h-full flex flex-col">
                     <DataGrid v-if="activeTab.result" :key="activeTab.id" class="flex-1 min-h-0" :result="activeTab.result" :sql="activeTab.lastExecutedSql || activeTab.sql" />
+                    <div v-else-if="activeTab.isExecuting" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
+                      <div class="flex items-center">
+                        <Loader2 class="h-5 w-5 animate-spin mr-2" />
+                        {{ t(queryExecutionLabelKey(activeTab)) }}
+                      </div>
+                    </div>
                     <div v-else class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
                       {{ t('editor.pressToExecute') }}
                     </div>
@@ -934,8 +953,22 @@ async function setupFileDrop() {
                   @paginate="onPaginate"
                   @sort="onSort"
                 />
-                <div v-else-if="activeTab.isExecuting" class="h-full flex items-center justify-center text-muted-foreground text-sm">
-                  <Loader2 class="h-5 w-5 animate-spin mr-2" /> {{ t('common.loading') }}
+                <div v-else-if="activeTab.isExecuting" class="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
+                  <div class="flex items-center">
+                    <Loader2 class="h-5 w-5 animate-spin mr-2" />
+                    {{ t(queryExecutionLabelKey(activeTab)) }}
+                  </div>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    class="h-7 gap-1.5"
+                    :disabled="!canCancelQueryExecution(activeTab)"
+                    @click="cancelActiveExecution"
+                  >
+                    <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
+                    <Square v-else class="h-3.5 w-3.5 fill-current" />
+                    {{ t('toolbar.stopQuery') }}
+                  </Button>
                 </div>
               </div>
             </template>

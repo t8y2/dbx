@@ -95,8 +95,12 @@ export async function getColumns(
   return invoke("get_columns", { connectionId, database, schema, table });
 }
 
-export async function executeQuery(connectionId: string, database: string, sql: string): Promise<QueryResult> {
-  return invoke("execute_query", { connectionId, database, sql });
+export async function executeQuery(connectionId: string, database: string, sql: string, executionId?: string): Promise<QueryResult> {
+  return invoke("execute_query", { connectionId, database, sql, executionId });
+}
+
+export async function cancelQuery(executionId: string): Promise<boolean> {
+  return invoke("cancel_query", { executionId });
 }
 
 export async function executeBatch(connectionId: string, database: string, statements: string[]): Promise<QueryResult> {

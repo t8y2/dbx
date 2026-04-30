@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { QueryTab } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
+import { canCancelQueryExecution } from "@/lib/queryExecutionState";
 import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
 import * as api from "@/lib/tauri";
 
@@ -31,6 +32,7 @@ export const useQueryStore = defineStore("query", () => {
       database,
       sql: "",
       isExecuting: false,
+      isCancelling: false,
       mode,
     };
     tabs.value.push(tab);
@@ -41,6 +43,7 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string) {
     const idx = tabs.value.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
     tabs.value.splice(idx, 1);
     if (activeTabId.value === id) {
       activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
@@ -48,12 +51,18 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function closeOtherTabs(id: string) {
+    tabs.value
+      .filter((tab) => tab.id !== id && tab.isExecuting)
+      .forEach((tab) => void cancelTabExecution(tab.id));
     const next = closeOtherTabsState(tabs.value, activeTabId.value, id);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
   }
 
   function closeAllTabs() {
+    tabs.value
+      .filter((tab) => tab.isExecuting)
+      .forEach((tab) => void cancelTabExecution(tab.id));
     const next = closeAllTabsState(tabs.value, activeTabId.value);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
@@ -97,7 +106,12 @@ export const useQueryStore = defineStore("query", () => {
 
   function setExecuting(id: string, isExecuting: boolean) {
     const tab = tabs.value.find((t) => t.id === id);
-    if (tab) tab.isExecuting = isExecuting;
+    if (!tab) return;
+    tab.isExecuting = isExecuting;
+    if (!isExecuting) {
+      tab.isCancelling = false;
+      tab.executionId = undefined;
+    }
   }
 
   function toErrorResult(e: any): NonNullable<QueryTab["result"]> {
@@ -114,6 +128,8 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.result = toErrorResult(e);
     tab.isExecuting = false;
+    tab.isCancelling = false;
+    tab.executionId = undefined;
   }
 
   async function executeCurrentTab() {
@@ -132,16 +148,51 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || !sql.trim()) return;
 
+    const executionId = crypto.randomUUID();
     tab.isExecuting = true;
+    tab.isCancelling = false;
+    tab.executionId = executionId;
     tab.lastExecutedSql = sql;
     try {
-      tab.result = await api.executeQuery(tab.connectionId, tab.database, sql);
+      tab.result = await api.executeQuery(tab.connectionId, tab.database, sql, executionId);
     } catch (e: any) {
-      tab.result = toErrorResult(e);
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.executionId === executionId) {
+        current.result = toErrorResult(e);
+      }
     } finally {
-      tab.isExecuting = false;
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.executionId === executionId) {
+        current.isExecuting = false;
+        current.isCancelling = false;
+        current.executionId = undefined;
+      }
     }
     trimResultCache();
+  }
+
+  async function cancelTabExecution(id: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || !canCancelQueryExecution(tab)) return false;
+
+    const executionId = tab.executionId;
+    if (!executionId) return false;
+    tab.isCancelling = true;
+    try {
+      const canceled = await api.cancelQuery(executionId);
+      if (!canceled) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current && current.executionId === executionId) current.isCancelling = false;
+      }
+      return canceled;
+    } catch (e: any) {
+      const current = tabs.value.find((t) => t.id === id);
+      if (current && current.executionId === executionId) {
+        current.isCancelling = false;
+        current.result = toErrorResult(e);
+      }
+      return false;
+    }
   }
 
   function trimResultCache() {
@@ -169,5 +220,6 @@ export const useQueryStore = defineStore("query", () => {
     executeCurrentTab,
     executeCurrentSql,
     executeTabSql,
+    cancelTabExecution,
   };
 });

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { resolveExecutableSql } from "../src/lib/sqlExecutionTarget.js";
+import { resolveExecutableSql } from "../src/lib/sqlExecutionTarget.ts";
 
 test("uses selected SQL when the editor has a non-empty selection", () => {
   const sql = "SELECT * FROM users;\nSELECT * FROM orders;";

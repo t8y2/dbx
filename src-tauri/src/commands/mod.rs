@@ -3,6 +3,7 @@ pub mod connection;
 pub mod history;
 pub mod mongo_cmd;
 pub mod query;
+pub mod query_cancel;
 pub mod redis_cmd;
 pub mod schema;
 pub mod transfer;

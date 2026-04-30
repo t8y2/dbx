@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
+use crate::commands::query_cancel::RunningQueries;
 use crate::db;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
@@ -23,6 +24,7 @@ pub enum PoolKind {
 pub struct AppState {
     pub connections: Mutex<HashMap<String, PoolKind>>,
     pub configs: Mutex<HashMap<String, ConnectionConfig>>,
+    pub running_queries: RunningQueries,
     pub tunnels: TunnelManager,
 }
 
@@ -31,6 +33,7 @@ impl AppState {
         Self {
             connections: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
+            running_queries: RunningQueries::default(),
             tunnels: TunnelManager::new(),
         }
     }

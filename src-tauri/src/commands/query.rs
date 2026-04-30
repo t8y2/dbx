@@ -1,13 +1,16 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::commands::connection::{AppState, PoolKind};
 use crate::db;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ROWS: usize = 10000;
+const QUERY_CANCELED: &str = "Query canceled";
 
 fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryResult, String> {
     let start = std::time::Instant::now();
@@ -68,10 +71,46 @@ fn is_connection_error(err: &str) -> bool {
         || lower.contains("eof")
 }
 
+fn timeout_error() -> String {
+    format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs())
+}
+
+fn canceled_error() -> String {
+    QUERY_CANCELED.to_string()
+}
+
+fn is_canceled(cancel_token: &Option<CancellationToken>) -> bool {
+    cancel_token
+        .as_ref()
+        .map(|token| token.is_cancelled())
+        .unwrap_or(false)
+}
+
+async fn wait_for_query<F>(
+    cancel_token: Option<CancellationToken>,
+    future: F,
+) -> Result<db::QueryResult, String>
+where
+    F: Future<Output = Result<db::QueryResult, String>>,
+{
+    if let Some(token) = cancel_token {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(canceled_error()),
+            result = timeout(QUERY_TIMEOUT, future) => result.map_err(|_| timeout_error())?,
+        }
+    } else {
+        timeout(QUERY_TIMEOUT, future)
+            .await
+            .map_err(|_| timeout_error())?
+    }
+}
+
 async fn do_execute(
     state: &AppState,
     pool_key: &str,
     sql: &str,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<db::QueryResult, String> {
     let connections = state.connections.lock().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
@@ -81,64 +120,72 @@ async fn do_execute(
             let con = con.clone();
             let sql = sql.to_string();
             drop(connections);
-            let task = tokio::task::spawn_blocking(move || {
-                let con = con.lock().map_err(|e| e.to_string())?;
-                duckdb_execute(&con, &sql)
-            });
-            timeout(QUERY_TIMEOUT, task)
-                .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
-                .map_err(|e| e.to_string())?
+            wait_for_query(cancel_token, async move {
+                let task = tokio::task::spawn_blocking(move || {
+                    let con = con.lock().map_err(|e| e.to_string())?;
+                    duckdb_execute(&con, &sql)
+                });
+                task.await.map_err(|e| e.to_string())?
+            })
+            .await
         }
         PoolKind::Mysql(p) => {
             let p = p.clone();
             drop(connections);
-            timeout(QUERY_TIMEOUT, db::mysql::execute_query(&p, sql))
+            wait_for_query(cancel_token, db::mysql::execute_query(&p, sql))
                 .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
             drop(connections);
-            timeout(QUERY_TIMEOUT, db::postgres::execute_query(&p, sql))
+            wait_for_query(cancel_token, db::postgres::execute_query(&p, sql))
                 .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
             drop(connections);
-            timeout(QUERY_TIMEOUT, db::sqlite::execute_query(&p, sql))
+            wait_for_query(cancel_token, db::sqlite::execute_query(&p, sql))
                 .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
         PoolKind::ClickHouse(client) => {
             let client = client.clone();
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
             drop(connections);
-            timeout(QUERY_TIMEOUT, db::clickhouse_driver::execute_query(&client, &database, sql))
+            wait_for_query(cancel_token, db::clickhouse_driver::execute_query(&client, &database, sql))
                 .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
             drop(connections);
-            let mut client = client.lock().await;
-            timeout(QUERY_TIMEOUT, db::sqlserver::execute_query(&mut client, sql))
+            let mut client = match cancel_token.as_ref() {
+                Some(token) => tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    guard = client.lock() => guard,
+                },
+                None => client.lock().await,
+            };
+            wait_for_query(cancel_token, db::sqlserver::execute_query(&mut client, sql))
                 .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
         PoolKind::Oracle(client) => {
             let client = client.clone();
             drop(connections);
-            let client = client.lock().await;
-            timeout(QUERY_TIMEOUT, db::oracle_driver::execute_query(&*client, sql))
+            let client = match cancel_token.as_ref() {
+                Some(token) => tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    guard = client.lock() => guard,
+                },
+                None => client.lock().await,
+            };
+            wait_for_query(cancel_token, db::oracle_driver::execute_query(&*client, sql))
                 .await
-                .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
         PoolKind::Elasticsearch(_) => Err("Use document browser for Elasticsearch".to_string()),
@@ -153,23 +200,42 @@ pub async fn execute_query(
     connection_id: String,
     database: String,
     sql: String,
+    execution_id: Option<String>,
 ) -> Result<db::QueryResult, String> {
+    let registered_query = execution_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| state.running_queries.register(id.clone()));
+    let cancel_token = registered_query.as_ref().map(|query| query.token());
+
     let pool_key = if database.is_empty() {
         connection_id.clone()
     } else {
         state.get_or_create_pool(&connection_id, Some(&database)).await?
     };
 
-    let result = do_execute(&state, &pool_key, &sql).await;
+    if is_canceled(&cancel_token) {
+        return Err(canceled_error());
+    }
+
+    let result = do_execute(&state, &pool_key, &sql, cancel_token.clone()).await;
 
     match &result {
-        Err(e) if is_connection_error(e) => {
+        Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
             let db_opt = if database.is_empty() { None } else { Some(database.as_str()) };
             let new_key = state.reconnect_pool(&connection_id, db_opt).await?;
-            do_execute(&state, &new_key, &sql).await
+            do_execute(&state, &new_key, &sql, cancel_token).await
         }
         _ => result,
     }
+}
+
+#[tauri::command]
+pub async fn cancel_query(
+    state: State<'_, Arc<AppState>>,
+    execution_id: String,
+) -> Result<bool, String> {
+    Ok(state.running_queries.cancel(&execution_id))
 }
 
 #[tauri::command]
@@ -189,7 +255,7 @@ pub async fn execute_batch(
     let start = std::time::Instant::now();
 
     for (i, sql) in statements.iter().enumerate() {
-        match do_execute(&state, &pool_key, sql).await {
+        match do_execute(&state, &pool_key, sql, None).await {
             Ok(result) => {
                 total_affected += result.affected_rows;
             }
@@ -213,4 +279,29 @@ pub async fn execute_batch(
         execution_time_ms: start.elapsed().as_millis(),
         truncated: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wait_for_query_returns_cancelled_when_token_is_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let result = wait_for_query(Some(token), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(db::QueryResult {
+                columns: vec![],
+                rows: vec![],
+                affected_rows: 0,
+                execution_time_ms: 0,
+                truncated: false,
+            })
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), QUERY_CANCELED);
+    }
 }

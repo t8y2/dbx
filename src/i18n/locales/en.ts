@@ -7,6 +7,7 @@ export default {
     newQuery: "New Query",
     execute: "Execute",
     executeShortcut: "Execute selection/query (Cmd+Enter)",
+    stopQuery: "Stop query",
     formatSql: "Format SQL",
     formatSqlFailed: "Failed to format SQL",
   },
@@ -123,6 +124,7 @@ export default {
   common: {
     language: "Language",
     loading: "Loading...",
+    stopping: "Stopping...",
     close: "Close",
   },
   ai: {

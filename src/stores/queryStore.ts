@@ -95,6 +95,27 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) tab.tableMeta = meta;
   }
 
+  function setExecuting(id: string, isExecuting: boolean) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (tab) tab.isExecuting = isExecuting;
+  }
+
+  function toErrorResult(e: any): NonNullable<QueryTab["result"]> {
+    return {
+      columns: ["Error"],
+      rows: [[String(e)]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+  }
+
+  function setErrorResult(id: string, e: any) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return;
+    tab.result = toErrorResult(e);
+    tab.isExecuting = false;
+  }
+
   async function executeCurrentTab() {
     const tab = tabs.value.find((t) => t.id === activeTabId.value);
     if (!tab || !tab.sql.trim()) return;
@@ -103,7 +124,12 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   async function executeCurrentSql(sql: string) {
-    const tab = tabs.value.find((t) => t.id === activeTabId.value);
+    if (!activeTabId.value) return;
+    await executeTabSql(activeTabId.value, sql);
+  }
+
+  async function executeTabSql(id: string, sql: string) {
+    const tab = tabs.value.find((t) => t.id === id);
     if (!tab || !sql.trim()) return;
 
     tab.isExecuting = true;
@@ -111,12 +137,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       tab.result = await api.executeQuery(tab.connectionId, tab.database, sql);
     } catch (e: any) {
-      tab.result = {
-        columns: ["Error"],
-        rows: [[String(e)]],
-        affected_rows: 0,
-        execution_time_ms: 0,
-      };
+      tab.result = toErrorResult(e);
     } finally {
       tab.isExecuting = false;
     }
@@ -143,7 +164,10 @@ export const useQueryStore = defineStore("query", () => {
     updateDatabase,
     updateConnection,
     setTableMeta,
+    setExecuting,
+    setErrorResult,
     executeCurrentTab,
     executeCurrentSql,
+    executeTabSql,
   };
 });

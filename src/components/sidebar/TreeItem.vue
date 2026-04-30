@@ -152,34 +152,42 @@ function onClick() {
 async function openData() {
   const node = props.node;
   if (!(node.type === "table" || node.type === "view") || !node.connectionId || !node.database) return;
-  await connectionStore.ensureConnected(node.connectionId);
   const config = connectionStore.getConfig(node.connectionId);
-  const qualifiedName = (config?.db_type === "postgres" || config?.db_type === "oracle" || config?.db_type === "sqlserver") && node.schema
-    ? `${quoteIdent(node.schema)}.${quoteIdent(node.label)}`
-    : quoteIdent(node.label);
   const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "data");
+  queryStore.setExecuting(tabId, true);
 
-  const querySchema = node.schema || node.database;
-  const columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
-  const pks = columns.filter((c) => c.is_primary_key).map((c) => c.name);
-  const order = pks.length ? ` ORDER BY ${pks.map((pk) => `${quoteIdent(pk)} ASC`).join(", ")}` : "";
-  let sql: string;
-  if (config?.db_type === "oracle") {
-    sql = `SELECT * FROM ${qualifiedName}${order} FETCH FIRST 100 ROWS ONLY`;
-  } else if (config?.db_type === "sqlserver") {
-    sql = `SELECT TOP 100 * FROM ${qualifiedName}${order}`;
-  } else {
-    sql = `SELECT * FROM ${qualifiedName}${order} LIMIT 100;`;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    if (!config) throw new Error("Connection config not found");
+
+    const qualifiedName = (config.db_type === "postgres" || config.db_type === "oracle" || config.db_type === "sqlserver") && node.schema
+      ? `${quoteIdent(node.schema)}.${quoteIdent(node.label)}`
+      : quoteIdent(node.label);
+
+    const querySchema = node.schema || node.database;
+    const columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+    const pks = columns.filter((c) => c.is_primary_key).map((c) => c.name);
+    const order = pks.length ? ` ORDER BY ${pks.map((pk) => `${quoteIdent(pk)} ASC`).join(", ")}` : "";
+    let sql: string;
+    if (config.db_type === "oracle") {
+      sql = `SELECT * FROM ${qualifiedName}${order} FETCH FIRST 100 ROWS ONLY`;
+    } else if (config.db_type === "sqlserver") {
+      sql = `SELECT TOP 100 * FROM ${qualifiedName}${order}`;
+    } else {
+      sql = `SELECT * FROM ${qualifiedName}${order} LIMIT 100;`;
+    }
+    queryStore.updateSql(tabId, sql);
+    queryStore.setTableMeta(tabId, {
+      schema: node.schema,
+      tableName: node.label,
+      columns,
+      primaryKeys: pks,
+    });
+
+    await queryStore.executeTabSql(tabId, sql);
+  } catch (e: any) {
+    queryStore.setErrorResult(tabId, e);
   }
-  queryStore.updateSql(tabId, sql);
-  queryStore.setTableMeta(tabId, {
-    schema: node.schema,
-    tableName: node.label,
-    columns,
-    primaryKeys: pks,
-  });
-
-  queryStore.executeCurrentTab();
 }
 
 async function newQuery() {

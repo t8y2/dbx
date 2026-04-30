@@ -173,6 +173,7 @@ export default {
     items: "{count} items",
     fields: "{count} fields",
     members: "{count} members",
+    entries: "{count} entries",
     noExpiry: "no expiry",
   },
   mongo: {

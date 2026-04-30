@@ -73,6 +73,7 @@ function typeColor(type: string): string {
     case "set": return "text-purple-500";
     case "zset": return "text-amber-500";
     case "hash": return "text-orange-500";
+    case "stream": return "text-teal-500";
     default: return "text-muted-foreground";
   }
 }

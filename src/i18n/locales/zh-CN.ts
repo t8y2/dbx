@@ -171,6 +171,7 @@ export default {
     items: "{count} 个元素",
     fields: "{count} 个字段",
     members: "{count} 个成员",
+    entries: "{count} 条记录",
     noExpiry: "永不过期",
   },
   mongo: {

@@ -234,6 +234,20 @@ onMounted(load);
         </div>
       </div>
 
+      <!-- Stream (readonly) -->
+      <div v-else-if="data.key_type === 'stream'" class="flex-1 overflow-auto">
+        <div class="px-4 py-1 text-xs text-muted-foreground border-b">
+          {{ t('redis.entries', { count: Array.isArray(data.value) ? data.value.length : 0 }) }}
+        </div>
+        <div v-for="entry in data.value" :key="entry.id" class="px-4 py-2 border-b text-sm font-mono hover:bg-accent/50">
+          <div class="mb-1 text-xs text-muted-foreground">{{ entry.id }}</div>
+          <div v-for="(val, field) in entry.fields" :key="String(field)" class="grid grid-cols-[minmax(6rem,0.35fr)_1fr] gap-3 py-0.5">
+            <span class="truncate text-blue-500">{{ field }}</span>
+            <span class="truncate text-muted-foreground">{{ val }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Unknown -->
       <div v-else class="flex-1 overflow-auto p-4">
         <pre class="font-mono text-sm whitespace-pre-wrap">{{ formatValue(data.value) }}</pre>

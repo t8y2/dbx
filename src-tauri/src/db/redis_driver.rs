@@ -1,5 +1,7 @@
-use redis::AsyncCommands;
+use redis::{AsyncCommands, Value as RedisRawValue};
 use serde::{Deserialize, Serialize};
+
+const STREAM_ENTRY_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisKeyInfo {
@@ -40,7 +42,9 @@ pub async fn connect(url: &str) -> Result<redis::aio::MultiplexedConnection, Str
     Ok(con)
 }
 
-pub async fn list_databases(con: &mut redis::aio::MultiplexedConnection) -> Result<Vec<u32>, String> {
+pub async fn list_databases(
+    con: &mut redis::aio::MultiplexedConnection,
+) -> Result<Vec<u32>, String> {
     let info: String = redis::cmd("INFO")
         .arg("keyspace")
         .query_async(con)
@@ -139,7 +143,10 @@ pub async fn get_value(
                 .zrange_withscores(key, 0, -1)
                 .await
                 .map_err(|e| e.to_string())?;
-            serde_json::json!(v.iter().map(|(m, s)| serde_json::json!({"member": m, "score": s})).collect::<Vec<_>>())
+            serde_json::json!(v
+                .iter()
+                .map(|(m, s)| serde_json::json!({"member": m, "score": s}))
+                .collect::<Vec<_>>())
         }
         "hash" => {
             let v: Vec<(String, String)> = con.hgetall(key).await.map_err(|e| e.to_string())?;
@@ -149,6 +156,7 @@ pub async fn get_value(
                 .collect();
             serde_json::Value::Object(map)
         }
+        "stream" => get_stream_entries(con, key).await?,
         _ => serde_json::Value::Null,
     };
 
@@ -158,6 +166,75 @@ pub async fn get_value(
         ttl,
         value,
     })
+}
+
+async fn get_stream_entries(
+    con: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+) -> Result<serde_json::Value, String> {
+    let raw: RedisRawValue = redis::cmd("XRANGE")
+        .arg(key)
+        .arg("-")
+        .arg("+")
+        .arg("COUNT")
+        .arg(STREAM_ENTRY_LIMIT)
+        .query_async(con)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(parse_stream_entries(raw))
+}
+
+fn parse_stream_entries(raw: RedisRawValue) -> serde_json::Value {
+    match raw {
+        RedisRawValue::Array(entries) => {
+            serde_json::Value::Array(entries.into_iter().filter_map(parse_stream_entry).collect())
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
+    let mut parts = match entry {
+        RedisRawValue::Array(parts) if parts.len() == 2 => parts.into_iter(),
+        _ => return None,
+    };
+
+    let id = redis_value_to_string(parts.next()?)?;
+    let fields = match parts.next()? {
+        RedisRawValue::Array(fields) => fields,
+        _ => return None,
+    };
+
+    let mut field_map = serde_json::Map::new();
+    let mut fields = fields.into_iter();
+    while let Some(field) = fields.next() {
+        let Some(value) = fields.next() else {
+            break;
+        };
+        if let Some(field_name) = redis_value_to_string(field) {
+            let value = redis_value_to_string(value).unwrap_or_default();
+            field_map.insert(field_name, serde_json::Value::String(value));
+        }
+    }
+
+    Some(serde_json::json!({
+        "id": id,
+        "fields": field_map,
+    }))
+}
+
+fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
+    match value {
+        RedisRawValue::BulkString(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+        RedisRawValue::SimpleString(value) => Some(value),
+        RedisRawValue::Int(value) => Some(value.to_string()),
+        RedisRawValue::Double(value) => Some(value.to_string()),
+        RedisRawValue::Boolean(value) => Some(value.to_string()),
+        RedisRawValue::VerbatimString { text, .. } => Some(text),
+        RedisRawValue::Okay => Some("OK".to_string()),
+        _ => None,
+    }
 }
 
 pub async fn set_string(
@@ -253,4 +330,66 @@ pub async fn set_remove(
     con.srem::<_, _, ()>(key, member)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_stream_entries, RedisRawValue};
+
+    fn bulk(value: &str) -> RedisRawValue {
+        RedisRawValue::BulkString(value.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn parses_stream_entries() {
+        let raw = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("1714470000000-0"),
+            RedisRawValue::Array(vec![
+                bulk("event"),
+                bulk("login"),
+                bulk("user_id"),
+                bulk("42"),
+            ]),
+        ])]);
+
+        let parsed = parse_stream_entries(raw);
+
+        assert_eq!(
+            parsed,
+            serde_json::json!([
+                {
+                    "id": "1714470000000-0",
+                    "fields": {
+                        "event": "login",
+                        "user_id": "42"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn skips_malformed_stream_entries() {
+        let raw = RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![bulk("1714470000000-0")]),
+            RedisRawValue::Array(vec![
+                bulk("1714470000001-0"),
+                RedisRawValue::Array(vec![bulk("event"), bulk("logout")]),
+            ]),
+        ]);
+
+        let parsed = parse_stream_entries(raw);
+
+        assert_eq!(
+            parsed,
+            serde_json::json!([
+                {
+                    "id": "1714470000001-0",
+                    "fields": {
+                        "event": "logout"
+                    }
+                }
+            ])
+        );
+    }
 }

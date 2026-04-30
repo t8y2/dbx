@@ -102,6 +102,8 @@ export interface QueryTab {
   pinned?: boolean;
   result?: QueryResult;
   isExecuting: boolean;
+  isCancelling?: boolean;
+  executionId?: string;
   mode: "data" | "query" | "redis" | "mongo";
   tableMeta?: {
     schema?: string;

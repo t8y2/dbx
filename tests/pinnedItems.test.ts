@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { orderPinnedFirst } from "../src/lib/pinnedItems.js";
+import { orderPinnedFirst } from "../src/lib/pinnedItems.ts";
 
 test("orders pinned items before unpinned items without changing relative order", () => {
   const items = [

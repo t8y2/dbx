@@ -7,6 +7,7 @@ export default {
     newQuery: "新建查询",
     execute: "执行",
     executeShortcut: "执行选中/全部 (Cmd+Enter)",
+    stopQuery: "停止执行",
     formatSql: "格式化 SQL",
     formatSqlFailed: "SQL 格式化失败",
   },
@@ -123,6 +124,7 @@ export default {
   common: {
     language: "语言",
     loading: "加载中...",
+    stopping: "正在停止...",
   },
   ai: {
     placeholder: "描述你想查什么...",

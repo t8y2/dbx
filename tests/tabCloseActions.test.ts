@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { closeAllTabsState, closeOtherTabsState } from "../src/lib/tabCloseActions.js";
+import { closeAllTabsState, closeOtherTabsState } from "../src/lib/tabCloseActions.ts";
 
 test("close other tabs keeps the target tab and makes it active", () => {
   const tabs = [{ id: "a" }, { id: "b" }, { id: "c" }];

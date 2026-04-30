@@ -79,7 +79,8 @@ impl AppState {
             }
         }
 
-        let url = db_config.connection_url();
+        let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
+        let url = connection_url_for_endpoint(&db_config, &host, port);
         let pool = match db_config.db_type {
             DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?),
             DatabaseType::Postgres => PoolKind::Postgres(db::postgres::connect(&url).await?),
@@ -103,24 +104,59 @@ impl AppState {
             }
             DatabaseType::SqlServer => {
                 let client = db::sqlserver::connect(
-                    &db_config.host, db_config.port,
-                    &db_config.username, &db_config.password,
+                    &host,
+                    port,
+                    &db_config.username,
+                    &db_config.password,
                     db_config.database.as_deref(),
-                ).await?;
+                )
+                .await?;
                 PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
             }
             DatabaseType::Oracle => {
                 let client = db::oracle_driver::connect(
-                    &db_config.host, db_config.port,
+                    &host,
+                    port,
                     db_config.database.as_deref().unwrap_or("ORCL"),
                     &db_config.username, &db_config.password,
-                ).await?;
+                )
+                .await?;
                 PoolKind::Oracle(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
             }
         };
 
         self.connections.lock().await.insert(pool_key.clone(), pool);
         Ok(pool_key)
+    }
+
+    async fn connection_host_port(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<(String, u16), String> {
+        if !config.ssh_enabled || config.ssh_host.is_empty() {
+            return Ok((config.host.clone(), config.port));
+        }
+
+        if let Some(local_port) = self.tunnels.local_port(connection_id).await {
+            return Ok(("127.0.0.1".to_string(), local_port));
+        }
+
+        let local_port = self
+            .tunnels
+            .start_tunnel(
+                connection_id,
+                &config.ssh_host,
+                config.ssh_port,
+                &config.ssh_user,
+                &config.ssh_password,
+                &config.ssh_key_path,
+                &config.host,
+                config.port,
+            )
+            .await?;
+
+        Ok(("127.0.0.1".to_string(), local_port))
     }
 
     pub async fn reconnect_pool(
@@ -153,6 +189,26 @@ fn connections_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("connections.json"))
 }
 
+fn connection_url_for_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> String {
+    if host == config.host && port == config.port {
+        config.connection_url()
+    } else {
+        config.connection_url_with_host(host, port)
+    }
+}
+
+fn redacted_connection_url_for_endpoint(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+) -> String {
+    if host == config.host && port == config.port {
+        config.redacted_connection_url()
+    } else {
+        config.redacted_connection_url_with_host(host, port)
+    }
+}
+
 #[tauri::command]
 pub async fn save_connections(
     app: AppHandle,
@@ -177,64 +233,95 @@ pub async fn load_connections(app: AppHandle) -> Result<Vec<ConnectionConfig>, S
 }
 
 #[tauri::command]
-pub async fn test_connection(config: ConnectionConfig) -> Result<String, String> {
-    let url = config.connection_url();
+pub async fn test_connection(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+) -> Result<String, String> {
+    let tunnel_id = format!("{}:test", config.id);
+    let connection_id = if config.ssh_enabled && !config.ssh_host.is_empty() {
+        tunnel_id.as_str()
+    } else {
+        config.id.as_str()
+    };
+    let (host, port) = state.connection_host_port(connection_id, &config).await?;
+    let url = connection_url_for_endpoint(&config, &host, port);
+    let target = redacted_connection_url_for_endpoint(&config, &host, port);
     log::info!(
         "[test_connection] db_type={:?} target={}",
         config.db_type,
-        config.redacted_connection_url()
+        target
     );
-    match config.db_type {
-        DatabaseType::Mysql => {
-            let pool = db::mysql::connect(&url).await?;
-            pool.close().await;
-            Ok("Connection successful".to_string())
-        }
-        DatabaseType::Postgres => {
-            let pool = db::postgres::connect(&url).await?;
-            pool.close().await;
-            Ok("Connection successful".to_string())
-        }
-        DatabaseType::Sqlite => {
-            let pool = db::sqlite::connect(&url).await?;
-            pool.close().await;
-            Ok("Connection successful".to_string())
-        }
+    let result = match config.db_type {
+        DatabaseType::Mysql => match db::mysql::connect(&url).await {
+            Ok(pool) => {
+                pool.close().await;
+                Ok("Connection successful".to_string())
+            }
+            Err(e) => Err(e),
+        },
+        DatabaseType::Postgres => match db::postgres::connect(&url).await {
+            Ok(pool) => {
+                pool.close().await;
+                Ok("Connection successful".to_string())
+            }
+            Err(e) => Err(e),
+        },
+        DatabaseType::Sqlite => match db::sqlite::connect(&url).await {
+            Ok(pool) => {
+                pool.close().await;
+                Ok("Connection successful".to_string())
+            }
+            Err(e) => Err(e),
+        },
         DatabaseType::Redis => {
-            let _con = db::redis_driver::connect(&url).await?;
-            Ok("Connection successful".to_string())
+            db::redis_driver::connect(&url)
+                .await
+                .map(|_| "Connection successful".to_string())
         }
         DatabaseType::DuckDb => {
-            let _con = duckdb::Connection::open(&config.host).map_err(|e| e.to_string())?;
-            Ok("Connection successful".to_string())
+            duckdb::Connection::open(&config.host)
+                .map(|_| "Connection successful".to_string())
+                .map_err(|e| e.to_string())
         }
-        DatabaseType::MongoDb => {
-            let client = mongodb::Client::with_uri_str(&url).await.map_err(|e| e.to_string())?;
-            client.list_database_names().await.map_err(|e| e.to_string())?;
-            Ok("Connection successful".to_string())
-        }
+        DatabaseType::MongoDb => match mongodb::Client::with_uri_str(&url).await {
+            Ok(client) => client
+                .list_database_names()
+                .await
+                .map(|_| "Connection successful".to_string())
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        },
         DatabaseType::ClickHouse => {
             let client = db::clickhouse_driver::ChClient::new(&url);
-            db::clickhouse_driver::test_connection(&client).await?;
-            Ok("Connection successful".to_string())
+            db::clickhouse_driver::test_connection(&client)
+                .await
+                .map(|_| "Connection successful".to_string())
         }
-        DatabaseType::SqlServer => {
-            let _client = db::sqlserver::connect(
-                &config.host, config.port,
-                &config.username, &config.password,
-                config.database.as_deref(),
-            ).await?;
-            Ok("Connection successful".to_string())
-        }
-        DatabaseType::Oracle => {
-            let _client = db::oracle_driver::connect(
-                &config.host, config.port,
-                config.database.as_deref().unwrap_or("ORCL"),
-                &config.username, &config.password,
-            ).await?;
-            Ok("Connection successful".to_string())
-        }
+        DatabaseType::SqlServer => db::sqlserver::connect(
+            &host,
+            port,
+            &config.username,
+            &config.password,
+            config.database.as_deref(),
+        )
+        .await
+        .map(|_| "Connection successful".to_string()),
+        DatabaseType::Oracle => db::oracle_driver::connect(
+            &host,
+            port,
+            config.database.as_deref().unwrap_or("ORCL"),
+            &config.username,
+            &config.password,
+        )
+        .await
+        .map(|_| "Connection successful".to_string()),
+    };
+
+    if config.ssh_enabled && !config.ssh_host.is_empty() {
+        state.tunnels.stop_tunnel(&tunnel_id).await;
     }
+
+    result
 }
 
 #[tauri::command]
@@ -244,16 +331,8 @@ pub async fn connect_db(
 ) -> Result<String, String> {
     let id = config.id.clone();
 
-    let url = if config.ssh_enabled && !config.ssh_host.is_empty() {
-        let local_port = state.tunnels.start_tunnel(
-            &id, &config.ssh_host, config.ssh_port,
-            &config.ssh_user, &config.ssh_password, &config.ssh_key_path,
-            &config.host, config.port,
-        ).await?;
-        config.connection_url_with_host("127.0.0.1", local_port)
-    } else {
-        config.connection_url()
-    };
+    let (host, port) = state.connection_host_port(&id, &config).await?;
+    let url = connection_url_for_endpoint(&config, &host, port);
 
     let pool = match config.db_type {
         DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?),
@@ -278,17 +357,23 @@ pub async fn connect_db(
         }
         DatabaseType::SqlServer => {
             let client = db::sqlserver::connect(
-                &config.host, config.port,
+                &host,
+                port,
                 &config.username, &config.password,
                 config.database.as_deref(),
-            ).await?;
-                PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))        }
+            )
+            .await?;
+            PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+        }
         DatabaseType::Oracle => {
             let client = db::oracle_driver::connect(
-                &config.host, config.port,
+                &host,
+                port,
                 config.database.as_deref().unwrap_or("ORCL"),
-                &config.username, &config.password,
-            ).await?;
+                &config.username,
+                &config.password,
+            )
+            .await?;
             PoolKind::Oracle(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
         }
     };

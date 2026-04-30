@@ -79,6 +79,14 @@ impl TunnelManager {
         Ok(local_port)
     }
 
+    pub async fn local_port(&self, connection_id: &str) -> Option<u16> {
+        self.tunnels
+            .lock()
+            .await
+            .get(connection_id)
+            .map(|(_, port)| *port)
+    }
+
     pub async fn stop_tunnel(&self, connection_id: &str) {
         if let Some((mut child, _)) = self.tunnels.lock().await.remove(connection_id) {
             let _ = child.kill().await;

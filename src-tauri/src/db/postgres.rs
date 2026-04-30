@@ -52,6 +52,8 @@ pub async fn list_schemas(pool: &PgPool) -> Result<Vec<String>, String> {
     let rows: Vec<PgRow> = sqlx::query(
         "SELECT schema_name FROM information_schema.schemata \
          WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+         AND schema_name NOT LIKE 'pg_toast_temp_%' \
+         AND schema_name NOT LIKE 'pg_temp_%' \
          ORDER BY schema_name",
     )
     .fetch_all(pool)

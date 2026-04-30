@@ -78,7 +78,7 @@ const activeTabContext = computed(() => {
 
   const items = [
     connection.name,
-    connection.db_type.toUpperCase(),
+    connectionDriverLabel(connection),
   ];
 
   if (tab.tableMeta?.tableName) {
@@ -100,7 +100,7 @@ const activeConnectionValue = computed(() => activeConnection.value?.id || "");
 const connectionStats = computed(() => {
   const total = connectionStore.connections.length;
   const connected = connectionStore.connectedIds.size;
-  const types = new Set(connectionStore.connections.map((connection) => connection.db_type)).size;
+  const types = new Set(connectionStore.connections.map((connection) => connection.driver_profile || connection.db_type)).size;
   return { total, connected, types };
 });
 
@@ -108,6 +108,14 @@ const recentConnections = computed(() => connectionStore.connections.slice(0, 5)
 
 function connectionDisplayName(connectionId: string): string {
   return connectionStore.getConfig(connectionId)?.name || connectionId;
+}
+
+function connectionDriverLabel(connection?: ConnectionConfig): string {
+  return connection?.driver_label || connection?.db_type.toUpperCase() || "";
+}
+
+function connectionIconType(connection?: ConnectionConfig): string {
+  return connection?.driver_profile || connection?.db_type || "postgres";
 }
 
 function connectionColor(connectionId: string): string {
@@ -424,6 +432,9 @@ async function setupFileDrop() {
         id: crypto.randomUUID(),
         name,
         db_type: dbType,
+        driver_profile: dbType,
+        driver_label: dbType === "duckdb" ? "DuckDB" : "SQLite",
+        url_params: "",
         host: path,
         port: 0,
         username: "",
@@ -599,7 +610,7 @@ async function setupFileDrop() {
                 </SelectContent>
               </Select>
               <span class="text-muted-foreground/50">/</span>
-              <span class="shrink-0">{{ activeConnection?.db_type.toUpperCase() }}</span>
+              <span class="shrink-0">{{ connectionDriverLabel(activeConnection) }}</span>
               <span class="text-muted-foreground/50">/</span>
               <Select
                 :model-value="activeDatabaseValue"
@@ -748,12 +759,12 @@ async function setupFileDrop() {
                       class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
                       @click="openConnectionQuery(connection.id)"
                     >
-                      <DatabaseIcon :db-type="connection.db_type" class="h-4 w-4" />
+                      <DatabaseIcon :db-type="connectionIconType(connection)" class="h-4 w-4" />
                       <span v-if="connection.color" class="h-5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color }" />
                       <div class="min-w-0 flex-1">
                         <div class="truncate text-sm font-medium">{{ connection.name }}</div>
                         <div class="truncate text-xs text-muted-foreground">
-                          {{ connection.db_type.toUpperCase() }} · {{ connection.host || connection.database || 'local' }}{{ connection.port ? ':' + connection.port : '' }}
+                          {{ connectionDriverLabel(connection) }} · {{ connection.host || connection.database || 'local' }}{{ connection.port ? ':' + connection.port : '' }}
                         </div>
                       </div>
                       <FilePlus2 class="h-4 w-4 text-muted-foreground" />

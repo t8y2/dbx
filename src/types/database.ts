@@ -4,6 +4,9 @@ export interface ConnectionConfig {
   id: string;
   name: string;
   db_type: DatabaseType;
+  driver_profile?: string;
+  driver_label?: string;
+  url_params?: string;
   host: string;
   port: number;
   username: string;

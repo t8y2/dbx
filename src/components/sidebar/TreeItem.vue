@@ -223,6 +223,11 @@ const isConnected = computed(() =>
   props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId)
 );
 
+function connectionIconType(connectionId?: string) {
+  const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
+  return config?.driver_profile || config?.db_type || "postgres";
+}
+
 const connectionColor = computed(() => {
   const connectionId = props.node.connectionId;
   return connectionId ? connectionStore.getConfig(connectionId)?.color || "" : "";
@@ -272,7 +277,7 @@ async function showMore() {
             <ChevronRight v-else class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
           </template>
           <span v-else class="w-3.5 h-3.5 shrink-0" />
-          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionStore.getConfig(node.connectionId || '')?.db_type || 'postgres'" class="w-3.5 h-3.5 shrink-0" />
+          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="getIconInfo(node)?.colorClass" />
           <span v-if="node.type === 'connection' && connectionColor" class="h-3 w-1.5 rounded-full shrink-0" :style="{ backgroundColor: connectionColor }" />
           <span class="truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>

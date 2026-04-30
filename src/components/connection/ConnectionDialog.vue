@@ -31,6 +31,9 @@ const editingId = ref<string | null>(null);
 const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   name: "",
   db_type: "mysql",
+  driver_profile: "mysql",
+  driver_label: "MySQL",
+  url_params: "",
   host: "127.0.0.1",
   port: 3306,
   username: "root",
@@ -48,6 +51,7 @@ const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
 
 const form = ref(defaultForm());
 const selectedType = ref("mysql");
+const customDriverName = ref("");
 
 const colorOptions = [
   { value: "", class: "bg-transparent border-dashed", labelKey: "connection.colorNone" },
@@ -59,12 +63,69 @@ const colorOptions = [
   { value: "#a855f7", class: "bg-purple-500", labelKey: "connection.colorPurple" },
 ];
 
+const driverProfiles: Record<string, { type: DatabaseType; port: number; user: string; label: string; icon: string; urlParams?: string }> = {
+  mysql:      { type: "mysql",      port: 3306,  user: "root",     label: "MySQL",       icon: "mysql",    urlParams: "" },
+  postgres:   { type: "postgres",   port: 5432,  user: "postgres", label: "PostgreSQL",  icon: "postgres", urlParams: "" },
+  redis:      { type: "redis",      port: 6379,  user: "",         label: "Redis",       icon: "redis" },
+  sqlite:     { type: "sqlite",     port: 0,     user: "",         label: "SQLite",      icon: "sqlite" },
+  duckdb:     { type: "duckdb",     port: 0,     user: "",         label: "DuckDB",      icon: "duckdb" },
+  mongodb:    { type: "mongodb",    port: 27017, user: "",         label: "MongoDB",     icon: "mongodb" },
+  clickhouse: { type: "clickhouse", port: 8123,  user: "default",  label: "ClickHouse",  icon: "clickhouse" },
+  sqlserver:  { type: "sqlserver",  port: 1433,  user: "sa",       label: "SQL Server",  icon: "sqlserver" },
+  oracle:     { type: "oracle",     port: 1521,  user: "system",   label: "Oracle",      icon: "oracle" },
+  mariadb:    { type: "mysql",      port: 3306,  user: "root",     label: "MariaDB",     icon: "mariadb" },
+  tidb:       { type: "mysql",      port: 4000,  user: "root",     label: "TiDB",        icon: "tidb" },
+  oceanbase:  { type: "mysql",      port: 2881,  user: "root",     label: "OceanBase",   icon: "oceanbase" },
+  goldendb:   { type: "mysql",      port: 3306,  user: "root",     label: "GoldenDB",    icon: "goldendb" },
+  opengauss:  { type: "postgres",   port: 5432,  user: "gaussdb",  label: "openGauss",   icon: "opengauss", urlParams: "sslmode=disable" },
+  gaussdb:    { type: "postgres",   port: 5432,  user: "gaussdb",  label: "GaussDB",     icon: "gaussdb" },
+  kingbase:   { type: "postgres",   port: 54321, user: "system",   label: "KingBase",    icon: "kingbase" },
+  vastbase:   { type: "postgres",   port: 5432,  user: "vastbase", label: "Vastbase",    icon: "vastbase" },
+  custom_mysql:    { type: "mysql",    port: 3306, user: "root",     label: "Custom MySQL-compatible",       icon: "mysql",    urlParams: "" },
+  custom_postgres: { type: "postgres", port: 5432, user: "postgres", label: "Custom PostgreSQL-compatible",  icon: "postgres", urlParams: "" },
+};
+
+function profileForConfig(config: ConnectionConfig) {
+  if (config.driver_profile && driverProfiles[config.driver_profile]) return config.driver_profile;
+  return config.db_type;
+}
+
+function selectedProfile() {
+  return driverProfiles[selectedType.value] ?? driverProfiles.mysql;
+}
+
+function isCustomCompatibleProfile() {
+  return selectedType.value === "custom_mysql" || selectedType.value === "custom_postgres";
+}
+
+function applyProfile(val: string, preserveConnectionFields = false) {
+  const profile = driverProfiles[val];
+  if (!profile) return;
+
+  selectedType.value = val;
+  form.value.db_type = profile.type;
+  form.value.driver_profile = val;
+  form.value.driver_label = isCustomCompatibleProfile()
+    ? (customDriverName.value.trim() || profile.label)
+    : profile.label;
+
+  if (!preserveConnectionFields) {
+    form.value.port = profile.port;
+    form.value.username = profile.user;
+    form.value.url_params = profile.urlParams || "";
+  }
+}
+
 watch(() => props.editConfig, (config) => {
   if (config) {
+    const profile = profileForConfig(config);
     editingId.value = config.id;
     form.value = {
       name: config.name,
       db_type: config.db_type,
+      driver_profile: profile,
+      driver_label: config.driver_label || driverProfiles[profile]?.label || config.db_type,
+      url_params: config.url_params || "",
       host: config.host,
       port: config.port,
       username: config.username,
@@ -79,11 +140,13 @@ watch(() => props.editConfig, (config) => {
       ssh_key_path: config.ssh_key_path || "",
       ssl: config.ssl || false,
     };
-    selectedType.value = config.db_type;
+    selectedType.value = profile;
+    customDriverName.value = isCustomCompatibleProfile() ? (config.driver_label || "") : "";
   } else {
     editingId.value = null;
     form.value = defaultForm();
     selectedType.value = "mysql";
+    customDriverName.value = "";
   }
   testResult.value = null;
 });
@@ -92,42 +155,17 @@ const isEditing = ref(false);
 watch(() => editingId.value, (v) => { isEditing.value = !!v; });
 
 function onDbTypeChange(val: string) {
-  const aliasMap: Record<string, { type: DatabaseType; port: number; user: string }> = {
-    mysql:      { type: "mysql",      port: 3306,  user: "root" },
-    postgres:   { type: "postgres",   port: 5432,  user: "postgres" },
-    redis:      { type: "redis",      port: 6379,  user: "" },
-    sqlite:     { type: "sqlite",     port: 0,     user: "" },
-    duckdb:     { type: "duckdb",     port: 0,     user: "" },
-    mongodb:    { type: "mongodb",    port: 27017, user: "" },
-    clickhouse: { type: "clickhouse", port: 8123,  user: "default" },
-    sqlserver:  { type: "sqlserver",  port: 1433,  user: "sa" },
-    oracle:     { type: "oracle",     port: 1521,  user: "system" },
-    tidb:       { type: "mysql",      port: 4000,  user: "root" },
-    oceanbase:  { type: "mysql",      port: 2881,  user: "root" },
-    goldendb:   { type: "mysql",      port: 3306,  user: "root" },
-    mariadb:    { type: "mysql",      port: 3306,  user: "root" },
-    opengauss:  { type: "postgres",   port: 5432,  user: "gaussdb" },
-    gaussdb:    { type: "postgres",   port: 5432,  user: "gaussdb" },
-    kingbase:   { type: "postgres",   port: 54321, user: "system" },
-    vastbase:   { type: "postgres",   port: 5432,  user: "vastbase" },
-  };
-  const alias = aliasMap[val];
-  if (alias) {
-    selectedType.value = val;
-    form.value.db_type = alias.type;
-    if (!editingId.value) {
-      form.value.port = alias.port;
-      form.value.username = alias.user;
-    }
-  }
+  customDriverName.value = "";
+  applyProfile(val, !!editingId.value);
 }
 
 const iconTypeMap: Record<string, string> = {
   mysql: "mysql", postgres: "postgres", sqlite: "sqlite", redis: "redis",
   mongodb: "mongodb", duckdb: "duckdb", clickhouse: "clickhouse", sqlserver: "sqlserver",
   oracle: "oracle",
-  mariadb: "mariadb", tidb: "tidb", oceanbase: "mysql", goldendb: "mysql",
-  opengauss: "postgres", gaussdb: "postgres", kingbase: "postgres", vastbase: "postgres",
+  mariadb: "mariadb", tidb: "tidb", oceanbase: "oceanbase", goldendb: "goldendb",
+  opengauss: "opengauss", gaussdb: "gaussdb", kingbase: "kingbase", vastbase: "vastbase",
+  custom_mysql: "mysql", custom_postgres: "postgres",
 };
 
 const dbOptions = [
@@ -147,6 +185,7 @@ const mysqlCompat = [
   { value: "tidb", label: "TiDB" },
   { value: "oceanbase", label: "OceanBase" },
   { value: "goldendb", label: "GoldenDB" },
+  { value: "custom_mysql", label: "Custom MySQL-compatible" },
 ];
 
 const pgCompat = [
@@ -154,7 +193,14 @@ const pgCompat = [
   { value: "gaussdb", label: "GaussDB" },
   { value: "kingbase", label: "KingBase" },
   { value: "vastbase", label: "Vastbase" },
+  { value: "custom_postgres", label: "Custom PostgreSQL-compatible" },
 ];
+
+watch(customDriverName, (value) => {
+  if (isCustomCompatibleProfile()) {
+    form.value.driver_label = value.trim() || selectedProfile().label;
+  }
+});
 
 async function testConnection() {
   isTesting.value = true;
@@ -257,6 +303,11 @@ watch([() => editingId.value, () => open.value], () => {
           </Select>
         </div>
 
+        <div v-if="isCustomCompatibleProfile()" class="grid grid-cols-4 items-center gap-4">
+          <Label class="text-right">{{ t('connection.driverName') }}</Label>
+          <Input v-model="customDriverName" class="col-span-3" :placeholder="t('connection.driverNamePlaceholder')" />
+        </div>
+
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-right">{{ t('connection.color') }}</Label>
           <div class="col-span-3 flex items-center gap-1.5">
@@ -325,6 +376,11 @@ watch([() => editingId.value, () => open.value], () => {
           <div class="grid grid-cols-4 items-center gap-4">
             <Label class="text-right">{{ t('connection.database') }}</Label>
             <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+          </div>
+
+          <div v-if="form.db_type === 'mysql' || form.db_type === 'postgres'" class="grid grid-cols-4 items-center gap-4">
+            <Label class="text-right">{{ t('connection.urlParams') }}</Label>
+            <Input v-model="form.url_params" class="col-span-3" :placeholder="form.db_type === 'postgres' ? 'sslmode=disable' : 'charset=utf8mb4'" />
           </div>
         </template>
 

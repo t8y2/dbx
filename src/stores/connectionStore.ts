@@ -22,8 +22,28 @@ export const useConnectionStore = defineStore("connection", () => {
     return connections.value.find((c) => c.id === connectionId);
   }
 
+  function normalizeConnection(config: ConnectionConfig): ConnectionConfig {
+    const labelMap: Record<string, string> = {
+      mysql: "MySQL",
+      postgres: "PostgreSQL",
+      sqlite: "SQLite",
+      redis: "Redis",
+      duckdb: "DuckDB",
+      clickhouse: "ClickHouse",
+      sqlserver: "SQL Server",
+      mongodb: "MongoDB",
+      oracle: "Oracle",
+    };
+    return {
+      ...config,
+      driver_profile: config.driver_profile || config.db_type,
+      driver_label: config.driver_label || labelMap[config.driver_profile || config.db_type] || config.db_type,
+      url_params: config.url_params || "",
+    };
+  }
+
   function addConnection(config: ConnectionConfig) {
-    connections.value.push(config);
+    connections.value.push(normalizeConnection(config));
     persistConnections();
   }
 
@@ -37,6 +57,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function updateConnection(config: ConnectionConfig) {
+    config = normalizeConnection(config);
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx >= 0) connections.value[idx] = config;
     const node = findNode(treeNodes.value, config.id);
@@ -50,6 +71,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function connect(config: ConnectionConfig) {
+    config = normalizeConnection(config);
     const id = await api.connectDb(config);
     activeConnectionId.value = id;
     connectedIds.value.add(id);
@@ -439,12 +461,13 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const config of imported) {
       if (!connections.value.find((c) => c.id === config.id)) {
         config.id = crypto.randomUUID();
-        addConnection(config);
+        const normalized = normalizeConnection(config);
+        addConnection(normalized);
         treeNodes.value.push({
-          id: config.id,
-          label: config.name,
+          id: normalized.id,
+          label: normalized.name,
           type: "connection" as const,
-          connectionId: config.id,
+          connectionId: normalized.id,
           isExpanded: false,
           children: [],
         });
@@ -454,7 +477,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function initFromDisk() {
     const saved = await api.loadConnections();
-    connections.value = saved;
+    connections.value = saved.map(normalizeConnection);
     treeNodes.value = saved.map((config) => ({
       id: config.id,
       label: config.name,

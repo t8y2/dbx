@@ -6,6 +6,12 @@ pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
     pub db_type: DatabaseType,
+    #[serde(default)]
+    pub driver_profile: Option<String>,
+    #[serde(default)]
+    pub driver_label: Option<String>,
+    #[serde(default)]
+    pub url_params: Option<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -64,6 +70,7 @@ impl ConnectionConfig {
             .unwrap_or_default();
         let username = encode_url_part(&self.username);
         let password = encode_url_part(&self.password);
+        let params = self.normalized_url_params();
 
         match self.db_type {
             DatabaseType::Sqlite | DatabaseType::DuckDb => {
@@ -79,14 +86,11 @@ impl ConnectionConfig {
                     format!("{scheme}://{username}:{password}@{host}:{port}/")
                 }
             }
-            DatabaseType::Mysql => format!(
-                "mysql://{}:{}@{host}:{port}{db_part}?ssl-mode=preferred",
-                username, password
-            ),
-            DatabaseType::Postgres => format!(
-                "postgres://{}:{}@{host}:{port}{db_part}",
-                username, password
-            ),
+            DatabaseType::Mysql => format!("mysql://{}:{}@{host}:{port}{db_part}?{params}", username, password),
+            DatabaseType::Postgres => {
+                let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
+                format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+            }
             DatabaseType::ClickHouse => format!(
                 "http://{host}:{port}{db_part}"
             ),
@@ -107,6 +111,23 @@ impl ConnectionConfig {
             ),
         }
     }
+
+    fn normalized_url_params(&self) -> String {
+        let value = self.url_params.as_deref().unwrap_or("").trim();
+        match self.db_type {
+            DatabaseType::Mysql => {
+                if value.is_empty() {
+                    "ssl-mode=preferred".to_string()
+                } else if value.contains("ssl-mode=") {
+                    value.trim_start_matches('?').to_string()
+                } else {
+                    format!("ssl-mode=preferred&{}", value.trim_start_matches('?'))
+                }
+            }
+            DatabaseType::Postgres => value.trim_start_matches('?').to_string(),
+            _ => value.trim_start_matches('?').to_string(),
+        }
+    }
 }
 
 fn encode_url_part(value: &str) -> String {
@@ -122,6 +143,9 @@ mod tests {
             id: "id".to_string(),
             name: "name".to_string(),
             db_type: DatabaseType::Mysql,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
             host: "10.1.2.3".to_string(),
             port: 2883,
             username: username.to_string(),
@@ -155,6 +179,29 @@ mod tests {
         assert_eq!(
             config.connection_url(),
             "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred"
+        );
+    }
+
+    #[test]
+    fn mysql_url_appends_custom_params() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("charset=utf8mb4".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn postgres_url_appends_custom_params() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("sslmode=disable".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=disable"
         );
     }
 }

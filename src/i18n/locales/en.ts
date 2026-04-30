@@ -153,6 +153,8 @@ export default {
     newQuery: "New Query",
     viewData: "View Data",
     refreshChildren: "Refresh",
+    pin: "Pin",
+    unpin: "Unpin",
     copyName: "Copy Name",
   },
   tree: {

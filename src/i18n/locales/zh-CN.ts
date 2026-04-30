@@ -151,6 +151,8 @@ export default {
     newQuery: "新建查询",
     viewData: "查看数据",
     refreshChildren: "刷新",
+    pin: "置顶",
+    unpin: "取消置顶",
     copyName: "复制名称",
   },
   tree: {

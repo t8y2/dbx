@@ -82,6 +82,7 @@ export interface TreeNode {
   children?: TreeNode[];
   isLoading?: boolean;
   isExpanded?: boolean;
+  pinned?: boolean;
   connectionId?: string;
   database?: string;
   schema?: string;
@@ -96,6 +97,7 @@ export interface QueryTab {
   database: string;
   sql: string;
   lastExecutedSql?: string;
+  pinned?: boolean;
   result?: QueryResult;
   isExecuting: boolean;
   mode: "data" | "query" | "redis" | "mongo";

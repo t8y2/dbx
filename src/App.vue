@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Sparkles } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Sparkles, Pin } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -591,14 +591,26 @@ async function setupFileDrop() {
             <div
               v-for="tab in queryStore.tabs"
               :key="tab.id"
-              class="flex items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap"
+              class="group flex min-w-0 items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap"
               :class="{ 'bg-background font-medium': tab.id === queryStore.activeTabId }"
               @click="queryStore.activeTabId = tab.id"
             >
               <span v-if="connectionColor(tab.connectionId)" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) }" />
-              <span>{{ tabDisplayTitle(tab) }}</span>
+              <span class="min-w-0 truncate">{{ tabDisplayTitle(tab) }}</span>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <button
+                    class="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
+                    :class="tab.pinned ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'"
+                    @click.stop="queryStore.togglePinnedTab(tab.id)"
+                  >
+                    <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{{ tab.pinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}</TooltipContent>
+              </Tooltip>
               <button
-                class="ml-1 rounded hover:bg-muted-foreground/20 p-0.5"
+                class="rounded hover:bg-muted-foreground/20 p-0.5"
                 @click.stop="queryStore.closeTab(tab.id)"
               >
                 <X class="h-3 w-3" />

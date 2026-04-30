@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { QueryTab } from "@/types/database";
+import { orderPinnedFirst } from "@/lib/pinnedItems";
 import * as api from "@/lib/tauri";
 
 export const useQueryStore = defineStore("query", () => {
@@ -48,6 +49,13 @@ export const useQueryStore = defineStore("query", () => {
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) tab.sql = sql;
+  }
+
+  function togglePinnedTab(id: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return;
+    tab.pinned = !tab.pinned;
+    tabs.value = orderPinnedFirst(tabs.value, (item) => !!item.pinned);
   }
 
   function updateDatabase(id: string, database: string) {
@@ -116,6 +124,7 @@ export const useQueryStore = defineStore("query", () => {
     createTab,
     closeTab,
     updateSql,
+    togglePinnedTab,
     updateDatabase,
     updateConnection,
     setTableMeta,

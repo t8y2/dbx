@@ -5,6 +5,7 @@ import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
   Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
+  Pin,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
@@ -77,6 +78,15 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
 
 const leafTypes: Set<TreeNodeType> = new Set(["column", "index", "fkey", "trigger", "redis-db"]);
 const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers"]);
+const pinnableTypes: Set<TreeNodeType> = new Set([
+  "database",
+  "schema",
+  "table",
+  "view",
+  "redis-db",
+  "mongo-db",
+  "mongo-collection",
+]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -220,6 +230,8 @@ function disconnectConnection() {
 }
 
 const canExpand = !leafTypes.has(props.node.type);
+const canPin = computed(() => pinnableTypes.has(props.node.type));
+const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
 const paddingLeft = `${props.depth * 16 + 8}px`;
 const isConnected = computed(() =>
   props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId)
@@ -249,6 +261,10 @@ const remainingCount = computed(() =>
   (props.node.children?.length ?? 0) - displayLimit.value
 );
 
+function togglePin() {
+  connectionStore.toggleTreeNodePin(props.node.id);
+}
+
 async function showMore() {
   if ((props.node.children?.length ?? 0) > displayLimit.value) {
     displayLimit.value += CHILDREN_PAGE_SIZE;
@@ -261,7 +277,7 @@ async function showMore() {
     <ContextMenuTrigger as-child>
       <div>
         <div
-          class="flex items-center gap-1.5 py-1 px-2 rounded-sm cursor-pointer hover:bg-accent transition-colors"
+          class="group flex min-w-0 items-center gap-1.5 py-1 px-2 rounded-sm cursor-pointer hover:bg-accent transition-colors"
           :style="{ paddingLeft }"
           @click="onClick"
         >
@@ -274,8 +290,17 @@ async function showMore() {
           <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="getIconInfo(node)?.colorClass" />
           <span v-if="node.type === 'connection' && connectionColor" class="h-3 w-1.5 rounded-full shrink-0" :style="{ backgroundColor: connectionColor }" />
-          <span class="truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>
+          <span class="min-w-0 flex-1 truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+          <button
+            v-if="canPin"
+            class="rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/15 hover:text-foreground focus:opacity-100"
+            :class="isPinned ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'"
+            :title="isPinned ? t('contextMenu.unpin') : t('contextMenu.pin')"
+            @click.stop="togglePin"
+          >
+            <Pin class="w-3 h-3" :class="{ 'fill-current': isPinned }" />
+          </button>
         </div>
         <template v-if="node.isExpanded && node.children">
           <TreeItem v-for="child in visibleChildren" :key="child.id" :node="child" :depth="depth + 1" />
@@ -293,6 +318,12 @@ async function showMore() {
     </ContextMenuTrigger>
 
     <ContextMenuContent class="w-48">
+      <ContextMenuItem v-if="canPin" @click="togglePin">
+        <Pin class="w-3.5 h-3.5 mr-2" :class="{ 'fill-current': isPinned }" />
+        {{ isPinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}
+      </ContextMenuItem>
+      <ContextMenuSeparator v-if="canPin" />
+
       <template v-if="node.type === 'connection'">
         <ContextMenuItem v-if="!isConnected" @click="toggle">
           <Plug class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.openConnection') }}

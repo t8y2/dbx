@@ -1,12 +1,16 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { orderPinnedFirst } from "@/lib/pinnedItems";
 import * as api from "@/lib/tauri";
+
+const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 
 export const useConnectionStore = defineStore("connection", () => {
   const connections = ref<ConnectionConfig[]>([]);
   const activeConnectionId = ref<string | null>(null);
   const treeNodes = ref<TreeNode[]>([]);
+  const pinnedTreeNodeIds = ref<Set<string>>(loadPinnedTreeNodeIds());
   const connectedIds = ref<Set<string>>(new Set());
   const editingConnectionId = ref<string | null>(null);
 
@@ -40,6 +44,64 @@ export const useConnectionStore = defineStore("connection", () => {
       driver_label: config.driver_label || labelMap[config.driver_profile || config.db_type] || config.db_type,
       url_params: config.url_params || "",
     };
+  }
+
+  function loadPinnedTreeNodeIds(): Set<string> {
+    try {
+      if (typeof localStorage === "undefined") return new Set();
+      const saved = localStorage.getItem(PINNED_TREE_NODES_STORAGE_KEY);
+      const ids = saved ? JSON.parse(saved) : [];
+      return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function persistPinnedTreeNodeIds() {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(PINNED_TREE_NODES_STORAGE_KEY, JSON.stringify([...pinnedTreeNodeIds.value]));
+  }
+
+  function isTreeNodePinned(id: string): boolean {
+    return pinnedTreeNodeIds.value.has(id);
+  }
+
+  function pinTreeNode(node: TreeNode): TreeNode {
+    node.pinned = isTreeNodePinned(node.id);
+    return node;
+  }
+
+  function setChildren(parent: TreeNode, children: TreeNode[]) {
+    parent.children = orderPinnedFirst(children.map(pinTreeNode), (node) => !!node.pinned);
+  }
+
+  function findParentNode(nodes: TreeNode[], id: string, parent: TreeNode | null = null): TreeNode | null {
+    for (const node of nodes) {
+      if (node.id === id) return parent;
+      if (node.children) {
+        const found = findParentNode(node.children, id, node);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function toggleTreeNodePin(id: string) {
+    const next = new Set(pinnedTreeNodeIds.value);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    pinnedTreeNodeIds.value = next;
+    persistPinnedTreeNodeIds();
+
+    const node = findNode(treeNodes.value, id);
+    if (node) node.pinned = next.has(id);
+
+    const parent = findParentNode(treeNodes.value, id);
+    if (parent?.children) {
+      parent.children = orderPinnedFirst(parent.children, (child) => !!child.pinned);
+    } else {
+      treeNodes.value = orderPinnedFirst(treeNodes.value, (child) => !!child.pinned);
+    }
   }
 
   function addConnection(config: ConnectionConfig) {
@@ -123,7 +185,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       const databases = await api.listDatabases(connectionId);
-      node.children = databases.map((db) => ({
+      setChildren(node, databases.map((db) => ({
         id: `${connectionId}:${db.name}`,
         label: db.name,
         type: "database" as const,
@@ -131,7 +193,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database: db.name,
         isExpanded: false,
         children: [],
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -146,7 +208,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       const dbs = await api.redisListDatabases(connectionId);
-      node.children = dbs.map((db) => ({
+      setChildren(node, dbs.map((db) => ({
         id: `${connectionId}:db${db}`,
         label: `db${db}`,
         type: "redis-db" as const,
@@ -154,7 +216,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database: String(db),
         isExpanded: false,
         children: [],
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -169,7 +231,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       const dbs = await api.mongoListDatabases(connectionId);
-      node.children = dbs.map((db) => ({
+      setChildren(node, dbs.map((db) => ({
         id: `${connectionId}:${db}`,
         label: db,
         type: "mongo-db" as const,
@@ -177,7 +239,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database: db,
         isExpanded: false,
         children: [],
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -192,14 +254,14 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const collections = await api.mongoListCollections(connectionId, database);
-      node.children = collections.map((col) => ({
+      setChildren(node, collections.map((col) => ({
         id: `${nodeId}:${col}`,
         label: col,
         type: "mongo-collection" as const,
         connectionId,
         database,
         isExpanded: false,
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -214,7 +276,7 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const schemas = await api.listSchemas(connectionId, database);
-      node.children = schemas.map((s) => ({
+      setChildren(node, schemas.map((s) => ({
         id: `${connectionId}:${database}:${s}`,
         label: s,
         type: "schema" as const,
@@ -223,7 +285,7 @@ export const useConnectionStore = defineStore("connection", () => {
         schema: s,
         isExpanded: false,
         children: [],
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -241,7 +303,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const querySchema = schema || database;
       const tables = await api.listTables(connectionId, database, querySchema);
-      node.children = tables.map((t) => ({
+      setChildren(node, tables.map((t) => ({
         id: `${nodeId}:${t.name}`,
         label: t.name,
         type: (t.table_type === "VIEW" ? "view" : "table") as "view" | "table",
@@ -250,7 +312,7 @@ export const useConnectionStore = defineStore("connection", () => {
         schema,
         isExpanded: false,
         children: [],
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -264,12 +326,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
 
-    node.children = [
+    setChildren(node, [
       { id: `${parentId}:__columns`, label: "tree.columns", type: "group-columns", connectionId, database, schema, tableName: table, isExpanded: false, children: [] },
       { id: `${parentId}:__indexes`, label: "tree.indexes", type: "group-indexes", connectionId, database, schema, tableName: table, isExpanded: false, children: [] },
       { id: `${parentId}:__fkeys`, label: "tree.foreignKeys", type: "group-fkeys", connectionId, database, schema, tableName: table, isExpanded: false, children: [] },
       { id: `${parentId}:__triggers`, label: "tree.triggers", type: "group-triggers", connectionId, database, schema, tableName: table, isExpanded: false, children: [] },
-    ];
+    ]);
     node.isExpanded = true;
   }
 
@@ -284,7 +346,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const querySchema = schema || database;
       const columns = await api.getColumns(connectionId, database, querySchema, table);
-      node.children = columns.map((col) => ({
+      setChildren(node, columns.map((col) => ({
         id: `${parentId}:${col.name}`,
         label: `${col.name} (${col.data_type})`,
         type: "column" as const,
@@ -292,7 +354,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database,
         schema,
         meta: col,
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -310,7 +372,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const querySchema = schema || database;
       const indexes = await api.listIndexes(connectionId, database, querySchema, table);
-      node.children = indexes.map((idx) => ({
+      setChildren(node, indexes.map((idx) => ({
         id: `${parentId}:${idx.name}`,
         label: `${idx.name} (${idx.columns.join(", ")})`,
         type: "index" as const,
@@ -318,7 +380,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database,
         schema,
         meta: idx,
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -336,7 +398,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const querySchema = schema || database;
       const fkeys = await api.listForeignKeys(connectionId, database, querySchema, table);
-      node.children = fkeys.map((fk) => ({
+      setChildren(node, fkeys.map((fk) => ({
         id: `${parentId}:${fk.name}`,
         label: `${fk.column} → ${fk.ref_table}.${fk.ref_column}`,
         type: "fkey" as const,
@@ -344,7 +406,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database,
         schema,
         meta: fk,
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -362,7 +424,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const querySchema = schema || database;
       const triggers = await api.listTriggers(connectionId, database, querySchema, table);
-      node.children = triggers.map((tr) => ({
+      setChildren(node, triggers.map((tr) => ({
         id: `${parentId}:${tr.name}`,
         label: `${tr.name} (${tr.timing} ${tr.event})`,
         type: "trigger" as const,
@@ -370,7 +432,7 @@ export const useConnectionStore = defineStore("connection", () => {
         database,
         schema,
         meta: tr,
-      }));
+      })));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;
@@ -444,6 +506,8 @@ export const useConnectionStore = defineStore("connection", () => {
     treeNodes,
     connectedIds,
     getConfig,
+    isTreeNodePinned,
+    toggleTreeNodePin,
     addConnection,
     updateConnection,
     removeConnection,

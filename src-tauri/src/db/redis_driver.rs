@@ -1,7 +1,8 @@
-use redis::{AsyncCommands, Value as RedisRawValue};
+use redis::{AsyncCommands, FromRedisValue, Value as RedisRawValue};
 use serde::{Deserialize, Serialize};
 
 const STREAM_ENTRY_LIMIT: usize = 100;
+const DEFAULT_REDIS_DATABASES: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisKeyInfo {
@@ -45,13 +46,53 @@ pub async fn connect(url: &str) -> Result<redis::aio::MultiplexedConnection, Str
 pub async fn list_databases(
     con: &mut redis::aio::MultiplexedConnection,
 ) -> Result<Vec<u32>, String> {
+    let configured_count = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("databases")
+        .query_async(con)
+        .await
+        .ok()
+        .and_then(parse_database_count);
+
+    let keyspace_dbs = list_keyspace_databases(con).await.unwrap_or_default();
+    let database_count = configured_count.unwrap_or(DEFAULT_REDIS_DATABASES);
+    let max_db = keyspace_dbs
+        .iter()
+        .copied()
+        .max()
+        .map(|db| db + 1)
+        .unwrap_or(0);
+    let visible_count = database_count.max(max_db).max(1);
+
+    Ok((0..visible_count).collect())
+}
+
+fn parse_database_count(value: redis::Value) -> Option<u32> {
+    let values = match value {
+        redis::Value::Array(values) => values,
+        _ => return None,
+    };
+
+    values.windows(2).find_map(|pair| {
+        let key = String::from_redis_value(&pair[0]).ok()?;
+        if key.eq_ignore_ascii_case("databases") {
+            String::from_redis_value(&pair[1]).ok()?.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+async fn list_keyspace_databases(
+    con: &mut redis::aio::MultiplexedConnection,
+) -> Result<Vec<u32>, String> {
     let info: String = redis::cmd("INFO")
         .arg("keyspace")
         .query_async(con)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut dbs: Vec<u32> = Vec::new();
+    let mut dbs = Vec::new();
     for line in info.lines() {
         if line.starts_with("db") {
             if let Some(num) = line.strip_prefix("db").and_then(|s| s.split(':').next()) {
@@ -60,9 +101,6 @@ pub async fn list_databases(
                 }
             }
         }
-    }
-    if dbs.is_empty() {
-        dbs.push(0);
     }
     Ok(dbs)
 }
@@ -334,7 +372,7 @@ pub async fn set_remove(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_stream_entries, RedisRawValue};
+    use super::{parse_database_count, parse_stream_entries, RedisRawValue};
 
     fn bulk(value: &str) -> RedisRawValue {
         RedisRawValue::BulkString(value.as_bytes().to_vec())
@@ -391,5 +429,15 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn parses_configured_database_count() {
+        let value = RedisRawValue::Array(vec![
+            RedisRawValue::BulkString(b"databases".to_vec()),
+            RedisRawValue::BulkString(b"32".to_vec()),
+        ]);
+
+        assert_eq!(parse_database_count(value), Some(32));
     }
 }

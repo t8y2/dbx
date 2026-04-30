@@ -178,6 +178,8 @@ export default {
     closeOtherTabs: "Close Other Tabs",
     closeAllTabs: "Close All Tabs",
     copyName: "Copy Name",
+    exportData: "Export Data",
+    exportStructure: "Export Structure",
   },
   tree: {
     columns: "Columns",

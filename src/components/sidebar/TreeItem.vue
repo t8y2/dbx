@@ -5,11 +5,12 @@ import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
   Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
-  Pin, ArrowRightLeft,
+  Pin, ArrowRightLeft, Download, FileCode,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
   ContextMenuSeparator, ContextMenuTrigger,
+  ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent,
 } from "@/components/ui/context-menu";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -225,6 +226,75 @@ function copyName() {
   navigator.clipboard.writeText(props.node.label);
 }
 
+async function exportStructure() {
+  const node = props.node;
+  if (!node.connectionId || !node.database) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const ddl = await api.getTableDdl(node.connectionId, node.database, node.schema || node.database, node.label);
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({ defaultPath: `${node.label}.sql`, filters: [{ name: "SQL", extensions: ["sql"] }] });
+    if (path) await writeTextFile(path, ddl + "\n");
+  } catch (e: any) {
+    console.error("Export structure failed:", e);
+  }
+}
+
+async function exportData(format: "csv" | "json" | "sql") {
+  const node = props.node;
+  if (!node.connectionId || !node.database) return;
+  const config = connectionStore.getConfig(node.connectionId);
+  if (!config) return;
+
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const qualifiedName = (config.db_type === "postgres" || config.db_type === "oracle" || config.db_type === "sqlserver") && node.schema
+      ? `${quoteIdent(node.schema)}.${quoteIdent(node.label)}`
+      : quoteIdent(node.label);
+    const result = await api.executeQuery(node.connectionId, node.database, `SELECT * FROM ${qualifiedName}`);
+
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+
+    let content: string;
+    let ext: string;
+
+    if (format === "csv") {
+      ext = "csv";
+      const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+      const header = result.columns.map(esc).join(",");
+      const body = result.rows.map((row) => row.map((c) => esc(c === null ? "" : String(c))).join(",")).join("\n");
+      content = `${header}\n${body}`;
+    } else if (format === "json") {
+      ext = "json";
+      const data = result.rows.map((row) => {
+        const obj: Record<string, unknown> = {};
+        result.columns.forEach((col, i) => { obj[col] = row[i]; });
+        return obj;
+      });
+      content = JSON.stringify(data, null, 2);
+    } else {
+      ext = "sql";
+      const cols = result.columns.map((c) => quoteIdent(c)).join(", ");
+      const lines = result.rows.map((row) => {
+        const vals = row.map((v) => {
+          if (v === null) return "NULL";
+          if (typeof v === "number" || typeof v === "boolean") return String(v);
+          return `'${String(v).replace(/'/g, "''")}'`;
+        }).join(", ");
+        return `INSERT INTO ${qualifiedName} (${cols}) VALUES (${vals});`;
+      });
+      content = lines.join("\n");
+    }
+
+    const path = await save({ defaultPath: `${node.label}.${ext}`, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+    if (path) await writeTextFile(path, content);
+  } catch (e: any) {
+    console.error("Export data failed:", e);
+  }
+}
+
 function editConnection() {
   if (props.node.connectionId) {
     connectionStore.startEditing(props.node.connectionId);
@@ -391,6 +461,20 @@ async function showMore() {
         </ContextMenuItem>
         <ContextMenuItem @click="newQuery">
           <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuSub>
+          <ContextMenuSubTrigger>
+            <Download class="w-4 h-4" /> {{ t('contextMenu.exportData') }}
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            <ContextMenuItem @click="exportData('csv')">CSV</ContextMenuItem>
+            <ContextMenuItem @click="exportData('json')">JSON</ContextMenuItem>
+            <ContextMenuItem @click="exportData('sql')">SQL INSERT</ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+        <ContextMenuItem @click="exportStructure">
+          <FileCode class="w-4 h-4" /> {{ t('contextMenu.exportStructure') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem @click="refresh">

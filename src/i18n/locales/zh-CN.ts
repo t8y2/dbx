@@ -183,6 +183,8 @@ export default {
     closeOtherTabs: "关闭其他标签页",
     closeAllTabs: "关闭全部标签页",
     copyName: "复制名称",
+    exportData: "导出数据",
+    exportStructure: "导出表结构",
   },
   tree: {
     columns: "字段",

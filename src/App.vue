@@ -43,6 +43,7 @@ import { useToast } from "@/composables/useToast";
 import { setLocale, currentLocale, type Locale } from "@/i18n";
 import { getCurrentWindow, type Theme } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getVersion } from "@tauri-apps/api/app";
 import * as api from "@/lib/tauri";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
@@ -108,6 +109,7 @@ const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
 const updateInfo = ref<api.UpdateInfo | null>(null);
 const updateCheckMessage = ref("");
+const appVersion = ref("");
 const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
 
 const editConfig = computed(() => {
@@ -575,6 +577,7 @@ onMounted(() => {
   window.addEventListener("keydown", handleKeydown, true);
   setupFileDrop();
   checkUpdates({ silent: true });
+  getVersion().then((v) => { appVersion.value = v; });
 });
 
 onUnmounted(() => {
@@ -1089,6 +1092,13 @@ async function setupFileDrop() {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <!-- Project Info -->
+              <div class="mt-2 flex items-center justify-center gap-3 text-[11px] text-muted-foreground/60">
+                <span>DBX {{ appVersion ? 'v' + appVersion : '' }}</span>
+                <span>·</span>
+                <a href="#" class="hover:text-foreground transition-colors" @click.prevent="openGitHub">GitHub</a>
               </div>
             </div>
           </div>

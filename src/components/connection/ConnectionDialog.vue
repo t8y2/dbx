@@ -25,6 +25,7 @@ const props = defineProps<{
 
 const store = useConnectionStore();
 const isTesting = ref(false);
+const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const editingId = ref<string | null>(null);
 
@@ -228,6 +229,9 @@ watch(open, (value) => {
 });
 
 async function save() {
+  if (isSaving.value) return;
+  isSaving.value = true;
+  testResult.value = null;
   try {
     if (editingId.value) {
       const updated: ConnectionConfig = { ...form.value, id: editingId.value };
@@ -235,12 +239,14 @@ async function save() {
       store.stopEditing();
     } else {
       const config: ConnectionConfig = { ...form.value, id: crypto.randomUUID() };
-      store.addConnection(config);
       await store.connect(config);
+      store.addConnection(config);
     }
     open.value = false;
-  } catch (e) {
-    console.error("[save] error:", e);
+  } catch (e: any) {
+    testResult.value = { ok: false, message: String(e?.message || e) };
+  } finally {
+    isSaving.value = false;
   }
 }
 
@@ -419,11 +425,11 @@ watch([() => editingId.value, () => open.value], () => {
         <span v-if="testResult" :class="testResult.ok ? 'text-green-500' : 'text-red-500'" class="text-sm mr-auto">
           {{ testResult.ok ? t('connection.testSuccess') : testResult.message }}
         </span>
-        <Button variant="outline" :disabled="isTesting" @click="testConnection">
+        <Button variant="outline" :disabled="isTesting || isSaving" @click="testConnection">
           {{ isTesting ? t('connection.testing') : t('connection.test') }}
         </Button>
-        <Button @click="save" :disabled="!form.name || !form.host">
-          {{ editingId ? t('connection.save') : t('connection.saveAndConnect') }}
+        <Button @click="save" :disabled="isSaving || !form.name || !form.host">
+          {{ isSaving ? t('common.loading') : (editingId ? t('connection.save') : t('connection.saveAndConnect')) }}
         </Button>
       </DialogFooter>
     </DialogContent>

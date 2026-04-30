@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -21,6 +21,12 @@ const open = defineModel<boolean>("open", { default: false });
 
 const props = defineProps<{
   editConfig?: ConnectionConfig;
+}>();
+
+const emit = defineEmits<{
+  connectStarted: [name: string];
+  connectSucceeded: [name: string];
+  connectFailed: [message: string];
 }>();
 
 const store = useConnectionStore();
@@ -239,8 +245,18 @@ async function save() {
       store.stopEditing();
     } else {
       const config: ConnectionConfig = { ...form.value, id: crypto.randomUUID() };
-      await store.connect(config);
       store.addConnection(config);
+      open.value = false;
+      await nextTick();
+      emit("connectStarted", config.name);
+      void store.connect(config)
+        .then(() => {
+          emit("connectSucceeded", config.name);
+        })
+        .catch((e: any) => {
+          emit("connectFailed", String(e?.message || e));
+        });
+      return;
     }
     open.value = false;
   } catch (e: any) {

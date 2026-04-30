@@ -65,6 +65,18 @@ watch(showConnectionDialog, (v) => {
   if (!v) connectionStore.stopEditing();
 });
 
+function onConnectionConnectStarted(name: string) {
+  toast(t("connection.connecting", { name }), 30000);
+}
+
+function onConnectionConnectSucceeded(name: string) {
+  toast(t("connection.connectSuccess", { name }), 2000);
+}
+
+function onConnectionConnectFailed(message: string) {
+  toast(t("connection.connectFailed", { message }), 5000);
+}
+
 const activeTab = computed(() =>
   queryStore.tabs.find((t) => t.id === queryStore.activeTabId)
 );
@@ -848,7 +860,13 @@ async function setupFileDrop() {
       </div>
       </div>
 
-      <ConnectionDialog v-model:open="showConnectionDialog" :edit-config="editConfig" />
+      <ConnectionDialog
+        v-model:open="showConnectionDialog"
+        :edit-config="editConfig"
+        @connect-started="onConnectionConnectStarted"
+        @connect-succeeded="onConnectionConnectSucceeded"
+        @connect-failed="onConnectionConnectFailed"
+      />
       <DangerConfirmDialog v-model:open="showDangerDialog" :sql="dangerSql" @confirm="onDangerConfirm" />
 
       <!-- Global Toast -->

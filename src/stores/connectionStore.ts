@@ -46,6 +46,23 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function upsertConnectionNode(config: ConnectionConfig) {
+    const node: TreeNode = {
+      id: config.id,
+      label: config.name,
+      type: "connection",
+      connectionId: config.id,
+      isExpanded: false,
+      children: [],
+    };
+    const existing = treeNodes.value.findIndex((n) => n.id === config.id);
+    if (existing >= 0) {
+      treeNodes.value[existing] = { ...treeNodes.value[existing], ...node };
+    } else {
+      treeNodes.value.push(node);
+    }
+  }
+
   function loadPinnedTreeNodeIds(): Set<string> {
     try {
       if (typeof localStorage === "undefined") return new Set();
@@ -105,7 +122,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function addConnection(config: ConnectionConfig) {
-    connections.value.push(normalizeConnection(config));
+    const normalized = normalizeConnection(config);
+    const existing = connections.value.findIndex((c) => c.id === normalized.id);
+    if (existing >= 0) {
+      connections.value[existing] = normalized;
+    } else {
+      connections.value.push(normalized);
+    }
+    upsertConnectionNode(normalized);
     persistConnections();
   }
 
@@ -134,25 +158,32 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
-    const id = await api.connectDb(config);
-    activeConnectionId.value = id;
-    connectedIds.value.add(id);
+    const pendingNode = findNode(treeNodes.value, config.id);
+    if (pendingNode) pendingNode.isLoading = true;
+    try {
+      const id = await api.connectDb(config);
+      activeConnectionId.value = id;
+      connectedIds.value.add(id);
 
-    const node: TreeNode = {
-      id,
-      label: config.name,
-      type: "connection",
-      connectionId: id,
-      isExpanded: false,
-      children: [],
-    };
-    const existing = treeNodes.value.findIndex((n) => n.id === id);
-    if (existing >= 0) {
-      treeNodes.value[existing] = node;
-    } else {
-      treeNodes.value.push(node);
+      const node: TreeNode = {
+        id,
+        label: config.name,
+        type: "connection",
+        connectionId: id,
+        isExpanded: false,
+        children: [],
+      };
+      const existing = treeNodes.value.findIndex((n) => n.id === id);
+      if (existing >= 0) {
+        treeNodes.value[existing] = node;
+      } else {
+        treeNodes.value.push(node);
+      }
+      return id;
+    } finally {
+      const node = findNode(treeNodes.value, config.id);
+      if (node) node.isLoading = false;
     }
-    return id;
   }
 
   async function disconnect(connectionId: string) {
@@ -475,14 +506,6 @@ export const useConnectionStore = defineStore("connection", () => {
         config.id = crypto.randomUUID();
         const normalized = normalizeConnection(config);
         addConnection(normalized);
-        treeNodes.value.push({
-          id: normalized.id,
-          label: normalized.name,
-          type: "connection" as const,
-          connectionId: normalized.id,
-          isExpanded: false,
-          children: [],
-        });
       }
     }
   }

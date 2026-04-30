@@ -300,7 +300,7 @@ async function showMore() {
           <span v-else class="w-3.5 h-3.5 shrink-0" />
           <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="getIconInfo(node)?.colorClass" />
-          <span v-if="node.type === 'connection' && connectionColor" class="h-3 w-1.5 rounded-full shrink-0" :style="{ backgroundColor: connectionColor }" />
+          <span v-if="node.type === 'connection'" class="h-3 w-1.5 rounded-full shrink-0" :style="{ backgroundColor: connectionColor || '#9ca3af' }" />
           <span class="min-w-0 flex-1 truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>
           <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{ columnComment }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />

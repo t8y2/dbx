@@ -523,6 +523,14 @@ export const useConnectionStore = defineStore("connection", () => {
     }));
   }
 
+  function addEphemeralConnection(config: ConnectionConfig) {
+    const normalized = normalizeConnection(config);
+    if (!connections.value.find((c) => c.id === normalized.id)) {
+      connections.value.push(normalized);
+    }
+    connectedIds.value.add(normalized.id);
+  }
+
   return {
     connections,
     activeConnectionId,
@@ -532,6 +540,7 @@ export const useConnectionStore = defineStore("connection", () => {
     isTreeNodePinned,
     toggleTreeNodePin,
     addConnection,
+    addEphemeralConnection,
     updateConnection,
     removeConnection,
     editingConnectionId,

@@ -6,6 +6,13 @@ import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -701,34 +708,62 @@ async function setupFileDrop() {
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
           <div v-if="queryStore.tabs.length > 0" class="h-8 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0">
-            <div
+            <ContextMenu
               v-for="tab in queryStore.tabs"
               :key="tab.id"
-              class="group flex min-w-0 items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap"
-              :class="{ 'bg-background font-medium': tab.id === queryStore.activeTabId }"
-              @click="queryStore.activeTabId = tab.id"
             >
-              <span v-if="connectionColor(tab.connectionId)" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) }" />
-              <span class="min-w-0 truncate">{{ tabDisplayTitle(tab) }}</span>
-              <Tooltip>
-                <TooltipTrigger as-child>
+              <ContextMenuTrigger as-child>
+                <div
+                  class="group flex min-w-0 items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap"
+                  :class="{ 'bg-background font-medium': tab.id === queryStore.activeTabId }"
+                  @click="queryStore.activeTabId = tab.id"
+                >
+                  <span v-if="connectionColor(tab.connectionId)" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) }" />
+                  <span class="min-w-0 truncate">{{ tabDisplayTitle(tab) }}</span>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <button
+                        class="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
+                        :class="tab.pinned ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'"
+                        @click.stop="queryStore.togglePinnedTab(tab.id)"
+                      >
+                        <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{{ tab.pinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}</TooltipContent>
+                  </Tooltip>
                   <button
-                    class="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
-                    :class="tab.pinned ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'"
-                    @click.stop="queryStore.togglePinnedTab(tab.id)"
+                    class="rounded hover:bg-muted-foreground/20 p-0.5"
+                    @click.stop="queryStore.closeTab(tab.id)"
                   >
-                    <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
+                    <X class="h-3 w-3" />
                   </button>
-                </TooltipTrigger>
-                <TooltipContent>{{ tab.pinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}</TooltipContent>
-              </Tooltip>
-              <button
-                class="rounded hover:bg-muted-foreground/20 p-0.5"
-                @click.stop="queryStore.closeTab(tab.id)"
-              >
-                <X class="h-3 w-3" />
-              </button>
-            </div>
+                </div>
+              </ContextMenuTrigger>
+
+              <ContextMenuContent class="w-44">
+                <ContextMenuItem @click="queryStore.togglePinnedTab(tab.id)">
+                  <Pin class="w-3.5 h-3.5 mr-2" :class="{ 'fill-current': tab.pinned }" />
+                  {{ tab.pinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem @click="queryStore.closeTab(tab.id)">
+                  <X class="w-3.5 h-3.5 mr-2" />
+                  {{ t('contextMenu.closeTab') }}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  :disabled="queryStore.tabs.length <= 1"
+                  @click="queryStore.closeOtherTabs(tab.id)"
+                >
+                  <X class="w-3.5 h-3.5 mr-2" />
+                  {{ t('contextMenu.closeOtherTabs') }}
+                </ContextMenuItem>
+                <ContextMenuItem variant="destructive" @click="queryStore.closeAllTabs">
+                  <X class="w-3.5 h-3.5 mr-2" />
+                  {{ t('contextMenu.closeAllTabs') }}
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           </div>
 
           <!-- Editor Panel -->

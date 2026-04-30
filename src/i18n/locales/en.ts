@@ -170,6 +170,9 @@ export default {
     refreshChildren: "Refresh",
     pin: "Pin",
     unpin: "Unpin",
+    closeTab: "Close Tab",
+    closeOtherTabs: "Close Other Tabs",
+    closeAllTabs: "Close All Tabs",
     copyName: "Copy Name",
   },
   tree: {

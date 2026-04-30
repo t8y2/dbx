@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { QueryTab } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
+import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
 import * as api from "@/lib/tauri";
 
 export const useQueryStore = defineStore("query", () => {
@@ -44,6 +45,18 @@ export const useQueryStore = defineStore("query", () => {
     if (activeTabId.value === id) {
       activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
     }
+  }
+
+  function closeOtherTabs(id: string) {
+    const next = closeOtherTabsState(tabs.value, activeTabId.value, id);
+    tabs.value = next.tabs;
+    activeTabId.value = next.activeTabId;
+  }
+
+  function closeAllTabs() {
+    const next = closeAllTabsState(tabs.value, activeTabId.value);
+    tabs.value = next.tabs;
+    activeTabId.value = next.activeTabId;
   }
 
   function updateSql(id: string, sql: string) {
@@ -123,6 +136,8 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId,
     createTab,
     closeTab,
+    closeOtherTabs,
+    closeAllTabs,
     updateSql,
     togglePinnedTab,
     updateDatabase,

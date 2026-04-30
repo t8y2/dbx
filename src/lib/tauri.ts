@@ -73,6 +73,10 @@ export async function executeQuery(connectionId: string, database: string, sql: 
   return invoke("execute_query", { connectionId, database, sql });
 }
 
+export async function executeBatch(connectionId: string, database: string, statements: string[]): Promise<QueryResult> {
+  return invoke("execute_batch", { connectionId, database, statements });
+}
+
 export async function listIndexes(connectionId: string, database: string, schema: string, table: string): Promise<IndexInfo[]> {
   return invoke("list_indexes", { connectionId, database, schema, table });
 }

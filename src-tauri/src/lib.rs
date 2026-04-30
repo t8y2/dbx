@@ -49,6 +49,7 @@ pub fn run() {
             commands::schema::list_triggers,
             commands::schema::get_table_ddl,
             commands::query::execute_query,
+            commands::query::execute_batch,
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_get_value,

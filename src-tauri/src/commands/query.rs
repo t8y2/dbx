@@ -170,3 +170,46 @@ pub async fn execute_query(
         _ => result,
     }
 }
+
+#[tauri::command]
+pub async fn execute_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    statements: Vec<String>,
+) -> Result<db::QueryResult, String> {
+    let pool_key = if database.is_empty() {
+        connection_id.clone()
+    } else {
+        state.get_or_create_pool(&connection_id, Some(&database)).await?
+    };
+
+    let mut total_affected: u64 = 0;
+    let start = std::time::Instant::now();
+
+    for (i, sql) in statements.iter().enumerate() {
+        match do_execute(&state, &pool_key, sql).await {
+            Ok(result) => {
+                total_affected += result.affected_rows;
+            }
+            Err(e) => {
+                if is_connection_error(&e) {
+                    let db_opt = if database.is_empty() { None } else { Some(database.as_str()) };
+                    let _ = state.reconnect_pool(&connection_id, db_opt).await;
+                }
+                return Err(format!(
+                    "Statement {} failed: {}. Previous {} statement(s) may have been committed.",
+                    i + 1, e, i
+                ));
+            }
+        }
+    }
+
+    Ok(db::QueryResult {
+        columns: vec![],
+        rows: vec![],
+        affected_rows: total_affected,
+        execution_time_ms: start.elapsed().as_millis(),
+        truncated: false,
+    })
+}

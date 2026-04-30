@@ -353,10 +353,12 @@ function deleteSelectedRow() {
 }
 
 function escapeVal(v: CellValue): string {
-  if (v === null) return "NULL";
+  if (v === null || v === undefined) return "NULL";
   if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-  if (typeof v === "number") return String(v);
-  return `'${String(v).replace(/'/g, "''")}'`;
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  const s = String(v);
+  if (s === "") return "''";
+  return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
 }
 
 function qualifiedTableName(): string {
@@ -407,7 +409,15 @@ async function saveChanges() {
   const stmts = generateSaveStatements();
   if (stmts.length === 0) return;
   saveError.value = "";
-  if (props.onExecuteSql) {
+
+  if (props.connectionId && props.database) {
+    try {
+      await api.executeBatch(props.connectionId, props.database, stmts);
+    } catch (e: any) {
+      saveError.value = String(e.message || e);
+      return;
+    }
+  } else if (props.onExecuteSql) {
     try {
       for (const sql of stmts) {
         await props.onExecuteSql(sql);

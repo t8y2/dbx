@@ -212,7 +212,7 @@ pub async fn execute_query(conn: &OracleClient, sql: &str) -> Result<QueryResult
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("Server rejected") || msg.contains("closed the connection") {
-                    Err("Operation failed — possibly a constraint violation (foreign key, unique, or check constraint).".to_string())
+                    Err("Operation failed (connection closed) — possibly a constraint violation (foreign key, unique, or check constraint).".to_string())
                 } else {
                     Err(msg)
                 }

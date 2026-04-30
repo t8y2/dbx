@@ -160,6 +160,29 @@
   background: oklch(0.6 0.15 250) !important;
 }
 
+/* Panel resize handles */
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+}
+.panel-resize-handle--right {
+  right: 0;
+  border-right: 1px solid var(--border);
+}
+.panel-resize-handle--left {
+  left: 0;
+  border-left: 1px solid var(--border);
+}
+.panel-resize-handle:hover,
+.panel-resize-handle:active {
+  background: oklch(0.6 0.15 250);
+}
+
 /* Frosted glass menus */
 .cn-menu-translucent {
   backdrop-filter: blur(16px) saturate(1.6) !important;

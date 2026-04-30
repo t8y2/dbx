@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -59,20 +59,40 @@ const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const showConnectionDialog = ref(false);
 const showHistory = ref(false);
 const showAiPanel = ref(localStorage.getItem("dbx-ai-panel-open") !== "false");
-const aiPanelSize = ref(Number(localStorage.getItem("dbx-ai-panel-size")) || 25);
+const aiPanelWidth = ref(Number(localStorage.getItem("dbx-ai-panel-width")) || 360);
+const sidebarWidth = ref(Number(localStorage.getItem("dbx-sidebar-width")) || 260);
+const historyWidth = ref(Number(localStorage.getItem("dbx-history-width")) || 288);
 
 function toggleAiPanel() {
   showAiPanel.value = !showAiPanel.value;
   localStorage.setItem("dbx-ai-panel-open", String(showAiPanel.value));
 }
 
-function onAiPanelResized(panes: { size: number }[]) {
-  const aiPane = panes[panes.length - 1];
-  if (aiPane) {
-    aiPanelSize.value = aiPane.size;
-    localStorage.setItem("dbx-ai-panel-size", String(aiPane.size));
-  }
+function startPanelResize(widthRef: Ref<number>, storageKey: string, direction: 'left' | 'right') {
+  return (e: MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = widthRef.value;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      widthRef.value = Math.max(180, Math.min(800, startWidth + (direction === 'right' ? delta : -delta)));
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      localStorage.setItem(storageKey, String(widthRef.value));
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
 }
+
+const startSidebarResize = startPanelResize(sidebarWidth, "dbx-sidebar-width", 'right');
+const startAiPanelResize = startPanelResize(aiPanelWidth, "dbx-ai-panel-width", 'left');
+const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", 'left');
 
 const showUpdateDialog = ref(false);
 const dangerSql = ref("");
@@ -637,23 +657,20 @@ async function setupFileDrop() {
     <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden">
       <!-- Toolbar -->
       <div class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0">
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-7 w-7" @click="showConnectionDialog = true">
-              <DatabaseZap class="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t('toolbar.newConnection') }}</TooltipContent>
-        </Tooltip>
+        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="showConnectionDialog = true">
+          <DatabaseZap class="h-3.5 w-3.5" />
+          {{ t('toolbar.newConnection') }}
+        </Button>
 
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-7 w-7" @click="newQuery" :disabled="!connectionStore.connections.length">
-              <FilePlus2 class="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t('toolbar.newQuery') }}</TooltipContent>
-        </Tooltip>
+        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="newQuery" :disabled="!connectionStore.connections.length">
+          <FilePlus2 class="h-3.5 w-3.5" />
+          {{ t('toolbar.newQuery') }}
+        </Button>
+
+        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="showTransferDialog = true" :disabled="!connectionStore.connections.length">
+          <ArrowLeftRight class="h-3.5 w-3.5" />
+          {{ t('transfer.dataTransfer') }}
+        </Button>
 
         <div class="flex-1" />
 
@@ -716,9 +733,8 @@ async function setupFileDrop() {
 
       <!-- Main Content -->
       <div class="flex-1 flex min-h-0">
-      <Splitpanes class="flex-1 min-h-0 min-w-0" @resized="onAiPanelResized">
-        <!-- Sidebar -->
-        <Pane :size="20" :min-size="10" :max-size="40">
+      <!-- Sidebar (fixed pixel width) -->
+      <div class="h-full shrink-0 relative" :style="{ width: sidebarWidth + 'px' }">
           <div class="h-full flex flex-col overflow-hidden">
             <div class="h-9 flex items-center px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20">
               {{ t('sidebar.connections') }}
@@ -744,10 +760,11 @@ async function setupFileDrop() {
               <ConnectionTree />
             </div>
           </div>
-        </Pane>
+          <div class="panel-resize-handle panel-resize-handle--right" @mousedown="startSidebarResize" />
+      </div>
 
         <!-- Editor + Results -->
-        <Pane :size="80">
+        <div class="flex-1 min-w-0">
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
           <div v-if="queryStore.tabs.length > 0" class="h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0">
@@ -1076,10 +1093,12 @@ async function setupFileDrop() {
             </div>
           </div>
           </div>
-        </Pane>
+        </div>
 
-      <Pane v-if="showAiPanel" :size="aiPanelSize" :min-size="15" :max-size="40">
-        <div class="h-full min-h-0 overflow-hidden bg-background">
+      <!-- AI Panel (outside Splitpanes, pixel-based width) -->
+      <div v-if="showAiPanel" class="h-full shrink-0 relative bg-background" :style="{ width: aiPanelWidth + 'px' }">
+        <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startAiPanelResize" />
+        <div class="h-full min-h-0 overflow-hidden">
           <AiAssistant
             :tab="activeTab"
             :connection="activeConnection"
@@ -1088,11 +1107,11 @@ async function setupFileDrop() {
             @close="toggleAiPanel"
           />
         </div>
-      </Pane>
-      </Splitpanes>
+      </div>
 
-      <!-- History Panel (fixed width, outside Splitpanes) -->
-      <div v-if="showHistory" class="w-72 h-full shrink-0 border-l bg-background">
+      <!-- History Panel -->
+      <div v-if="showHistory" class="h-full shrink-0 relative bg-background" :style="{ width: historyWidth + 'px' }">
+        <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
         <QueryHistory @restore="onHistoryRestore" @close="showHistory = false" />
       </div>
       </div>

@@ -50,7 +50,7 @@ onMounted(() => store.load());
 
 <template>
   <div class="h-full flex flex-col overflow-hidden border-l">
-    <div class="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 bg-muted/20">
+    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
       <Clock class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
       <span class="text-xs font-medium">{{ t('history.title') }}</span>
       <span class="flex-1" />

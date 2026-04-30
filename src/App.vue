@@ -195,10 +195,17 @@ async function openConnectionQuery(connectionId: string) {
   queryStore.createTab(connectionId, database);
 }
 
-const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER)\b/i;
+const DANGER_RE = /\b(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
+
+function stripSqlComments(sql: string): string {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--.*$/gm, " ")
+    .replace(/#.*$/gm, " ");
+}
 
 function isDangerousSql(sql: string): boolean {
-  return DANGER_RE.test(sql);
+  return DANGER_RE.test(stripSqlComments(sql));
 }
 
 function tryExecute() {

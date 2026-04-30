@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Plus, Trash2 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { EditNode, EditNodeKind } from "@/types/editor";
 
 defineOptions({ name: "JsonEditNode" });
@@ -23,12 +24,25 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const isContainer = computed(() => props.node.kind !== "value");
+const showChildDeleteConfirm = ref(false);
+const pendingChildDeleteIdx = ref<number | null>(null);
 
 const childKeyWidth = computed(() => {
   const longest = props.node.children.reduce((max, child) => {
     return Math.max(max, Array.from(child.keyName || "").length);
   }, 0);
   return `${Math.min(Math.max(longest + 4, 8), 36)}ch`;
+});
+
+const childDeleteDetails = computed(() => {
+  const idx = pendingChildDeleteIdx.value;
+  if (idx === null) return "";
+  const child = props.node.children[idx];
+  if (!child) return "";
+  if (props.node.kind === "array") {
+    return t("dangerDialog.mongoArrayItemDetails", { index: child.keyName });
+  }
+  return t("dangerDialog.mongoFieldDetails", { field: child.keyName || t("mongo.field") });
 });
 
 function fieldRows(value: string): number {
@@ -75,6 +89,17 @@ function removeChild(idx: number) {
       child.keyName = String(childIdx);
     });
   }
+}
+
+function requestRemoveChild(idx: number) {
+  pendingChildDeleteIdx.value = idx;
+  showChildDeleteConfirm.value = true;
+}
+
+function confirmRemoveChild() {
+  if (pendingChildDeleteIdx.value === null) return;
+  removeChild(pendingChildDeleteIdx.value);
+  pendingChildDeleteIdx.value = null;
 }
 </script>
 
@@ -138,7 +163,7 @@ function removeChild(idx: number) {
         :node="child"
         :parent-kind="node.kind"
         :removable="!child.readonlyValue || node.kind === 'array'"
-        @remove="removeChild(idx)"
+        @remove="requestRemoveChild(idx)"
       />
 
       <Button variant="ghost" size="sm" class="json-edit-add" @click="addChild">
@@ -149,6 +174,14 @@ function removeChild(idx: number) {
         {{ node.kind === 'array' ? ']' : '}' }}<span class="json-edit-comma">,</span>
       </div>
     </div>
+
+    <DangerConfirmDialog
+      v-model:open="showChildDeleteConfirm"
+      :message="t('dangerDialog.deleteMessage')"
+      :details="childDeleteDetails"
+      :confirm-label="t('mongo.deleteField')"
+      @confirm="confirmRemoveChild"
+    />
   </div>
 </template>
 

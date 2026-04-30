@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { computed, ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Copy, Trash2, Save, RefreshCw, Plus } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import * as api from "@/lib/tauri";
 import type { RedisValue } from "@/lib/tauri";
 
@@ -23,6 +24,24 @@ const editValue = ref("");
 const isEditing = ref(false);
 const newField = ref("");
 const newValue = ref("");
+const showDeleteConfirm = ref(false);
+
+type PendingDelete =
+  | { kind: "key" }
+  | { kind: "hash"; field: string }
+  | { kind: "list"; index: number }
+  | { kind: "set"; member: string };
+
+const pendingDelete = ref<PendingDelete | null>(null);
+
+const deleteDetails = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return "";
+  if (pending.kind === "key") return t("dangerDialog.redisKeyDetails", { key: props.keyName });
+  if (pending.kind === "hash") return t("dangerDialog.redisHashFieldDetails", { key: props.keyName, field: pending.field });
+  if (pending.kind === "list") return t("dangerDialog.redisListItemDetails", { key: props.keyName, index: pending.index });
+  return t("dangerDialog.redisSetMemberDetails", { key: props.keyName, member: pending.member });
+});
 
 async function load() {
   loading.value = true;
@@ -42,9 +61,14 @@ async function saveString() {
   await load();
 }
 
-async function deleteKey() {
+async function applyDeleteKey() {
   await api.redisDeleteKey(props.connectionId, props.keyName);
   emit("deleted");
+}
+
+function requestDeleteKey() {
+  pendingDelete.value = { kind: "key" };
+  showDeleteConfirm.value = true;
 }
 
 function copyValue() {
@@ -61,9 +85,13 @@ async function hashSet() {
   newValue.value = "";
   await load();
 }
-async function hashDel(field: string) {
+async function applyHashDel(field: string) {
   await api.redisHashDel(props.connectionId, props.keyName, field);
   await load();
+}
+function requestHashDel(field: string) {
+  pendingDelete.value = { kind: "hash", field };
+  showDeleteConfirm.value = true;
 }
 
 // List
@@ -73,9 +101,13 @@ async function listPush() {
   newValue.value = "";
   await load();
 }
-async function listRemove(index: number) {
+async function applyListRemove(index: number) {
   await api.redisListRemove(props.connectionId, props.keyName, index);
   await load();
+}
+function requestListRemove(index: number) {
+  pendingDelete.value = { kind: "list", index };
+  showDeleteConfirm.value = true;
 }
 
 // Set
@@ -85,9 +117,23 @@ async function setAdd() {
   newValue.value = "";
   await load();
 }
-async function setRemove(member: string) {
+async function applySetRemove(member: string) {
   await api.redisSetRemove(props.connectionId, props.keyName, member);
   await load();
+}
+function requestSetRemove(member: string) {
+  pendingDelete.value = { kind: "set", member };
+  showDeleteConfirm.value = true;
+}
+
+async function confirmDelete() {
+  const pending = pendingDelete.value;
+  if (!pending) return;
+  if (pending.kind === "key") await applyDeleteKey();
+  else if (pending.kind === "hash") await applyHashDel(pending.field);
+  else if (pending.kind === "list") await applyListRemove(pending.index);
+  else await applySetRemove(pending.member);
+  pendingDelete.value = null;
 }
 
 function formatValue(val: any): string {
@@ -114,7 +160,7 @@ onMounted(load);
         <span class="flex-1" />
         <Button variant="ghost" size="icon" class="h-7 w-7" @click="load"><RefreshCw class="h-3.5 w-3.5" /></Button>
         <Button variant="ghost" size="icon" class="h-7 w-7" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
-        <Button variant="ghost" size="icon" class="h-7 w-7 text-destructive" @click="deleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
+        <Button variant="ghost" size="icon" class="h-7 w-7 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
       </div>
 
       <!-- String -->
@@ -138,7 +184,7 @@ onMounted(load);
           <div v-for="(item, idx) in data.value" :key="idx" class="px-4 py-1.5 border-b text-sm font-mono hover:bg-accent/50 flex items-center gap-2 group">
             <span class="text-muted-foreground text-xs w-8 shrink-0">{{ idx }}</span>
             <span class="truncate flex-1">{{ item }}</span>
-            <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" @click="listRemove(Number(idx))"><Trash2 class="w-3 h-3" /></Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" @click="requestListRemove(Number(idx))"><Trash2 class="w-3 h-3" /></Button>
           </div>
         </div>
       </div>
@@ -154,7 +200,7 @@ onMounted(load);
         <div class="flex-1 overflow-y-auto">
           <div v-for="(item, idx) in data.value" :key="idx" class="px-4 py-1.5 border-b text-sm font-mono hover:bg-accent/50 flex items-center gap-2 group">
             <span class="truncate flex-1">{{ item }}</span>
-            <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" @click="setRemove(String(item))"><Trash2 class="w-3 h-3" /></Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" @click="requestSetRemove(String(item))"><Trash2 class="w-3 h-3" /></Button>
           </div>
         </div>
       </div>
@@ -172,7 +218,7 @@ onMounted(load);
           <div v-for="(val, field) in data.value" :key="String(field)" class="px-4 py-1.5 border-b text-sm font-mono hover:bg-accent/50 flex items-center gap-3 group">
             <span class="text-blue-500 shrink-0 min-w-24">{{ field }}</span>
             <span class="truncate text-muted-foreground flex-1">{{ val }}</span>
-            <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" @click="hashDel(String(field))"><Trash2 class="w-3 h-3" /></Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" @click="requestHashDel(String(field))"><Trash2 class="w-3 h-3" /></Button>
           </div>
         </div>
       </div>
@@ -193,5 +239,13 @@ onMounted(load);
         <pre class="font-mono text-sm whitespace-pre-wrap">{{ formatValue(data.value) }}</pre>
       </div>
     </template>
+
+    <DangerConfirmDialog
+      v-model:open="showDeleteConfirm"
+      :message="t('dangerDialog.deleteMessage')"
+      :details="deleteDetails"
+      :confirm-label="t('dangerDialog.deleteConfirm')"
+      @confirm="confirmDelete"
+    />
   </div>
 </template>

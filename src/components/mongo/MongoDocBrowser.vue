@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { RefreshCw, Trash2, Plus, Save, ChevronLeft, ChevronRight } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import * as api from "@/lib/tauri";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
@@ -31,6 +32,13 @@ const isEditing = ref(false);
 const isNew = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
+const showDeleteConfirm = ref(false);
+
+type PendingDelete =
+  | { kind: "document"; index: number }
+  | { kind: "field"; index: number; name: string };
+
+const pendingDelete = ref<PendingDelete | null>(null);
 
 const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
@@ -42,6 +50,16 @@ const editKeyWidth = computed(() => {
     return Math.max(max, Array.from(field.keyName || "").length);
   }, 0);
   return `${Math.min(Math.max(longest + 4, 8), 36)}ch`;
+});
+
+const deleteDetails = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return "";
+  if (pending.kind === "document") {
+    const id = documents.value[pending.index]?._id ?? "";
+    return t("dangerDialog.mongoDocumentDetails", { collection: props.collection, id: String(id) });
+  }
+  return t("dangerDialog.mongoFieldDetails", { field: pending.name || t("mongo.field") });
 });
 
 async function load() {
@@ -150,9 +168,16 @@ function addField() {
   editFields.value.push(createEditNode("", "", false, false));
 }
 
-function removeField(idx: number) {
+function applyRemoveField(idx: number) {
   if (editFields.value[idx]?.readonlyValue) return;
   editFields.value.splice(idx, 1);
+}
+
+function requestRemoveField(idx: number) {
+  const field = editFields.value[idx];
+  if (!field || field.readonlyValue) return;
+  pendingDelete.value = { kind: "field", index: idx, name: field.keyName };
+  showDeleteConfirm.value = true;
 }
 
 function formatForEdit(value: unknown): string {
@@ -222,7 +247,7 @@ async function saveDoc() {
   }
 }
 
-async function deleteDoc(idx: number) {
+async function applyDeleteDoc(idx: number) {
   const doc = documents.value[idx];
   const id = doc._id;
   if (!id) return;
@@ -234,6 +259,22 @@ async function deleteDoc(idx: number) {
   } catch (e: unknown) {
     error.value = String(e);
   }
+}
+
+function requestDeleteDoc(idx: number) {
+  pendingDelete.value = { kind: "document", index: idx };
+  showDeleteConfirm.value = true;
+}
+
+async function confirmDelete() {
+  const pending = pendingDelete.value;
+  if (!pending) return;
+  if (pending.kind === "document") {
+    await applyDeleteDoc(pending.index);
+  } else {
+    applyRemoveField(pending.index);
+  }
+  pendingDelete.value = null;
 }
 
 function prevPage() {
@@ -297,7 +338,7 @@ onMounted(load);
           @click="selectDoc(idx)"
         >
           <span class="truncate flex-1">{{ docPreview(doc) }}</span>
-          <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive shrink-0" @click.stop="deleteDoc(idx)">
+          <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive shrink-0" @click.stop="requestDeleteDoc(idx)">
             <Trash2 class="w-3 h-3" />
           </Button>
         </div>
@@ -346,7 +387,7 @@ onMounted(load);
               :node="field"
               parent-kind="root"
               :removable="!field.readonlyValue"
-              @remove="removeField(idx)"
+              @remove="requestRemoveField(idx)"
             />
 
             <Button variant="ghost" size="sm" class="json-edit-add" @click="addField">
@@ -371,6 +412,13 @@ onMounted(load);
       <div v-if="error" class="px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0">
         {{ error }}
       </div>
+      <DangerConfirmDialog
+        v-model:open="showDeleteConfirm"
+        :message="t('dangerDialog.deleteMessage')"
+        :details="deleteDetails"
+        :confirm-label="t('dangerDialog.deleteConfirm')"
+        @confirm="confirmDelete"
+      />
     </div>
     </Pane>
   </Splitpanes>

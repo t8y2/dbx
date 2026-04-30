@@ -18,6 +18,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { QueryResult, ColumnInfo, DatabaseType } from "@/types/database";
 import { save as savePath } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
@@ -422,7 +423,7 @@ function addRow() {
   });
 }
 
-function deleteRow(rowId: number) {
+function applyDeleteRow(rowId: number) {
   const item = getRowItem(rowId);
   if (!item) return;
   if (item.isNew && item.newIndex !== undefined) {
@@ -434,6 +435,25 @@ function deleteRow(rowId: number) {
   if (editingCell.value?.rowId === rowId) editingCell.value = null;
 }
 
+const showDeleteRowConfirm = ref(false);
+const pendingDeleteRowId = ref<number | null>(null);
+const deleteRowDetails = computed(() =>
+  props.tableMeta?.tableName
+    ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName })
+    : t("dangerDialog.deleteRowDetailsNoTable")
+);
+
+function requestDeleteRow(rowId: number) {
+  pendingDeleteRowId.value = rowId;
+  showDeleteRowConfirm.value = true;
+}
+
+function confirmDeleteRow() {
+  if (pendingDeleteRowId.value === null) return;
+  applyDeleteRow(pendingDeleteRowId.value);
+  pendingDeleteRowId.value = null;
+}
+
 function restoreRow(rowId: number) {
   const item = getRowItem(rowId);
   if (item?.sourceIndex !== undefined) {
@@ -443,7 +463,7 @@ function restoreRow(rowId: number) {
 
 function deleteSelectedRow() {
   if (!contextCell.value) return;
-  deleteRow(contextCell.value.rowId);
+  requestDeleteRow(contextCell.value.rowId);
 }
 
 function escapeVal(v: CellValue): string {
@@ -793,7 +813,7 @@ function escapeAndHighlightKeywords(s: string): string {
                     size="icon"
                     class="h-5 w-5 shrink-0 text-destructive"
                     :title="t('grid.deleteRow')"
-                    @click.stop="deleteRow(item.id)"
+                    @click.stop="requestDeleteRow(item.id)"
                   >
                     <Trash2 class="w-3 h-3" />
                   </Button>
@@ -955,6 +975,14 @@ function escapeAndHighlightKeywords(s: string): string {
         </TooltipContent>
       </Tooltip>
     </div>
+
+    <DangerConfirmDialog
+      v-model:open="showDeleteRowConfirm"
+      :message="t('dangerDialog.deleteRowMessage')"
+      :details="deleteRowDetails"
+      :confirm-label="t('grid.deleteRow')"
+      @confirm="confirmDeleteRow"
+    />
   </div>
 </template>
 

@@ -646,37 +646,6 @@ async function setupFileDrop() {
           <TooltipContent>{{ t('toolbar.newQuery') }}</TooltipContent>
         </Tooltip>
 
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-7 w-7"
-              :disabled="!activeTab || activeTab.isExecuting"
-              @click="tryExecute()"
-            >
-              <Loader2 v-if="activeTab?.isExecuting" class="h-4 w-4 animate-spin" />
-              <Play v-else class="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t('toolbar.executeShortcut') }}</TooltipContent>
-        </Tooltip>
-
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-7 w-7"
-              :disabled="!activeTab || activeTab.mode !== 'query' || activeTab.isExecuting || !activeTab.sql.trim()"
-              @click="formatActiveSql"
-            >
-              <AlignLeft class="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t('toolbar.formatSql') }}</TooltipContent>
-        </Tooltip>
-
         <div class="flex-1" />
 
         <Tooltip>
@@ -880,6 +849,25 @@ async function setupFileDrop() {
                 <span class="min-w-0 truncate">{{ item }}</span>
               </template>
               <span class="flex-1" />
+              <div class="flex items-center gap-0.5">
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="activeTab.isExecuting" @click="tryExecute()">
+                      <Loader2 v-if="activeTab.isExecuting" class="h-3.5 w-3.5 animate-spin" />
+                      <Play v-else class="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{{ t('toolbar.executeShortcut') }}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="activeTab.isExecuting || !activeTab.sql.trim()" @click="formatActiveSql">
+                      <AlignLeft class="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{{ t('toolbar.formatSql') }}</TooltipContent>
+                </Tooltip>
+              </div>
               <div v-if="activeTab.tableMeta" class="flex min-w-0 items-center gap-1">
                 <Table2 class="h-3.5 w-3.5 shrink-0" />
                 <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t('tree.columns') }}</span>

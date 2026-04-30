@@ -1,11 +1,19 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch, shallowRef } from "vue";
+import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
+import { useConnectionStore } from "@/stores/connectionStore";
+import {
+  buildSqlCompletionItemsFromContext,
+  getSqlCompletionContext,
+} from "@/lib/sqlCompletion";
 
 const props = defineProps<{
   modelValue: string;
+  connectionId?: string;
+  database?: string;
   dialect?: "mysql" | "postgres";
   formatDialect?: SqlFormatDialect;
   formatRequestId?: number;
@@ -20,6 +28,7 @@ const emit = defineEmits<{
 
 const editorRef = ref<HTMLDivElement>();
 const view = shallowRef<EditorViewType | null>(null);
+const connectionStore = useConnectionStore();
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 24;
@@ -98,6 +107,53 @@ async function formatCurrentSql() {
   }
 }
 
+async function provideSqlCompletions(
+  currentState: import("@codemirror/state").EditorState,
+  position: number,
+) {
+  if (!props.connectionId || !props.database) return null;
+
+  const completionContext = getSqlCompletionContext(currentState.doc.toString(), position);
+  const tables = await connectionStore.listCompletionTables(props.connectionId, props.database);
+  const columnsByTable = new Map<string, Awaited<ReturnType<typeof connectionStore.listCompletionColumns>>>();
+
+  if (completionContext.suggestColumns) {
+    const relatedTables = completionContext.qualifier
+      ? completionContext.referencedTables.filter((table) => table.alias === completionContext.qualifier || table.name === completionContext.qualifier)
+      : completionContext.referencedTables;
+
+    await Promise.all(relatedTables.map(async (table) => {
+      const cacheKey = table.schema ? `${table.schema}.${table.name}` : table.name;
+      if (columnsByTable.has(cacheKey)) return;
+      const columns = await connectionStore.listCompletionColumns(
+        props.connectionId!,
+        props.database!,
+        table.name,
+        table.schema,
+      );
+      columnsByTable.set(cacheKey, columns);
+    }));
+  }
+
+  const items = buildSqlCompletionItemsFromContext(completionContext, {
+    tables,
+    columnsByTable,
+  });
+
+  if (items.length === 0) return null;
+
+  return {
+    from: position - completionContext.prefix.length,
+    options: items.map((item) => ({
+      label: item.label,
+      type: item.type === "keyword" ? "keyword" : item.type === "table" ? "class" : "property",
+      detail: item.detail,
+      boost: item.boost,
+    })),
+    validFor: /^[\w$]*$/,
+  };
+}
+
 onMounted(async () => {
   if (!editorRef.value) return;
 
@@ -107,12 +163,14 @@ onMounted(async () => {
     { sql, MySQL, PostgreSQL },
     { basicSetup },
     { oneDark },
+    { autocompletion, startCompletion },
   ] = await Promise.all([
     import("@codemirror/view"),
     import("@codemirror/state"),
     import("@codemirror/lang-sql"),
     import("codemirror"),
     import("@codemirror/theme-one-dark"),
+    import("@codemirror/autocomplete"),
   ]);
   editorViewModule = { EditorView, keymap } as typeof import("@codemirror/view");
   fontSizeTheme = new Compartment();
@@ -162,11 +220,24 @@ onMounted(async () => {
     extensions: [
       basicSetup,
       sql({ dialect }),
+      autocompletion({
+        activateOnTyping: true,
+        override: [
+          async (context: CompletionContext) => provideSqlCompletions(context.state, context.pos),
+        ],
+      }),
       oneDark,
       runKeymap,
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           emit("update:modelValue", update.state.doc.toString());
+          let insertedText = "";
+          update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+            insertedText += inserted.toString();
+          });
+          if (insertedText.endsWith(".")) {
+            startCompletion(update.view);
+          }
         }
         if (update.selectionSet || update.docChanged) {
           emit("selectionChange", selectedSqlFromView(update.view));

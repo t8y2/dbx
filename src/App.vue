@@ -853,6 +853,8 @@ async function setupFileDrop() {
                     <QueryEditor
                       class="flex-1"
                       :model-value="activeTab.sql"
+                      :connection-id="activeTab.connectionId"
+                      :database="activeTab.database"
                       :dialect="editorDialect"
                       :format-dialect="activeSqlFormatDialect"
                       :format-request-id="formatSqlRequestId"

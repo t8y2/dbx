@@ -35,7 +35,9 @@ pub struct ConnectionConfig {
     pub ssl: bool,
 }
 
-fn default_ssh_port() -> u16 { 22 }
+fn default_ssh_port() -> u16 {
+    22
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +61,46 @@ pub enum DatabaseType {
 impl ConnectionConfig {
     pub fn connection_url(&self) -> String {
         self.connection_url_with_host(&self.host, self.port)
+    }
+
+    pub fn redacted_connection_url(&self) -> String {
+        self.redacted_connection_url_with_host(&self.host, self.port)
+    }
+
+    pub fn redacted_connection_url_with_host(&self, host: &str, port: u16) -> String {
+        let db_part = self
+            .database
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("/{}", encode_url_part(d)))
+            .unwrap_or_default();
+        let params = self.normalized_url_params();
+
+        match self.db_type {
+            DatabaseType::Sqlite | DatabaseType::DuckDb => {
+                format!("{}?mode=rwc", self.host)
+            }
+            DatabaseType::Redis => {
+                let scheme = if self.ssl { "rediss" } else { "redis" };
+                format!("{scheme}://{host}:{port}/")
+            }
+            DatabaseType::Mysql => format!("mysql://{host}:{port}{db_part}?{params}"),
+            DatabaseType::Postgres => {
+                let suffix = if params.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{params}")
+                };
+                format!("postgres://{host}:{port}{db_part}{suffix}")
+            }
+            DatabaseType::ClickHouse => format!("http://{host}:{port}{db_part}"),
+            DatabaseType::SqlServer => format!(
+                "server=tcp:{host},{port};database={}",
+                self.database.as_deref().unwrap_or("master")
+            ),
+            DatabaseType::MongoDb => format!("mongodb://{host}:{port}{db_part}"),
+            DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
+        }
     }
 
     pub fn connection_url_with_host(&self, host: &str, port: u16) -> String {
@@ -86,17 +128,27 @@ impl ConnectionConfig {
                     format!("{scheme}://{username}:{password}@{host}:{port}/")
                 }
             }
-            DatabaseType::Mysql => format!("mysql://{}:{}@{host}:{port}{db_part}?{params}", username, password),
-            DatabaseType::Postgres => {
-                let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
-            }
-            DatabaseType::ClickHouse => format!(
-                "http://{host}:{port}{db_part}"
+            DatabaseType::Mysql => format!(
+                "mysql://{}:{}@{host}:{port}{db_part}?{params}",
+                username, password
             ),
+            DatabaseType::Postgres => {
+                let suffix = if params.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{params}")
+                };
+                format!(
+                    "postgres://{}:{}@{host}:{port}{db_part}{suffix}",
+                    username, password
+                )
+            }
+            DatabaseType::ClickHouse => format!("http://{host}:{port}{db_part}"),
             DatabaseType::SqlServer => format!(
                 "server=tcp:{host},{port};user={};password={};database={}",
-                self.username, self.password, self.database.as_deref().unwrap_or("master")
+                self.username,
+                self.password,
+                self.database.as_deref().unwrap_or("master")
             ),
             DatabaseType::MongoDb => {
                 if self.username.is_empty() {
@@ -105,10 +157,9 @@ impl ConnectionConfig {
                     format!("mongodb://{username}:{password}@{host}:{port}{db_part}")
                 }
             }
-            DatabaseType::Oracle => format!(
-                "oracle://{}:{}@{host}:{port}{db_part}",
-                username, password
-            ),
+            DatabaseType::Oracle => {
+                format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
+            }
         }
     }
 
@@ -203,5 +254,42 @@ mod tests {
             config.connection_url(),
             "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=disable"
         );
+    }
+
+    #[test]
+    fn redacted_mysql_url_omits_credentials() {
+        let config = mysql_config("user@tenant#cluster", "p@ss:word#1", Some("db/name"));
+
+        let url = config.redacted_connection_url();
+
+        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=preferred");
+        assert!(!url.contains("user"));
+        assert!(!url.contains("p%40ss"));
+        assert!(!url.contains("p@ss"));
+    }
+
+    #[test]
+    fn redacted_sqlserver_url_omits_credentials() {
+        let mut config = mysql_config("sa", "super-secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+
+        let url = config.redacted_connection_url();
+
+        assert_eq!(url, "server=tcp:10.1.2.3,2883;database=master");
+        assert!(!url.contains("sa"));
+        assert!(!url.contains("super-secret"));
+    }
+
+    #[test]
+    fn redacted_redis_url_omits_credentials_and_keeps_tls_scheme() {
+        let mut config = mysql_config("default", "redis-secret", None);
+        config.db_type = DatabaseType::Redis;
+        config.ssl = true;
+
+        let url = config.redacted_connection_url();
+
+        assert_eq!(url, "rediss://10.1.2.3:2883/");
+        assert!(!url.contains("default"));
+        assert!(!url.contains("redis-secret"));
     }
 }

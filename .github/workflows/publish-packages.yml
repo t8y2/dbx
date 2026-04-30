@@ -92,42 +92,44 @@ jobs:
           mkdir -p Casks
 
           cat > Casks/dbx.rb <<'RUBY_EOF'
-cask "dbx" do
-  version "__VERSION__"
+          cask "dbx" do
+            version "__VERSION__"
 
-  on_arm do
-    url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__APP___#{version}_aarch64.dmg",
-        verified: "github.com/__OWNER__/__APP__/"
-    sha256 "__SHA_ARM64__"
-  end
+            on_arm do
+              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__APP___#{version}_aarch64.dmg",
+                  verified: "github.com/__OWNER__/__APP__/"
+              sha256 "__SHA_ARM64__"
+            end
 
-  on_intel do
-    url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__APP___#{version}_x64.dmg",
-        verified: "github.com/__OWNER__/__APP__/"
-    sha256 "__SHA_X64__"
-  end
+            on_intel do
+              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__APP___#{version}_x64.dmg",
+                  verified: "github.com/__OWNER__/__APP__/"
+              sha256 "__SHA_X64__"
+            end
 
-  name "DBX"
-  desc "Open-source database management tool"
-  homepage "https://github.com/__OWNER__/__APP__"
+            name "DBX"
+            desc "Open-source database management tool"
+            homepage "https://github.com/__OWNER__/__APP__"
 
-  livecheck do
-    url :url
-    strategy :github_latest
-  end
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
 
-  depends_on macos: ">= :big_sur"
+            depends_on macos: ">= :big_sur"
 
-  app "dbx.app"
+            app "dbx.app"
 
-  zap trash: [
-    "~/Library/Application Support/com.dbx.app",
-    "~/Library/Caches/com.dbx.app",
-    "~/Library/Preferences/com.dbx.app.plist",
-    "~/Library/Logs/com.dbx.app",
-  ]
-end
-RUBY_EOF
+            zap trash: [
+              "~/Library/Application Support/com.dbx.app",
+              "~/Library/Caches/com.dbx.app",
+              "~/Library/Preferences/com.dbx.app.plist",
+              "~/Library/Logs/com.dbx.app",
+            ]
+          end
+          RUBY_EOF
+
+          sed -i 's/^          //' Casks/dbx.rb
 
           sed -i "s/__VERSION__/${VERSION}/g" Casks/dbx.rb
           sed -i "s/__OWNER__/${REPO_OWNER}/g" Casks/dbx.rb

@@ -94,6 +94,7 @@ export interface QueryTab {
   connectionId: string;
   database: string;
   sql: string;
+  lastExecutedSql?: string;
   result?: QueryResult;
   isExecuting: boolean;
   mode: "data" | "query" | "redis" | "mongo";

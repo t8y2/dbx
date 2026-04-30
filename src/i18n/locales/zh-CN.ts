@@ -6,7 +6,7 @@ export default {
     newConnection: "新建连接",
     newQuery: "新建查询",
     execute: "执行",
-    executeShortcut: "执行 (Cmd+Enter)",
+    executeShortcut: "执行选中/全部 (Cmd+Enter)",
   },
   sidebar: {
     connections: "连接",

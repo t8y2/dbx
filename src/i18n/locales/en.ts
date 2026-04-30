@@ -6,7 +6,7 @@ export default {
     newConnection: "New Connection",
     newQuery: "New Query",
     execute: "Execute",
-    executeShortcut: "Execute (Cmd+Enter)",
+    executeShortcut: "Execute selection/query (Cmd+Enter)",
   },
   sidebar: {
     connections: "CONNECTIONS",

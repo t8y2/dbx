@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use std::time::{Duration, Instant};
@@ -26,6 +27,22 @@ fn get_opt_str(row: &MySqlRow, name: &str) -> Option<String> {
                 .flatten()
                 .map(|b| String::from_utf8_lossy(&b).to_string())
         })
+}
+
+fn mysql_temporal_to_json_value(row: &MySqlRow, idx: usize) -> Option<serde_json::Value> {
+    if let Ok(v) = row.try_get::<NaiveDateTime, _>(idx) {
+        return Some(serde_json::Value::String(v.to_string()));
+    }
+    if let Ok(v) = row.try_get::<DateTime<Utc>, _>(idx) {
+        return Some(serde_json::Value::String(v.to_rfc3339()));
+    }
+    if let Ok(v) = row.try_get::<NaiveDate, _>(idx) {
+        return Some(serde_json::Value::String(v.to_string()));
+    }
+    if let Ok(v) = row.try_get::<NaiveTime, _>(idx) {
+        return Some(serde_json::Value::String(v.to_string()));
+    }
+    None
 }
 
 fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_json::Value {
@@ -60,6 +77,17 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_jso
             .unwrap_or(serde_json::Value::Null);
     }
 
+    if upper_type.starts_with("DATETIME")
+        || upper_type.starts_with("TIMESTAMP")
+        || upper_type == "DATE"
+        || upper_type == "TIME"
+        || upper_type.starts_with("TIME(")
+    {
+        if let Some(v) = mysql_temporal_to_json_value(row, idx) {
+            return v;
+        }
+    }
+
     row.try_get::<String, _>(idx)
         .map(serde_json::Value::String)
         .or_else(|_| row.try_get::<i64, _>(idx).map(|v| serde_json::Value::Number(v.into())))
@@ -74,6 +102,7 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_jso
             row.try_get::<Vec<u8>, _>(idx)
                 .map(|b| serde_json::Value::String(String::from_utf8_lossy(&b).to_string()))
         })
+        .or_else(|e| mysql_temporal_to_json_value(row, idx).ok_or(e))
         .unwrap_or(serde_json::Value::Null)
 }
 

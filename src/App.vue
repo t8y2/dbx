@@ -128,6 +128,12 @@ function tabDisplayTitle(tab: typeof queryStore.tabs[number]): string {
   if (tab.mode === "query") {
     return `${connectionDisplayName(tab.connectionId)} | ${database}`;
   }
+  if (tab.mode === "mongo" && tab.sql) {
+    return `${database} | ${tab.sql}`;
+  }
+  if (tab.mode === "redis") {
+    return `${connectionDisplayName(tab.connectionId)} | ${database}`;
+  }
   return tab.title;
 }
 

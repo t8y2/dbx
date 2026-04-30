@@ -7,8 +7,9 @@ const globalDdlOpen = ref(false);
 import { computed, nextTick, watch } from "vue";
 import { useElementSize } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
-import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X } from "lucide-vue-next";
+import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X, Undo2 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
   ContextMenuSeparator, ContextMenuTrigger,
@@ -90,7 +91,7 @@ function typeColorClass(t: string): string {
   if (["bytea", "blob", "binary", "varbinary", "image"].includes(s)) return "text-red-400";
   return "text-muted-foreground";
 }
-const contextCell = ref<{ row: number; col: number } | null>(null);
+const contextCell = ref<{ rowId: number; col: number } | null>(null);
 const sortCol = ref<string | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
@@ -131,24 +132,28 @@ function onResizeStart(colIdx: number, event: MouseEvent) {
 }
 
 const ROW_NUM_WIDTH = 48;
+const ACTION_COL_WIDTH = 112;
 const baseTotalWidth = computed(() => columnWidths.value.reduce((a, b) => a + b, 0));
+const rowActionWidth = computed(() => props.editable ? ACTION_COL_WIDTH : 0);
 const renderedColumnWidths = computed(() => {
   const widths = columnWidths.value;
   if (widths.length === 0) return widths;
 
-  const extraWidth = Math.max(0, gridWidth.value - ROW_NUM_WIDTH - baseTotalWidth.value);
+  const extraWidth = Math.max(0, gridWidth.value - ROW_NUM_WIDTH - rowActionWidth.value - baseTotalWidth.value);
   if (extraWidth === 0) return widths;
 
   const extraPerColumn = extraWidth / widths.length;
   return widths.map((width) => width + extraPerColumn);
 });
-const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + ROW_NUM_WIDTH);
+const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + ROW_NUM_WIDTH + rowActionWidth.value);
 
 const columnVars = computed(() => {
   const vars: Record<string, string> = {};
   renderedColumnWidths.value.forEach((w, i) => {
     vars[`--col-w-${i}`] = `${w}px`;
   });
+  vars["--row-num-w"] = `${ROW_NUM_WIDTH}px`;
+  vars["--row-action-w"] = `${rowActionWidth.value}px`;
   vars['--total-w'] = `${totalWidth.value}px`;
   return vars;
 });
@@ -179,44 +184,62 @@ function changePageSize(size: number) {
 
 // --- Editing ---
 type CellValue = string | number | boolean | null;
-const editingCell = ref<{ row: number; col: number } | null>(null);
+type RowStatus = "clean" | "edited" | "new" | "deleted";
+const editingCell = ref<{ rowId: number; col: number } | null>(null);
 const editValue = ref("");
 const scrollerRef = ref<HTMLElement | { $el?: HTMLElement; el?: HTMLElement | { value?: HTMLElement } } | null>(null);
 const dirtyRows = ref<Map<number, Map<number, CellValue>>>(new Map());
 const newRows = ref<CellValue[][]>([]);
 const deletedRows = ref<Set<number>>(new Set());
 
+const dirtyRowCount = computed(() => dirtyRows.value.size);
+const newRowCount = computed(() => newRows.value.length);
+const deletedRowCount = computed(() => deletedRows.value.size);
+const pendingChangeCount = computed(() => dirtyRowCount.value + newRowCount.value + deletedRowCount.value);
 const hasPendingChanges = computed(() =>
-  dirtyRows.value.size > 0 || newRows.value.length > 0 || deletedRows.value.size > 0
+  pendingChangeCount.value > 0
 );
 
 const sortedRows = computed(() => {
-  let rows = props.result.rows;
+  let rows = props.result.rows.map((row, sourceIndex) => ({ row, sourceIndex }));
   if (searchText.value) {
     const q = searchText.value.toLowerCase();
-    rows = rows.filter((row) => row.some((cell) => cell !== null && String(cell).toLowerCase().includes(q)));
+    rows = rows.filter(({ row, sourceIndex }) => {
+      const data = rowDataWithChanges(row, sourceIndex);
+      return data.some((cell) => cell !== null && String(cell).toLowerCase().includes(q));
+    });
   }
   return rows;
 });
 
+function rowDataWithChanges(row: CellValue[], sourceIndex: number): CellValue[] {
+  const dirty = dirtyRows.value.get(sourceIndex);
+  return row.map((v, colIdx) => dirty?.get(colIdx) ?? v);
+}
+
 interface RowItem {
   id: number;
+  sourceIndex?: number;
+  newIndex?: number;
   data: CellValue[];
   isNew: boolean;
   isDeleted: boolean;
   isDirtyCol: boolean[];
+  status: RowStatus;
 }
 
 const displayItems = computed<RowItem[]>(() => {
   const cols = props.result.columns;
-  const items: RowItem[] = sortedRows.value.map((row, i) => {
-    const dirty = dirtyRows.value.get(i);
-    const data = row.map((v, colIdx) => dirty?.get(colIdx) ?? v);
+  const items: RowItem[] = sortedRows.value.map(({ row, sourceIndex }) => {
+    const dirty = dirtyRows.value.get(sourceIndex);
+    const data = rowDataWithChanges(row, sourceIndex);
     const isDirtyCol = row.map((_, colIdx) => dirty?.has(colIdx) ?? false);
-    return { id: i, data, isNew: false, isDeleted: deletedRows.value.has(i), isDirtyCol };
+    const isDeleted = deletedRows.value.has(sourceIndex);
+    const status: RowStatus = isDeleted ? "deleted" : dirty ? "edited" : "clean";
+    return { id: sourceIndex, sourceIndex, data, isNew: false, isDeleted, isDirtyCol, status };
   });
   newRows.value.forEach((row, i) => {
-    items.push({ id: 100000 + i, data: row, isNew: true, isDeleted: false, isDirtyCol: cols.map(() => false) });
+    items.push({ id: -(i + 1), newIndex: i, data: row, isNew: true, isDeleted: false, isDirtyCol: cols.map(() => false), status: "new" });
   });
   return items;
 });
@@ -243,6 +266,20 @@ function formatCell(value: CellValue): string {
 }
 
 function isNull(value: unknown): boolean { return value === null; }
+
+function rowStatusLabel(item: RowItem): string {
+  if (item.status === "new") return t("grid.statusNew");
+  if (item.status === "edited") return t("grid.statusEdited");
+  if (item.status === "deleted") return t("grid.statusDeleted");
+  return t("grid.statusClean");
+}
+
+function rowStatusVariant(item: RowItem): "default" | "secondary" | "destructive" | "outline" {
+  if (item.status === "new") return "default";
+  if (item.status === "edited") return "secondary";
+  if (item.status === "deleted") return "destructive";
+  return "outline";
+}
 
 // --- Inline editor ---
 let isCancelling = false;
@@ -292,11 +329,29 @@ function restoreScrollAcrossFrames(restoreScroll: () => void) {
   });
 }
 
-function startEdit(rowIdx: number, colIdx: number) {
+function getRowItem(rowId: number): RowItem | undefined {
+  return displayItems.value.find((item) => item.id === rowId);
+}
+
+function coerceCellValue(value: string, oldVal: CellValue | undefined): CellValue {
+  if (value.toUpperCase() === "NULL") return null;
+  if (value === "" && isNull(oldVal)) return null;
+  if (typeof oldVal === "number") {
+    const num = Number(value);
+    if (!Number.isNaN(num)) return num;
+  }
+  if (typeof oldVal === "boolean") {
+    return value === "true" || value === "1";
+  }
+  return value;
+}
+
+function startEdit(rowId: number, colIdx: number) {
   if (!props.editable) return;
+  const item = getRowItem(rowId);
+  if (!item || item.isDeleted) return;
   isCancelling = false;
-  editingCell.value = { row: rowIdx, col: colIdx };
-  const item = displayItems.value.find((it) => it.id === rowIdx);
+  editingCell.value = { rowId, col: colIdx };
   const val = item?.data[colIdx] ?? null;
   editValue.value = val === null ? "" : String(val);
   nextTick(() => {
@@ -309,20 +364,37 @@ function startEdit(rowIdx: number, colIdx: number) {
 function commitEdit() {
   if (isCancelling) return;
   if (!editingCell.value) return;
-  const { row, col } = editingCell.value;
-  const oldVal = sortedRows.value[row]?.[col];
-  let newVal: CellValue = editValue.value;
-  if (newVal === "" && isNull(oldVal)) newVal = null;
-  else if (newVal === "NULL") newVal = null;
-  else if (typeof oldVal === "number") {
-    const num = Number(newVal);
-    if (!isNaN(num)) newVal = num;
-  } else if (typeof oldVal === "boolean") {
-    newVal = newVal === "true" || newVal === "1";
+  const { rowId, col } = editingCell.value;
+  const item = getRowItem(rowId);
+  if (!item || item.isDeleted) {
+    editingCell.value = null;
+    return;
   }
+
+  if (item.isNew && item.newIndex !== undefined) {
+    const oldVal = newRows.value[item.newIndex]?.[col];
+    const newVal = coerceCellValue(editValue.value, oldVal);
+    if (newRows.value[item.newIndex]) {
+      newRows.value[item.newIndex][col] = newVal;
+    }
+    editingCell.value = null;
+    return;
+  }
+
+  if (item.sourceIndex === undefined) {
+    editingCell.value = null;
+    return;
+  }
+
+  const oldVal = props.result.rows[item.sourceIndex]?.[col];
+  const newVal = coerceCellValue(editValue.value, oldVal);
   if (newVal !== oldVal) {
-    if (!dirtyRows.value.has(row)) dirtyRows.value.set(row, new Map());
-    dirtyRows.value.get(row)!.set(col, newVal);
+    if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
+    dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);
+  } else {
+    const rowChanges = dirtyRows.value.get(item.sourceIndex);
+    rowChanges?.delete(col);
+    if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
   }
   editingCell.value = null;
 }
@@ -342,15 +414,36 @@ function onEditKeydown(e: KeyboardEvent) {
 
 function addRow() {
   newRows.value.push(props.result.columns.map(() => null));
+  const rowId = -newRows.value.length;
   nextTick(() => {
     const el = getScrollerElement();
     if (el) el.scrollTop = el.scrollHeight;
+    startEdit(rowId, 0);
   });
+}
+
+function deleteRow(rowId: number) {
+  const item = getRowItem(rowId);
+  if (!item) return;
+  if (item.isNew && item.newIndex !== undefined) {
+    newRows.value.splice(item.newIndex, 1);
+  } else if (item.sourceIndex !== undefined) {
+    dirtyRows.value.delete(item.sourceIndex);
+    deletedRows.value.add(item.sourceIndex);
+  }
+  if (editingCell.value?.rowId === rowId) editingCell.value = null;
+}
+
+function restoreRow(rowId: number) {
+  const item = getRowItem(rowId);
+  if (item?.sourceIndex !== undefined) {
+    deletedRows.value.delete(item.sourceIndex);
+  }
 }
 
 function deleteSelectedRow() {
   if (!contextCell.value) return;
-  deletedRows.value.add(contextCell.value.row);
+  deleteRow(contextCell.value.rowId);
 }
 
 function escapeVal(v: CellValue): string {
@@ -386,7 +479,7 @@ function generateSaveStatements(): string[] {
   const tbl = qualifiedTableName();
 
   for (const [rowIdx, changes] of dirtyRows.value) {
-    const row = sortedRows.value[rowIdx];
+    const row = props.result.rows[rowIdx];
     if (!row) continue;
     const sets = Array.from(changes.entries())
       .map(([colIdx, val]) => `${quoteIdent(cols[colIdx])} = ${escapeVal(val)}`)
@@ -398,7 +491,7 @@ function generateSaveStatements(): string[] {
   }
 
   for (const rowIdx of deletedRows.value) {
-    const row = sortedRows.value[rowIdx];
+    const row = props.result.rows[rowIdx];
     if (!row) continue;
     const where = primaryKeys
       .map((pk) => `${quoteIdent(pk)} = ${escapeVal(row[cols.indexOf(pk)])}`)
@@ -452,44 +545,49 @@ function discardChanges() {
 }
 
 // --- Copy/Export ---
-function onCellContext(rowIdx: number, colIdx: number) {
-  contextCell.value = { row: rowIdx, col: colIdx };
+function onCellContext(rowId: number, colIdx: number) {
+  contextCell.value = { rowId, col: colIdx };
 }
 
 function copyCell() {
   if (!contextCell.value) return;
-  const item = displayItems.value.find((it) => it.id === contextCell.value!.row);
+  const item = getRowItem(contextCell.value.rowId);
   const val = item?.data[contextCell.value.col] ?? null;
   navigator.clipboard.writeText(formatCell(val));
 }
 
 function copyRow() {
   if (!contextCell.value) return;
-  const row = sortedRows.value[contextCell.value.row];
-  if (!row) return;
+  const item = getRowItem(contextCell.value.rowId);
+  if (!item) return;
   const obj: Record<string, unknown> = {};
-  props.result.columns.forEach((col, i) => { obj[col] = row[i]; });
+  props.result.columns.forEach((col, i) => { obj[col] = item.data[i]; });
   navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
 }
 
 function copyAll() {
   const header = props.result.columns.join("\t");
-  const body = sortedRows.value.map((row) => row.map((c) => formatCell(c)).join("\t")).join("\n");
+  const body = sortedRows.value
+    .map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex).map((c) => formatCell(c)).join("\t"))
+    .join("\n");
   navigator.clipboard.writeText(`${header}\n${body}`);
 }
 
 async function exportCsv() {
   const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
   const header = props.result.columns.map(escape).join(",");
-  const body = sortedRows.value.map((row) => row.map((c) => escape(formatCell(c))).join(",")).join("\n");
+  const body = sortedRows.value
+    .map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex).map((c) => escape(formatCell(c))).join(","))
+    .join("\n");
   const path = await savePath({ filters: [{ name: "CSV", extensions: ["csv"] }] });
   if (path) await writeTextFile(path, `${header}\n${body}`);
 }
 
 async function exportJson() {
-  const data = sortedRows.value.map((row) => {
+  const data = sortedRows.value.map(({ row, sourceIndex }) => {
+    const data = rowDataWithChanges(row, sourceIndex);
     const obj: Record<string, unknown> = {};
-    props.result.columns.forEach((col, i) => { obj[col] = row[i]; });
+    props.result.columns.forEach((col, i) => { obj[col] = data[i]; });
     return obj;
   });
   const path = await savePath({ filters: [{ name: "JSON", extensions: ["json"] }] });
@@ -499,10 +597,11 @@ async function exportJson() {
 async function exportMarkdown() {
   const pad = (s: string, len: number) => s.padEnd(len);
   const cols = props.result.columns;
-  const widths = cols.map((c, i) => Math.max(c.length, ...sortedRows.value.map((r) => formatCell(r[i]).length), 3));
+  const visibleRows = sortedRows.value.map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex));
+  const widths = cols.map((c, i) => Math.max(c.length, ...visibleRows.map((r) => formatCell(r[i]).length), 3));
   const header = `| ${cols.map((c, i) => pad(c, widths[i])).join(" | ")} |`;
   const sep = `| ${widths.map((w) => "-".repeat(w)).join(" | ")} |`;
-  const body = sortedRows.value.map((row) =>
+  const body = visibleRows.map((row) =>
     `| ${row.map((c, i) => pad(formatCell(c), widths[i])).join(" | ")} |`
   ).join("\n");
   const md = `${header}\n${sep}\n${body}\n`;
@@ -600,6 +699,9 @@ function escapeAndHighlightKeywords(s: string): string {
             <span v-if="searchText" class="text-xs text-muted-foreground">
               {{ sortedRows.length }}/{{ result.rows.length }}
             </span>
+            <Button v-if="editable && tableMeta" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" @click="addRow">
+              <Plus class="w-3 h-3 mr-1" /> {{ t('grid.addRow') }}
+            </Button>
             <Button v-if="tableMeta && connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': showDdl }" @click="toggleDdl">
               <Code2 class="w-3 h-3 mr-1" /> DDL
             </Button>
@@ -610,7 +712,10 @@ function escapeAndHighlightKeywords(s: string): string {
               <!-- Sticky header -->
           <div ref="headerRef" class="shrink-0 bg-muted z-10 border-b border-border overflow-hidden">
             <div class="flex text-xs font-medium" :style="{ width: 'var(--total-w)' }">
-              <div class="shrink-0 w-12 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none">#</div>
+              <div class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none" :style="{ width: 'var(--row-num-w)' }">#</div>
+              <div v-if="editable" class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none" :style="{ width: 'var(--row-action-w)' }">
+                {{ t('grid.rowState') }}
+              </div>
               <div
                 v-for="(col, colIdx) in result.columns"
                 :key="col"
@@ -667,13 +772,42 @@ function escapeAndHighlightKeywords(s: string): string {
               <div
                 class="flex text-xs border-b border-border hover:bg-accent/50"
                 :class="{
-                  'line-through opacity-30': item.isDeleted,
-                  'bg-green-500/10': item.isNew,
+                  'bg-destructive/5 opacity-70': item.isDeleted,
+                  'bg-primary/5': item.isNew,
                   'bg-muted/30': !item.isNew && !item.isDeleted && index % 2 === 1,
                 }"
                 :style="{ height: '26px', width: 'var(--total-w)' }"
               >
-                <div class="shrink-0 w-12 px-2 py-1 border-r border-border text-center text-muted-foreground select-none">{{ index + 1 }}</div>
+                <div class="shrink-0 px-2 py-1 border-r border-border text-center text-muted-foreground select-none" :style="{ width: 'var(--row-num-w)' }">{{ index + 1 }}</div>
+                <div
+                  v-if="editable"
+                  class="shrink-0 px-1.5 py-0.5 border-r border-border flex items-center justify-between gap-1"
+                  :style="{ width: 'var(--row-action-w)' }"
+                >
+                  <Badge :variant="rowStatusVariant(item)" class="h-4 px-1.5 text-[10px]">
+                    {{ rowStatusLabel(item) }}
+                  </Badge>
+                  <Button
+                    v-if="editable && !item.isDeleted"
+                    variant="ghost"
+                    size="icon"
+                    class="h-5 w-5 shrink-0 text-destructive"
+                    :title="t('grid.deleteRow')"
+                    @click.stop="deleteRow(item.id)"
+                  >
+                    <Trash2 class="w-3 h-3" />
+                  </Button>
+                  <Button
+                    v-else-if="editable && item.isDeleted"
+                    variant="ghost"
+                    size="icon"
+                    class="h-5 w-5 shrink-0"
+                    :title="t('grid.restoreRow')"
+                    @click.stop="restoreRow(item.id)"
+                  >
+                    <Undo2 class="w-3 h-3" />
+                  </Button>
+                </div>
                 <div
                   v-for="(cell, colIdx) in item.data"
                   :key="colIdx"
@@ -683,15 +817,18 @@ function escapeAndHighlightKeywords(s: string): string {
                     'text-muted-foreground italic': isNull(cell),
                     'bg-yellow-500/10': item.isDirtyCol[colIdx],
                     'tabular-nums': typeof cell === 'number',
+                    'cursor-text hover:bg-accent/50': editable && !item.isDeleted,
+                    'line-through': item.isDeleted,
                   }"
-                  @dblclick="!item.isNew && !item.isDeleted && startEdit(item.id, colIdx)"
+                  @dblclick="editable && !item.isDeleted && startEdit(item.id, colIdx)"
                   @contextmenu="onCellContext(item.id, colIdx)"
                 >
-                  <template v-if="editingCell?.row === item.id && editingCell?.col === colIdx">
+                  <template v-if="editingCell?.rowId === item.id && editingCell?.col === colIdx">
                     <input
                       v-model="editValue"
                       class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2 py-0.5 text-xs outline-none z-10"
                       @blur="commitEdit"
+                      @click.stop
                       @keydown.stop="onEditKeydown"
                     />
                   </template>
@@ -758,14 +895,14 @@ function escapeAndHighlightKeywords(s: string): string {
       <span>{{ result.execution_time_ms }}ms</span>
 
       <template v-if="editable && tableMeta">
+        <span v-if="hasPendingChanges" class="ml-2 text-foreground">
+          {{ t('grid.pendingChanges', { count: pendingChangeCount }) }}
+        </span>
         <Button v-if="hasPendingChanges" variant="default" size="sm" class="h-5 text-xs ml-2" @click="saveChanges">
           <Save class="w-3 h-3 mr-1" /> {{ t('grid.save') }}
         </Button>
         <Button v-if="hasPendingChanges" variant="ghost" size="sm" class="h-5 text-xs" @click="discardChanges">
           {{ t('grid.discard') }}
-        </Button>
-        <Button variant="ghost" size="sm" class="h-5 text-xs" @click="addRow">
-          <Plus class="w-3 h-3 mr-1" /> {{ t('grid.addRow') }}
         </Button>
         <Button variant="ghost" size="sm" class="h-5 text-xs" @click="toggleDdl">
           <Code2 class="w-3 h-3 mr-1" /> DDL

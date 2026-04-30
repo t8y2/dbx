@@ -33,6 +33,7 @@ import MongoDocBrowser from "@/components/mongo/MongoDocBrowser.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import QueryHistory from "@/components/editor/QueryHistory.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import DataTransferDialog from "@/components/transfer/DataTransferDialog.vue";
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -79,6 +80,9 @@ const pendingDangerSql = ref("");
 const selectedSql = ref("");
 const formatSqlRequestId = ref(0);
 const showDangerDialog = ref(false);
+const showTransferDialog = ref(false);
+const transferPrefillConnectionId = ref("");
+const transferPrefillDatabase = ref("");
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -98,6 +102,15 @@ watch(editConfig, (v) => {
 
 watch(showConnectionDialog, (v) => {
   if (!v) connectionStore.stopEditing();
+});
+
+watch(() => connectionStore.transferSource, (v) => {
+  if (v) {
+    transferPrefillConnectionId.value = v.connectionId;
+    transferPrefillDatabase.value = v.database;
+    showTransferDialog.value = true;
+    connectionStore.transferSource = null;
+  }
 });
 
 function onConnectionConnectStarted(name: string) {
@@ -1092,6 +1105,11 @@ async function setupFileDrop() {
         @connect-failed="onConnectionConnectFailed"
       />
       <DangerConfirmDialog v-model:open="showDangerDialog" :sql="dangerSql" @confirm="onDangerConfirm" />
+      <DataTransferDialog
+        v-model:open="showTransferDialog"
+        :prefill-connection-id="transferPrefillConnectionId"
+        :prefill-database="transferPrefillDatabase"
+      />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">
           <DialogHeader>

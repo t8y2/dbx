@@ -5,7 +5,7 @@ import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
   Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
-  Pin,
+  Pin, ArrowRightLeft,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
@@ -239,9 +239,22 @@ function disconnectConnection() {
   }
 }
 
+function openTransfer() {
+  if (props.node.connectionId) {
+    connectionStore.transferSource = {
+      connectionId: props.node.connectionId,
+      database: props.node.database ?? "",
+    };
+  }
+}
+
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
+const hasTypeMenu = computed(() => {
+  const t = props.node.type;
+  return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || isGroupLabel(props.node);
+});
 const columnComment = computed(() => props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null);
 const paddingLeft = `${props.depth * 16 + 8}px`;
 const isConnected = computed(() =>
@@ -329,67 +342,71 @@ async function showMore() {
       </div>
     </ContextMenuTrigger>
 
-    <ContextMenuContent class="w-48">
+    <ContextMenuContent class="w-auto min-w-36">
       <ContextMenuItem v-if="canPin" @click="togglePin">
-        <Pin class="w-3.5 h-3.5 mr-2" :class="{ 'fill-current': isPinned }" />
+        <Pin class="w-4 h-4" :class="{ 'fill-current': isPinned }" />
         {{ isPinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}
       </ContextMenuItem>
-      <ContextMenuSeparator v-if="canPin" />
+      <ContextMenuSeparator v-if="canPin && hasTypeMenu" />
 
       <template v-if="node.type === 'connection'">
         <ContextMenuItem v-if="!isConnected" @click="toggle">
-          <Plug class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.openConnection') }}
+          <Plug class="w-4 h-4" /> {{ t('contextMenu.openConnection') }}
         </ContextMenuItem>
         <ContextMenuItem v-else @click="disconnectConnection">
-          <Unplug class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.closeConnection') }}
+          <Unplug class="w-4 h-4" /> {{ t('contextMenu.closeConnection') }}
         </ContextMenuItem>
         <ContextMenuItem @click="newQuery">
-          <TerminalSquare class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.newQuery') }}
+          <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem @click="refresh">
-          <RefreshCw class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.refreshChildren') }}
+          <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
         </ContextMenuItem>
         <ContextMenuItem @click="editConnection">
-          <Pencil class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.editConnection') }}
+          <Pencil class="w-4 h-4" /> {{ t('contextMenu.editConnection') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem class="text-destructive" @click="deleteConnection">
-          <Trash2 class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.deleteConnection') }}
+          <Trash2 class="w-4 h-4" /> {{ t('contextMenu.deleteConnection') }}
         </ContextMenuItem>
       </template>
 
       <template v-if="node.type === 'database' || node.type === 'schema'">
         <ContextMenuItem @click="newQuery">
-          <TerminalSquare class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.newQuery') }}
+          <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
         </ContextMenuItem>
         <ContextMenuItem @click="refresh">
-          <RefreshCw class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.refreshChildren') }}
+          <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem @click="openTransfer">
+          <ArrowRightLeft class="w-4 h-4" /> {{ t('transfer.dataTransfer') }}
         </ContextMenuItem>
       </template>
 
       <template v-if="node.type === 'table' || node.type === 'view'">
         <ContextMenuItem @click="openData">
-          <TableProperties class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.viewData') }}
+          <TableProperties class="w-4 h-4" /> {{ t('contextMenu.viewData') }}
         </ContextMenuItem>
         <ContextMenuItem @click="newQuery">
-          <TerminalSquare class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.newQuery') }}
+          <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem @click="refresh">
-          <RefreshCw class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.refreshChildren') }}
+          <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
         </ContextMenuItem>
       </template>
 
       <template v-if="isGroupLabel(node)">
         <ContextMenuItem @click="refresh">
-          <RefreshCw class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.refreshChildren') }}
+          <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
         </ContextMenuItem>
       </template>
 
-      <ContextMenuSeparator />
+      <ContextMenuSeparator v-if="hasTypeMenu" />
       <ContextMenuItem @click="copyName">
-        <Copy class="w-3.5 h-3.5 mr-2" /> {{ t('contextMenu.copyName') }}
+        <Copy class="w-4 h-4" /> {{ t('contextMenu.copyName') }}
       </ContextMenuItem>
     </ContextMenuContent>
   </ContextMenu>

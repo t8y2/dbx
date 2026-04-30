@@ -78,6 +78,8 @@ pub fn run() {
             commands::history::clear_history,
             commands::history::delete_history_entry,
             commands::update::check_for_updates,
+            commands::transfer::start_transfer,
+            commands::transfer::cancel_transfer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

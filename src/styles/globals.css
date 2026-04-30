@@ -136,8 +136,10 @@
   [role="switch"],
   select,
   summary,
+  label,
   a[href] {
     cursor: pointer;
+    user-select: none;
     }
 }
 
@@ -156,4 +158,18 @@
 }
 .splitpanes__splitter:hover {
   background: oklch(0.6 0.15 250) !important;
+}
+
+/* Frosted glass menus */
+.cn-menu-translucent {
+  backdrop-filter: blur(16px) saturate(1.6) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(1.6) !important;
+  background-color: oklch(1 0 0 / 0.95) !important;
+  box-shadow: none !important;
+  border: 0.5px solid oklch(0 0 0 / 0.12) !important;
+  --tw-ring-shadow: none !important;
+}
+.dark .cn-menu-translucent {
+  background-color: oklch(0.205 0 0 / 0.82) !important;
+  border-color: oklch(1 0 0 / 0.1) !important;
 }

@@ -265,3 +265,55 @@ export async function clearHistory(): Promise<void> {
 export async function deleteHistoryEntry(id: string): Promise<void> {
   return invoke("delete_history_entry", { id });
 }
+
+// --- Data Transfer ---
+export interface TransferRequest {
+  transferId: string;
+  sourceConnectionId: string;
+  sourceDatabase: string;
+  sourceSchema: string;
+  targetConnectionId: string;
+  targetDatabase: string;
+  targetSchema: string;
+  tables: string[];
+  createTable: boolean;
+  truncateBefore: boolean;
+  batchSize: number;
+}
+
+export interface TransferProgress {
+  transferId: string;
+  table: string;
+  tableIndex: number;
+  totalTables: number;
+  rowsTransferred: number;
+  totalRows: number | null;
+  status: "running" | "tableDone" | "done" | "error" | "cancelled";
+  error: string | null;
+}
+
+export async function startTransfer(
+  request: TransferRequest,
+  onProgress: (progress: TransferProgress) => void,
+): Promise<void> {
+  const unlisten: UnlistenFn = await listen<TransferProgress>("transfer-progress", (event) => {
+    if (event.payload.transferId === request.transferId) {
+      onProgress(event.payload);
+      if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
+        if (event.payload.tableIndex === event.payload.totalTables - 1 || event.payload.status !== "error") {
+          unlisten();
+        }
+      }
+    }
+  });
+  try {
+    await invoke("start_transfer", { request });
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
+}
+
+export async function cancelTransfer(transferId: string): Promise<void> {
+  return invoke("cancel_transfer", { transferId });
+}

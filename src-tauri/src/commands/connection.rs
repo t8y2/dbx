@@ -179,7 +179,11 @@ pub async fn load_connections(app: AppHandle) -> Result<Vec<ConnectionConfig>, S
 #[tauri::command]
 pub async fn test_connection(config: ConnectionConfig) -> Result<String, String> {
     let url = config.connection_url();
-    log::info!("[test_connection] db_type={:?} url={}", config.db_type, &url[..url.len().min(80)]);
+    log::info!(
+        "[test_connection] db_type={:?} target={}",
+        config.db_type,
+        config.redacted_connection_url()
+    );
     match config.db_type {
         DatabaseType::Mysql => {
             let pool = db::mysql::connect(&url).await?;

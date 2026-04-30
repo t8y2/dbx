@@ -190,7 +190,13 @@ function databaseDisplayName(database: string): string {
   return database || t("editor.noDatabase");
 }
 
+function isPreviewTab(tab: typeof queryStore.tabs[number]): boolean {
+  const config = connectionStore.getConfig(tab.connectionId);
+  return !!config?.name.startsWith("[Preview]");
+}
+
 function tabDisplayTitle(tab: typeof queryStore.tabs[number]): string {
+  if (isPreviewTab(tab)) return tab.title;
   const database = databaseDisplayNameForTab(tab.connectionId, tab.database);
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     return `${database} | ${tab.tableMeta.tableName}`;
@@ -555,14 +561,48 @@ function getDbType(path: string): "sqlite" | "duckdb" | null {
   return null;
 }
 
+function getDataFileQuery(path: string): string | null {
+  const lower = path.toLowerCase();
+  const escaped = path.replace(/'/g, "''");
+  if (lower.endsWith(".parquet")) return `SELECT * FROM read_parquet('${escaped}') LIMIT 1000`;
+  if (lower.endsWith(".csv")) return `SELECT * FROM read_csv('${escaped}') LIMIT 1000`;
+  if (lower.endsWith(".tsv")) return `SELECT * FROM read_csv('${escaped}', delim='\t') LIMIT 1000`;
+  if (lower.endsWith(".json")) return `SELECT * FROM read_json('${escaped}') LIMIT 1000`;
+  return null;
+}
+
 async function setupFileDrop() {
   const webview = getCurrentWebview();
-  await webview.onDragDropEvent((event) => {
+  await webview.onDragDropEvent(async (event) => {
     if (event.payload.type !== "drop") return;
     for (const path of event.payload.paths) {
+      const name = path.split("/").pop()?.split("\\").pop() || path;
+
+      const dataQuery = getDataFileQuery(path);
+      if (dataQuery) {
+        const config: ConnectionConfig = {
+          id: crypto.randomUUID(),
+          name: `[Preview] ${name}`,
+          db_type: "duckdb",
+          driver_profile: "duckdb",
+          driver_label: "DuckDB",
+          url_params: "",
+          host: ":memory:",
+          port: 0,
+          username: "",
+          password: "",
+        };
+        const connectionId = await api.connectDb(config);
+        connectionStore.addEphemeralConnection({ ...config, id: connectionId });
+        const tabId = queryStore.createTab(connectionId, "", name, "query");
+        queryStore.updateSql(tabId, dataQuery);
+        queryStore.executeCurrentTab();
+        toast(t("welcome.fileOpened", { name }));
+        continue;
+      }
+
       const dbType = getDbType(path);
       if (!dbType) continue;
-      const name = path.split("/").pop()?.split("\\").pop() || path;
       const config: ConnectionConfig = {
         id: crypto.randomUUID(),
         name,
@@ -784,7 +824,7 @@ async function setupFileDrop() {
 
           <!-- Editor Panel -->
           <div v-if="activeTab" class="flex flex-col flex-1 min-h-0">
-            <div v-if="activeTab.mode === 'query'" class="h-8 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs text-muted-foreground">
+            <div v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)" class="h-8 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs text-muted-foreground">
               <Server class="h-3.5 w-3.5 shrink-0" />
               <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
               <Select

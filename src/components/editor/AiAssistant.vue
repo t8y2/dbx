@@ -1,67 +1,50 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { nextTick, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import {
-  Bot,
-  Check,
-  Clipboard,
-  Code2,
-  Copy,
-  FilePlus2,
-  Loader2,
-  MessageSquareText,
-  Replace,
-  Settings,
-  Sparkles,
-  Wand2,
-  Wrench,
+  Bot, Copy, Loader2, Replace, Send, Settings,
+  Sparkles, Trash2, X,
 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSettingsStore, type AiProvider } from "@/stores/settingsStore";
-import { buildAiContext, extractSql, runAiAction, type AiAction, type AiContext } from "@/lib/ai";
+import { buildAiContext, extractSql, runAiAction, type AiAction } from "@/lib/ai";
+import type { AiMessage } from "@/lib/tauri";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
 
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  action?: AiAction;
+}
+
 const props = defineProps<{
-  tab: QueryTab;
+  tab?: QueryTab;
   connection?: ConnectionConfig;
 }>();
 
 const emit = defineEmits<{
   replaceSql: [sql: string];
-  appendSql: [sql: string];
+  close: [];
 }>();
 
 const action = ref<AiAction>("generate");
 const prompt = ref("");
+const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
-const isBuildingContext = ref(false);
 const showSettings = ref(false);
-const showPreview = ref(false);
-const error = ref("");
-const output = ref("");
-const copied = ref(false);
-const lastContext = ref<AiContext | null>(null);
+const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 
 const tempProvider = ref<AiProvider>(settings.aiConfig.provider);
 const tempApiKey = ref(settings.aiConfig.apiKey);
@@ -74,26 +57,14 @@ const providerDefaults: Record<AiProvider, { endpoint: string; model: string }> 
   custom: { endpoint: "", model: "" },
 };
 
-const actionItems: Array<{ value: AiAction; labelKey: string; icon: any }> = [
-  { value: "generate", labelKey: "ai.actions.generate", icon: Sparkles },
-  { value: "explain", labelKey: "ai.actions.explain", icon: MessageSquareText },
-  { value: "optimize", labelKey: "ai.actions.optimize", icon: Wand2 },
-  { value: "fix", labelKey: "ai.actions.fix", icon: Wrench },
-  { value: "convert", labelKey: "ai.actions.convert", icon: Replace },
-  { value: "sampleData", labelKey: "ai.actions.sampleData", icon: FilePlus2 },
-];
-
-const selectedAction = computed(() => actionItems.find((item) => item.value === action.value) ?? actionItems[0]);
-const sqlCandidate = computed(() => extractSql(output.value));
-const canUseSql = computed(() => !!sqlCandidate.value.trim());
-const contextSummary = computed(() => {
-  if (!lastContext.value) return "";
-  const tableCount = lastContext.value.tables.length;
-  return t("ai.contextSummary", {
-    database: lastContext.value.database,
-    tables: tableCount,
-  });
-});
+const actionLabels: Record<AiAction, string> = {
+  generate: "ai.actions.generate",
+  explain: "ai.actions.explain",
+  optimize: "ai.actions.optimize",
+  fix: "ai.actions.fix",
+  convert: "ai.actions.convert",
+  sampleData: "ai.actions.sampleData",
+};
 
 function openSettings() {
   tempProvider.value = settings.aiConfig.provider;
@@ -119,169 +90,154 @@ function selectProvider(provider: AiProvider) {
   tempModel.value = providerDefaults[provider].model;
 }
 
-async function generate() {
-  if (!props.connection) {
-    error.value = t("ai.noConnection");
-    return;
-  }
+function scrollToBottom() {
+  nextTick(() => {
+    const el = scrollRef.value?.$el?.querySelector("[data-radix-scroll-area-viewport]");
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
+async function send() {
+  const text = prompt.value.trim();
+  if (!text || isGenerating.value) return;
+
+  if (!props.connection || !props.tab) return;
   if (!settings.isConfigured()) {
     openSettings();
     return;
   }
-  if (action.value === "generate" && !prompt.value.trim()) return;
-  if (action.value !== "generate" && !props.tab.sql.trim() && !prompt.value.trim()) {
-    error.value = t("ai.noSql");
-    return;
-  }
+
+  messages.value.push({ role: "user", content: text, action: action.value });
+  prompt.value = "";
+  scrollToBottom();
 
   isGenerating.value = true;
-  isBuildingContext.value = true;
-  error.value = "";
-  copied.value = false;
   try {
     const context = await buildAiContext(props.tab, props.connection);
-    lastContext.value = context;
-    isBuildingContext.value = false;
-    output.value = await runAiAction({
+    const history: AiMessage[] = messages.value.slice(0, -1).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    const result = await runAiAction({
       config: settings.aiConfig,
       action: action.value,
-      instruction: prompt.value,
+      instruction: text,
       context,
-    });
-    showPreview.value = true;
+    }, history);
+    messages.value.push({ role: "assistant", content: result });
   } catch (e: any) {
-    error.value = String(e.message || e);
+    messages.value.push({ role: "assistant", content: `Error: ${e.message || e}` });
   } finally {
-    isBuildingContext.value = false;
     isGenerating.value = false;
+    scrollToBottom();
   }
 }
 
-function replaceSql() {
-  if (!canUseSql.value) return;
-  emit("replaceSql", sqlCandidate.value);
-  showPreview.value = false;
+function applySql(text: string) {
+  const sql = extractSql(text);
+  if (sql) emit("replaceSql", sql);
 }
 
-function appendSql() {
-  if (!canUseSql.value) return;
-  emit("appendSql", sqlCandidate.value);
-  showPreview.value = false;
+async function copySql(text: string) {
+  const sql = extractSql(text);
+  if (sql) await navigator.clipboard.writeText(sql);
 }
 
-async function copySql() {
-  if (!canUseSql.value) return;
-  await navigator.clipboard.writeText(sqlCandidate.value);
-  copied.value = true;
-  window.setTimeout(() => { copied.value = false; }, 1200);
+function clearMessages() {
+  messages.value = [];
 }
 
-async function copyAll() {
-  if (!output.value.trim()) return;
-  await navigator.clipboard.writeText(output.value.trim());
-  copied.value = true;
-  window.setTimeout(() => { copied.value = false; }, 1200);
+function hasSql(text: string): boolean {
+  return /```(?:sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*[\s\S]*?```/i.test(text);
+}
+
+function formatMessageContent(text: string): string {
+  return text
+    .replace(/```(?:sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*([\s\S]*?)```/gi, '<pre class="my-2 rounded bg-black/30 p-2 text-xs overflow-x-auto"><code>$1</code></pre>')
+    .replace(/`([^`]+)`/g, '<code class="rounded bg-black/20 px-1 py-0.5 text-xs">$1</code>')
+    .replace(/\n/g, "<br>");
 }
 </script>
 
 <template>
-  <div class="shrink-0 border-b bg-muted/20 px-2 py-1.5">
-    <div class="flex items-center gap-1.5">
-      <Bot class="h-3.5 w-3.5 shrink-0 text-primary" />
-      <Select :model-value="action" @update:model-value="(v: any) => action = v">
-        <SelectTrigger class="h-7 w-32 text-xs">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="item in actionItems" :key="item.value" :value="item.value">
-            {{ t(item.labelKey) }}
-          </SelectItem>
-        </SelectContent>
-      </Select>
-
-      <Input
-        v-model="prompt"
-        class="h-7 flex-1 border-0 bg-background/70 text-xs shadow-none focus-visible:ring-1"
-        :placeholder="t(`ai.placeholders.${action}`)"
-        @keydown.enter="generate"
-      />
-
-      <Button
-        variant="default"
-        size="xs"
-        class="shrink-0"
-        :disabled="isGenerating"
-        @click="generate"
-      >
-        <Loader2 v-if="isGenerating" class="h-3 w-3 animate-spin" />
-        <component :is="selectedAction.icon" v-else class="h-3 w-3" />
-        <span>{{ isBuildingContext ? t('ai.readingSchema') : t('ai.run') }}</span>
+  <div class="flex h-full flex-col">
+    <div class="flex items-center gap-2 border-b px-3 py-2">
+      <Sparkles class="h-4 w-4 text-primary shrink-0" />
+      <span class="text-sm font-medium flex-1">AI</span>
+      <Button variant="ghost" size="icon" class="h-6 w-6" @click="clearMessages" :title="t('ai.clear')">
+        <Trash2 class="h-3.5 w-3.5" />
       </Button>
-
-      <Button variant="ghost" size="icon-xs" class="shrink-0" @click="openSettings">
-        <Settings class="h-3 w-3" />
+      <Button variant="ghost" size="icon" class="h-6 w-6" @click="openSettings">
+        <Settings class="h-3.5 w-3.5" />
+      </Button>
+      <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('close')">
+        <X class="h-3.5 w-3.5" />
       </Button>
     </div>
 
-    <div v-if="error || contextSummary" class="mt-1 flex items-center gap-2 text-xs">
-      <span v-if="error" class="truncate text-destructive">{{ error }}</span>
-      <span v-else-if="contextSummary" class="truncate text-muted-foreground">{{ contextSummary }}</span>
-      <Badge v-if="lastContext?.truncated" variant="outline" class="h-4 px-1.5 text-[10px]">
-        {{ t('ai.truncated') }}
-      </Badge>
-    </div>
-  </div>
-
-  <Dialog v-model:open="showPreview">
-    <DialogContent class="sm:max-w-3xl">
-      <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
-          <Code2 class="h-4 w-4" />
-          {{ t(selectedAction.labelKey) }}
-        </DialogTitle>
-      </DialogHeader>
-
-      <div class="grid gap-3">
-        <div v-if="contextSummary" class="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>{{ contextSummary }}</span>
-          <Badge v-if="lastContext?.truncated" variant="outline">{{ t('ai.truncated') }}</Badge>
+    <ScrollArea ref="scrollRef" class="flex-1">
+      <div class="flex flex-col gap-3 p-3">
+        <div v-if="messages.length === 0" class="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
+          <Bot class="h-10 w-10 mb-3 opacity-30" />
+          <p class="text-sm">{{ t('ai.welcome') }}</p>
         </div>
 
-        <ScrollArea class="h-72 rounded-lg border bg-background">
-          <pre class="whitespace-pre-wrap p-3 text-xs leading-relaxed"><code>{{ output }}</code></pre>
-        </ScrollArea>
-
-        <div v-if="canUseSql" class="rounded-lg border bg-muted/20">
-          <div class="flex items-center justify-between border-b px-3 py-2">
-            <span class="text-xs font-medium">{{ t('ai.sqlPreview') }}</span>
-            <Button variant="ghost" size="xs" @click="copySql">
-              <Check v-if="copied" class="h-3 w-3" />
-              <Copy v-else class="h-3 w-3" />
-              {{ copied ? t('ai.copied') : t('ai.copySql') }}
-            </Button>
+        <template v-for="(msg, i) in messages" :key="i">
+          <div v-if="msg.role === 'user'" class="flex justify-end">
+            <div class="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+              {{ msg.content }}
+            </div>
           </div>
-          <ScrollArea class="max-h-48">
-            <pre class="whitespace-pre-wrap p-3 text-xs leading-relaxed"><code>{{ sqlCandidate }}</code></pre>
-          </ScrollArea>
+
+          <div v-else class="flex flex-col gap-1">
+            <div class="max-w-[95%] rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
+              <div v-html="formatMessageContent(msg.content)" />
+            </div>
+            <div v-if="hasSql(msg.content)" class="flex gap-1">
+              <Button variant="outline" size="xs" class="h-6 text-[10px]" @click="applySql(msg.content)">
+                <Replace class="h-3 w-3" />
+                {{ t('ai.apply') }}
+              </Button>
+              <Button variant="ghost" size="xs" class="h-6 text-[10px]" @click="copySql(msg.content)">
+                <Copy class="h-3 w-3" />
+                {{ t('ai.copySql') }}
+              </Button>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="isGenerating" class="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+          <span>{{ t('ai.thinking') }}</span>
         </div>
       </div>
+    </ScrollArea>
 
-      <DialogFooter class="gap-2 sm:gap-2">
-        <Button variant="outline" size="sm" @click="copyAll">
-          <Clipboard class="h-3.5 w-3.5" />
-          {{ t('ai.copyAll') }}
+    <div class="border-t p-2">
+      <div class="flex items-center gap-1.5">
+        <Select :model-value="action" @update:model-value="(v: any) => action = v">
+          <SelectTrigger class="h-7 w-24 text-[10px] shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="(label, key) in actionLabels" :key="key" :value="key">
+              {{ t(label) }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <Input
+          v-model="prompt"
+          class="h-7 flex-1 text-xs"
+          :placeholder="t(`ai.placeholders.${action}`)"
+          :disabled="isGenerating"
+          @keydown.enter="send"
+        />
+        <Button variant="default" size="icon" class="h-7 w-7 shrink-0" :disabled="isGenerating || !prompt.trim()" @click="send">
+          <Send class="h-3.5 w-3.5" />
         </Button>
-        <Button variant="outline" size="sm" :disabled="!canUseSql" @click="appendSql">
-          <FilePlus2 class="h-3.5 w-3.5" />
-          {{ t('ai.append') }}
-        </Button>
-        <Button size="sm" :disabled="!canUseSql" @click="replaceSql">
-          <Replace class="h-3.5 w-3.5" />
-          {{ t('ai.replace') }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+      </div>
+    </div>
+  </div>
 
   <Dialog v-model:open="showSettings">
     <DialogContent class="sm:max-w-[420px]">
@@ -312,9 +268,6 @@ async function copyAll() {
           <Label class="text-right text-xs">Model</Label>
           <Input v-model="tempModel" class="col-span-2 h-8 text-xs" />
         </div>
-        <p class="text-xs leading-relaxed text-muted-foreground">
-          {{ t('ai.settingsHint') }}
-        </p>
       </div>
       <DialogFooter>
         <Button size="sm" @click="saveSettings">{{ t('grid.save') }}</Button>

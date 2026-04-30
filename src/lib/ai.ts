@@ -38,7 +38,7 @@ const ACTION_INSTRUCTIONS: Record<AiAction, string> = {
   sampleData: "Generate safe sample SQL statements or mock data for the current schema. Do not use real production data.",
 };
 
-export async function runAiAction(input: AiRequestInput): Promise<string> {
+export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
   const systemPrompt = buildSystemPrompt(input.action, input.context);
   const userPrompt = [
     `Action: ${input.action}`,
@@ -48,10 +48,15 @@ export async function runAiAction(input: AiRequestInput): Promise<string> {
     input.instruction.trim() || "(No extra instruction provided.)",
   ].join("\n");
 
+  const messages: api.AiMessage[] = [
+    ...(history || []),
+    { role: "user", content: userPrompt },
+  ];
+
   return api.aiComplete({
     config: input.config,
     systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
+    messages,
     maxTokens: 2400,
     temperature: 0.15,
   });

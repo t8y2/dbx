@@ -56,6 +56,7 @@ const { message: toastMessage, visible: toastVisible, toast } = useToast();
 
 const showConnectionDialog = ref(false);
 const showHistory = ref(false);
+const showAiPanel = ref(false);
 const showUpdateDialog = ref(false);
 const dangerSql = ref("");
 const pendingDangerSql = ref("");
@@ -351,13 +352,6 @@ function replaceActiveSql(sql: string) {
   const tab = activeTab.value;
   if (!tab) return;
   queryStore.updateSql(tab.id, sql);
-}
-
-function appendActiveSql(sql: string) {
-  const tab = activeTab.value;
-  if (!tab) return;
-  const current = tab.sql.trimEnd();
-  queryStore.updateSql(tab.id, current ? `${current}\n\n${sql}` : sql);
 }
 
 function changeActiveDatabase(database: any) {
@@ -669,6 +663,15 @@ async function setupFileDrop() {
 
         <Tooltip>
           <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-7" :class="{ 'bg-accent': showAiPanel }" @click="showAiPanel = !showAiPanel">
+              <Sparkles class="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>AI</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-7 w-7" @click="toggleTheme">
               <Moon v-if="!isDark" class="h-4 w-4" />
               <Sun v-else class="h-4 w-4" />
@@ -895,12 +898,6 @@ async function setupFileDrop() {
                 </Pane>
                 <Pane :size="60" :min-size="20">
                   <div class="h-full flex flex-col">
-                    <AiAssistant
-                      :tab="activeTab"
-                      :connection="activeConnection"
-                      @replace-sql="replaceActiveSql"
-                      @append-sql="appendActiveSql"
-                    />
                     <DataGrid v-if="activeTab.result" :key="activeTab.id" class="flex-1 min-h-0" :result="activeTab.result" :sql="activeTab.lastExecutedSql || activeTab.sql" />
                     <div v-else class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
                       {{ t('editor.pressToExecute') }}
@@ -1043,6 +1040,15 @@ async function setupFileDrop() {
       <!-- History Panel (fixed width, outside Splitpanes) -->
       <div v-if="showHistory" class="w-72 h-full shrink-0 border-l bg-background">
         <QueryHistory @restore="onHistoryRestore" @close="showHistory = false" />
+      </div>
+
+      <div v-if="showAiPanel" class="w-80 h-full shrink-0 border-l bg-background">
+        <AiAssistant
+          :tab="activeTab"
+          :connection="activeConnection"
+          @replace-sql="replaceActiveSql"
+          @close="showAiPanel = false"
+        />
       </div>
       </div>
 

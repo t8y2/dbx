@@ -1,4 +1,4 @@
-export type DatabaseType = "mysql" | "postgres" | "sqlite" | "redis" | "duckdb" | "clickhouse" | "sqlserver" | "mongodb" | "oracle";
+export type DatabaseType = "mysql" | "postgres" | "sqlite" | "redis" | "duckdb" | "clickhouse" | "sqlserver" | "mongodb" | "oracle" | "elasticsearch";
 
 export interface ConnectionConfig {
   id: string;

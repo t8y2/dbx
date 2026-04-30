@@ -17,6 +17,7 @@ pub enum PoolKind {
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(std::sync::Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Oracle(std::sync::Arc<tokio::sync::Mutex<db::oracle_driver::OracleClient>>),
+    Elasticsearch(db::elasticsearch_driver::EsClient),
 }
 
 pub struct AppState {
@@ -123,6 +124,15 @@ impl AppState {
                 .await?;
                 PoolKind::Oracle(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
             }
+            DatabaseType::Elasticsearch => {
+                let client = db::elasticsearch_driver::EsClient::new(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                );
+                db::elasticsearch_driver::test_connection(&client).await?;
+                PoolKind::Elasticsearch(client)
+            }
         };
 
         self.connections.lock().await.insert(pool_key.clone(), pool);
@@ -167,7 +177,7 @@ impl AppState {
         let is_single_conn = {
             let configs = self.configs.lock().await;
             configs.get(connection_id)
-                .map(|c| c.db_type == DatabaseType::Oracle)
+                .map(|c| c.db_type == DatabaseType::Oracle || c.db_type == DatabaseType::Elasticsearch)
                 .unwrap_or(false)
         };
         let pool_key = if is_single_conn {
@@ -315,6 +325,16 @@ pub async fn test_connection(
         )
         .await
         .map(|_| "Connection successful".to_string()),
+        DatabaseType::Elasticsearch => {
+            let client = db::elasticsearch_driver::EsClient::new(
+                &url,
+                Some(&config.username),
+                Some(&config.password),
+            );
+            db::elasticsearch_driver::test_connection(&client)
+                .await
+                .map(|_| "Connection successful".to_string())
+        }
     };
 
     if config.ssh_enabled && !config.ssh_host.is_empty() {
@@ -376,6 +396,15 @@ pub async fn connect_db(
             .await?;
             PoolKind::Oracle(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
         }
+        DatabaseType::Elasticsearch => {
+            let client = db::elasticsearch_driver::EsClient::new(
+                &url,
+                Some(&config.username),
+                Some(&config.password),
+            );
+            db::elasticsearch_driver::test_connection(&client).await?;
+            PoolKind::Elasticsearch(client)
+        }
     };
 
     state.connections.lock().await.insert(id.clone(), pool);
@@ -407,6 +436,7 @@ pub async fn disconnect_db(
                 PoolKind::ClickHouse(_) => {},
                 PoolKind::SqlServer(_) => {},
                 PoolKind::Oracle(_) => {},
+                PoolKind::Elasticsearch(_) => {},
             }
         }
     }

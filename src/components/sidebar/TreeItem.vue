@@ -76,7 +76,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const leafTypes: Set<TreeNodeType> = new Set(["column", "index", "fkey", "trigger", "redis-db"]);
+const leafTypes: Set<TreeNodeType> = new Set(["column", "index", "fkey", "trigger", "redis-db", "mongo-collection"]);
 const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers"]);
 const pinnableTypes: Set<TreeNodeType> = new Set([
   "database",
@@ -101,7 +101,7 @@ async function toggle() {
     const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "redis") {
       await connectionStore.loadRedisDatabases(node.connectionId);
-    } else if (config?.db_type === "mongodb") {
+    } else if (config?.db_type === "mongodb" || config?.db_type === "elasticsearch") {
       await connectionStore.loadMongoDatabases(node.connectionId);
     } else {
       await connectionStore.loadDatabases(node.connectionId);
@@ -143,6 +143,8 @@ function onClick() {
     openData();
     toggle();
   } else if (node.type === "redis-db") {
+    toggle();
+  } else if (node.type === "mongo-collection") {
     toggle();
   } else if (canExpand) {
     toggle();

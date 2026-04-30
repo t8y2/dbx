@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { siPostgresql, siSqlite, siRedis, siMongodb, siClickhouse, siDuckdb, siMariadb, siTidb } from "simple-icons";
+import { siPostgresql, siSqlite, siRedis, siMongodb, siClickhouse, siDuckdb, siMariadb, siTidb, siElasticsearch } from "simple-icons";
 import { Database } from "lucide-vue-next";
 
 const props = defineProps<{
@@ -21,6 +21,7 @@ const brandIcons: Record<string, { path: string; color: string; viewBox?: string
   duckdb: { path: siDuckdb.path, color: `#${siDuckdb.hex}` },
   mariadb: { path: siMariadb.path, color: `#${siMariadb.hex}` },
   tidb: { path: siTidb.path, color: `#${siTidb.hex}` },
+  elasticsearch: { path: siElasticsearch.path, color: `#${siElasticsearch.hex}` },
   oracle: {
     viewBox: "0 0 32 32",
     color: "#F80000",

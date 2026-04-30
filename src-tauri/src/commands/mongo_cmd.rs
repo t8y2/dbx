@@ -3,6 +3,7 @@ use tauri::State;
 
 use crate::commands::connection::{AppState, PoolKind};
 use crate::db::mongo_driver::{self, MongoDocumentResult};
+use crate::db::elasticsearch_driver;
 
 #[tauri::command]
 pub async fn mongo_list_databases(
@@ -12,7 +13,8 @@ pub async fn mongo_list_databases(
     let connections = state.connections.lock().await;
     match connections.get(&connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::list_databases(client).await,
-        _ => Err("Not a MongoDB connection".to_string()),
+        PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
+        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
 }
 
@@ -25,7 +27,8 @@ pub async fn mongo_list_collections(
     let connections = state.connections.lock().await;
     match connections.get(&connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::list_collections(client, &database).await,
-        _ => Err("Not a MongoDB connection".to_string()),
+        PoolKind::Elasticsearch(client) => elasticsearch_driver::list_indices(client).await,
+        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
 }
 
@@ -43,7 +46,12 @@ pub async fn mongo_find_documents(
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents(client, &database, &collection, skip, limit).await
         }
-        _ => Err("Not a MongoDB connection".to_string()),
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::find_documents(&client, &collection, skip, limit).await
+        }
+        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
 }
 
@@ -60,7 +68,12 @@ pub async fn mongo_insert_document(
         PoolKind::MongoDb(client) => {
             mongo_driver::insert_document(client, &database, &collection, &doc_json).await
         }
-        _ => Err("Not a MongoDB connection".to_string()),
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::insert_document(&client, &collection, &doc_json).await
+        }
+        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
 }
 
@@ -78,7 +91,12 @@ pub async fn mongo_update_document(
         PoolKind::MongoDb(client) => {
             mongo_driver::update_document(client, &database, &collection, &id, &doc_json).await
         }
-        _ => Err("Not a MongoDB connection".to_string()),
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::update_document(&client, &collection, &id, &doc_json).await
+        }
+        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
 }
 
@@ -95,6 +113,11 @@ pub async fn mongo_delete_document(
         PoolKind::MongoDb(client) => {
             mongo_driver::delete_document(client, &database, &collection, &id).await
         }
-        _ => Err("Not a MongoDB connection".to_string()),
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::delete_document(&client, &collection, &id).await
+        }
+        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
 }

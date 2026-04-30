@@ -141,6 +141,7 @@ async fn do_execute(
                 .map_err(|_| format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))?
                 .map(truncate_result)
         }
+        PoolKind::Elasticsearch(_) => Err("Use document browser for Elasticsearch".to_string()),
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
     }

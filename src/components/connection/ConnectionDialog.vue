@@ -82,6 +82,7 @@ const driverProfiles: Record<string, { type: DatabaseType; port: number; user: s
   clickhouse: { type: "clickhouse", port: 8123,  user: "default",  label: "ClickHouse",  icon: "clickhouse" },
   sqlserver:  { type: "sqlserver",  port: 1433,  user: "sa",       label: "SQL Server",  icon: "sqlserver" },
   oracle:     { type: "oracle",     port: 1521,  user: "system",   label: "Oracle",      icon: "oracle" },
+  elasticsearch: { type: "elasticsearch", port: 9200, user: "", label: "Elasticsearch", icon: "elasticsearch" },
   mariadb:    { type: "mysql",      port: 3306,  user: "root",     label: "MariaDB",     icon: "mariadb" },
   tidb:       { type: "mysql",      port: 4000,  user: "root",     label: "TiDB",        icon: "tidb" },
   oceanbase:  { type: "mysql",      port: 2881,  user: "root",     label: "OceanBase",   icon: "oceanbase" },
@@ -174,6 +175,7 @@ const iconTypeMap: Record<string, string> = {
   mysql: "mysql", postgres: "postgres", sqlite: "sqlite", redis: "redis",
   mongodb: "mongodb", duckdb: "duckdb", clickhouse: "clickhouse", sqlserver: "sqlserver",
   oracle: "oracle",
+  elasticsearch: "elasticsearch",
   mariadb: "mariadb", tidb: "tidb", oceanbase: "oceanbase", goldendb: "goldendb",
   opengauss: "opengauss", gaussdb: "gaussdb", kingbase: "kingbase", vastbase: "vastbase",
   custom_mysql: "mysql", custom_postgres: "postgres",
@@ -189,6 +191,7 @@ const dbOptions = [
   { value: "clickhouse", label: "ClickHouse" },
   { value: "sqlserver", label: "SQL Server" },
   { value: "oracle", label: "Oracle" },
+  { value: "elasticsearch", label: "Elasticsearch" },
   { value: "mariadb", label: "MariaDB" },
 ];
 

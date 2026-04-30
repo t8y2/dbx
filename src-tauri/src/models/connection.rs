@@ -58,6 +58,8 @@ pub enum DatabaseType {
     MongoDb,
     #[serde(rename = "oracle")]
     Oracle,
+    #[serde(rename = "elasticsearch")]
+    Elasticsearch,
 }
 
 impl ConnectionConfig {
@@ -107,6 +109,7 @@ impl ConnectionConfig {
                 format!("mongodb://{host}:{port}{db_part}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
+            DatabaseType::Elasticsearch => format!("http://{host}:{port}"),
         }
     }
 
@@ -170,6 +173,7 @@ impl ConnectionConfig {
             DatabaseType::Oracle => {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
+            DatabaseType::Elasticsearch => format!("http://{host}:{port}"),
         }
     }
 

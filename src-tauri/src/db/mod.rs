@@ -1,4 +1,5 @@
 pub mod clickhouse_driver;
+pub mod elasticsearch_driver;
 pub mod mongo_driver;
 pub mod mysql;
 pub mod oracle_driver;

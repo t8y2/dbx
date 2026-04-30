@@ -40,6 +40,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sqlserver: "SQL Server",
       mongodb: "MongoDB",
       oracle: "Oracle",
+      elasticsearch: "Elasticsearch",
     };
     return {
       ...config,

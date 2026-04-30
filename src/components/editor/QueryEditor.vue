@@ -2,15 +2,19 @@
 import { ref, onMounted, onBeforeUnmount, watch, shallowRef } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
+import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 
 const props = defineProps<{
   modelValue: string;
   dialect?: "mysql" | "postgres";
+  formatDialect?: SqlFormatDialect;
+  formatRequestId?: number;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   "selectionChange": [value: string];
+  "formatError": [message: string];
   execute: [sql: string];
 }>();
 
@@ -67,6 +71,31 @@ function selectedSqlFromView(currentView: EditorViewType): string {
 
 function executableSqlFromView(currentView: EditorViewType): string {
   return resolveExecutableSql(currentView.state.doc.toString(), selectedSqlFromView(currentView));
+}
+
+async function formatCurrentSql() {
+  const currentView = view.value;
+  if (!currentView) return;
+
+  const selection = currentView.state.selection.main;
+  const formatsSelection = !selection.empty;
+  const from = formatsSelection ? selection.from : 0;
+  const to = formatsSelection ? selection.to : currentView.state.doc.length;
+  const source = currentView.state.sliceDoc(from, to);
+  if (!source.trim()) return;
+
+  try {
+    const formatted = await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic");
+    if (formatted === source) return;
+    currentView.dispatch({
+      changes: { from, to, insert: formatted },
+      selection: formatsSelection
+        ? { anchor: from, head: from + formatted.length }
+        : { anchor: from + formatted.length },
+    });
+  } catch (e: any) {
+    emit("formatError", String(e?.message || e));
+  }
 }
 
 onMounted(async () => {
@@ -167,6 +196,13 @@ watch(
         changes: { from: 0, to: view.value.state.doc.length, insert: val },
       });
     }
+  }
+);
+
+watch(
+  () => props.formatRequestId,
+  (val, oldVal) => {
+    if (val && val !== oldVal) formatCurrentSql();
   }
 );
 

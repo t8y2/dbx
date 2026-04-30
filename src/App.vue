@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Sparkles, Pin } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Sparkles, Pin, AlignLeft } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,7 @@ import { getCurrentWindow, type Theme } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import * as api from "@/lib/tauri";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
+import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -47,6 +48,7 @@ const showHistory = ref(false);
 const dangerSql = ref("");
 const pendingDangerSql = ref("");
 const selectedSql = ref("");
+const formatSqlRequestId = ref(0);
 const showDangerDialog = ref(false);
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
@@ -83,6 +85,25 @@ const activeConnection = computed(() => {
   const tab = activeTab.value;
   return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
 });
+
+const activeSqlFormatDialect = computed<SqlFormatDialect>(() => {
+  switch (activeConnection.value?.db_type) {
+    case "mysql":
+      return "mysql";
+    case "postgres":
+      return "postgres";
+    case "sqlite":
+      return "sqlite";
+    case "sqlserver":
+      return "sqlserver";
+    default:
+      return "generic";
+  }
+});
+
+const editorDialect = computed<"mysql" | "postgres">(() =>
+  activeConnection.value?.db_type === "postgres" ? "postgres" : "mysql"
+);
 
 const activeTabContext = computed(() => {
   const tab = activeTab.value;
@@ -206,6 +227,16 @@ function onEditorUpdate(val: string) {
 
 function onEditorSelectionChange(val: string) {
   selectedSql.value = val;
+}
+
+function formatActiveSql() {
+  const tab = activeTab.value;
+  if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
+  formatSqlRequestId.value++;
+}
+
+function onFormatSqlError() {
+  toast(t("toolbar.formatSqlFailed"));
 }
 
 function newQuery() {
@@ -511,6 +542,21 @@ async function setupFileDrop() {
           <TooltipContent>{{ t('toolbar.executeShortcut') }}</TooltipContent>
         </Tooltip>
 
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-7 w-7"
+              :disabled="!activeTab || activeTab.mode !== 'query' || activeTab.isExecuting || !activeTab.sql.trim()"
+              @click="formatActiveSql"
+            >
+              <AlignLeft class="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t('toolbar.formatSql') }}</TooltipContent>
+        </Tooltip>
+
         <div class="flex-1" />
 
         <Tooltip>
@@ -689,8 +735,12 @@ async function setupFileDrop() {
                     <QueryEditor
                       class="flex-1"
                       :model-value="activeTab.sql"
+                      :dialect="editorDialect"
+                      :format-dialect="activeSqlFormatDialect"
+                      :format-request-id="formatSqlRequestId"
                       @update:model-value="onEditorUpdate"
                       @selection-change="onEditorSelectionChange"
+                      @format-error="onFormatSqlError"
                       @execute="tryExecute"
                     />
                   </div>

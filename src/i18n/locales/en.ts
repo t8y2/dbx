@@ -7,6 +7,8 @@ export default {
     newQuery: "New Query",
     execute: "Execute",
     executeShortcut: "Execute selection/query (Cmd+Enter)",
+    formatSql: "Format SQL",
+    formatSqlFailed: "Failed to format SQL",
   },
   sidebar: {
     connections: "CONNECTIONS",

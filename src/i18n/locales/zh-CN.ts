@@ -7,6 +7,8 @@ export default {
     newQuery: "新建查询",
     execute: "执行",
     executeShortcut: "执行选中/全部 (Cmd+Enter)",
+    formatSql: "格式化 SQL",
+    formatSqlFailed: "SQL 格式化失败",
   },
   sidebar: {
     connections: "连接",

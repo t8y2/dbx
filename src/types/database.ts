@@ -20,6 +20,7 @@ export interface ConnectionConfig {
   ssh_password?: string;
   ssh_key_path?: string;
   ssl?: boolean;
+  connection_string?: string;
 }
 
 export interface DatabaseInfo {

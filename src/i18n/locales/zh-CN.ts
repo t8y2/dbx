@@ -41,6 +41,8 @@ export default {
     driverName: "驱动名称",
     driverNamePlaceholder: "厂商或环境名称",
     urlParams: "URL 参数",
+    mode: "连接方式",
+    modeForm: "表单",
     test: "测试",
     testing: "测试中...",
     saveAndConnect: "保存并连接",

@@ -33,6 +33,8 @@ pub struct ConnectionConfig {
     pub ssh_key_path: String,
     #[serde(default)]
     pub ssl: bool,
+    #[serde(default)]
+    pub connection_string: Option<String>,
 }
 
 fn default_ssh_port() -> u16 {
@@ -98,7 +100,12 @@ impl ConnectionConfig {
                 "server=tcp:{host},{port};database={}",
                 self.database.as_deref().unwrap_or("master")
             ),
-            DatabaseType::MongoDb => format!("mongodb://{host}:{port}{db_part}"),
+            DatabaseType::MongoDb => {
+                if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
+                    return cs.to_string();
+                }
+                format!("mongodb://{host}:{port}{db_part}")
+            }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
         }
     }
@@ -151,6 +158,9 @@ impl ConnectionConfig {
                 self.database.as_deref().unwrap_or("master")
             ),
             DatabaseType::MongoDb => {
+                if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
+                    return cs.to_string();
+                }
                 if self.username.is_empty() {
                     format!("mongodb://{host}:{port}{db_part}")
                 } else {
@@ -210,6 +220,7 @@ mod tests {
             ssh_password: String::new(),
             ssh_key_path: String::new(),
             ssl: false,
+            connection_string: None,
         }
     }
 

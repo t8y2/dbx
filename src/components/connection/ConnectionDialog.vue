@@ -54,11 +54,13 @@ const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   ssh_password: "",
   ssh_key_path: "",
   ssl: false,
+  connection_string: undefined,
 });
 
 const form = ref(defaultForm());
 const selectedType = ref("mysql");
 const customDriverName = ref("");
+const mongoUseUrl = ref(false);
 
 const colorOptions = [
   { value: "", class: "bg-transparent border-dashed", labelKey: "connection.colorNone" },
@@ -146,8 +148,10 @@ watch(() => props.editConfig, (config) => {
       ssh_password: config.ssh_password || "",
       ssh_key_path: config.ssh_key_path || "",
       ssl: config.ssl || false,
+      connection_string: config.connection_string,
     };
     selectedType.value = profile;
+    mongoUseUrl.value = !!config.connection_string;
     customDriverName.value = isCustomCompatibleProfile() ? (config.driver_label || "") : "";
   } else {
     editingId.value = null;
@@ -227,6 +231,7 @@ function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
   selectedType.value = "mysql";
+  mongoUseUrl.value = false;
   testResult.value = null;
 }
 
@@ -377,6 +382,46 @@ watch([() => editingId.value, () => open.value], () => {
           </div>
         </template>
 
+        <!-- MongoDB: URL or form -->
+        <template v-else-if="form.db_type === 'mongodb'">
+          <div class="grid grid-cols-4 items-center gap-4">
+            <Label class="text-right text-xs">{{ t('connection.mode') }}</Label>
+            <div class="col-span-3 flex gap-2">
+              <Button size="sm" :variant="mongoUseUrl ? 'outline' : 'default'" @click="mongoUseUrl = false">{{ t('connection.modeForm') }}</Button>
+              <Button size="sm" :variant="mongoUseUrl ? 'default' : 'outline'" @click="mongoUseUrl = true">URL</Button>
+            </div>
+          </div>
+          <template v-if="mongoUseUrl">
+            <div class="grid grid-cols-4 items-start gap-4">
+              <Label class="text-right mt-2">URL</Label>
+              <textarea
+                v-model="form.connection_string"
+                class="col-span-3 flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="mongodb+srv://user:pass@cluster.mongodb.net/mydb"
+              />
+            </div>
+          </template>
+          <template v-else>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right">{{ t('connection.host') }}</Label>
+              <Input v-model="form.host" class="col-span-2" />
+              <Input v-model.number="form.port" type="number" class="col-span-1" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right">{{ t('connection.user') }}</Label>
+              <Input v-model="form.username" class="col-span-3" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right">{{ t('connection.password') }}</Label>
+              <Input v-model="form.password" type="password" class="col-span-3" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right">{{ t('connection.database') }}</Label>
+              <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+            </div>
+          </template>
+        </template>
+
         <!-- MySQL / PostgreSQL: host, port, user, password, database -->
         <template v-else>
           <div class="grid grid-cols-4 items-center gap-4">
@@ -444,7 +489,7 @@ watch([() => editingId.value, () => open.value], () => {
         <Button variant="outline" :disabled="isTesting || isSaving" @click="testConnection">
           {{ isTesting ? t('connection.testing') : t('connection.test') }}
         </Button>
-        <Button @click="save" :disabled="isSaving || !form.name || !form.host">
+        <Button @click="save" :disabled="isSaving || !form.name || (!form.host && !(mongoUseUrl && form.connection_string))">
           {{ isSaving ? t('common.loading') : (editingId ? t('connection.save') : t('connection.saveAndConnect')) }}
         </Button>
       </DialogFooter>

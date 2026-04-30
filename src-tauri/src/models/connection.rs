@@ -1,3 +1,4 @@
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +52,14 @@ impl ConnectionConfig {
     }
 
     pub fn connection_url_with_host(&self, host: &str, port: u16) -> String {
-        let db_part = self.database.as_deref().map(|d| format!("/{d}")).unwrap_or_default();
+        let db_part = self
+            .database
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("/{}", encode_url_part(d)))
+            .unwrap_or_default();
+        let username = encode_url_part(&self.username);
+        let password = encode_url_part(&self.password);
 
         match self.db_type {
             DatabaseType::Sqlite | DatabaseType::DuckDb => {
@@ -61,16 +69,16 @@ impl ConnectionConfig {
                 if self.password.is_empty() {
                     format!("redis://{host}:{port}/")
                 } else {
-                    format!("redis://:{}@{host}:{port}/", self.password)
+                    format!("redis://:{password}@{host}:{port}/")
                 }
             }
             DatabaseType::Mysql => format!(
                 "mysql://{}:{}@{host}:{port}{db_part}?ssl-mode=preferred",
-                self.username, self.password
+                username, password
             ),
             DatabaseType::Postgres => format!(
                 "postgres://{}:{}@{host}:{port}{db_part}",
-                self.username, self.password
+                username, password
             ),
             DatabaseType::ClickHouse => format!(
                 "http://{host}:{port}{db_part}"
@@ -83,13 +91,61 @@ impl ConnectionConfig {
                 if self.username.is_empty() {
                     format!("mongodb://{host}:{port}{db_part}")
                 } else {
-                    format!("mongodb://{}:{}@{host}:{port}{db_part}", self.username, self.password)
+                    format!("mongodb://{username}:{password}@{host}:{port}{db_part}")
                 }
             }
             DatabaseType::Oracle => format!(
                 "oracle://{}:{}@{host}:{port}{db_part}",
-                self.username, self.password
+                username, password
             ),
         }
+    }
+}
+
+fn encode_url_part(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionConfig, DatabaseType};
+
+    fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "id".to_string(),
+            name: "name".to_string(),
+            db_type: DatabaseType::Mysql,
+            host: "10.1.2.3".to_string(),
+            port: 2883,
+            username: username.to_string(),
+            password: password.to_string(),
+            database: database.map(str::to_string),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn mysql_url_encodes_oceanbase_username() {
+        let config = mysql_config("user@tenant#cluster", "secret", None);
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=preferred"
+        );
+    }
+
+    #[test]
+    fn mysql_url_encodes_password_and_database() {
+        let config = mysql_config("root", "p@ss:word#1", Some("db/name"));
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred"
+        );
     }
 }

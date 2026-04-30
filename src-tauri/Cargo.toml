@@ -43,3 +43,4 @@ tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json"] }
 mongodb = "3.2.5"
 oracle-rs = "0.1"
+percent-encoding = "2"

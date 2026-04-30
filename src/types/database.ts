@@ -39,6 +39,7 @@ export interface ColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   extra: string | null;
+  comment?: string | null;
 }
 
 export interface IndexInfo {

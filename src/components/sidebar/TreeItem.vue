@@ -240,6 +240,7 @@ function disconnectConnection() {
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
+const columnComment = computed(() => props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null);
 const paddingLeft = `${props.depth * 16 + 8}px`;
 const isConnected = computed(() =>
   props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId)
@@ -299,6 +300,7 @@ async function showMore() {
           <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="getIconInfo(node)?.colorClass" />
           <span v-if="node.type === 'connection' && connectionColor" class="h-3 w-1.5 rounded-full shrink-0" :style="{ backgroundColor: connectionColor }" />
           <span class="min-w-0 flex-1 truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>
+          <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{ columnComment }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
           <button
             v-if="canPin"

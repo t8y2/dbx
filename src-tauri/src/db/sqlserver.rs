@@ -111,7 +111,7 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
             is_nullable: row.get::<&str, _>(2).unwrap_or("NO") == "YES",
             column_default: row.get::<&str, _>(3).map(|s| s.to_string()),
             is_primary_key: row.get::<i32, _>(4).unwrap_or(0) == 1,
-            extra: None,
+            extra: None, comment: None,
         }
     }).collect())
 }

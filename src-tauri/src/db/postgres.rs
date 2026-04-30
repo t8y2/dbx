@@ -71,7 +71,8 @@ pub async fn get_columns(
 ) -> Result<Vec<ColumnInfo>, String> {
     let rows: Vec<PgRow> = sqlx::query(
         "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, \
-         CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_pk \
+         CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_pk, \
+         col_description((c.table_schema || '.' || c.table_name)::regclass, c.ordinal_position) AS column_comment \
          FROM information_schema.columns c \
          LEFT JOIN information_schema.key_column_usage kcu \
            ON c.table_schema = kcu.table_schema \
@@ -99,6 +100,7 @@ pub async fn get_columns(
             column_default: row.get::<Option<String>, _>("column_default"),
             is_primary_key: row.get::<bool, _>("is_pk"),
             extra: None,
+            comment: row.get::<Option<String>, _>("column_comment"),
         })
         .collect())
 }

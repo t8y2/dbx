@@ -177,12 +177,15 @@ impl ConnectionConfig {
         let value = self.url_params.as_deref().unwrap_or("").trim();
         match self.db_type {
             DatabaseType::Mysql => {
+                let base = "ssl-mode=preferred&charset=utf8mb4";
                 if value.is_empty() {
-                    "ssl-mode=preferred".to_string()
+                    base.to_string()
                 } else if value.contains("ssl-mode=") {
-                    value.trim_start_matches('?').to_string()
+                    let v = value.trim_start_matches('?');
+                    if v.contains("charset=") { v.to_string() } else { format!("{v}&charset=utf8mb4") }
                 } else {
-                    format!("ssl-mode=preferred&{}", value.trim_start_matches('?'))
+                    let v = value.trim_start_matches('?');
+                    if v.contains("charset=") { format!("ssl-mode=preferred&{v}") } else { format!("{base}&{v}") }
                 }
             }
             DatabaseType::Postgres => value.trim_start_matches('?').to_string(),
@@ -230,7 +233,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=preferred"
+            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=preferred&charset=utf8mb4"
         );
     }
 
@@ -240,7 +243,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred"
+            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4"
         );
     }
 
@@ -273,7 +276,7 @@ mod tests {
 
         let url = config.redacted_connection_url();
 
-        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=preferred");
+        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4");
         assert!(!url.contains("user"));
         assert!(!url.contains("p%40ss"));
         assert!(!url.contains("p@ss"));

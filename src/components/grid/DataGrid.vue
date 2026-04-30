@@ -63,6 +63,16 @@ const columnTypeMap = computed(() => {
   return map;
 });
 
+const columnCommentMap = computed(() => {
+  const map = new Map<string, string>();
+  if (props.tableMeta?.columns) {
+    for (const col of props.tableMeta.columns) {
+      if (col.comment) map.set(col.name, col.comment);
+    }
+  }
+  return map;
+});
+
 function shortTypeName(t: string): string {
   const s = t.toLowerCase();
   if (s === "character varying") return "varchar";
@@ -778,6 +788,7 @@ function escapeAndHighlightKeywords(s: string): string {
                 :key="col"
                 class="shrink-0 px-3 py-1.5 border-r border-border whitespace-nowrap cursor-pointer hover:bg-accent/50 select-none relative overflow-hidden"
                 :style="{ width: `var(--col-w-${colIdx})` }"
+                :title="columnCommentMap.get(col)"
                 @click="toggleSort(col)"
               >
                 <span class="flex min-w-0 items-center gap-1 overflow-hidden">

@@ -97,7 +97,7 @@ pub async fn get_columns(conn: &OracleClient, schema: &str, table: &str) -> Resu
             data_type: row.get_string(1).unwrap_or("").to_string(),
             is_nullable: row.get_string(2).unwrap_or("N") == "Y",
             column_default: None,
-            extra: None,
+            extra: None, comment: None,
         }
     }).collect())
 }

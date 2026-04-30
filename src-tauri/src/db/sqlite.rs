@@ -52,7 +52,7 @@ pub async fn get_columns(pool: &SqlitePool, _schema: &str, table: &str) -> Resul
             is_nullable: row.get::<i32, _>("notnull") == 0,
             column_default: row.get::<Option<String>, _>("dflt_value"),
             is_primary_key: row.get::<i32, _>("pk") > 0,
-            extra: None,
+            extra: None, comment: None,
         })
         .collect())
 }

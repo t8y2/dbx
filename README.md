@@ -3,6 +3,13 @@
   <h1>DBX</h1>
   <p>Open-source, lightweight, cross-platform database management tool.</p>
   <p>
+    <a href="https://github.com/t8y2/dbx/releases"><img src="https://img.shields.io/github/v/release/t8y2/dbx?label=version" /></a>
+    <a href="https://github.com/t8y2/dbx/releases"><img src="https://img.shields.io/github/downloads/t8y2/dbx/total" /></a>
+    <a href="https://github.com/t8y2/dbx/blob/main/LICENSE"><img src="https://img.shields.io/github/license/t8y2/dbx" /></a>
+    <a href="https://github.com/t8y2/dbx/graphs/contributors"><img src="https://img.shields.io/github/contributors/t8y2/dbx" /></a>
+    <a href="https://linux.do"><img src="https://img.shields.io/badge/community-LINUX%20DO-blue" /></a>
+  </p>
+  <p>
     <img src="https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white" />
     <img src="https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white" />
     <img src="https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white" />
@@ -11,6 +18,7 @@
     <img src="https://img.shields.io/badge/DuckDB-FFF000?logo=duckdb&logoColor=black" />
     <img src="https://img.shields.io/badge/ClickHouse-FFCC01?logo=clickhouse&logoColor=black" />
     <img src="https://img.shields.io/badge/SQL%20Server-CC2927?logo=microsoftsqlserver&logoColor=white" />
+    <img src="https://img.shields.io/badge/Oracle-F80000?logo=oracle&logoColor=white" />
     <img src="https://img.shields.io/badge/MariaDB-003545?logo=mariadb&logoColor=white" />
     <img src="https://img.shields.io/badge/TiDB-DC150B?logo=tidb&logoColor=white" />
   </p>
@@ -21,19 +29,21 @@
 
 ## Features
 
-- **Multi-database** — MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KingBase, Vastbase, GoldenDB
-- **Schema browser** — Databases, schemas, tables, columns, indexes, foreign keys, triggers
-- **Query editor** — CodeMirror 6 with syntax highlighting, Cmd+Enter execution, Cmd+scroll zoom
+- **Multi-database** — MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KingBase, Vastbase, GoldenDB
+- **Schema browser** — Databases, schemas, tables, columns, indexes, foreign keys, triggers, with sidebar search & pin
+- **Query editor** — CodeMirror 6 with syntax highlighting, SQL autocomplete (tables & columns), Cmd+Enter execution, selected SQL execution, SQL formatting
 - **AI SQL assistant** — Natural language to SQL, explain, optimize, fix errors (Claude / OpenAI)
 - **Data grid** — Virtual-scrolled table with inline editing, sorting, search, pagination, column resize, row numbers, zebra stripes
 - **Export** — CSV, JSON, Markdown
-- **Redis browser** — Key pattern search, value viewer for all data types (String, Hash, List, Set, ZSet)
-- **MongoDB browser** — Document CRUD with pagination
+- **File preview** — Drag & drop Parquet, CSV, JSON files to preview data instantly (powered by DuckDB)
+- **Redis browser** — Key pattern search, value viewer for all data types (String, Hash, List, Set, ZSet, Stream)
+- **MongoDB browser** — Document CRUD with pagination, direct URL connection (Atlas, replica sets)
 - **Query history** — Persistent history with search, restore, one-click copy
 - **Safety** — Confirmation dialog for DROP / DELETE / TRUNCATE / ALTER
 - **Auto-reconnect** — Transparent retry on connection loss
 - **SSH tunnel** — Key and password authentication
-- **File drag & drop** — Drag .db / .sqlite / .duckdb files to open directly
+- **Connection colors** — Color-coded connections for visual identification
+- **Auto-update** — Built-in update checker with release notifications
 - **Dark mode** — Native title bar theme sync
 - **i18n** — English & 简体中文
 - **Tiny** — ~15 MB installer (no bundled Chromium)
@@ -47,6 +57,19 @@
 ## Install
 
 Download the latest release from the [Releases](https://github.com/t8y2/dbx/releases) page.
+
+**Homebrew (macOS):**
+
+```bash
+brew install --cask t8y2/tap/dbx
+```
+
+**Scoop (Windows):**
+
+```bash
+scoop bucket add dbx https://github.com/t8y2/scoop-bucket
+scoop install dbx
+```
 
 ### macOS Note
 
@@ -90,6 +113,12 @@ The installer will be in `src-tauri/target/release/bundle/`.
 | UI        | [shadcn-vue](https://www.shadcn-vue.com/) + Tailwind CSS                                                                                                                                                         |
 | Editor    | [CodeMirror 6](https://codemirror.net/)                                                                                                                                                                          |
 | Backend   | Rust + [sqlx](https://github.com/launchbadge/sqlx) / [tiberius](https://github.com/prisma/tiberius) / [redis-rs](https://github.com/redis-rs/redis-rs) / [mongodb](https://github.com/mongodb/mongo-rust-driver) |
+
+## Contributors
+
+<a href="https://github.com/t8y2/dbx/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=t8y2/dbx" />
+</a>
 
 ## License
 

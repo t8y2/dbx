@@ -1,8 +1,9 @@
 name: Publish Packages
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -14,13 +15,13 @@ env:
 jobs:
   publish:
     name: Publish to Homebrew & Scoop
-    if: github.event_name == 'release'
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Extract version from tag
         id: version
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ github.event.workflow_run.head_branch }}"
           VERSION="${TAG#v}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             echo "::error::Tag '${TAG}' does not look like a semver version."

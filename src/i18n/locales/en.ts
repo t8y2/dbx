@@ -67,6 +67,7 @@ export default {
     rowsPerPage: "Rows per page",
     save: "Save",
     discard: "Discard",
+    dismiss: "Dismiss",
     addRow: "Add Row",
     deleteRow: "Delete Row",
     rowsPerPageShort: " rows",

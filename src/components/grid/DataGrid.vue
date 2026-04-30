@@ -17,7 +17,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { QueryResult, ColumnInfo } from "@/types/database";
+import type { QueryResult, ColumnInfo, DatabaseType } from "@/types/database";
 import { save as savePath } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import * as api from "@/lib/tauri";
@@ -31,6 +31,7 @@ const props = defineProps<{
   result: QueryResult;
   sql?: string;
   editable?: boolean;
+  databaseType?: DatabaseType;
   connectionId?: string;
   database?: string;
   tableMeta?: {
@@ -361,10 +362,20 @@ function escapeVal(v: CellValue): string {
   return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
 }
 
+function quoteIdent(name: string): string {
+  if (props.databaseType === "mysql") {
+    return `\`${name.replace(/`/g, "``")}\``;
+  }
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
 function qualifiedTableName(): string {
   if (!props.tableMeta) return "";
   const { schema, tableName } = props.tableMeta;
-  return schema ? `"${schema}"."${tableName}"` : `"${tableName}"`;
+  if ((props.databaseType === "postgres" || props.databaseType === "oracle") && schema) {
+    return `${quoteIdent(schema)}.${quoteIdent(tableName)}`;
+  }
+  return quoteIdent(tableName);
 }
 
 function generateSaveStatements(): string[] {
@@ -378,10 +389,10 @@ function generateSaveStatements(): string[] {
     const row = sortedRows.value[rowIdx];
     if (!row) continue;
     const sets = Array.from(changes.entries())
-      .map(([colIdx, val]) => `"${cols[colIdx]}" = ${escapeVal(val)}`)
+      .map(([colIdx, val]) => `${quoteIdent(cols[colIdx])} = ${escapeVal(val)}`)
       .join(", ");
     const where = primaryKeys
-      .map((pk) => `"${pk}" = ${escapeVal(row[cols.indexOf(pk)])}`)
+      .map((pk) => `${quoteIdent(pk)} = ${escapeVal(row[cols.indexOf(pk)])}`)
       .join(" AND ");
     stmts.push(`UPDATE ${tbl} SET ${sets} WHERE ${where};`);
   }
@@ -390,13 +401,13 @@ function generateSaveStatements(): string[] {
     const row = sortedRows.value[rowIdx];
     if (!row) continue;
     const where = primaryKeys
-      .map((pk) => `"${pk}" = ${escapeVal(row[cols.indexOf(pk)])}`)
+      .map((pk) => `${quoteIdent(pk)} = ${escapeVal(row[cols.indexOf(pk)])}`)
       .join(" AND ");
     stmts.push(`DELETE FROM ${tbl} WHERE ${where};`);
   }
 
   for (const newRow of newRows.value) {
-    const colNames = cols.map((c) => `"${c}"`).join(", ");
+    const colNames = cols.map((c) => quoteIdent(c)).join(", ");
     const vals = newRow.map((v) => escapeVal(v)).join(", ");
     stmts.push(`INSERT INTO ${tbl} (${colNames}) VALUES (${vals});`);
   }
@@ -737,7 +748,7 @@ function escapeAndHighlightKeywords(s: string): string {
     <!-- Error bar -->
     <div v-if="saveError" class="px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0 flex items-center gap-2">
       <span class="flex-1">{{ saveError }}</span>
-      <button class="hover:underline" @click="saveError = ''">dismiss</button>
+      <button class="hover:underline" @click="saveError = ''">{{ t('grid.dismiss') }}</button>
     </div>
 
     <!-- Bottom status bar -->

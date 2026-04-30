@@ -67,6 +67,7 @@ export default {
     rowsPerPage: "每页行数",
     save: "保存",
     discard: "放弃",
+    dismiss: "关闭",
     addRow: "新增行",
     deleteRow: "删除行",
     rowsPerPageShort: " 行/页",

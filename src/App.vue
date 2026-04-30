@@ -634,6 +634,7 @@ async function setupFileDrop() {
                   :result="activeTab.result"
                   :sql="activeTab.sql"
                   :editable="!!activeTab.tableMeta?.primaryKeys?.length"
+                  :database-type="activeConnection?.db_type"
                   :connection-id="activeTab.connectionId"
                   :database="activeTab.database"
                   :table-meta="activeTab.tableMeta"

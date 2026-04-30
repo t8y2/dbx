@@ -1,5 +1,5 @@
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, Executor, Row};
+use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use std::time::{Duration, Instant};
 
 use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
@@ -17,8 +17,64 @@ fn get_str_by_name(row: &MySqlRow, name: &str) -> String {
 }
 
 fn get_opt_str(row: &MySqlRow, name: &str) -> Option<String> {
-    row.try_get::<Option<String>, _>(name).ok().flatten()
-        .or_else(|| row.try_get::<Option<Vec<u8>>, _>(name).ok().flatten().map(|b| String::from_utf8_lossy(&b).to_string()))
+    row.try_get::<Option<String>, _>(name)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            row.try_get::<Option<Vec<u8>>, _>(name)
+                .ok()
+                .flatten()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+        })
+}
+
+fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_json::Value {
+    if row.try_get_raw(idx).map(|v| v.is_null()).unwrap_or(true) {
+        return serde_json::Value::Null;
+    }
+
+    let upper_type = type_name.to_uppercase();
+
+    if upper_type == "BOOLEAN" {
+        return row
+            .try_get::<bool, _>(idx)
+            .map(serde_json::Value::Bool)
+            .unwrap_or(serde_json::Value::Null);
+    }
+
+    if upper_type.contains("BIGINT") {
+        return row
+            .try_get::<i64, _>(idx)
+            .map(|v| serde_json::Value::String(v.to_string()))
+            .or_else(|_| {
+                row.try_get::<u64, _>(idx)
+                    .map(|v| serde_json::Value::String(v.to_string()))
+            })
+            .unwrap_or(serde_json::Value::Null);
+    }
+
+    if upper_type == "DECIMAL" {
+        return row
+            .try_get_unchecked::<String, _>(idx)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+    }
+
+    row.try_get::<String, _>(idx)
+        .map(serde_json::Value::String)
+        .or_else(|_| row.try_get::<i64, _>(idx).map(|v| serde_json::Value::Number(v.into())))
+        .or_else(|_| row.try_get::<u64, _>(idx).map(|v| serde_json::Value::Number(v.into())))
+        .or_else(|_| row.try_get::<f64, _>(idx).map(|v| {
+            serde_json::Number::from_f64(v)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }))
+        .or_else(|_| row.try_get::<bool, _>(idx).map(serde_json::Value::Bool))
+        .or_else(|_| {
+            row.try_get::<Vec<u8>, _>(idx)
+                .map(|b| serde_json::Value::String(String::from_utf8_lossy(&b).to_string()))
+        })
+        .unwrap_or(serde_json::Value::Null)
 }
 
 pub async fn connect(url: &str) -> Result<MySqlPool, String> {
@@ -101,6 +157,11 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str) -> Result<QueryResult, S
     if trimmed.starts_with("SELECT") || trimmed.starts_with("SHOW") || trimmed.starts_with("DESCRIBE") || trimmed.starts_with("EXPLAIN") {
         let desc = pool.describe(sql).await.map_err(|e| e.to_string())?;
         let columns: Vec<String> = desc.columns().iter().map(|c| c.name().to_string()).collect();
+        let column_types: Vec<String> = desc
+            .columns()
+            .iter()
+            .map(|c| c.type_info().name().to_string())
+            .collect();
 
         let rows: Vec<MySqlRow> = sqlx::query(sql)
             .fetch_all(pool)
@@ -111,18 +172,7 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str) -> Result<QueryResult, S
             .iter()
             .map(|row| {
                 (0..row.len())
-                    .map(|i| {
-                        row.try_get::<String, _>(i)
-                            .map(serde_json::Value::String)
-                            .or_else(|_| row.try_get::<i64, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                            .or_else(|_| row.try_get::<f64, _>(i).map(|v| {
-                                serde_json::Number::from_f64(v)
-                                    .map(serde_json::Value::Number)
-                                    .unwrap_or(serde_json::Value::Null)
-                            }))
-                            .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
-                            .unwrap_or(serde_json::Value::Null)
-                    })
+                    .map(|i| mysql_value_to_json(row, i, column_types.get(i).map(String::as_str).unwrap_or("")))
                     .collect()
             })
             .collect();

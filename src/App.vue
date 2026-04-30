@@ -149,25 +149,6 @@ const editorDialect = computed<"mysql" | "postgres">(() =>
   activeConnection.value?.db_type === "postgres" ? "postgres" : "mysql"
 );
 
-const activeTabContext = computed(() => {
-  const tab = activeTab.value;
-  const connection = activeConnection.value;
-  if (!tab || !connection) return [];
-
-  const items = [
-    connection.name,
-    connectionDriverLabel(connection),
-  ];
-
-  if (tab.tableMeta?.tableName) {
-    items.push(tab.tableMeta.schema
-      ? `${tab.tableMeta.schema}.${tab.tableMeta.tableName}`
-      : tab.tableMeta.tableName);
-  }
-
-  return items;
-});
-
 const activeDatabaseOptions = computed(() => {
   const connection = activeConnection.value;
   return connection ? databaseOptions.value[connection.id] ?? [] : [];

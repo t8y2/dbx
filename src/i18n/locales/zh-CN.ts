@@ -14,6 +14,7 @@ export default {
     import: "导入连接",
     export: "导出连接",
     showMore: "加载更多 ({count})...",
+    loadMore: "继续加载...",
   },
   connection: {
     title: "新建连接",
@@ -153,6 +154,8 @@ export default {
     noKeys: "未找到 key",
     pattern: "匹配模式 (如 user:*)",
     keys: "{count} 个 key",
+    loadingKeys: "正在加载 key...",
+    loadMoreKeys: "继续加载 key",
     items: "{count} 个元素",
     fields: "{count} 个字段",
     members: "{count} 个成员",

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::commands::connection::{AppState, PoolKind};
-use crate::db::redis_driver::{self, RedisKeyInfo, RedisValue};
+use crate::db::redis_driver::{self, RedisScanResult, RedisValue};
 
 #[tauri::command]
 pub async fn redis_list_databases(
@@ -25,16 +25,17 @@ pub async fn redis_scan_keys(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     db: u32,
+    cursor: u64,
     pattern: String,
     count: usize,
-) -> Result<Vec<RedisKeyInfo>, String> {
+) -> Result<RedisScanResult, String> {
     let connections = state.connections.lock().await;
     let pool = connections.get(&connection_id).ok_or("Connection not found")?;
     match pool {
         PoolKind::Redis(con) => {
             let mut con = con.lock().await;
             redis_driver::select_db(&mut con, db).await?;
-            redis_driver::scan_keys(&mut con, &pattern, count).await
+            redis_driver::scan_keys_page(&mut con, cursor, &pattern, count).await
         }
         _ => Err("Not a Redis connection".to_string()),
     }

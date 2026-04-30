@@ -14,6 +14,7 @@ export default {
     import: "Import Connections",
     export: "Export Connections",
     showMore: "Show {count} more...",
+    loadMore: "Load more...",
   },
   connection: {
     title: "New Connection",
@@ -155,6 +156,8 @@ export default {
     noKeys: "No keys found",
     pattern: "pattern (e.g. user:*)",
     keys: "{count} keys",
+    loadingKeys: "Loading keys...",
+    loadMoreKeys: "Load more keys",
     items: "{count} items",
     fields: "{count} fields",
     members: "{count} members",

@@ -115,12 +115,17 @@ export interface RedisValue {
   value: any;
 }
 
+export interface RedisScanResult {
+  cursor: number;
+  keys: RedisKeyInfo[];
+}
+
 export async function redisListDatabases(connectionId: string): Promise<number[]> {
   return invoke("redis_list_databases", { connectionId });
 }
 
-export async function redisScanKeys(connectionId: string, db: number, pattern: string, count: number): Promise<RedisKeyInfo[]> {
-  return invoke("redis_scan_keys", { connectionId, db, pattern, count });
+export async function redisScanKeys(connectionId: string, db: number, cursor: number, pattern: string, count: number): Promise<RedisScanResult> {
+  return invoke("redis_scan_keys", { connectionId, db, cursor, pattern, count });
 }
 
 export async function redisGetValue(connectionId: string, key: string): Promise<RedisValue> {

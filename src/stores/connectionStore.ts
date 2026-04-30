@@ -145,8 +145,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
     node.isLoading = true;
     try {
-      const keys = await api.redisScanKeys(connectionId, db, "*", 500);
-      node.children = keys.map((k) => ({
+      const result = await api.redisScanKeys(connectionId, db, 0, "*", 200);
+      node.scanCursor = result.cursor;
+      node.hasMore = result.cursor !== 0;
+      node.children = result.keys.map((k) => ({
         id: `${nodeId}:${k.key}`,
         label: `${k.key} [${k.key_type}]${k.ttl > 0 ? ` TTL:${k.ttl}` : ""}`,
         type: "redis-key" as const,
@@ -155,6 +157,33 @@ export const useConnectionStore = defineStore("connection", () => {
         isExpanded: false,
       }));
       node.isExpanded = true;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadMoreRedisKeys(connectionId: string, db: number, nodeId: string) {
+    const node = findNode(treeNodes.value, nodeId);
+    if (!node || node.isLoading || !node.hasMore) return;
+
+    node.isLoading = true;
+    try {
+      const result = await api.redisScanKeys(connectionId, db, node.scanCursor ?? 0, "*", 200);
+      const existingIds = new Set((node.children ?? []).map((child) => child.id));
+      const moreChildren = result.keys
+        .filter((k) => !existingIds.has(`${nodeId}:${k.key}`))
+        .map((k) => ({
+          id: `${nodeId}:${k.key}`,
+          label: `${k.key} [${k.key_type}]${k.ttl > 0 ? ` TTL:${k.ttl}` : ""}`,
+          type: "redis-key" as const,
+          connectionId,
+          database: String(db),
+          isExpanded: false,
+        }));
+
+      node.scanCursor = result.cursor;
+      node.hasMore = result.cursor !== 0;
+      node.children = [...(node.children ?? []), ...moreChildren];
     } finally {
       node.isLoading = false;
     }
@@ -455,6 +484,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadDatabases,
     loadRedisDatabases,
     loadRedisKeys,
+    loadMoreRedisKeys,
     loadMongoDatabases,
     loadMongoCollections,
     loadSchemas,

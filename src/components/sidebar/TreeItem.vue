@@ -101,6 +101,7 @@ async function toggle() {
   } else if (node.type === "redis-db" && node.connectionId && node.database) {
     const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:db${node.database}`;
     queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
+    await connectionStore.loadRedisKeys(node.connectionId, Number(node.database), node.id);
   } else if (node.type === "mongo-db" && node.connectionId && node.database) {
     await connectionStore.loadMongoCollections(node.connectionId, node.database);
   } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
@@ -179,6 +180,8 @@ async function refresh() {
   const node = props.node;
   node.isExpanded = false;
   node.children = [];
+  node.scanCursor = undefined;
+  node.hasMore = undefined;
   await toggle();
 }
 
@@ -229,15 +232,23 @@ const visibleChildren = computed(() => {
 });
 
 const hasMoreChildren = computed(() =>
-  (props.node.children?.length ?? 0) > displayLimit.value
+  (props.node.children?.length ?? 0) > displayLimit.value || !!props.node.hasMore
 );
 
 const remainingCount = computed(() =>
   (props.node.children?.length ?? 0) - displayLimit.value
 );
 
-function showMore() {
-  displayLimit.value += CHILDREN_PAGE_SIZE;
+async function showMore() {
+  if ((props.node.children?.length ?? 0) > displayLimit.value) {
+    displayLimit.value += CHILDREN_PAGE_SIZE;
+    return;
+  }
+
+  if (props.node.type === "redis-db" && props.node.connectionId && props.node.database && props.node.hasMore) {
+    await connectionStore.loadMoreRedisKeys(props.node.connectionId, Number(props.node.database), props.node.id);
+    displayLimit.value += CHILDREN_PAGE_SIZE;
+  }
 }
 </script>
 
@@ -269,7 +280,8 @@ function showMore() {
             :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
             @click="showMore"
           >
-            <span>{{ t('sidebar.showMore', { count: Math.min(CHILDREN_PAGE_SIZE, remainingCount) }) }}</span>
+            <Loader2 v-if="node.isLoading" class="w-3 h-3 shrink-0 animate-spin" />
+            <span>{{ node.hasMore && remainingCount <= 0 ? t('sidebar.loadMore') : t('sidebar.showMore', { count: Math.min(CHILDREN_PAGE_SIZE, remainingCount) }) }}</span>
           </div>
         </template>
       </div>

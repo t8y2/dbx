@@ -9,6 +9,12 @@ pub struct RedisKeyInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisScanResult {
+    pub cursor: u64,
+    pub keys: Vec<RedisKeyInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisValue {
     pub key: String,
     pub key_type: String,
@@ -18,13 +24,20 @@ pub struct RedisValue {
 
 pub async fn connect(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = redis::Client::open(url).map_err(|e| format!("Redis connection failed: {e}"))?;
-    tokio::time::timeout(
+    let mut con = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         client.get_multiplexed_async_connection(),
     )
     .await
     .map_err(|_| "Redis connection timed out (10s)".to_string())?
-    .map_err(|e| format!("Redis connection failed: {e}"))
+    .map_err(|e| format!("Redis connection failed: {e}"))?;
+
+    redis::cmd("PING")
+        .query_async::<String>(&mut con)
+        .await
+        .map_err(|e| format!("Redis authentication failed or command rejected: {e}"))?;
+
+    Ok(con)
 }
 
 pub async fn list_databases(con: &mut redis::aio::MultiplexedConnection) -> Result<Vec<u32>, String> {
@@ -58,33 +71,24 @@ pub async fn select_db(con: &mut redis::aio::MultiplexedConnection, db: u32) -> 
         .map_err(|e| e.to_string())
 }
 
-pub async fn scan_keys(
+pub async fn scan_keys_page(
     con: &mut redis::aio::MultiplexedConnection,
+    cursor: u64,
     pattern: &str,
     count: usize,
-) -> Result<Vec<RedisKeyInfo>, String> {
-    let mut cursor: u64 = 0;
-    let mut all_keys: Vec<String> = Vec::new();
-    loop {
-        let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(100)
-            .query_async(con)
-            .await
-            .map_err(|e| e.to_string())?;
-        all_keys.extend(keys);
-        cursor = new_cursor;
-        if cursor == 0 || all_keys.len() >= count {
-            break;
-        }
-    }
-    all_keys.truncate(count);
+) -> Result<RedisScanResult, String> {
+    let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(cursor)
+        .arg("MATCH")
+        .arg(pattern)
+        .arg("COUNT")
+        .arg(count)
+        .query_async(con)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut result = Vec::new();
-    for key in &all_keys {
+    for key in &keys {
         let key_type: String = redis::cmd("TYPE")
             .arg(key.as_str())
             .query_async(con)
@@ -99,7 +103,10 @@ pub async fn scan_keys(
             ttl,
         });
     }
-    Ok(result)
+    Ok(RedisScanResult {
+        cursor: next_cursor,
+        keys: result,
+    })
 }
 
 pub async fn get_value(

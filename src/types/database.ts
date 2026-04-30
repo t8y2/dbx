@@ -78,6 +78,8 @@ export interface TreeNode {
   children?: TreeNode[];
   isLoading?: boolean;
   isExpanded?: boolean;
+  scanCursor?: number;
+  hasMore?: boolean;
   connectionId?: string;
   database?: string;
   schema?: string;

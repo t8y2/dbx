@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, RefreshCw, Key } from "lucide-vue-next";
+import { Search, RefreshCw, Key, Loader2 } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -22,11 +22,34 @@ const keys = ref<RedisKeyInfo[]>([]);
 const loading = ref(false);
 const searchPattern = ref("*");
 const selectedKey = ref<string | null>(null);
+const cursor = ref(0);
+const hasMore = ref(false);
+
+const PAGE_SIZE = 200;
 
 async function loadKeys() {
   loading.value = true;
   try {
-    keys.value = await api.redisScanKeys(props.connectionId, props.db, searchPattern.value, 1000);
+    const result = await api.redisScanKeys(props.connectionId, props.db, 0, searchPattern.value, PAGE_SIZE);
+    keys.value = result.keys;
+    cursor.value = result.cursor;
+    hasMore.value = result.cursor !== 0;
+    selectedKey.value = null;
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function loadMoreKeys() {
+  if (loading.value || !hasMore.value) return;
+
+  loading.value = true;
+  try {
+    const result = await api.redisScanKeys(props.connectionId, props.db, cursor.value, searchPattern.value, PAGE_SIZE);
+    const existingKeys = new Set(keys.value.map((k) => k.key));
+    keys.value = [...keys.value, ...result.keys.filter((k) => !existingKeys.has(k.key))];
+    cursor.value = result.cursor;
+    hasMore.value = result.cursor !== 0;
   } finally {
     loading.value = false;
   }
@@ -72,13 +95,14 @@ onMounted(loadKeys);
           @keydown.enter="loadKeys"
         />
         <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" @click="loadKeys">
-          <RefreshCw class="h-3 w-3" />
+          <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
+          <RefreshCw v-else class="h-3 w-3" />
         </Button>
       </div>
 
       <!-- Key count -->
       <div class="px-3 py-1 text-xs text-muted-foreground border-b shrink-0">
-        {{ t('redis.keys', { count: keys.length }) }}
+        {{ loading && keys.length === 0 ? t('redis.loadingKeys') : t('redis.keys', { count: keys.length }) }}
       </div>
 
       <!-- Key list -->
@@ -96,6 +120,16 @@ onMounted(loadKeys);
         </div>
         <div v-if="keys.length === 0 && !loading" class="px-3 py-8 text-center text-muted-foreground text-xs">
           {{ t('redis.noKeys') }}
+        </div>
+        <div v-if="loading && keys.length === 0" class="px-3 py-8 flex items-center justify-center gap-2 text-muted-foreground text-xs">
+          <Loader2 class="w-3.5 h-3.5 animate-spin" />
+          <span>{{ t('redis.loadingKeys') }}</span>
+        </div>
+        <div v-if="hasMore || (loading && keys.length > 0)" class="p-2">
+          <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loading" @click="loadMoreKeys">
+            <Loader2 v-if="loading" class="w-3 h-3 mr-1.5 animate-spin" />
+            {{ t('redis.loadMoreKeys') }}
+          </Button>
         </div>
       </div>
     </div>

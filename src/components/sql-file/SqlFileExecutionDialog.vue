@@ -18,6 +18,7 @@ import {
   cancelSqlFileExecution,
   executeSqlFile,
   listenSqlFileProgress,
+  listDatabases,
   previewSqlFile,
   type SqlFilePreview,
   type SqlFileProgress,
@@ -42,6 +43,8 @@ const selectingFile = ref(false);
 const loadingPreview = ref(false);
 const connectionId = ref("");
 const database = ref("");
+const databaseOptions = ref<string[]>([]);
+const loadingDatabases = ref(false);
 const continueOnError = ref(false);
 
 const running = ref(false);
@@ -62,7 +65,7 @@ const selectedConnection = computed(() =>
 );
 
 const canStart = computed(() =>
-  Boolean(preview.value && connectionId.value && database.value.trim() && !running.value && !loadingPreview.value),
+  Boolean(preview.value && selectedConnection.value && database.value.trim() && !running.value && !loadingPreview.value && !loadingDatabases.value),
 );
 
 const statusTone = computed(() => {
@@ -122,6 +125,23 @@ function isTerminalStatus(status: SqlFileStatus | "idle") {
   return status === "done" || status === "error" || status === "cancelled";
 }
 
+function resolveInitialConnectionId() {
+  if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
+    return props.prefillConnectionId;
+  }
+  return sqlConnections.value[0]?.id ?? "";
+}
+
+function chooseDatabase(names: string[], id: string) {
+  const configDatabase = store.getConfig(id)?.database ?? "";
+  if (names.length > 0) {
+    if (props.prefillDatabase && names.includes(props.prefillDatabase)) return props.prefillDatabase;
+    if (configDatabase && names.includes(configDatabase)) return configDatabase;
+    return names.length === 1 ? names[0] : "";
+  }
+  return props.prefillDatabase ?? configDatabase;
+}
+
 function resetExecution() {
   running.value = false;
   cancelling.value = false;
@@ -136,10 +156,42 @@ function resetState() {
   preview.value = null;
   selectingFile.value = false;
   loadingPreview.value = false;
-  connectionId.value = props.prefillConnectionId ?? "";
-  database.value = props.prefillDatabase ?? selectedConnection.value?.database ?? "";
+  connectionId.value = resolveInitialConnectionId();
+  database.value = "";
+  databaseOptions.value = [];
+  loadingDatabases.value = false;
   continueOnError.value = false;
   resetExecution();
+}
+
+let databaseLoadToken = 0;
+
+async function loadDatabasesForConnection(id: string) {
+  const token = databaseLoadToken + 1;
+  databaseLoadToken = token;
+  databaseOptions.value = [];
+
+  if (!sqlConnections.value.some((c) => c.id === id)) {
+    database.value = "";
+    return;
+  }
+
+  loadingDatabases.value = true;
+  try {
+    await store.ensureConnected(id);
+    const names = (await listDatabases(id)).map((db) => db.name);
+    if (token !== databaseLoadToken) return;
+    databaseOptions.value = names;
+    database.value = chooseDatabase(names, id);
+  } catch {
+    if (token !== databaseLoadToken) return;
+    databaseOptions.value = [];
+    database.value = chooseDatabase([], id);
+  } finally {
+    if (token === databaseLoadToken) {
+      loadingDatabases.value = false;
+    }
+  }
 }
 
 async function loadPreview(path: string) {
@@ -238,12 +290,20 @@ function handleOpenChange(nextOpen: boolean) {
 }
 
 watch(connectionId, (id) => {
-  const config = store.getConfig(id);
-  database.value = props.prefillDatabase ?? config?.database ?? "";
+  loadDatabasesForConnection(id);
+});
+
+watch(sqlConnections, () => {
+  if (!open.value || running.value || selectedConnection.value) return;
+  connectionId.value = resolveInitialConnectionId();
 });
 
 watch(open, (value) => {
-  if (value) resetState();
+  if (!value) return;
+  resetState();
+  if (connectionId.value) {
+    loadDatabasesForConnection(connectionId.value);
+  }
 });
 </script>
 
@@ -318,12 +378,26 @@ watch(open, (value) => {
 
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t('sqlFile.database') }}</Label>
-              <Input
-                v-model="database"
-                class="h-8 text-xs"
-                :disabled="running"
-                :placeholder="t('sqlFile.databasePlaceholder')"
-              />
+              <Select v-if="databaseOptions.length" v-model="database" :disabled="running || loadingDatabases">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue :placeholder="t('sqlFile.selectDatabase')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <div v-else class="relative">
+                <Input
+                  v-model="database"
+                  class="h-8 text-xs"
+                  :disabled="running || loadingDatabases"
+                  :placeholder="t('sqlFile.databasePlaceholder')"
+                />
+                <Loader2
+                  v-if="loadingDatabases"
+                  class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground"
+                />
+              </div>
             </div>
           </div>
         </div>

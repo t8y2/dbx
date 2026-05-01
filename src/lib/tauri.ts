@@ -58,6 +58,10 @@ export async function saveAiConfig(config: AiConfig): Promise<void> {
   return invoke("save_ai_config", { config });
 }
 
+export async function aiTestConnection(config: AiConfig): Promise<string> {
+  return invoke("ai_test_connection", { config });
+}
+
 export async function loadAiConfig(): Promise<AiConfig | null> {
   return invoke("load_ai_config");
 }

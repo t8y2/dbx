@@ -15,11 +15,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useSettingsStore, type AiProvider } from "@/stores/settingsStore";
+import { useSettingsStore, type AiProvider, type AiApiStyle } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { buildAiContext, runAiStream } from "@/lib/ai";
-import { listDatabases, redisListDatabases, mongoListDatabases } from "@/lib/tauri";
+import { listDatabases, redisListDatabases, mongoListDatabases, aiTestConnection } from "@/lib/tauri";
 import type { AiMessage } from "@/lib/tauri";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -102,6 +102,7 @@ const tempProvider = ref<AiProvider>(settings.aiConfig.provider);
 const tempApiKey = ref(settings.aiConfig.apiKey);
 const tempEndpoint = ref(settings.aiConfig.endpoint);
 const tempModel = ref(settings.aiConfig.model);
+const tempApiStyle = ref<AiApiStyle>(settings.aiConfig.apiStyle || "completions");
 
 const providerDefaults: Record<AiProvider, { endpoint: string; model: string }> = {
   claude: { endpoint: "https://api.anthropic.com/v1/messages", model: "claude-sonnet-4-20250514" },
@@ -119,6 +120,7 @@ function openSettings() {
   tempApiKey.value = settings.aiConfig.apiKey;
   tempEndpoint.value = settings.aiConfig.endpoint;
   tempModel.value = settings.aiConfig.model;
+  tempApiStyle.value = settings.aiConfig.apiStyle || "completions";
   showSettings.value = true;
 }
 
@@ -128,8 +130,34 @@ function saveSettings() {
     apiKey: tempApiKey.value,
     endpoint: tempEndpoint.value,
     model: tempModel.value,
+    apiStyle: tempApiStyle.value,
   });
   showSettings.value = false;
+}
+
+const testingAi = ref(false);
+const testResult = ref<"" | "success" | "error">("");
+const testError = ref("");
+
+async function testAiConnection() {
+  testingAi.value = true;
+  testResult.value = "";
+  testError.value = "";
+  try {
+    await aiTestConnection({
+      provider: tempProvider.value,
+      apiKey: tempApiKey.value,
+      endpoint: tempEndpoint.value,
+      model: tempModel.value,
+      apiStyle: tempApiStyle.value,
+    });
+    testResult.value = "success";
+  } catch (e: any) {
+    testResult.value = "error";
+    testError.value = e?.message || String(e);
+  } finally {
+    testingAi.value = false;
+  }
 }
 
 function selectProvider(provider: AiProvider) {
@@ -279,7 +307,7 @@ function formatInlineText(text: string): string {
             </div>
           </div>
 
-          <div v-else class="flex">
+          <div v-else-if="msg.content" class="flex">
             <div class="max-w-[95%] rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
               <template v-for="(seg, j) in parseMessage(msg.content)" :key="j">
                 <div v-if="seg.type === 'text'" class="whitespace-normal">
@@ -350,12 +378,12 @@ function formatInlineText(text: string): string {
             rows="4"
             class="flex-1 resize-none bg-transparent text-xs outline-none placeholder:text-muted-foreground"
             :placeholder="t('ai.placeholder')"
-            :disabled="isGenerating"
+            :disabled="isGenerating || !props.tab?.database"
             @keydown.enter.exact="send"
           />
           <button
             class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30"
-            :disabled="isGenerating || !prompt.trim()"
+            :disabled="isGenerating || !prompt.trim() || !props.tab?.database"
             @click="send"
           >
             <ArrowUp class="h-4 w-4" />
@@ -388,14 +416,29 @@ function formatInlineText(text: string): string {
         </div>
         <div class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">Endpoint</Label>
-          <Input v-model="tempEndpoint" class="col-span-2 h-8 text-xs" />
+          <Input v-model="tempEndpoint" placeholder="https://api.openai.com/v1" class="col-span-2 h-8 text-xs" />
         </div>
         <div class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">Model</Label>
           <Input v-model="tempModel" class="col-span-2 h-8 text-xs" />
         </div>
+        <div v-if="tempProvider !== 'claude'" class="grid grid-cols-3 items-center gap-3">
+          <Label class="text-right text-xs">API</Label>
+          <div class="col-span-2 flex gap-2">
+            <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'bg-accent': tempApiStyle === 'completions' }" @click="tempApiStyle = 'completions'">/chat/completions</Button>
+            <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'bg-accent': tempApiStyle === 'responses' }" @click="tempApiStyle = 'responses'">/responses</Button>
+          </div>
+        </div>
       </div>
-      <DialogFooter>
+      <DialogFooter class="flex items-center gap-2">
+        <div class="flex-1 flex items-center gap-2">
+          <Button size="sm" variant="outline" :disabled="testingAi || !tempApiKey.trim() || !tempEndpoint.trim() || !tempModel.trim()" @click="testAiConnection">
+            <Loader2 v-if="testingAi" class="h-3 w-3 animate-spin mr-1" />
+            {{ t('connection.test') }}
+          </Button>
+          <span v-if="testResult === 'success'" class="text-xs text-green-500">{{ t('connection.testSuccess') }}</span>
+          <span v-else-if="testResult === 'error'" class="text-xs text-destructive truncate max-w-[200px]" :title="testError">{{ testError }}</span>
+        </div>
         <Button size="sm" @click="saveSettings">{{ t('grid.save') }}</Button>
       </DialogFooter>
     </DialogContent>

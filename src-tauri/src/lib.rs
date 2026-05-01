@@ -38,6 +38,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
+            commands::ai::ai_test_connection,
             commands::ai::save_ai_config,
             commands::ai::load_ai_config,
             commands::connection::test_connection,

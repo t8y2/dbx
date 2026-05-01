@@ -3,22 +3,24 @@ import { ref } from "vue";
 import * as api from "@/lib/tauri";
 
 export type AiProvider = "claude" | "openai" | "custom";
+export type AiApiStyle = "completions" | "responses";
 
 export interface AiConfig {
   provider: AiProvider;
   apiKey: string;
   endpoint: string;
   model: string;
+  apiStyle: AiApiStyle;
 }
 
 const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = {
-  claude: { provider: "claude", endpoint: "https://api.anthropic.com/v1/messages", model: "claude-sonnet-4-20250514" },
-  openai: { provider: "openai", endpoint: "https://api.openai.com/v1/chat/completions", model: "gpt-4o" },
-  custom: { provider: "custom", endpoint: "", model: "" },
+  claude: { provider: "claude", endpoint: "https://api.anthropic.com/v1/messages", model: "claude-sonnet-4-20250514", apiStyle: "completions" },
+  openai: { provider: "openai", endpoint: "https://api.openai.com/v1/chat/completions", model: "gpt-4o", apiStyle: "completions" },
+  custom: { provider: "custom", endpoint: "", model: "", apiStyle: "completions" },
 };
 
 export const useSettingsStore = defineStore("settings", () => {
-  const aiConfig = ref<AiConfig>({ ...defaultConfigs.claude, apiKey: "" });
+  const aiConfig = ref<AiConfig>({ ...defaultConfigs.claude, apiKey: "", apiStyle: "completions" });
   const isAiConfigLoaded = ref(false);
 
   async function initAiConfig() {

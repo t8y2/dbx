@@ -303,7 +303,7 @@ export default {
     dataTransfer: "数据传输",
   },
   sqlFile: {
-    title: "SQL 文件",
+    title: "执行 SQL 文件",
     file: "文件",
     selectSqlFile: "选择 SQL 文件",
     browse: "浏览",

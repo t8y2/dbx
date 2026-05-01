@@ -303,7 +303,7 @@ export default {
     dataTransfer: "Data Transfer",
   },
   sqlFile: {
-    title: "SQL File",
+    title: "Execute SQL File",
     file: "File",
     selectSqlFile: "Select SQL file",
     browse: "Browse",

@@ -333,6 +333,15 @@ function openSchemaDiff() {
   }
 }
 
+function openSqlFileExecution() {
+  if (props.node.connectionId) {
+    connectionStore.sqlFileSource = {
+      connectionId: props.node.connectionId,
+      database: props.node.database ?? "",
+    };
+  }
+}
+
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
@@ -444,6 +453,9 @@ async function showMore() {
         <ContextMenuItem @click="newQuery">
           <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
         </ContextMenuItem>
+        <ContextMenuItem @click="openSqlFileExecution">
+          <FileCode class="w-4 h-4" /> {{ t('sqlFile.title') }}
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem @click="refresh">
           <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
@@ -460,6 +472,9 @@ async function showMore() {
       <template v-if="node.type === 'database' || node.type === 'schema'">
         <ContextMenuItem @click="newQuery">
           <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
+        </ContextMenuItem>
+        <ContextMenuItem @click="openSqlFileExecution">
+          <FileCode class="w-4 h-4" /> {{ t('sqlFile.title') }}
         </ContextMenuItem>
         <ContextMenuItem @click="refresh">
           <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,7 @@ import QueryHistory from "@/components/editor/QueryHistory.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import DataTransferDialog from "@/components/transfer/DataTransferDialog.vue";
 import SchemaDiffDialog from "@/components/diff/SchemaDiffDialog.vue";
+import SqlFileExecutionDialog from "@/components/sql-file/SqlFileExecutionDialog.vue";
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -115,10 +116,13 @@ const formatSqlRequestId = ref(0);
 const showDangerDialog = ref(false);
 const showTransferDialog = ref(false);
 const showSchemaDiffDialog = ref(false);
+const showSqlFileDialog = ref(false);
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
+const sqlFilePrefillConnectionId = ref("");
+const sqlFilePrefillDatabase = ref("");
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -156,6 +160,15 @@ watch(() => connectionStore.schemaDiffSource, (v) => {
     schemaDiffPrefillDatabase.value = v.database;
     showSchemaDiffDialog.value = true;
     connectionStore.schemaDiffSource = null;
+  }
+});
+
+watch(() => connectionStore.sqlFileSource, (v) => {
+  if (v) {
+    sqlFilePrefillConnectionId.value = v.connectionId;
+    sqlFilePrefillDatabase.value = v.database;
+    showSqlFileDialog.value = true;
+    connectionStore.sqlFileSource = null;
   }
 });
 
@@ -699,6 +712,11 @@ async function setupFileDrop() {
           {{ t('transfer.dataTransfer') }}
         </Button>
 
+        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="showSqlFileDialog = true" :disabled="!connectionStore.connections.length">
+          <FileCode class="h-3.5 w-3.5" />
+          {{ t('sqlFile.title') }}
+        </Button>
+
         <div class="flex-1" />
 
         <Tooltip>
@@ -1175,6 +1193,11 @@ async function setupFileDrop() {
         v-model:open="showSchemaDiffDialog"
         :prefill-connection-id="schemaDiffPrefillConnectionId"
         :prefill-database="schemaDiffPrefillDatabase"
+      />
+      <SqlFileExecutionDialog
+        v-model:open="showSqlFileDialog"
+        :prefill-connection-id="sqlFilePrefillConnectionId"
+        :prefill-database="sqlFilePrefillDatabase"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

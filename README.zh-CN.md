@@ -53,10 +53,10 @@
 
 <div align="center">
   <img src="docs/screenshot.png" width="800" />
-  <br /><br />
-  <img src="docs/screenshot-connections.jpg" width="800" />
-  <br /><br />
-  <img src="docs/screenshot-ai.jpg" width="800" />
+  <p>
+    <img src="docs/screenshot-connections.jpg" width="395" />
+    <img src="docs/screenshot-ai.jpg" width="395" />
+  </p>
 </div>
 
 ## 安装

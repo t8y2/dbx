@@ -7,7 +7,7 @@ const globalDdlOpen = ref(false);
 import { computed, nextTick, onUnmounted, watch } from "vue";
 import { useElementSize } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
-import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X, Undo2, WrapText } from "lucide-vue-next";
+import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X, Undo2, WrapText, Info } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -23,6 +23,17 @@ import type { QueryResult, ColumnInfo, DatabaseType } from "@/types/database";
 import { save as savePath } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import * as api from "@/lib/tauri";
+import {
+  extractSelection,
+  formatSelectionAsCsv,
+  formatSelectionAsJson,
+  formatSelectionAsSqlInList,
+  formatSelectionAsTsv,
+  isCellInSelection,
+  normalizeSelectionRange,
+  type CellPosition,
+  type CellSelectionRange,
+} from "@/lib/gridSelection";
 
 import { useToast } from "@/composables/useToast";
 
@@ -103,7 +114,12 @@ function typeColorClass(t: string): string {
   if (["bytea", "blob", "binary", "varbinary", "image"].includes(s)) return "text-red-400";
   return "text-muted-foreground";
 }
-const contextCell = ref<{ rowId: number; col: number } | null>(null);
+const contextCell = ref<{ rowId: number; rowIndex: number; col: number } | null>(null);
+const selectionAnchor = ref<CellPosition | null>(null);
+const selectionFocus = ref<CellPosition | null>(null);
+const isSelectingCells = ref(false);
+const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
+const showCellDetail = ref(false);
 const sortCol = ref<string | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
@@ -258,6 +274,46 @@ const displayItems = computed<RowItem[]>(() => {
 const hasVisibleRows = computed(() => displayItems.value.length > 0);
 const emptyTitle = computed(() => searchText.value ? t('grid.noSearchResults') : t('grid.noRows'));
 const emptyDescription = computed(() => searchText.value ? t('grid.noSearchResultsDescription') : t('grid.noRowsDescription'));
+const selectedRange = computed<CellSelectionRange | null>(() => {
+  if (!selectionAnchor.value || !selectionFocus.value) return null;
+  return normalizeSelectionRange(selectionAnchor.value, selectionFocus.value);
+});
+const visibleSelectionRows = computed(() => displayItems.value.map((item) => item.data));
+const selectedCells = computed(() => extractSelection(props.result.columns, visibleSelectionRows.value, selectedRange.value));
+const selectedCellCount = computed(() => selectedCells.value.columns.length * selectedCells.value.rows.length);
+const hasCellSelection = computed(() => selectedCellCount.value > 0);
+const selectionSummary = computed(() => t("grid.selectedCells", { count: selectedCellCount.value }));
+const activeCellDetail = computed(() => {
+  const cell = detailCell.value;
+  if (!cell) return null;
+  const item = displayItems.value[cell.rowIndex];
+  const column = props.result.columns[cell.col];
+  if (!item || !column) return null;
+  const value = item.data[cell.col] ?? null;
+  const rawValue = formatCell(value);
+  const valueText = value === null ? "" : String(value);
+  const trimmed = valueText.trim();
+  const maybeJson = typeof value === "string" && (trimmed.startsWith("{") || trimmed.startsWith("["));
+  let formattedJson = "";
+  if (maybeJson) {
+    try {
+      formattedJson = JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      formattedJson = "";
+    }
+  }
+  return {
+    rowNumber: cell.rowIndex + 1,
+    colIndex: cell.col,
+    column,
+    type: columnTypeMap.value.get(column) || "",
+    comment: columnCommentMap.value.get(column) || "",
+    value,
+    rawValue,
+    length: value === null ? 0 : String(value).length,
+    formattedJson,
+  };
+});
 
 function toggleSort(colName: string) {
   if (isResizing) return;
@@ -575,16 +631,111 @@ function discardChanges() {
   editingCell.value = null;
 }
 
+// --- Cell selection and detail ---
+function clearCellSelection() {
+  selectionAnchor.value = null;
+  selectionFocus.value = null;
+  isSelectingCells.value = false;
+}
+
+function selectSingleCell(rowIndex: number, colIndex: number) {
+  const cell = { rowIndex, colIndex };
+  selectionAnchor.value = cell;
+  selectionFocus.value = cell;
+}
+
+function finishCellSelection() {
+  isSelectingCells.value = false;
+  document.removeEventListener("mouseup", finishCellSelection);
+}
+
+function beginCellSelection(rowIndex: number, colIndex: number, event: MouseEvent) {
+  if (event.button !== 0) return;
+  if (editingCell.value) return;
+  event.preventDefault();
+  selectSingleCell(rowIndex, colIndex);
+  isSelectingCells.value = true;
+  document.addEventListener("mouseup", finishCellSelection);
+}
+
+function extendCellSelection(rowIndex: number, colIndex: number) {
+  if (!isSelectingCells.value || !selectionAnchor.value) return;
+  selectionFocus.value = { rowIndex, colIndex };
+}
+
+function cellIsSelected(rowIndex: number, colIndex: number): boolean {
+  return isCellInSelection(rowIndex, colIndex, selectedRange.value);
+}
+
+function showCellDetails(rowIndex: number, colIndex: number) {
+  detailCell.value = { rowIndex, col: colIndex };
+  showCellDetail.value = true;
+}
+
+function copyText(text: string) {
+  navigator.clipboard.writeText(text);
+  toast(t('grid.copied'));
+}
+
+function copySelectionTsv() {
+  if (!hasCellSelection.value) return;
+  copyText(formatSelectionAsTsv(selectedCells.value));
+}
+
+function copySelectionCsv() {
+  if (!hasCellSelection.value) return;
+  copyText(formatSelectionAsCsv(selectedCells.value));
+}
+
+function copySelectionJson() {
+  if (!hasCellSelection.value) return;
+  copyText(formatSelectionAsJson(selectedCells.value));
+}
+
+function copySelectionSqlInList() {
+  if (!hasCellSelection.value) return;
+  copyText(formatSelectionAsSqlInList(selectedCells.value));
+}
+
+function copyDetailValue() {
+  if (!activeCellDetail.value) return;
+  copyText(activeCellDetail.value.rawValue);
+}
+
+function copyDetailColumnName() {
+  if (!activeCellDetail.value) return;
+  copyText(activeCellDetail.value.column);
+}
+
+function copyDetailSqlCondition() {
+  const detail = activeCellDetail.value;
+  if (!detail) return;
+  const column = quoteIdent(detail.column);
+  const condition = detail.value === null
+    ? `${column} IS NULL`
+    : `${column} = ${escapeVal(detail.value)}`;
+  copyText(condition);
+}
+
+watch(() => props.result, () => {
+  clearCellSelection();
+  showCellDetail.value = false;
+  detailCell.value = null;
+});
+
 // --- Copy/Export ---
-function onCellContext(rowId: number, colIdx: number) {
-  contextCell.value = { rowId, col: colIdx };
+function onCellContext(rowId: number, rowIndex: number, colIdx: number) {
+  contextCell.value = { rowId, rowIndex, col: colIdx };
+  if (!cellIsSelected(rowIndex, colIdx)) {
+    selectSingleCell(rowIndex, colIdx);
+  }
 }
 
 function copyCell() {
   if (!contextCell.value) return;
   const item = getRowItem(contextCell.value.rowId);
   const val = item?.data[contextCell.value.col] ?? null;
-  navigator.clipboard.writeText(formatCell(val));
+  copyText(formatCell(val));
 }
 
 function copyRow() {
@@ -593,7 +744,7 @@ function copyRow() {
   if (!item) return;
   const obj: Record<string, unknown> = {};
   props.result.columns.forEach((col, i) => { obj[col] = item.data[i]; });
-  navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
+  copyText(JSON.stringify(obj, null, 2));
 }
 
 function copyAll() {
@@ -601,7 +752,7 @@ function copyAll() {
   const body = sortedRows.value
     .map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex).map((c) => formatCell(c)).join("\t"))
     .join("\n");
-  navigator.clipboard.writeText(`${header}\n${body}`);
+  copyText(`${header}\n${body}`);
 }
 
 async function exportCsv() {
@@ -722,7 +873,10 @@ function onDdlResizeEnd() {
   window.removeEventListener("mouseup", onDdlResizeEnd);
 }
 
-onUnmounted(onDdlResizeEnd);
+onUnmounted(() => {
+  onDdlResizeEnd();
+  finishCellSelection();
+});
 
 const SQL_KEYWORDS = /\b(CREATE|TABLE|INDEX|UNIQUE|PRIMARY|KEY|FOREIGN|REFERENCES|CONSTRAINT|NOT|NULL|DEFAULT|INT|INTEGER|BIGINT|SMALLINT|VARCHAR|CHARACTER|VARYING|TEXT|BOOLEAN|DOUBLE|PRECISION|REAL|FLOAT|NUMERIC|DECIMAL|TIMESTAMP|DATE|TIME|SERIAL|AUTOINCREMENT|AUTO_INCREMENT|IF|EXISTS|ON|SET|CASCADE|RESTRICT|CHECK|WITH|WITHOUT|ZONE)\b/gi;
 
@@ -880,17 +1034,20 @@ function escapeAndHighlightKeywords(s: string): string {
                 <div
                   v-for="(cell, colIdx) in item.data"
                   :key="colIdx"
-                  class="shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative"
+                  class="group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none"
                   :style="{ width: `var(--col-w-${colIdx})` }"
                   :class="{
                     'text-muted-foreground italic': isNull(cell),
                     'bg-yellow-500/10': item.isDirtyCol[colIdx],
+                    'cell-selected': cellIsSelected(index, colIdx),
                     'tabular-nums': typeof cell === 'number',
                     'cursor-text hover:bg-accent/50': editable && !item.isDeleted,
                     'line-through': item.isDeleted,
                   }"
+                  @mousedown="beginCellSelection(index, colIdx, $event)"
+                  @mouseenter="extendCellSelection(index, colIdx)"
                   @dblclick="editable && !item.isDeleted && startEdit(item.id, colIdx)"
-                  @contextmenu="onCellContext(item.id, colIdx)"
+                  @contextmenu="onCellContext(item.id, index, colIdx)"
                 >
                   <template v-if="editingCell?.rowId === item.id && editingCell?.col === colIdx">
                     <input
@@ -903,6 +1060,14 @@ function escapeAndHighlightKeywords(s: string): string {
                   </template>
                   <template v-else>
                     {{ formatCell(cell) }}
+                    <button
+                      class="absolute right-0.5 top-0.5 hidden h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground group-hover/cell:flex"
+                      :title="t('grid.cellDetails')"
+                      @mousedown.stop
+                      @click.stop="showCellDetails(index, colIdx)"
+                    >
+                      <Info class="h-3 w-3" />
+                    </button>
                   </template>
                 </div>
               </div>
@@ -943,15 +1108,87 @@ function escapeAndHighlightKeywords(s: string): string {
                 v-html="highlightSql(ddlContent)"
               ></pre>
             </div>
+            <!-- Cell Detail Drawer -->
+            <div
+              v-if="showCellDetail && activeCellDetail"
+              class="relative w-80 shrink-0 border-l flex flex-col bg-background min-w-0"
+            >
+              <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20">
+                <Info class="w-3.5 h-3.5 text-muted-foreground" />
+                <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t('grid.cellDetails') }}</span>
+                <Button variant="ghost" size="icon" class="h-5 w-5" @click="showCellDetail = false">
+                  <X class="w-3 h-3" />
+                </Button>
+              </div>
+
+              <div class="flex-1 min-h-0 overflow-auto p-3 text-xs space-y-3">
+                <div class="space-y-1">
+                  <div class="text-muted-foreground">{{ t('grid.columnName') }}</div>
+                  <div class="font-medium break-all">{{ activeCellDetail.column }}</div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="space-y-1">
+                    <div class="text-muted-foreground">{{ t('grid.rowNumber') }}</div>
+                    <div>{{ activeCellDetail.rowNumber }}</div>
+                  </div>
+                  <div class="space-y-1">
+                    <div class="text-muted-foreground">{{ t('grid.columnType') }}</div>
+                    <div :class="activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'">
+                      {{ activeCellDetail.type || '-' }}
+                    </div>
+                  </div>
+                  <div class="space-y-1">
+                    <div class="text-muted-foreground">{{ t('grid.nullValue') }}</div>
+                    <div>{{ activeCellDetail.value === null ? 'true' : 'false' }}</div>
+                  </div>
+                  <div class="space-y-1">
+                    <div class="text-muted-foreground">{{ t('grid.valueLength') }}</div>
+                    <div>{{ activeCellDetail.length }}</div>
+                  </div>
+                </div>
+                <div class="space-y-1">
+                  <div class="text-muted-foreground">{{ t('grid.columnComment') }}</div>
+                  <div class="whitespace-pre-wrap break-words">{{ activeCellDetail.comment || t('grid.noComment') }}</div>
+                </div>
+                <div class="space-y-1">
+                  <div class="text-muted-foreground">{{ t('grid.cellValue') }}</div>
+                  <pre class="max-h-56 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ activeCellDetail.rawValue }}</pre>
+                </div>
+                <div v-if="activeCellDetail.formattedJson" class="space-y-1">
+                  <div class="text-muted-foreground">{{ t('grid.formattedJson') }}</div>
+                  <pre class="max-h-72 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ activeCellDetail.formattedJson }}</pre>
+                </div>
+              </div>
+
+              <div class="border-t p-2 grid grid-cols-1 gap-1">
+                <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="copyDetailValue">
+                  <Copy class="w-3 h-3 mr-2" /> {{ t('grid.copyValue') }}
+                </Button>
+                <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="copyDetailColumnName">
+                  <Copy class="w-3 h-3 mr-2" /> {{ t('grid.copyColumnName') }}
+                </Button>
+                <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="copyDetailSqlCondition">
+                  <Code2 class="w-3 h-3 mr-2" /> {{ t('grid.copySqlCondition') }}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       </ContextMenuTrigger>
 
-      <ContextMenuContent class="w-48">
+      <ContextMenuContent class="w-60">
         <ContextMenuItem @click="copyCell">{{ t('grid.copyCell') }}</ContextMenuItem>
         <ContextMenuItem @click="copyRow">{{ t('grid.copyRow') }}</ContextMenuItem>
         <ContextMenuItem @click="copyAll">{{ t('grid.copyAll') }}</ContextMenuItem>
         <ContextMenuSeparator />
+        <template v-if="hasCellSelection">
+          <ContextMenuItem @click="copySelectionTsv">{{ t('grid.copySelectionTsv') }}</ContextMenuItem>
+          <ContextMenuItem @click="copySelectionCsv">{{ t('grid.copySelectionCsv') }}</ContextMenuItem>
+          <ContextMenuItem @click="copySelectionJson">{{ t('grid.copySelectionJson') }}</ContextMenuItem>
+          <ContextMenuItem @click="copySelectionSqlInList">{{ t('grid.copySelectionSql') }}</ContextMenuItem>
+          <ContextMenuItem @click="clearCellSelection">{{ t('grid.clearSelection') }}</ContextMenuItem>
+          <ContextMenuSeparator />
+        </template>
         <template v-if="editable">
           <ContextMenuItem class="text-destructive" @click="deleteSelectedRow">
             <Trash2 class="w-3.5 h-3.5 mr-2" /> {{ t('grid.deleteRow') }}
@@ -979,6 +1216,7 @@ function escapeAndHighlightKeywords(s: string): string {
       <span v-if="hasData">{{ t('grid.rows', { count: result.rows.length }) }}</span>
       <span v-else>{{ t('grid.rowsAffected', { count: result.affected_rows }) }}</span>
       <span>{{ result.execution_time_ms }}ms</span>
+      <span v-if="hasCellSelection" class="text-foreground">{{ selectionSummary }}</span>
 
       <template v-if="editable && tableMeta">
         <span v-if="hasPendingChanges" class="ml-2 text-foreground">
@@ -1065,6 +1303,11 @@ function escapeAndHighlightKeywords(s: string): string {
 
 .ddl-drawer-resizing {
   transition: none;
+}
+
+.cell-selected {
+  background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .ddl-code :deep(.ddl-kw) {

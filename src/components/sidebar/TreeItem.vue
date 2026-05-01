@@ -324,6 +324,15 @@ function openTransfer() {
   }
 }
 
+function openSchemaDiff() {
+  if (props.node.connectionId) {
+    connectionStore.schemaDiffSource = {
+      connectionId: props.node.connectionId,
+      database: props.node.database ?? "",
+    };
+  }
+}
+
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
@@ -458,6 +467,9 @@ async function showMore() {
         <ContextMenuSeparator />
         <ContextMenuItem @click="openTransfer">
           <ArrowRightLeft class="w-4 h-4" /> {{ t('transfer.dataTransfer') }}
+        </ContextMenuItem>
+        <ContextMenuItem @click="openSchemaDiff">
+          <ArrowRightLeft class="w-4 h-4" /> {{ t('diff.title') }}
         </ContextMenuItem>
       </template>
 

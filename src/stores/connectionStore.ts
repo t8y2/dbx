@@ -17,6 +17,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionTablesCache = ref<Record<string, SqlCompletionTable[]>>({});
   const completionColumnsCache = ref<Record<string, ColumnInfo[]>>({});
   const transferSource = ref<{ connectionId: string; database: string } | null>(null);
+  const schemaDiffSource = ref<{ connectionId: string; database: string } | null>(null);
 
   function startEditing(id: string) {
     editingConnectionId.value = id;
@@ -645,5 +646,6 @@ export const useConnectionStore = defineStore("connection", () => {
     exportConnectionsToFile,
     importConnectionsFromFile,
     transferSource,
+    schemaDiffSource,
   };
 });

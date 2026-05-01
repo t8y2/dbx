@@ -34,6 +34,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import QueryHistory from "@/components/editor/QueryHistory.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import DataTransferDialog from "@/components/transfer/DataTransferDialog.vue";
+import SchemaDiffDialog from "@/components/diff/SchemaDiffDialog.vue";
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -102,8 +103,11 @@ const selectedSql = ref("");
 const formatSqlRequestId = ref(0);
 const showDangerDialog = ref(false);
 const showTransferDialog = ref(false);
+const showSchemaDiffDialog = ref(false);
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
+const schemaDiffPrefillConnectionId = ref("");
+const schemaDiffPrefillDatabase = ref("");
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -132,6 +136,15 @@ watch(() => connectionStore.transferSource, (v) => {
     transferPrefillDatabase.value = v.database;
     showTransferDialog.value = true;
     connectionStore.transferSource = null;
+  }
+});
+
+watch(() => connectionStore.schemaDiffSource, (v) => {
+  if (v) {
+    schemaDiffPrefillConnectionId.value = v.connectionId;
+    schemaDiffPrefillDatabase.value = v.database;
+    showSchemaDiffDialog.value = true;
+    connectionStore.schemaDiffSource = null;
   }
 });
 
@@ -1139,6 +1152,11 @@ async function setupFileDrop() {
         v-model:open="showTransferDialog"
         :prefill-connection-id="transferPrefillConnectionId"
         :prefill-database="transferPrefillDatabase"
+      />
+      <SchemaDiffDialog
+        v-model:open="showSchemaDiffDialog"
+        :prefill-connection-id="schemaDiffPrefillConnectionId"
+        :prefill-database="schemaDiffPrefillDatabase"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

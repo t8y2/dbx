@@ -133,6 +133,16 @@ The installer will be in `src-tauri/target/release/bundle/`.
   <img src="https://contrib.rocks/image?repo=t8y2/dbx" />
 </a>
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=t8y2%2Fdbx&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## License
 
 [MIT](LICENSE)

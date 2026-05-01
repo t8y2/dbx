@@ -35,6 +35,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: "release"
 
       - name: Install system dependencies (Linux)
         run: |

@@ -7,7 +7,7 @@ const globalDdlOpen = ref(false);
 import { computed, nextTick, onUnmounted, watch } from "vue";
 import { useElementSize } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
-import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X, Undo2, WrapText, Info } from "lucide-vue-next";
+import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X, Undo2, WrapText, Info, Rows3 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -120,6 +120,8 @@ const selectionFocus = ref<CellPosition | null>(null);
 const isSelectingCells = ref(false);
 const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const showCellDetail = ref(false);
+const transposeRowIndex = ref<number | null>(null);
+const showTranspose = ref(false);
 const sortCol = ref<string | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
@@ -655,6 +657,7 @@ function beginCellSelection(rowIndex: number, colIndex: number, event: MouseEven
   event.preventDefault();
   selectSingleCell(rowIndex, colIndex);
   isSelectingCells.value = true;
+  if (showTranspose.value) transposeRowIndex.value = rowIndex;
   document.addEventListener("mouseup", finishCellSelection);
 }
 
@@ -717,10 +720,39 @@ function copyDetailSqlCondition() {
   copyText(condition);
 }
 
+const transposeData = computed(() => {
+  if (transposeRowIndex.value === null) return null;
+  const item = displayItems.value[transposeRowIndex.value];
+  if (!item) return null;
+  return props.result.columns.map((col, i) => ({
+    column: col,
+    type: columnTypeMap.value.get(col) || "",
+    value: item.data[i],
+    display: formatCell(item.data[i]),
+    isNull: item.data[i] === null,
+  }));
+});
+
+function openTranspose(rowIndex: number) {
+  transposeRowIndex.value = rowIndex;
+  showTranspose.value = true;
+  showCellDetail.value = false;
+}
+
+function transposeNav(delta: number) {
+  if (transposeRowIndex.value === null) return;
+  const next = transposeRowIndex.value + delta;
+  if (next >= 0 && next < displayItems.value.length) {
+    transposeRowIndex.value = next;
+  }
+}
+
 watch(() => props.result, () => {
   clearCellSelection();
   showCellDetail.value = false;
   detailCell.value = null;
+  showTranspose.value = false;
+  transposeRowIndex.value = null;
 });
 
 // --- Copy/Export ---
@@ -1172,6 +1204,46 @@ function escapeAndHighlightKeywords(s: string): string {
                 </Button>
               </div>
             </div>
+            <!-- Transpose Panel -->
+            <div
+              v-if="showTranspose && transposeData"
+              class="relative w-80 shrink-0 border-l flex flex-col bg-background min-w-0"
+            >
+              <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
+                <Rows3 class="w-3.5 h-3.5 text-muted-foreground" />
+                <span class="text-xs font-medium">{{ t('grid.transpose') }}</span>
+                <span class="text-xs text-muted-foreground">{{ t('grid.rowNumber') }} {{ (transposeRowIndex ?? 0) + 1 }}</span>
+                <span class="flex-1" />
+                <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="transposeRowIndex === 0" @click="transposeNav(-1)">
+                  <ChevronLeft class="w-3 h-3" />
+                </Button>
+                <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="transposeRowIndex === displayItems.length - 1" @click="transposeNav(1)">
+                  <ChevronRight class="w-3 h-3" />
+                </Button>
+                <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTranspose = false">
+                  <X class="w-3 h-3" />
+                </Button>
+              </div>
+              <div class="flex-1 min-h-0 overflow-auto">
+                <table class="w-full text-xs">
+                  <tbody>
+                    <tr
+                      v-for="(field, fi) in transposeData"
+                      :key="fi"
+                      class="border-b border-border/50 hover:bg-accent/50"
+                    >
+                      <td class="px-3 py-1.5 font-medium text-muted-foreground whitespace-nowrap w-1/3 align-top">
+                        <div>{{ field.column }}</div>
+                        <div v-if="field.type" :class="typeColorClass(field.type)" class="text-[10px]">{{ field.type }}</div>
+                      </td>
+                      <td class="px-3 py-1.5 break-all" :class="{ 'text-muted-foreground italic': field.isNull }">
+                        {{ field.display }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </ContextMenuTrigger>
@@ -1180,6 +1252,10 @@ function escapeAndHighlightKeywords(s: string): string {
         <ContextMenuItem @click="copyCell">{{ t('grid.copyCell') }}</ContextMenuItem>
         <ContextMenuItem @click="copyRow">{{ t('grid.copyRow') }}</ContextMenuItem>
         <ContextMenuItem @click="copyAll">{{ t('grid.copyAll') }}</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem v-if="contextCell" @click="openTranspose(contextCell.rowIndex)">
+          <Rows3 class="w-3.5 h-3.5 mr-2" /> {{ t('grid.transpose') }}
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <template v-if="hasCellSelection">
           <ContextMenuItem @click="copySelectionTsv">{{ t('grid.copySelectionTsv') }}</ContextMenuItem>

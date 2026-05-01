@@ -126,6 +126,7 @@ export default {
     copyValue: "复制值",
     copyColumnName: "复制列名",
     copySqlCondition: "复制 SQL 条件",
+    transpose: "转置查看",
     rowsPerPageShort: " 行/页",
   },
   welcome: {

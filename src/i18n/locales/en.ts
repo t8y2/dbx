@@ -124,6 +124,7 @@ export default {
     copyValue: "Copy Value",
     copyColumnName: "Copy Column Name",
     copySqlCondition: "Copy SQL Condition",
+    transpose: "Transpose Row",
     rowsPerPageShort: " rows",
   },
   welcome: {

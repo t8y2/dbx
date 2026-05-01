@@ -36,6 +36,18 @@ impl SqlStatementSplitter {
             }
 
             if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
+                if self.previous == Some('-') && ch == '-' {
+                    self.in_line_comment = true;
+                    self.buffer.push(ch);
+                    self.previous = Some(ch);
+                    continue;
+                }
+                if self.previous == Some('/') && ch == '*' {
+                    self.in_block_comment = true;
+                    self.buffer.push(ch);
+                    self.previous = Some(ch);
+                    continue;
+                }
                 if ch == '-' && next == Some('-') {
                     self.in_line_comment = true;
                     self.buffer.push(ch);
@@ -107,7 +119,7 @@ fn split_sql_script(sql: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_sql_script;
+    use super::{split_sql_script, SqlStatementSplitter};
 
     #[test]
     fn splits_semicolon_delimited_statements() {
@@ -139,5 +151,29 @@ mod tests {
             split_sql_script("CREATE TABLE a(id int);\nINSERT INTO a VALUES (1)").unwrap(),
             vec!["CREATE TABLE a(id int)", "INSERT INTO a VALUES (1)"]
         );
+    }
+
+    #[test]
+    fn line_comment_openers_can_span_chunks() {
+        let mut splitter = SqlStatementSplitter::default();
+
+        assert_eq!(splitter.push_chunk("SELECT 1; -"), vec!["SELECT 1"]);
+        assert_eq!(
+            splitter.push_chunk("- comment ; ignored\nSELECT 2;"),
+            vec!["-- comment ; ignored\nSELECT 2"]
+        );
+        assert_eq!(splitter.finish(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn block_comment_openers_can_span_chunks() {
+        let mut splitter = SqlStatementSplitter::default();
+
+        assert_eq!(splitter.push_chunk("SELECT 1; /"), vec!["SELECT 1"]);
+        assert_eq!(
+            splitter.push_chunk("* comment ; ignored */\nSELECT 2;"),
+            vec!["/* comment ; ignored */\nSELECT 2"]
+        );
+        assert_eq!(splitter.finish(), Vec::<String>::new());
     }
 }

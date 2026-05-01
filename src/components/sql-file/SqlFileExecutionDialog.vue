@@ -300,6 +300,7 @@ async function cancelExecution() {
   try {
     await cancelSqlFileExecution(executionId.value);
   } catch (e: any) {
+    cancelRequested.value = false;
     cancelling.value = false;
     toast(e?.message || String(e), 5000);
   }

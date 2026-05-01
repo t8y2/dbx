@@ -49,6 +49,8 @@ const continueOnError = ref(false);
 
 const running = ref(false);
 const cancelling = ref(false);
+const cancelRequested = ref(false);
+const executionStarted = ref(false);
 const executionId = ref("");
 const progress = ref<SqlFileProgress | null>(null);
 const terminalStatus = ref<SqlFileStatus | "idle">("idle");
@@ -145,6 +147,8 @@ function chooseDatabase(names: string[], id: string) {
 function resetExecution() {
   running.value = false;
   cancelling.value = false;
+  cancelRequested.value = false;
+  executionStarted.value = false;
   executionId.value = "";
   progress.value = null;
   terminalStatus.value = "idle";
@@ -233,6 +237,8 @@ async function startExecution() {
   executionId.value = id;
   running.value = true;
   cancelling.value = false;
+  cancelRequested.value = false;
+  executionStarted.value = false;
   terminalStatus.value = "running";
   terminalError.value = "";
   progress.value = null;
@@ -240,6 +246,10 @@ async function startExecution() {
   let unlisten: (() => void) | undefined;
   try {
     await store.ensureConnected(connectionId.value);
+    if (cancelRequested.value) {
+      terminalStatus.value = "cancelled";
+      return;
+    }
 
     unlisten = await listenSqlFileProgress((next) => {
       if (next.executionId !== id) return;
@@ -252,6 +262,12 @@ async function startExecution() {
       }
     });
 
+    if (cancelRequested.value) {
+      terminalStatus.value = "cancelled";
+      return;
+    }
+
+    executionStarted.value = true;
     await executeSqlFile({
       executionId: id,
       connectionId: connectionId.value,
@@ -260,22 +276,27 @@ async function startExecution() {
       continueOnError: continueOnError.value,
     });
     if (!isTerminalStatus(terminalStatus.value)) {
-      terminalStatus.value = "done";
+      terminalStatus.value = cancelRequested.value ? "cancelled" : "done";
     }
   } catch (e: any) {
-    terminalStatus.value = cancelling.value ? "cancelled" : "error";
+    terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
     terminalError.value = e?.message || String(e);
-    toast(terminalError.value, 5000);
+    if (!cancelRequested.value) {
+      toast(terminalError.value, 5000);
+    }
   } finally {
     unlisten?.();
     running.value = false;
     cancelling.value = false;
+    executionStarted.value = false;
   }
 }
 
 async function cancelExecution() {
   if (!executionId.value || !running.value || cancelling.value) return;
+  cancelRequested.value = true;
   cancelling.value = true;
+  if (!executionStarted.value) return;
   try {
     await cancelSqlFileExecution(executionId.value);
   } catch (e: any) {
@@ -440,22 +461,22 @@ watch(open, (value) => {
             />
           </div>
 
-          <div class="grid grid-cols-4 gap-2 text-xs">
-            <div class="border rounded-md px-2 py-1.5">
-              <div class="text-muted-foreground">{{ t('sqlFile.statement') }}</div>
-              <div class="font-medium">{{ progress?.statementIndex ?? 0 }}</div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div class="border rounded-md px-2 py-1.5 min-w-0">
+              <div class="text-muted-foreground truncate">{{ t('sqlFile.statement') }}</div>
+              <div class="font-medium truncate">{{ progress?.statementIndex ?? 0 }}</div>
             </div>
-            <div class="border rounded-md px-2 py-1.5">
-              <div class="text-muted-foreground">{{ t('sqlFile.succeeded') }}</div>
-              <div class="font-medium text-green-600">{{ progress?.successCount ?? 0 }}</div>
+            <div class="border rounded-md px-2 py-1.5 min-w-0">
+              <div class="text-muted-foreground truncate">{{ t('sqlFile.succeeded') }}</div>
+              <div class="font-medium text-green-600 truncate">{{ progress?.successCount ?? 0 }}</div>
             </div>
-            <div class="border rounded-md px-2 py-1.5">
-              <div class="text-muted-foreground">{{ t('sqlFile.failed') }}</div>
-              <div class="font-medium text-destructive">{{ progress?.failureCount ?? 0 }}</div>
+            <div class="border rounded-md px-2 py-1.5 min-w-0">
+              <div class="text-muted-foreground truncate">{{ t('sqlFile.failed') }}</div>
+              <div class="font-medium text-destructive truncate">{{ progress?.failureCount ?? 0 }}</div>
             </div>
-            <div class="border rounded-md px-2 py-1.5">
-              <div class="text-muted-foreground">{{ t('sqlFile.affectedRows') }}</div>
-              <div class="font-medium">{{ (progress?.affectedRows ?? 0).toLocaleString() }}</div>
+            <div class="border rounded-md px-2 py-1.5 min-w-0">
+              <div class="text-muted-foreground truncate">{{ t('sqlFile.affectedRows') }}</div>
+              <div class="font-medium truncate">{{ (progress?.affectedRows ?? 0).toLocaleString() }}</div>
             </div>
           </div>
 

@@ -8,6 +8,7 @@
     <a href="https://github.com/t8y2/dbx/blob/main/LICENSE"><img src="https://img.shields.io/github/license/t8y2/dbx" /></a>
     <a href="https://github.com/t8y2/dbx/graphs/contributors"><img src="https://img.shields.io/github/contributors/t8y2/dbx" /></a>
     <a href="https://linux.do"><img src="https://img.shields.io/badge/community-LINUX%20DO-blue" /></a>
+    <a href="#community"><img src="https://img.shields.io/badge/WeChat%20%7C%20QQ-Join%20Group-brightgreen" /></a>
   </p>
   <p>
     <img src="https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white" />
@@ -52,6 +53,10 @@
 
 <div align="center">
   <img src="docs/screenshot.png" width="800" />
+  <br /><br />
+  <img src="docs/screenshot-connections.jpg" width="800" />
+  <br /><br />
+  <img src="docs/screenshot-ai.jpg" width="800" />
 </div>
 
 ## Install
@@ -114,6 +119,14 @@ The installer will be in `src-tauri/target/release/bundle/`.
 | Editor    | [CodeMirror 6](https://codemirror.net/)                                                                                                                                                                          |
 | Backend   | Rust + [sqlx](https://github.com/launchbadge/sqlx) / [tiberius](https://github.com/prisma/tiberius) / [redis-rs](https://github.com/redis-rs/redis-rs) / [mongodb](https://github.com/mongodb/mongo-rust-driver) |
 
+## Community
+
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
+
+|                     WeChat Group                      |                     QQ Group                      |
+| :---------------------------------------------: | :-----------------------------------------: |
+| <img src="docs/wechat-group.jpg" width="200" /> | <img src="docs/qq-group.jpg" width="200" /> |
+
 ## Contributors
 
 <a href="https://github.com/t8y2/dbx/graphs/contributors">
@@ -123,11 +136,3 @@ The installer will be in `src-tauri/target/release/bundle/`.
 ## License
 
 [MIT](LICENSE)
-
-## Community
-
-[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
-
-|                     WeChat Group                      |                     QQ Group                      |
-| :---------------------------------------------: | :-----------------------------------------: |
-| <img src="docs/wechat-group.jpg" width="200" /> | <img src="docs/qq-group.jpg" width="200" /> |

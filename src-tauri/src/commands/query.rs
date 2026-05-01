@@ -93,14 +93,25 @@ async fn wait_for_query<F>(
 where
     F: Future<Output = Result<db::QueryResult, String>>,
 {
+    wait_for_query_with_timeout(cancel_token, QUERY_TIMEOUT, future).await
+}
+
+async fn wait_for_query_with_timeout<F>(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Duration,
+    future: F,
+) -> Result<db::QueryResult, String>
+where
+    F: Future<Output = Result<db::QueryResult, String>>,
+{
     if let Some(token) = cancel_token {
         tokio::select! {
             biased;
             _ = token.cancelled() => Err(canceled_error()),
-            result = timeout(QUERY_TIMEOUT, future) => result.map_err(|_| timeout_error())?,
+            result = timeout(timeout_duration, future) => result.map_err(|_| timeout_error())?,
         }
     } else {
-        timeout(QUERY_TIMEOUT, future)
+        timeout(timeout_duration, future)
             .await
             .map_err(|_| timeout_error())?
     }
@@ -326,8 +337,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_query_without_token_still_times_out() {
-        let result = wait_for_query(None, async {
-            tokio::time::sleep(Duration::from_secs(31)).await;
+        let result = wait_for_query_with_timeout(None, Duration::from_millis(10), async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
             Ok(db::QueryResult {
                 columns: vec![],
                 rows: vec![],

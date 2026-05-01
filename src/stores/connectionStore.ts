@@ -130,16 +130,18 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  function addConnection(config: ConnectionConfig) {
+  async function addConnection(config: ConnectionConfig) {
     const normalized = normalizeConnection(config);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
+    const nextConnections = [...connections.value];
     if (existing >= 0) {
-      connections.value[existing] = normalized;
+      nextConnections[existing] = normalized;
     } else {
-      connections.value.push(normalized);
+      nextConnections.push(normalized);
     }
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
     upsertConnectionNode(normalized);
-    persistConnections();
   }
 
   function invalidateCompletionCache(connectionId: string) {
@@ -152,20 +154,25 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  function removeConnection(id: string) {
-    connections.value = connections.value.filter((c) => c.id !== id);
+  async function removeConnection(id: string) {
+    const nextConnections = connections.value.filter((c) => c.id !== id);
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
     treeNodes.value = treeNodes.value.filter((n) => n.id !== id);
     if (activeConnectionId.value === id) {
       activeConnectionId.value = null;
     }
     invalidateCompletionCache(id);
-    persistConnections();
   }
 
-  function updateConnection(config: ConnectionConfig) {
+  async function updateConnection(config: ConnectionConfig) {
     config = normalizeConnection(config);
     const idx = connections.value.findIndex((c) => c.id === config.id);
-    if (idx >= 0) connections.value[idx] = config;
+    if (idx < 0) return;
+    const nextConnections = [...connections.value];
+    nextConnections[idx] = config;
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
     const node = findNode(treeNodes.value, config.id);
     if (node) {
       node.label = config.name;
@@ -174,7 +181,6 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     connectedIds.value.delete(config.id);
     invalidateCompletionCache(config.id);
-    persistConnections();
   }
 
   async function connect(config: ConnectionConfig) {
@@ -561,8 +567,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return null;
   }
 
-  function persistConnections() {
-    api.saveConnections(connections.value).catch(() => {});
+  async function persistConnections(nextConnections: ConnectionConfig[] = connections.value) {
+    await api.saveConnections(nextConnections);
   }
 
   async function exportConnectionsToFile() {
@@ -570,7 +576,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     const path = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "dbx-connections.json" });
     if (!path) return;
-    const data = connections.value.map((c) => ({ ...c, password: "", ssh_password: "" }));
+    const data = connections.value.map((c) => ({ ...c, password: "", ssh_password: "", connection_string: undefined }));
     await writeTextFile(path, JSON.stringify(data, null, 2));
   }
 
@@ -585,7 +591,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!connections.value.find((c) => c.id === config.id)) {
         config.id = crypto.randomUUID();
         const normalized = normalizeConnection(config);
-        addConnection(normalized);
+        await addConnection(normalized);
       }
     }
   }

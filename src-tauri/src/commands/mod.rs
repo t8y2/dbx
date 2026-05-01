@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod connection;
+mod connection_secrets;
 pub mod history;
 pub mod mongo_cmd;
 pub mod query;

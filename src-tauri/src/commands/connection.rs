@@ -3,6 +3,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
+use crate::commands::connection_secrets::{
+    load_connections_from_file, save_connections_to_file, KeyringConnectionSecretStore,
+};
 use crate::commands::query_cancel::RunningQueries;
 use crate::db;
 use crate::db::ssh_tunnel::TunnelManager;
@@ -230,21 +233,15 @@ pub async fn save_connections(
     configs: Vec<ConnectionConfig>,
 ) -> Result<(), String> {
     let path = connections_file(&app)?;
-    let json = serde_json::to_string_pretty(&configs).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())?;
-    Ok(())
+    let store = KeyringConnectionSecretStore;
+    save_connections_to_file(&path, &configs, &store)
 }
 
 #[tauri::command]
 pub async fn load_connections(app: AppHandle) -> Result<Vec<ConnectionConfig>, String> {
     let path = connections_file(&app)?;
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let configs: Vec<ConnectionConfig> =
-        serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    Ok(configs)
+    let store = KeyringConnectionSecretStore;
+    load_connections_from_file(&path, &store)
 }
 
 #[tauri::command]

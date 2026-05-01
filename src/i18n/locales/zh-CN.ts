@@ -53,6 +53,8 @@ export default {
     connecting: "正在连接 {name}...",
     connectSuccess: "已连接 {name}",
     connectFailed: "连接失败：{message}",
+    saveFailed: "保存连接失败：{message}",
+    loadFailed: "加载已保存连接失败：{message}",
     sshTunnel: "SSH 隧道",
     sshEnable: "通过 SSH 隧道连接",
     sshHost: "SSH 主机",

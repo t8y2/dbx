@@ -269,11 +269,11 @@ async function save() {
   try {
     if (editingId.value) {
       const updated: ConnectionConfig = { ...form.value, id: editingId.value };
-      store.updateConnection(updated);
+      await store.updateConnection(updated);
       store.stopEditing();
     } else {
       const config: ConnectionConfig = { ...form.value, id: crypto.randomUUID() };
-      store.addConnection(config);
+      await store.addConnection(config);
       open.value = false;
       await nextTick();
       emit("connectStarted", config.name);

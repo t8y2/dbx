@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/context-menu";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useToast } from "@/composables/useToast";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/tauri";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -25,6 +26,7 @@ import { Button } from "@/components/ui/button";
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
+const { toast } = useToast();
 
 const props = defineProps<{
   node: TreeNode;
@@ -98,6 +100,7 @@ async function toggle() {
   if (node.isLoading) return;
   if (node.isExpanded) { node.isExpanded = false; return; }
 
+  try {
   if (node.type === "connection" && node.connectionId) {
     const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "redis") {
@@ -135,6 +138,9 @@ async function toggle() {
     await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema);
   } else if (node.type === "group-triggers" && node.connectionId && node.database && node.tableName) {
     await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema);
+  }
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 

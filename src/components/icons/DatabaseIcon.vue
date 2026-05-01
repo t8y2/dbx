@@ -36,6 +36,7 @@ const assetIcons: Record<string, string> = {
   bigquery: "bigquery",
   cassandra: "cassandra",
   doris: "doris",
+  selectdb: "selectdb",
   tdengine: "tdengine",
   starrocks: "starrocks",
   redshift: "redshift",

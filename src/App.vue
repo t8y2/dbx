@@ -596,7 +596,9 @@ function handleKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   applyTheme();
-  connectionStore.initFromDisk();
+  connectionStore.initFromDisk().catch((e: any) => {
+    toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+  });
   settingsStore.initAiConfig();
   window.addEventListener("keydown", handleKeydown, true);
   setupFileDrop();
@@ -671,9 +673,13 @@ async function setupFileDrop() {
         username: "",
         password: "",
       };
-      connectionStore.addConnection(config);
-      connectionStore.connect(config);
-      toast(t("welcome.fileOpened", { name }));
+      try {
+        await connectionStore.addConnection(config);
+        void connectionStore.connect(config);
+        toast(t("welcome.fileOpened", { name }));
+      } catch (e: any) {
+        toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+      }
     }
   });
 }

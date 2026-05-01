@@ -220,11 +220,15 @@ function deleteConnection() {
   showDeleteConfirm.value = true;
 }
 
-function confirmDelete() {
+async function confirmDelete() {
   const node = props.node;
   if (node.connectionId) {
-    connectionStore.disconnect(node.connectionId);
-    connectionStore.removeConnection(node.connectionId);
+    try {
+      await connectionStore.disconnect(node.connectionId);
+      await connectionStore.removeConnection(node.connectionId);
+    } catch (e: any) {
+      toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+    }
   }
 }
 

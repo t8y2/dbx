@@ -194,6 +194,35 @@ async fn do_execute(
     }
 }
 
+pub(super) async fn execute_sql_statement(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    cancel_token: Option<CancellationToken>,
+) -> Result<db::QueryResult, String> {
+    let pool_key = if database.is_empty() {
+        connection_id.to_string()
+    } else {
+        state.get_or_create_pool(connection_id, Some(database)).await?
+    };
+
+    if is_canceled(&cancel_token) {
+        return Err(canceled_error());
+    }
+
+    let result = do_execute(state, &pool_key, sql, cancel_token.clone()).await;
+
+    match &result {
+        Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
+            let db_opt = if database.is_empty() { None } else { Some(database) };
+            let new_key = state.reconnect_pool(connection_id, db_opt).await?;
+            do_execute(state, &new_key, sql, cancel_token).await
+        }
+        _ => result,
+    }
+}
+
 #[tauri::command]
 pub async fn execute_query(
     state: State<'_, Arc<AppState>>,
@@ -208,26 +237,16 @@ pub async fn execute_query(
         .map(|id| state.running_queries.register(id.clone()));
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    let pool_key = if database.is_empty() {
-        connection_id.clone()
-    } else {
-        state.get_or_create_pool(&connection_id, Some(&database)).await?
-    };
+    let result = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &sql,
+        cancel_token,
+    )
+    .await;
 
-    if is_canceled(&cancel_token) {
-        return Err(canceled_error());
-    }
-
-    let result = do_execute(&state, &pool_key, &sql, cancel_token.clone()).await;
-
-    match &result {
-        Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
-            let db_opt = if database.is_empty() { None } else { Some(database.as_str()) };
-            let new_key = state.reconnect_pool(&connection_id, db_opt).await?;
-            do_execute(&state, &new_key, &sql, cancel_token).await
-        }
-        _ => result,
-    }
+    result
 }
 
 #[tauri::command]
@@ -303,5 +322,22 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err(), QUERY_CANCELED);
+    }
+
+    #[tokio::test]
+    async fn wait_for_query_without_token_still_times_out() {
+        let result = wait_for_query(None, async {
+            tokio::time::sleep(Duration::from_secs(31)).await;
+            Ok(db::QueryResult {
+                columns: vec![],
+                rows: vec![],
+                affected_rows: 0,
+                execution_time_ms: 0,
+                truncated: false,
+            })
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), timeout_error());
     }
 }

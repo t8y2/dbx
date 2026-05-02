@@ -193,7 +193,7 @@ watch(previewRef, async (el) => {
         })
       ),
     ],
-    readOnly: true,
+    // readOnly: true,
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });

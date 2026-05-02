@@ -34,6 +34,7 @@ import {
   type CellPosition,
   type CellSelectionRange,
 } from "@/lib/gridSelection";
+import { buildTableSelectSql, normalizeWhereInput } from "@/lib/tableSelectSql";
 
 import { useToast } from "@/composables/useToast";
 
@@ -59,8 +60,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   reload: [];
-  paginate: [offset: number, limit: number];
-  sort: [column: string, direction: "asc" | "desc" | null];
+  paginate: [offset: number, limit: number, whereInput?: string];
+  sort: [column: string, direction: "asc" | "desc" | null, whereInput?: string];
 }>();
 
 const hasData = computed(() => props.result.columns.length > 0);
@@ -133,6 +134,8 @@ const showTranspose = ref(false);
 const sortCol = ref<string | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
+const saveError = ref("");
+const isApplyingWhere = ref(false);
 const columnWidths = ref<number[]>([]);
 const gridRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
@@ -203,21 +206,26 @@ watch(() => props.result.columns.length, initColumnWidths);
 const pageSize = ref(100);
 const currentPage = ref(1);
 const isFullPage = computed(() => props.result.rows.length >= pageSize.value);
+const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql);
+const isWhereSearch = computed(() => canUseWhereSearch.value && /^\s*where\b/i.test(searchText.value));
+const wherePredicate = computed(() => normalizeWhereInput(searchText.value));
+const activeWhereInput = computed(() => isWhereSearch.value && wherePredicate.value ? searchText.value : undefined);
+const clientSearchText = computed(() => isWhereSearch.value ? "" : searchText.value);
 
 function prevPage() {
   if (currentPage.value <= 1) return;
   currentPage.value--;
-  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value);
+  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, activeWhereInput.value);
 }
 function nextPage() {
   if (!isFullPage.value) return;
   currentPage.value++;
-  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value);
+  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, activeWhereInput.value);
 }
 function changePageSize(size: number) {
   pageSize.value = size;
   currentPage.value = 1;
-  emit("paginate", 0, size);
+  emit("paginate", 0, size, activeWhereInput.value);
 }
 
 // --- Editing ---
@@ -240,8 +248,8 @@ const hasPendingChanges = computed(() =>
 
 const sortedRows = computed(() => {
   let rows = props.result.rows.map((row, sourceIndex) => ({ row, sourceIndex }));
-  if (searchText.value) {
-    const q = searchText.value.toLowerCase();
+  if (clientSearchText.value) {
+    const q = clientSearchText.value.toLowerCase();
     rows = rows.filter(({ row, sourceIndex }) => {
       const data = rowDataWithChanges(row, sourceIndex);
       return data.some((cell) => cell !== null && String(cell).toLowerCase().includes(q));
@@ -282,8 +290,8 @@ const displayItems = computed<RowItem[]>(() => {
   return items;
 });
 const hasVisibleRows = computed(() => displayItems.value.length > 0);
-const emptyTitle = computed(() => searchText.value ? t('grid.noSearchResults') : t('grid.noRows'));
-const emptyDescription = computed(() => searchText.value ? t('grid.noSearchResultsDescription') : t('grid.noRowsDescription'));
+const emptyTitle = computed(() => clientSearchText.value ? t('grid.noSearchResults') : t('grid.noRows'));
+const emptyDescription = computed(() => clientSearchText.value ? t('grid.noSearchResultsDescription') : t('grid.noRowsDescription'));
 const selectedRange = computed<CellSelectionRange | null>(() => {
   if (!selectionAnchor.value || !selectionFocus.value) return null;
   return normalizeSelectionRange(selectionAnchor.value, selectionFocus.value);
@@ -328,12 +336,41 @@ const activeCellDetail = computed(() => {
 function toggleSort(colName: string) {
   if (isResizing) return;
   if (sortCol.value === colName) {
-    if (sortDir.value === "asc") { sortDir.value = "desc"; emit("sort", colName, "desc"); }
-    else { sortCol.value = null; sortDir.value = "asc"; emit("sort", colName, null); }
+    if (sortDir.value === "asc") { sortDir.value = "desc"; emit("sort", colName, "desc", activeWhereInput.value); }
+    else { sortCol.value = null; sortDir.value = "asc"; emit("sort", colName, null, activeWhereInput.value); }
   } else {
     sortCol.value = colName;
     sortDir.value = "asc";
-    emit("sort", colName, "asc");
+    emit("sort", colName, "asc", activeWhereInput.value);
+  }
+}
+
+function onSearchEnter(event: KeyboardEvent) {
+  if (!isWhereSearch.value) return;
+  event.preventDefault();
+  void applyWhereSearch();
+}
+
+async function applyWhereSearch() {
+  if (!props.tableMeta || !props.onExecuteSql || !wherePredicate.value) return;
+  isApplyingWhere.value = true;
+  saveError.value = "";
+  currentPage.value = 1;
+  try {
+    const sql = buildTableSelectSql({
+      databaseType: props.databaseType,
+      schema: props.tableMeta.schema,
+      tableName: props.tableMeta.tableName,
+      primaryKeys: props.tableMeta.primaryKeys,
+      orderBy: sortCol.value ? `${quoteIdent(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined,
+      limit: pageSize.value,
+      whereInput: searchText.value,
+    });
+    await props.onExecuteSql(sql);
+  } catch (e: any) {
+    saveError.value = String(e?.message || e);
+  } finally {
+    isApplyingWhere.value = false;
   }
 }
 
@@ -603,8 +640,6 @@ function generateSaveStatements(): string[] {
   }
   return stmts;
 }
-
-const saveError = ref("");
 
 async function saveChanges() {
   const stmts = generateSaveStatements();
@@ -956,11 +991,24 @@ function escapeAndHighlightKeywords(s: string): string {
             <input
               v-model="searchText"
               class="flex-1 h-5 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
-              :placeholder="t('grid.search')"
+              :placeholder="canUseWhereSearch ? t('grid.searchOrWhere') : t('grid.search')"
+              @keydown.enter="onSearchEnter"
             />
-            <span v-if="searchText" class="text-xs text-muted-foreground">
+            <span v-if="clientSearchText" class="text-xs text-muted-foreground">
               {{ sortedRows.length }}/{{ result.rows.length }}
             </span>
+            <Button
+              v-if="isWhereSearch"
+              variant="ghost"
+              size="sm"
+              class="h-5 text-xs px-1.5 shrink-0"
+              :disabled="isApplyingWhere || !wherePredicate"
+              @click="applyWhereSearch"
+            >
+              <Loader2 v-if="isApplyingWhere" class="w-3 h-3 mr-1 animate-spin" />
+              <Search v-else class="w-3 h-3 mr-1" />
+              {{ t('grid.applyWhere') }}
+            </Button>
             <Button v-if="editable && tableMeta" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" @click="addRow">
               <Plus class="w-3 h-3 mr-1" /> {{ t('grid.addRow') }}
             </Button>
@@ -1297,7 +1345,7 @@ function escapeAndHighlightKeywords(s: string): string {
 
     <!-- Bottom status bar -->
     <div class="flex items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0">
-      <span v-if="hasData">{{ t('grid.rows', { count: result.rows.length }) }}</span>
+      <span v-if="hasData">{{ t('grid.totalRows', { count: result.rows.length }) }}</span>
       <span v-else>{{ t('grid.rowsAffected', { count: result.affected_rows }) }}</span>
       <span>{{ result.execution_time_ms }}ms</span>
       <span v-if="hasCellSelection" class="text-foreground">{{ selectionSummary }}</span>

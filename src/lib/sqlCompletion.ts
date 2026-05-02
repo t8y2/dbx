@@ -83,7 +83,7 @@ export function buildSqlCompletionItemsFromContext(
     items.push(...buildTableItems(context.prefix, input.tables));
   }
 
-  if (!context.qualifier) {
+  if (!context.qualifier && !context.suggestTables) {
     items.push(...buildKeywordItems(context.prefix));
   }
 

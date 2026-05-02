@@ -36,6 +36,7 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import DataTransferDialog from "@/components/transfer/DataTransferDialog.vue";
 import SchemaDiffDialog from "@/components/diff/SchemaDiffDialog.vue";
 import SqlFileExecutionDialog from "@/components/sql-file/SqlFileExecutionDialog.vue";
+import SchemaDiagramDialog from "@/components/diagram/SchemaDiagramDialog.vue";
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -117,12 +118,17 @@ const showDangerDialog = ref(false);
 const showTransferDialog = ref(false);
 const showSchemaDiffDialog = ref(false);
 const showSqlFileDialog = ref(false);
+const showDiagramDialog = ref(false);
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
+const diagramPrefillConnectionId = ref("");
+const diagramPrefillDatabase = ref("");
+const diagramPrefillSchema = ref("");
+const diagramFocusTableName = ref("");
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -174,6 +180,17 @@ watch(() => connectionStore.sqlFileSource, (v) => {
     sqlFilePrefillDatabase.value = v.database;
     showSqlFileDialog.value = true;
     connectionStore.sqlFileSource = null;
+  }
+});
+
+watch(() => connectionStore.diagramSource, (v) => {
+  if (v) {
+    diagramPrefillConnectionId.value = v.connectionId;
+    diagramPrefillDatabase.value = v.database;
+    diagramPrefillSchema.value = v.schema ?? "";
+    diagramFocusTableName.value = v.tableName ?? "";
+    showDiagramDialog.value = true;
+    connectionStore.diagramSource = null;
   }
 });
 
@@ -1209,6 +1226,13 @@ async function setupFileDrop() {
         v-model:open="showSqlFileDialog"
         :prefill-connection-id="sqlFilePrefillConnectionId"
         :prefill-database="sqlFilePrefillDatabase"
+      />
+      <SchemaDiagramDialog
+        v-model:open="showDiagramDialog"
+        :prefill-connection-id="diagramPrefillConnectionId"
+        :prefill-database="diagramPrefillDatabase"
+        :prefill-schema="diagramPrefillSchema"
+        :focus-table-name="diagramFocusTableName"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

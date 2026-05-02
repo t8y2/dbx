@@ -5,7 +5,7 @@ import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
   Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
-  Pin, ArrowRightLeft, Download, FileCode,
+  Pin, ArrowRightLeft, Download, FileCode, Network,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
@@ -34,6 +34,7 @@ const props = defineProps<{
 }>();
 
 const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
+const diagramSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
 
 function quoteIdent(name: string): string {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
@@ -348,11 +349,26 @@ function openSqlFileExecution() {
   }
 }
 
+function openDiagram() {
+  const node = props.node;
+  if (!node.connectionId || !node.database) return;
+  connectionStore.diagramSource = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    tableName: node.type === "table" ? node.label : undefined,
+  };
+}
+
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const canOpenSqlFileExecution = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return !!config && !sqlFileUnsupportedTypes.has(config.db_type);
+});
+const canOpenDiagram = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return !!props.node.database && !!config && diagramSupportedTypes.has(config.db_type);
 });
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
 const hasTypeMenu = computed(() => {
@@ -486,6 +502,9 @@ async function showMore() {
         <ContextMenuItem v-if="canOpenSqlFileExecution" @click="openSqlFileExecution">
           <FileCode class="w-4 h-4" /> {{ t('sqlFile.title') }}
         </ContextMenuItem>
+        <ContextMenuItem v-if="canOpenDiagram" @click="openDiagram">
+          <Network class="w-4 h-4" /> {{ t('diagram.open') }}
+        </ContextMenuItem>
         <ContextMenuItem @click="refresh">
           <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
         </ContextMenuItem>
@@ -504,6 +523,9 @@ async function showMore() {
         </ContextMenuItem>
         <ContextMenuItem @click="newQuery">
           <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
+        </ContextMenuItem>
+        <ContextMenuItem v-if="canOpenDiagram" @click="openDiagram">
+          <Network class="w-4 h-4" /> {{ t('diagram.open') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuSub>

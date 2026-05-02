@@ -51,6 +51,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import * as api from "@/lib/tauri";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
+import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCloseTabShortcut, isExecuteSqlShortcut } from "@/lib/keyboardShortcuts";
 
@@ -307,6 +308,14 @@ function tabDisplayTitle(tab: typeof queryStore.tabs[number]): string {
   return tab.title;
 }
 
+function tabModeLabel(tab: typeof queryStore.tabs[number]): string {
+  if (tab.mode === "data") return t("tabs.table");
+  if (tab.mode === "query") return t("tabs.sql");
+  if (tab.mode === "mongo") return t("tabs.mongo");
+  if (tab.mode === "redis") return t("tabs.redis");
+  return tab.mode;
+}
+
 function databaseDisplayNameForTab(connectionId: string, database: string): string {
   const connection = connectionStore.getConfig(connectionId);
   if (connection?.db_type === "redis" && database !== "") return `db${database}`;
@@ -472,7 +481,8 @@ async function changeActiveConnection(connectionId: any) {
 async function onExecuteSql(sql: string) {
   const tab = activeTab.value;
   if (!tab) return;
-  await api.executeQuery(tab.connectionId, tab.database, sql);
+  queryStore.updateSql(tab.id, sql);
+  await queryStore.executeTabSql(tab.id, sql);
 }
 
 async function onReloadData() {
@@ -488,61 +498,36 @@ type ActiveTab = NonNullable<typeof activeTab.value>;
 
 function quoteIdent(tab: ActiveTab, name: string): string {
   const config = connectionStore.getConfig(tab.connectionId);
-  return config?.db_type === "mysql"
-    ? `\`${name.replace(/`/g, "``")}\``
-    : `"${name.replace(/"/g, '""')}"`;
-}
-
-function qualifiedTableName(tab: NonNullable<typeof activeTab.value>): string {
-  const config = connectionStore.getConfig(tab.connectionId);
-  if (!tab.tableMeta) return "";
-  if ((config?.db_type === "postgres" || config?.db_type === "oracle" || config?.db_type === "sqlserver") && tab.tableMeta.schema) {
-    return `${quoteIdent(tab, tab.tableMeta.schema)}.${quoteIdent(tab, tab.tableMeta.tableName)}`;
-  }
-  return quoteIdent(tab, tab.tableMeta.tableName);
-}
-
-function defaultOrderBy(tab: NonNullable<typeof activeTab.value>): string | undefined {
-  const primaryKeys = tab.tableMeta?.primaryKeys ?? [];
-  if (primaryKeys.length === 0) return undefined;
-  return primaryKeys.map((pk) => `${quoteIdent(tab, pk)} ASC`).join(", ");
+  return quoteTableIdentifier(config?.db_type, name);
 }
 
 function buildTableSql(
   tab: NonNullable<typeof activeTab.value>,
-  options: { orderBy?: string; limit?: number; offset?: number } = {},
+  options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {},
 ): string {
   const config = connectionStore.getConfig(tab.connectionId);
-  const limit = options.limit ?? 100;
-  const orderBy = options.orderBy ?? defaultOrderBy(tab);
-  const order = orderBy ? ` ORDER BY ${orderBy}` : "";
-
-  if (config?.db_type === "oracle") {
-    const offset = options.offset ? ` OFFSET ${options.offset} ROWS` : "";
-    return `SELECT * FROM ${qualifiedTableName(tab)}${order}${offset} FETCH FIRST ${limit} ROWS ONLY`;
-  }
-
-  if (config?.db_type === "sqlserver") {
-    return `SELECT TOP ${limit} * FROM ${qualifiedTableName(tab)}${order}`;
-  }
-
-  const offset = options.offset ? ` OFFSET ${options.offset}` : "";
-  return `SELECT * FROM ${qualifiedTableName(tab)}${order} LIMIT ${limit}${offset};`;
+  return buildTableSelectSql({
+    databaseType: config?.db_type,
+    schema: tab.tableMeta?.schema,
+    tableName: tab.tableMeta?.tableName ?? "",
+    primaryKeys: tab.tableMeta?.primaryKeys,
+    ...options,
+  });
 }
 
-async function onPaginate(offset: number, limit: number) {
+async function onPaginate(offset: number, limit: number, whereInput?: string) {
   const tab = activeTab.value;
   if (!tab?.tableMeta) return;
-  const sql = buildTableSql(tab, { limit, offset });
+  const sql = buildTableSql(tab, { limit, offset, whereInput });
   queryStore.updateSql(tab.id, sql);
   await queryStore.executeCurrentTab();
 }
 
-async function onSort(column: string, direction: "asc" | "desc" | null) {
+async function onSort(column: string, direction: "asc" | "desc" | null, whereInput?: string) {
   const tab = activeTab.value;
   if (!tab?.tableMeta) return;
-  const orderBy = direction ? `${quoteIdent(tab, column)} ${direction.toUpperCase()}` : defaultOrderBy(tab);
-  const sql = buildTableSql(tab, { orderBy });
+  const orderBy = direction ? `${quoteIdent(tab, column)} ${direction.toUpperCase()}` : undefined;
+  const sql = buildTableSql(tab, { orderBy, whereInput });
   queryStore.updateSql(tab.id, sql);
   await queryStore.executeCurrentTab();
 }
@@ -863,7 +848,18 @@ async function setupFileDrop() {
                   @click="queryStore.activeTabId = tab.id"
                 >
                   <span class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) || '#9ca3af' }" />
+                  <component
+                    :is="tab.mode === 'data' ? Table2 : FileCode"
+                    class="h-3.5 w-3.5 shrink-0"
+                    :class="tab.mode === 'data' ? 'text-emerald-600' : 'text-blue-600'"
+                  />
                   <span class="min-w-0 truncate">{{ tabDisplayTitle(tab) }}</span>
+                  <span
+                    class="shrink-0 rounded border px-1 text-[10px] leading-4"
+                    :class="tab.mode === 'data' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300'"
+                  >
+                    {{ tabModeLabel(tab) }}
+                  </span>
                   <Tooltip>
                     <TooltipTrigger as-child>
                       <button
@@ -1028,13 +1024,13 @@ async function setupFileDrop() {
                         {{ t('ai.fixWithAi') }}
                       </button>
                     </div>
-                    <div v-else-if="activeTab.isExecuting" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
+                    <div v-else-if="!activeTab.result && activeTab.isExecuting" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
                       <div class="flex items-center">
                         <Loader2 class="h-5 w-5 animate-spin mr-2" />
                         {{ t(queryExecutionLabelKey(activeTab)) }}
                       </div>
                     </div>
-                    <div v-else class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
+                    <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
                       {{ t('editor.pressToExecute') }}
                     </div>
                   </div>
@@ -1044,9 +1040,24 @@ async function setupFileDrop() {
 
             <!-- Data mode: full-height grid -->
             <template v-else-if="activeTab.mode === 'data'">
-              <div class="flex-1 min-h-0">
+              <div class="flex-1 min-h-0 flex flex-col">
+                <div class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs">
+                  <span class="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
+                    <Table2 class="h-3.5 w-3.5" />
+                    {{ t('tabs.tableData') }}
+                  </span>
+                  <span class="font-medium truncate">{{ activeTab.tableMeta?.tableName || activeTab.title }}</span>
+                  <span class="text-muted-foreground truncate">
+                    {{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database) }}
+                    <template v-if="activeTab.tableMeta?.schema"> · {{ activeTab.tableMeta.schema }}</template>
+                  </span>
+                  <span v-if="activeTab.tableMeta" class="ml-auto text-muted-foreground">
+                    {{ activeTab.tableMeta.columns.length }} {{ t('tree.columns') }}
+                  </span>
+                </div>
                 <DataGrid
                   v-if="activeTab.result"
+                  class="flex-1 min-h-0"
                   :key="activeTab.id"
                   :result="activeTab.result"
                   :sql="activeTab.sql"

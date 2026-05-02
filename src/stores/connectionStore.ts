@@ -19,6 +19,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const transferSource = ref<{ connectionId: string; database: string } | null>(null);
   const schemaDiffSource = ref<{ connectionId: string; database: string } | null>(null);
   const sqlFileSource = ref<{ connectionId: string; database: string } | null>(null);
+  const diagramSource = ref<{ connectionId: string; database: string; schema?: string; tableName?: string } | null>(null);
 
   function startEditing(id: string) {
     editingConnectionId.value = id;
@@ -655,5 +656,6 @@ export const useConnectionStore = defineStore("connection", () => {
     transferSource,
     schemaDiffSource,
     sqlFileSource,
+    diagramSource,
   };
 });

@@ -30,6 +30,39 @@ fn get_opt_str(row: &MySqlRow, name: &str) -> Option<String> {
         })
 }
 
+fn numeric_metadata_u64_to_i32(value: Option<u64>) -> Option<i32> {
+    value.and_then(|v| i32::try_from(v).ok())
+}
+
+fn numeric_metadata_i64_to_i32(value: Option<i64>) -> Option<i32> {
+    value.and_then(|v| i32::try_from(v).ok())
+}
+
+fn numeric_metadata_str_to_i32(value: Option<String>) -> Option<i32> {
+    value.and_then(|v| v.parse::<i64>().ok())
+        .and_then(|v| i32::try_from(v).ok())
+}
+
+fn get_opt_i32(row: &MySqlRow, name: &str) -> Option<i32> {
+    if row.try_get_raw(name).map(|v| v.is_null()).unwrap_or(true) {
+        return None;
+    }
+
+    row.try_get::<Option<i32>, _>(name)
+        .ok()
+        .flatten()
+        .or_else(|| numeric_metadata_i64_to_i32(row.try_get::<Option<i64>, _>(name).ok().flatten()))
+        .or_else(|| numeric_metadata_u64_to_i32(row.try_get::<Option<u64>, _>(name).ok().flatten()))
+        .or_else(|| numeric_metadata_str_to_i32(row.try_get::<Option<String>, _>(name).ok().flatten()))
+        .or_else(|| {
+            row.try_get::<Option<Vec<u8>>, _>(name)
+                .ok()
+                .flatten()
+                .and_then(|b| String::from_utf8(b).ok())
+                .and_then(|v| numeric_metadata_str_to_i32(Some(v)))
+        })
+}
+
 fn mysql_temporal_to_json_value(row: &MySqlRow, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<NaiveDateTime, _>(idx) {
         return Some(serde_json::Value::String(v.to_string()));
@@ -193,8 +226,8 @@ pub async fn get_columns(
             is_primary_key: row.get::<i32, _>("IS_PK") == 1,
             extra: get_opt_str(row, "EXTRA"),
             comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
-            numeric_precision: row.get::<Option<i32>, _>("NUMERIC_PRECISION"),
-            numeric_scale: row.get::<Option<i32>, _>("NUMERIC_SCALE"),
+            numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
+            numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
         })
         .collect())
 }
@@ -325,4 +358,20 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             timing: get_str_by_name(row, "ACTION_TIMING"),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_metadata_accepts_unsigned_information_schema_values() {
+        assert_eq!(numeric_metadata_u64_to_i32(Some(65)), Some(65));
+    }
+
+    #[test]
+    fn numeric_metadata_ignores_values_outside_frontend_range() {
+        assert_eq!(numeric_metadata_u64_to_i32(Some(i32::MAX as u64 + 1)), None);
+        assert_eq!(numeric_metadata_u64_to_i32(None), None);
+    }
 }

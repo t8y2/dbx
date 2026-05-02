@@ -5,7 +5,7 @@ import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
   Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
-  Pin, ArrowRightLeft, Download, FileCode, Network,
+  Pin, ArrowRightLeft, Download, FileCode, Network, FileUp,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
@@ -43,6 +43,7 @@ const props = defineProps<{
 
 const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
 const diagramSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
+const tableImportSupportedTypes = new Set(["mysql", "postgres", "sqlite", "duckdb", "clickhouse", "sqlserver", "oracle", "doris", "starrocks", "redshift"]);
 const isExportingDatabase = ref(false);
 
 function currentDatabaseType(): DatabaseType | undefined {
@@ -513,6 +514,17 @@ function openDiagram() {
   };
 }
 
+function openTableImport() {
+  const node = props.node;
+  if (node.type !== "table" || !node.connectionId || !node.database) return;
+  connectionStore.tableImportSource = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    tableName: node.label,
+  };
+}
+
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const canOpenSqlFileExecution = computed(() => {
@@ -522,6 +534,10 @@ const canOpenSqlFileExecution = computed(() => {
 const canOpenDiagram = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return !!props.node.database && !!config && diagramSupportedTypes.has(config.db_type);
+});
+const canOpenTableImport = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return props.node.type === "table" && !!props.node.database && !!config && tableImportSupportedTypes.has(config.db_type);
 });
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
 const hasTypeMenu = computed(() => {
@@ -684,6 +700,9 @@ async function showMore() {
         </ContextMenuItem>
         <ContextMenuItem v-if="canOpenDiagram" @click="openDiagram">
           <Network class="w-4 h-4" /> {{ t('diagram.open') }}
+        </ContextMenuItem>
+        <ContextMenuItem v-if="canOpenTableImport" @click="openTableImport">
+          <FileUp class="w-4 h-4" /> {{ t('contextMenu.importData') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuSub>

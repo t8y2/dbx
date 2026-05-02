@@ -49,3 +49,5 @@ oracle-rs = "0.1"
 percent-encoding = "2"
 russh = "0.60"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
+csv = "1.4.0"
+calamine = "0.30.1"

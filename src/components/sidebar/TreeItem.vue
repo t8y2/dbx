@@ -15,8 +15,16 @@ import {
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
-import type { TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, QueryResult, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/tauri";
+import {
+  DATABASE_EXPORT_PAGE_SIZE,
+  DATABASE_EXPORT_ROW_LIMIT,
+  buildDatabaseSqlExport,
+  buildExportPageSql,
+  type ExportedTableSql,
+} from "@/lib/databaseExport";
+import { qualifiedTableName as buildQualifiedTableName, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -35,12 +43,30 @@ const props = defineProps<{
 
 const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
 const diagramSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
+const isExportingDatabase = ref(false);
+
+function currentDatabaseType(): DatabaseType | undefined {
+  return props.node.connectionId ? connectionStore.getConfig(props.node.connectionId)?.db_type : undefined;
+}
 
 function quoteIdent(name: string): string {
-  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return config?.db_type === "mysql"
-    ? `\`${name.replace(/`/g, "``")}\``
-    : `"${name.replace(/"/g, '""')}"`;
+  return quoteTableIdentifier(currentDatabaseType(), name);
+}
+
+function isSchemaAwareDbType(dbType?: DatabaseType): boolean {
+  return dbType === "postgres" || dbType === "oracle" || dbType === "sqlserver";
+}
+
+function qualifiedTableName(tableName: string, schema?: string): string {
+  return buildQualifiedTableName({
+    databaseType: currentDatabaseType(),
+    schema,
+    tableName,
+  });
+}
+
+function safeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]+/g, "_").trim() || "database";
 }
 
 function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
@@ -237,6 +263,133 @@ async function confirmDelete() {
 
 function copyName() {
   navigator.clipboard.writeText(props.node.label);
+}
+
+async function collectDatabaseExportTables(): Promise<Array<{ schema?: string; name: string; displayName: string }>> {
+  const node = props.node;
+  if (!node.connectionId || !node.database) return [];
+
+  const config = connectionStore.getConfig(node.connectionId);
+  if (node.type === "schema" && node.schema) {
+    const tables = await api.listTables(node.connectionId, node.database, node.schema);
+    return tables.map((table) => ({
+      schema: node.schema,
+      name: table.name,
+      displayName: `${node.schema}.${table.name}`,
+    }));
+  }
+
+  if (isSchemaAwareDbType(config?.db_type)) {
+    const schemas = await api.listSchemas(node.connectionId, node.database);
+    const groups = await Promise.all(
+      schemas.map(async (schema) => {
+        const tables = await api.listTables(node.connectionId!, node.database!, schema);
+        return tables.map((table) => ({
+          schema,
+          name: table.name,
+          displayName: `${schema}.${table.name}`,
+        }));
+      }),
+    );
+    return groups.flat();
+  }
+
+  const tables = await api.listTables(node.connectionId, node.database, node.database);
+  return tables.map((table) => ({
+    name: table.name,
+    displayName: table.name,
+  }));
+}
+
+async function fetchExportTableRows(
+  connectionId: string,
+  database: string,
+  table: { schema?: string; name: string },
+  databaseType?: DatabaseType,
+): Promise<{ columns: QueryResult["columns"]; rows: QueryResult["rows"]; truncated: boolean }> {
+  const rows: QueryResult["rows"] = [];
+  let columns: QueryResult["columns"] = [];
+  let offset = 0;
+
+  while (rows.length < DATABASE_EXPORT_ROW_LIMIT) {
+    const remaining = DATABASE_EXPORT_ROW_LIMIT - rows.length;
+    const limit = databaseType === "sqlserver"
+      ? DATABASE_EXPORT_ROW_LIMIT
+      : Math.min(DATABASE_EXPORT_PAGE_SIZE, remaining);
+    const sql = buildExportPageSql({
+      databaseType,
+      schema: table.schema,
+      tableName: table.name,
+      limit,
+      offset: databaseType === "sqlserver" ? undefined : offset,
+    });
+    const result = await api.executeQuery(connectionId, database, sql);
+    if (columns.length === 0) columns = result.columns;
+    rows.push(...result.rows);
+
+    if (result.rows.length < limit || databaseType === "sqlserver") break;
+    offset += result.rows.length;
+  }
+
+  return {
+    columns,
+    rows,
+    truncated: rows.length >= DATABASE_EXPORT_ROW_LIMIT,
+  };
+}
+
+async function exportDatabase() {
+  const node = props.node;
+  if (!(node.type === "database" || node.type === "schema") || !node.connectionId || !node.database) return;
+
+  isExportingDatabase.value = true;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const config = connectionStore.getConfig(node.connectionId);
+    const tables = await collectDatabaseExportTables();
+    const exportedTables: ExportedTableSql[] = [];
+
+    for (const table of tables) {
+      const querySchema = table.schema || node.database;
+      const qualifiedName = qualifiedTableName(table.name, table.schema);
+      const ddl = await api.getTableDdl(node.connectionId, node.database, querySchema, table.name);
+      const result = await fetchExportTableRows(node.connectionId, node.database, table, config?.db_type);
+      exportedTables.push({
+        displayName: table.displayName,
+        qualifiedTableName: qualifiedName,
+        ddl,
+        columns: result.columns,
+        rows: result.rows,
+        truncated: result.truncated,
+      });
+    }
+
+    const scopeName = node.type === "schema" && node.schema
+      ? `${node.database}.${node.schema}`
+      : node.database;
+    const content = buildDatabaseSqlExport({
+      databaseName: scopeName,
+      tables: exportedTables,
+      quoteIdentifier: quoteIdent,
+      rowLimitPerTable: DATABASE_EXPORT_ROW_LIMIT,
+    });
+
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({
+      defaultPath: `${safeFileName(scopeName)}.sql`,
+      filters: [{ name: "SQL", extensions: ["sql"] }],
+    });
+    if (!path) return;
+
+    await writeTextFile(path, content);
+    toast(t("contextMenu.exportDatabaseSuccess", { count: exportedTables.length, limit: DATABASE_EXPORT_ROW_LIMIT }), 3000);
+  } catch (e: any) {
+    console.error("Export database failed:", e);
+    toast(t("contextMenu.exportDatabaseFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    isExportingDatabase.value = false;
+  }
 }
 
 async function exportStructure() {
@@ -514,6 +667,11 @@ async function showMore() {
         </ContextMenuItem>
         <ContextMenuItem @click="openSchemaDiff">
           <ArrowRightLeft class="w-4 h-4" /> {{ t('diff.title') }}
+        </ContextMenuItem>
+        <ContextMenuItem :disabled="isExportingDatabase" @click="exportDatabase">
+          <Loader2 v-if="isExportingDatabase" class="w-4 h-4 animate-spin" />
+          <Download v-else class="w-4 h-4" />
+          {{ t('contextMenu.exportDatabase') }}
         </ContextMenuItem>
       </template>
 

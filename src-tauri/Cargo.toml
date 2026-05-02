@@ -16,8 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5.6", features = [] }
 
 [profile.release]
+panic = "abort"
 strip = true
-lto = "thin"
+lto = true
 codegen-units = 1
 opt-level = "s"
 

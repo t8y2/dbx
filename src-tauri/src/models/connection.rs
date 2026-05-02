@@ -69,6 +69,12 @@ pub enum DatabaseType {
 }
 
 impl ConnectionConfig {
+    pub fn needs_bare_mysql(&self) -> bool {
+        matches!(self.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
+            || self.driver_profile.as_deref().map(|p| p.to_lowercase())
+                .is_some_and(|p| matches!(p.as_str(), "doris" | "starrocks" | "selectdb" | "tdengine"))
+    }
+
     pub fn connection_url(&self) -> String {
         self.connection_url_with_host(&self.host, self.port)
     }
@@ -187,6 +193,13 @@ impl ConnectionConfig {
 
     fn normalized_url_params(&self) -> String {
         let value = self.url_params.as_deref().unwrap_or("").trim();
+        if self.needs_bare_mysql() {
+            let v = value.trim_start_matches('?');
+            let filtered: Vec<&str> = v.split('&')
+                .filter(|p| !p.is_empty() && !p.starts_with("charset=") && !p.starts_with("ssl-mode=preferred"))
+                .collect();
+            return if filtered.is_empty() { "ssl-mode=disabled".to_string() } else { format!("ssl-mode=disabled&{}", filtered.join("&")) };
+        }
         match self.db_type {
             DatabaseType::Mysql => {
                 let base = "ssl-mode=preferred&charset=utf8mb4";

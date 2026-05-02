@@ -400,7 +400,8 @@ pub async fn get_table_ddl(
 
 async fn mysql_ddl(pool: &sqlx::mysql::MySqlPool, table: &str) -> Result<String, String> {
     use sqlx::Row;
-    let row: sqlx::mysql::MySqlRow = sqlx::query(&format!("SHOW CREATE TABLE `{}`", table.replace('`', "``")))
+    let sql = format!("SHOW CREATE TABLE `{}`", table.replace('`', "``"));
+    let row: sqlx::mysql::MySqlRow = sqlx::raw_sql(&sql)
         .fetch_one(pool).await.map_err(|e| e.to_string())?;
     row.try_get::<String, _>(1)
         .or_else(|_| row.try_get::<Vec<u8>, _>(1).map(|b| String::from_utf8_lossy(&b).to_string()))

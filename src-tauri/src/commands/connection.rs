@@ -89,6 +89,7 @@ impl AppState {
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
         let url = connection_url_for_endpoint(&db_config, &host, port);
         let pool = match db_config.db_type {
+            DatabaseType::Mysql if db_config.needs_bare_mysql() => PoolKind::Mysql(db::mysql::connect_bare(&url).await?),
             DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?),
             DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(db::mysql::connect_bare(&url).await?),
             DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),
@@ -266,19 +267,32 @@ pub async fn test_connection(
         target
     );
     let result = match config.db_type {
-        DatabaseType::Mysql => match db::mysql::connect(&url).await {
-            Ok(pool) => {
-                pool.close().await;
-                Ok("Connection successful".to_string())
+        DatabaseType::Mysql if config.needs_bare_mysql() => {
+            match db::mysql::connect_bare(&url).await {
+                Ok(pool) => {
+                    pool.close().await;
+                    Ok("Connection successful".to_string())
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
         },
-        DatabaseType::Doris | DatabaseType::StarRocks => match db::mysql::connect_bare(&url).await {
-            Ok(pool) => {
-                pool.close().await;
-                Ok("Connection successful".to_string())
+        DatabaseType::Mysql => {
+            match db::mysql::connect(&url).await {
+                Ok(pool) => {
+                    pool.close().await;
+                    Ok("Connection successful".to_string())
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
+        },
+        DatabaseType::Doris | DatabaseType::StarRocks => {
+            match db::mysql::connect_bare(&url).await {
+                Ok(pool) => {
+                    pool.close().await;
+                    Ok("Connection successful".to_string())
+                }
+                Err(e) => Err(e),
+            }
         },
         DatabaseType::Postgres | DatabaseType::Redshift => match db::postgres::connect(&url).await {
             Ok(pool) => {
@@ -368,6 +382,7 @@ pub async fn connect_db(
     let url = connection_url_for_endpoint(&config, &host, port);
 
     let pool = match config.db_type {
+        DatabaseType::Mysql if config.needs_bare_mysql() => PoolKind::Mysql(db::mysql::connect_bare(&url).await?),
         DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?),
         DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(db::mysql::connect_bare(&url).await?),
         DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),

@@ -1,10 +1,14 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
+use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::time::{Duration, Instant};
 
 use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+
+fn quote_value(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
 
 fn get_str(row: &MySqlRow, idx: usize) -> String {
     row.try_get::<String, _>(idx)
@@ -168,7 +172,7 @@ pub async fn connect_bare(url: &str) -> Result<MySqlPool, String> {
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME")
+    let rows: Vec<MySqlRow> = sqlx::raw_sql("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME")
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -177,13 +181,14 @@ pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, Strin
 }
 
 pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query(
-        "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
-    )
-    .bind(database)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let sql = format!(
+        "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME",
+        quote_value(database),
+    );
+    let rows: Vec<MySqlRow> = sqlx::raw_sql(&sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -199,7 +204,7 @@ pub async fn get_columns(
     database: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query(
+    let sql = format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
          CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
          c.NUMERIC_PRECISION, c.NUMERIC_SCALE \
@@ -209,14 +214,15 @@ pub async fn get_columns(
            AND c.TABLE_NAME = kcu.TABLE_NAME \
            AND c.COLUMN_NAME = kcu.COLUMN_NAME \
            AND kcu.CONSTRAINT_NAME = 'PRIMARY' \
-         WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? \
+         WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+        quote_value(database),
+        quote_value(table),
+    );
+    let rows: Vec<MySqlRow> = sqlx::raw_sql(&sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -239,18 +245,18 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str) -> Result<QueryResult, S
     let trimmed = sql.trim().to_uppercase();
 
     if trimmed.starts_with("SELECT") || trimmed.starts_with("SHOW") || trimmed.starts_with("DESCRIBE") || trimmed.starts_with("EXPLAIN") {
-        let desc = pool.describe(sql).await.map_err(|e| e.to_string())?;
-        let columns: Vec<String> = desc.columns().iter().map(|c| c.name().to_string()).collect();
-        let column_types: Vec<String> = desc
-            .columns()
-            .iter()
-            .map(|c| c.type_info().name().to_string())
-            .collect();
-
-        let rows: Vec<MySqlRow> = sqlx::query(sql)
+        let rows: Vec<MySqlRow> = sqlx::raw_sql(sql)
             .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
+
+        let (columns, column_types) = if let Some(first) = rows.first() {
+            let cols: Vec<String> = first.columns().iter().map(|c| c.name().to_string()).collect();
+            let types: Vec<String> = first.columns().iter().map(|c| c.type_info().name().to_string()).collect();
+            (cols, types)
+        } else {
+            (vec![], vec![])
+        };
 
         let result_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
@@ -269,7 +275,7 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str) -> Result<QueryResult, S
             truncated: false,
         })
     } else {
-        let result = sqlx::query(sql)
+        let result = sqlx::raw_sql(sql)
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -285,19 +291,20 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str) -> Result<QueryResult, S
 }
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query(
+    let sql = format!(
         "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
          NOT NON_UNIQUE AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary \
          FROM information_schema.STATISTICS \
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          GROUP BY INDEX_NAME, NON_UNIQUE \
          ORDER BY INDEX_NAME",
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+        quote_value(database),
+        quote_value(table),
+    );
+    let rows: Vec<MySqlRow> = sqlx::raw_sql(&sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -314,19 +321,20 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
 }
 
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query(
+    let sql = format!(
         "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
          kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
          FROM information_schema.KEY_COLUMN_USAGE kcu \
-         WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ? \
+         WHERE kcu.TABLE_SCHEMA = {} AND kcu.TABLE_NAME = {} \
          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
          ORDER BY kcu.CONSTRAINT_NAME",
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+        quote_value(database),
+        quote_value(table),
+    );
+    let rows: Vec<MySqlRow> = sqlx::raw_sql(&sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -340,17 +348,18 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
 }
 
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
-    let rows: Vec<MySqlRow> = sqlx::query(
+    let sql = format!(
         "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING \
          FROM information_schema.TRIGGERS \
-         WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
+         WHERE TRIGGER_SCHEMA = {} AND EVENT_OBJECT_TABLE = {} \
          ORDER BY TRIGGER_NAME",
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+        quote_value(database),
+        quote_value(table),
+    );
+    let rows: Vec<MySqlRow> = sqlx::raw_sql(&sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()

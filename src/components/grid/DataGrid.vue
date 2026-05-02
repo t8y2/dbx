@@ -9,7 +9,6 @@ import { useElementSize } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 import { ArrowUp, ArrowDown, Download, Plus, Trash2, Save, ChevronLeft, ChevronRight, Search, Inbox, SearchX, Code2, Copy, Loader2, X, Undo2, WrapText, Info, Rows3 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
   ContextMenuSeparator, ContextMenuTrigger,
@@ -17,6 +16,9 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { QueryResult, ColumnInfo, DatabaseType } from "@/types/database";
@@ -35,6 +37,12 @@ import {
   type CellSelectionRange,
 } from "@/lib/gridSelection";
 import { buildTableSelectSql, normalizeWhereInput } from "@/lib/tableSelectSql";
+import {
+  matchesRowStatusFilter,
+  rowStatusFilterAfterAddingRow,
+  type RowStatus,
+  type RowStatusFilter,
+} from "@/lib/gridRowStatus";
 
 import { useToast } from "@/composables/useToast";
 
@@ -136,6 +144,7 @@ const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
 const saveError = ref("");
 const isApplyingWhere = ref(false);
+const rowStatusFilter = ref<RowStatusFilter>("all");
 const columnWidths = ref<number[]>([]);
 const gridRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
@@ -173,20 +182,18 @@ function onResizeStart(colIdx: number, event: MouseEvent) {
 }
 
 const ROW_NUM_WIDTH = 48;
-const ACTION_COL_WIDTH = 112;
 const baseTotalWidth = computed(() => columnWidths.value.reduce((a, b) => a + b, 0));
-const rowActionWidth = computed(() => props.editable ? ACTION_COL_WIDTH : 0);
 const renderedColumnWidths = computed(() => {
   const widths = columnWidths.value;
   if (widths.length === 0) return widths;
 
-  const extraWidth = Math.max(0, gridWidth.value - ROW_NUM_WIDTH - rowActionWidth.value - baseTotalWidth.value);
+  const extraWidth = Math.max(0, gridWidth.value - ROW_NUM_WIDTH - baseTotalWidth.value);
   if (extraWidth === 0) return widths;
 
   const extraPerColumn = extraWidth / widths.length;
   return widths.map((width) => width + extraPerColumn);
 });
-const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + ROW_NUM_WIDTH + rowActionWidth.value);
+const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + ROW_NUM_WIDTH);
 
 const columnVars = computed(() => {
   const vars: Record<string, string> = {};
@@ -194,7 +201,6 @@ const columnVars = computed(() => {
     vars[`--col-w-${i}`] = `${w}px`;
   });
   vars["--row-num-w"] = `${ROW_NUM_WIDTH}px`;
-  vars["--row-action-w"] = `${rowActionWidth.value}px`;
   vars['--total-w'] = `${totalWidth.value}px`;
   return vars;
 });
@@ -230,7 +236,6 @@ function changePageSize(size: number) {
 
 // --- Editing ---
 type CellValue = string | number | boolean | null;
-type RowStatus = "clean" | "edited" | "new" | "deleted";
 const editingCell = ref<{ rowId: number; col: number } | null>(null);
 const editValue = ref("");
 const scrollerRef = ref<HTMLElement | { $el?: HTMLElement; el?: HTMLElement | { value?: HTMLElement } } | null>(null);
@@ -287,11 +292,13 @@ const displayItems = computed<RowItem[]>(() => {
   newRows.value.forEach((row, i) => {
     items.push({ id: -(i + 1), newIndex: i, data: row, isNew: true, isDeleted: false, isDirtyCol: cols.map(() => false), status: "new" });
   });
-  return items;
+  return items.filter((item) => matchesRowStatusFilter(item.status, rowStatusFilter.value));
 });
 const hasVisibleRows = computed(() => displayItems.value.length > 0);
-const emptyTitle = computed(() => clientSearchText.value ? t('grid.noSearchResults') : t('grid.noRows'));
-const emptyDescription = computed(() => clientSearchText.value ? t('grid.noSearchResultsDescription') : t('grid.noRowsDescription'));
+const hasActiveFilter = computed(() => !!clientSearchText.value || rowStatusFilter.value !== "all");
+const totalFilterableRowCount = computed(() => props.result.rows.length + newRows.value.length);
+const emptyTitle = computed(() => hasActiveFilter.value ? t('grid.noFilteredRows') : t('grid.noRows'));
+const emptyDescription = computed(() => hasActiveFilter.value ? t('grid.noFilteredRowsDescription') : t('grid.noRowsDescription'));
 const selectedRange = computed<CellSelectionRange | null>(() => {
   if (!selectionAnchor.value || !selectionFocus.value) return null;
   return normalizeSelectionRange(selectionAnchor.value, selectionFocus.value);
@@ -301,6 +308,7 @@ const selectedCells = computed(() => extractSelection(props.result.columns, visi
 const selectedCellCount = computed(() => selectedCells.value.columns.length * selectedCells.value.rows.length);
 const hasCellSelection = computed(() => selectedCellCount.value > 0);
 const selectionSummary = computed(() => t("grid.selectedCells", { count: selectedCellCount.value }));
+const contextRowItem = computed(() => contextCell.value ? getRowItem(contextCell.value.rowId) : undefined);
 const activeCellDetail = computed(() => {
   const cell = detailCell.value;
   if (!cell) return null;
@@ -382,18 +390,21 @@ function formatCell(value: CellValue): string {
 
 function isNull(value: unknown): boolean { return value === null; }
 
-function rowStatusLabel(item: RowItem): string {
-  if (item.status === "new") return t("grid.statusNew");
-  if (item.status === "edited") return t("grid.statusEdited");
-  if (item.status === "deleted") return t("grid.statusDeleted");
-  return t("grid.statusClean");
+function rowNumberStatusClass(item: RowItem): string {
+  if (item.status === "new") {
+    return "border-emerald-500/40 bg-emerald-500/15 font-semibold text-emerald-700 dark:text-emerald-300";
+  }
+  if (item.status === "edited") {
+    return "border-amber-500/40 bg-amber-500/15 font-semibold text-amber-700 dark:text-amber-300";
+  }
+  if (item.status === "deleted") {
+    return "border-destructive/40 bg-destructive/15 font-semibold text-destructive line-through";
+  }
+  return "text-muted-foreground";
 }
 
-function rowStatusVariant(item: RowItem): "default" | "secondary" | "destructive" | "outline" {
-  if (item.status === "new") return "default";
-  if (item.status === "edited") return "secondary";
-  if (item.status === "deleted") return "destructive";
-  return "outline";
+function setRowStatusFilter(value: string) {
+  rowStatusFilter.value = value as RowStatusFilter;
 }
 
 // --- Inline editor ---
@@ -528,6 +539,7 @@ function onEditKeydown(e: KeyboardEvent) {
 }
 
 function addRow() {
+  rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
   newRows.value.push(props.result.columns.map(() => null));
   const rowId = -newRows.value.length;
   nextTick(() => {
@@ -824,8 +836,8 @@ function copyRow() {
 
 function copyAll() {
   const header = props.result.columns.join("\t");
-  const body = sortedRows.value
-    .map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex).map((c) => formatCell(c)).join("\t"))
+  const body = displayItems.value
+    .map((item) => item.data.map((c) => formatCell(c)).join("\t"))
     .join("\n");
   copyText(`${header}\n${body}`);
 }
@@ -833,18 +845,17 @@ function copyAll() {
 async function exportCsv() {
   const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
   const header = props.result.columns.map(escape).join(",");
-  const body = sortedRows.value
-    .map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex).map((c) => escape(formatCell(c))).join(","))
+  const body = displayItems.value
+    .map((item) => item.data.map((c) => escape(formatCell(c))).join(","))
     .join("\n");
   const path = await savePath({ filters: [{ name: "CSV", extensions: ["csv"] }] });
   if (path) await writeTextFile(path, `${header}\n${body}`);
 }
 
 async function exportJson() {
-  const data = sortedRows.value.map(({ row, sourceIndex }) => {
-    const data = rowDataWithChanges(row, sourceIndex);
+  const data = displayItems.value.map((item) => {
     const obj: Record<string, unknown> = {};
-    props.result.columns.forEach((col, i) => { obj[col] = data[i]; });
+    props.result.columns.forEach((col, i) => { obj[col] = item.data[i]; });
     return obj;
   });
   const path = await savePath({ filters: [{ name: "JSON", extensions: ["json"] }] });
@@ -854,7 +865,7 @@ async function exportJson() {
 async function exportMarkdown() {
   const pad = (s: string, len: number) => s.padEnd(len);
   const cols = props.result.columns;
-  const visibleRows = sortedRows.value.map(({ row, sourceIndex }) => rowDataWithChanges(row, sourceIndex));
+  const visibleRows = displayItems.value.map((item) => item.data);
   const widths = cols.map((c, i) => Math.max(c.length, ...visibleRows.map((r) => formatCell(r[i]).length), 3));
   const header = `| ${cols.map((c, i) => pad(c, widths[i])).join(" | ")} |`;
   const sep = `| ${widths.map((w) => "-".repeat(w)).join(" | ")} |`;
@@ -994,8 +1005,24 @@ function escapeAndHighlightKeywords(s: string): string {
               :placeholder="canUseWhereSearch ? t('grid.searchOrWhere') : t('grid.search')"
               @keydown.enter="onSearchEnter"
             />
-            <span v-if="clientSearchText" class="text-xs text-muted-foreground">
-              {{ sortedRows.length }}/{{ result.rows.length }}
+            <Select
+              v-if="editable && tableMeta"
+              :model-value="rowStatusFilter"
+              @update:model-value="(value: any) => setRowStatusFilter(String(value))"
+            >
+              <SelectTrigger class="h-6 w-28 px-2 text-xs">
+                <SelectValue :placeholder="t('grid.filterRows')" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{{ t('grid.filterAllRows') }}</SelectItem>
+                <SelectItem value="changed">{{ t('grid.filterChangedRows') }}</SelectItem>
+                <SelectItem value="edited">{{ t('grid.statusEdited') }}</SelectItem>
+                <SelectItem value="new">{{ t('grid.statusNew') }}</SelectItem>
+                <SelectItem value="deleted">{{ t('grid.statusDeleted') }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <span v-if="hasActiveFilter" class="text-xs text-muted-foreground">
+              {{ displayItems.length }}/{{ totalFilterableRowCount }}
             </span>
             <Button
               v-if="isWhereSearch"
@@ -1023,9 +1050,6 @@ function escapeAndHighlightKeywords(s: string): string {
           <div ref="headerRef" class="shrink-0 bg-muted z-10 border-b border-border overflow-hidden">
             <div class="flex text-xs font-medium" :style="{ width: 'var(--total-w)' }">
               <div class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none" :style="{ width: 'var(--row-num-w)' }">#</div>
-              <div v-if="editable" class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none" :style="{ width: 'var(--row-action-w)' }">
-                {{ t('grid.rowState') }}
-              </div>
               <div
                 v-for="(col, colIdx) in result.columns"
                 :key="col"
@@ -1059,7 +1083,7 @@ function escapeAndHighlightKeywords(s: string): string {
             class="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground"
           >
             <component
-              :is="searchText ? SearchX : Inbox"
+              :is="hasActiveFilter ? SearchX : Inbox"
               class="h-8 w-8 text-muted-foreground/50"
               aria-hidden="true"
             />
@@ -1089,35 +1113,12 @@ function escapeAndHighlightKeywords(s: string): string {
                 }"
                 :style="{ height: '26px', width: 'var(--total-w)' }"
               >
-                <div class="shrink-0 px-2 py-1 border-r border-border text-center text-muted-foreground select-none" :style="{ width: 'var(--row-num-w)' }">{{ index + 1 }}</div>
                 <div
-                  v-if="editable"
-                  class="shrink-0 px-1.5 py-0.5 border-r border-border flex items-center justify-between gap-1"
-                  :style="{ width: 'var(--row-action-w)' }"
+                  class="shrink-0 px-2 py-1 border-r border-border text-center select-none"
+                  :class="rowNumberStatusClass(item)"
+                  :style="{ width: 'var(--row-num-w)' }"
                 >
-                  <Badge :variant="rowStatusVariant(item)" class="h-4 px-1.5 text-[10px]">
-                    {{ rowStatusLabel(item) }}
-                  </Badge>
-                  <Button
-                    v-if="editable && !item.isDeleted"
-                    variant="ghost"
-                    size="icon"
-                    class="h-5 w-5 shrink-0 text-destructive"
-                    :title="t('grid.deleteRow')"
-                    @click.stop="requestDeleteRow(item.id)"
-                  >
-                    <Trash2 class="w-3 h-3" />
-                  </Button>
-                  <Button
-                    v-else-if="editable && item.isDeleted"
-                    variant="ghost"
-                    size="icon"
-                    class="h-5 w-5 shrink-0"
-                    :title="t('grid.restoreRow')"
-                    @click.stop="restoreRow(item.id)"
-                  >
-                    <Undo2 class="w-3 h-3" />
-                  </Button>
+                  {{ index + 1 }}
                 </div>
                 <div
                   v-for="(cell, colIdx) in item.data"
@@ -1321,8 +1322,11 @@ function escapeAndHighlightKeywords(s: string): string {
           <ContextMenuItem @click="clearCellSelection">{{ t('grid.clearSelection') }}</ContextMenuItem>
           <ContextMenuSeparator />
         </template>
-        <template v-if="editable">
-          <ContextMenuItem class="text-destructive" @click="deleteSelectedRow">
+        <template v-if="editable && contextRowItem">
+          <ContextMenuItem v-if="contextRowItem.isDeleted" @click="restoreRow(contextRowItem.id)">
+            <Undo2 class="w-3.5 h-3.5 mr-2" /> {{ t('grid.restoreRow') }}
+          </ContextMenuItem>
+          <ContextMenuItem v-else class="text-destructive" @click="deleteSelectedRow">
             <Trash2 class="w-3.5 h-3.5 mr-2" /> {{ t('grid.deleteRow') }}
           </ContextMenuItem>
           <ContextMenuSeparator />

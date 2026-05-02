@@ -146,7 +146,7 @@ function buildTableItems(prefix: string, tables: SqlCompletionTable[]): SqlCompl
       label: table.name,
       type: "table" as const,
       detail: table.schema ? `${table.schema}.${table.name}` : table.type,
-      boost: computeBoost(table.name, prefix) + 1000,
+      boost: computeBoost(table.name, prefix),
     }));
 }
 

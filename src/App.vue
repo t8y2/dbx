@@ -800,14 +800,14 @@ async function setupFileDrop() {
         <div class="flex-1 min-w-0">
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
-          <div v-if="queryStore.tabs.length > 0" class="h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0">
+          <div v-if="queryStore.tabs.length > 0" class="h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0" style="-ms-overflow-style:none;scrollbar-width:none;-webkit-overflow-scrolling:touch">
             <ContextMenu
               v-for="tab in queryStore.tabs"
               :key="tab.id"
             >
               <ContextMenuTrigger as-child>
                 <div
-                  class="group flex min-w-0 items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap"
+                  class="group flex min-w-36 items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap max-w-48"
                   :class="{ 'bg-background font-medium': tab.id === queryStore.activeTabId }"
                   @click="queryStore.activeTabId = tab.id"
                 >

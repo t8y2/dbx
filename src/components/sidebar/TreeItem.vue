@@ -45,6 +45,7 @@ const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
 const diagramSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
 const tableImportSupportedTypes = new Set(["mysql", "postgres", "sqlite", "duckdb", "clickhouse", "sqlserver", "oracle", "doris", "starrocks", "redshift"]);
 const tableStructureSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver"]);
+const fieldLineageSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
 const isExportingDatabase = ref(false);
 
 function currentDatabaseType(): DatabaseType | undefined {
@@ -537,6 +538,19 @@ function openStructureEditor() {
   };
 }
 
+function openFieldLineage() {
+  const node = props.node;
+  const column = node.type === "column" && node.meta && "name" in node.meta ? node.meta.name : node.label;
+  if (node.type !== "column" || !node.connectionId || !node.database || !node.tableName || !column) return;
+  connectionStore.fieldLineageSource = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    tableName: node.tableName,
+    columnName: column,
+  };
+}
+
 const canExpand = !leafTypes.has(props.node.type);
 const canPin = computed(() => pinnableTypes.has(props.node.type));
 const canOpenSqlFileExecution = computed(() => {
@@ -555,10 +569,14 @@ const canOpenStructureEditor = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return props.node.type === "table" && !!props.node.database && !!config && tableStructureSupportedTypes.has(config.db_type);
 });
+const canOpenFieldLineage = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return props.node.type === "column" && !!props.node.database && !!props.node.tableName && !!config && fieldLineageSupportedTypes.has(config.db_type);
+});
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
 const hasTypeMenu = computed(() => {
   const t = props.node.type;
-  return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || isGroupLabel(props.node);
+  return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || isGroupLabel(props.node);
 });
 const columnComment = computed(() => props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null);
 const paddingLeft = `${props.depth * 16 + 8}px`;
@@ -740,6 +758,12 @@ async function showMore() {
         <ContextMenuSeparator />
         <ContextMenuItem @click="refresh">
           <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
+        </ContextMenuItem>
+      </template>
+
+      <template v-if="node.type === 'column'">
+        <ContextMenuItem v-if="canOpenFieldLineage" @click="openFieldLineage">
+          <Network class="w-4 h-4" /> {{ t('lineage.open') }}
         </ContextMenuItem>
       </template>
 

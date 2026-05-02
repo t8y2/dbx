@@ -184,6 +184,17 @@ export default {
     emptySql: "No SQL to explain",
     unsafe: "This first version only explains SELECT / WITH / TABLE / VALUES statements",
   },
+  lineage: {
+    title: "Field Lineage",
+    open: "View Field Lineage",
+    loading: "Reading metadata {done}/{total}",
+    empty: "No related lineage found",
+    certain: "Certain",
+    likely: "Likely",
+    possible: "Possible",
+    cancel: "Cancel",
+    refresh: "Analyze Again",
+  },
   ai: {
     placeholder: "Describe your query in natural language...",
     settings: "AI Settings",

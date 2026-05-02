@@ -184,6 +184,17 @@ export default {
     emptySql: "当前没有可分析的 SQL",
     unsafe: "第一版执行计划仅支持 SELECT / WITH / TABLE / VALUES",
   },
+  lineage: {
+    title: "字段血缘",
+    open: "查看字段血缘",
+    loading: "正在读取元数据 {done}/{total}",
+    empty: "没有找到相关血缘",
+    certain: "确定",
+    likely: "高置信",
+    possible: "可能相关",
+    cancel: "取消读取",
+    refresh: "重新分析",
+  },
   ai: {
     placeholder: "描述你想查什么...",
     settings: "AI 设置",

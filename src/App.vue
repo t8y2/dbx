@@ -41,6 +41,7 @@ const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diag
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const TableStructureEditorDialog = defineAsyncComponent(() => import("@/components/structure/TableStructureEditorDialog.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
+const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -128,6 +129,7 @@ const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showStructureEditorDialog = ref(false);
+const showFieldLineageDialog = ref(false);
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
 const schemaDiffPrefillConnectionId = ref("");
@@ -146,6 +148,11 @@ const structurePrefillConnectionId = ref("");
 const structurePrefillDatabase = ref("");
 const structurePrefillSchema = ref("");
 const structurePrefillTable = ref("");
+const lineagePrefillConnectionId = ref("");
+const lineagePrefillDatabase = ref("");
+const lineagePrefillSchema = ref("");
+const lineagePrefillTable = ref("");
+const lineagePrefillColumn = ref("");
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -230,6 +237,18 @@ watch(() => connectionStore.structureEditorSource, (v) => {
     structurePrefillTable.value = v.tableName;
     showStructureEditorDialog.value = true;
     connectionStore.structureEditorSource = null;
+  }
+});
+
+watch(() => connectionStore.fieldLineageSource, (v) => {
+  if (v) {
+    lineagePrefillConnectionId.value = v.connectionId;
+    lineagePrefillDatabase.value = v.database;
+    lineagePrefillSchema.value = v.schema ?? "";
+    lineagePrefillTable.value = v.tableName;
+    lineagePrefillColumn.value = v.columnName;
+    showFieldLineageDialog.value = true;
+    connectionStore.fieldLineageSource = null;
   }
 });
 
@@ -1410,6 +1429,14 @@ async function setupFileDrop() {
         :prefill-schema="structurePrefillSchema"
         :prefill-table="structurePrefillTable"
         @saved="onStructureEditorSaved"
+      />
+      <FieldLineageDialog
+        v-model:open="showFieldLineageDialog"
+        :prefill-connection-id="lineagePrefillConnectionId"
+        :prefill-database="lineagePrefillDatabase"
+        :prefill-schema="lineagePrefillSchema"
+        :prefill-table="lineagePrefillTable"
+        :prefill-column="lineagePrefillColumn"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

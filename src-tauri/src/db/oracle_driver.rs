@@ -81,7 +81,7 @@ pub async fn get_columns(conn: &OracleClient, schema: &str, table: &str) -> Resu
 
     let col_result = conn.query(
         &format!(
-            "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE \
+            "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_PRECISION, DATA_SCALE \
              FROM ALL_TAB_COLUMNS \
              WHERE OWNER = '{s}' AND TABLE_NAME = '{t}' \
              ORDER BY COLUMN_ID"
@@ -98,6 +98,8 @@ pub async fn get_columns(conn: &OracleClient, schema: &str, table: &str) -> Resu
             is_nullable: row.get_string(2).unwrap_or("N") == "Y",
             column_default: None,
             extra: None, comment: None,
+            numeric_precision: row.get_i64(3).map(|v| v as i32),
+            numeric_scale: row.get_i64(4).map(|v| v as i32),
         }
     }).collect())
 }

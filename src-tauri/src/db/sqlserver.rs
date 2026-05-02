@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use tiberius::{AuthMethod, Client, Config};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -38,6 +39,8 @@ async fn try_connect(host: &str, port: u16, user: &str, pass: &str, database: Op
 fn row_to_json(row: &tiberius::Row) -> Vec<serde_json::Value> {
     (0..row.len()).map(|i| {
         if let Some(v) = row.try_get::<&str, _>(i).ok().flatten() {
+            serde_json::Value::String(v.to_string())
+        } else if let Some(v) = row.try_get::<Decimal, _>(i).ok().flatten() {
             serde_json::Value::String(v.to_string())
         } else if let Some(v) = row.try_get::<i32, _>(i).ok().flatten() {
             serde_json::Value::Number(v.into())
@@ -93,7 +96,8 @@ pub async fn list_tables(client: &mut SqlServerClient, schema: &str) -> Result<V
 pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
-         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK \
+         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
+         c.NUMERIC_PRECISION, c.NUMERIC_SCALE \
          FROM INFORMATION_SCHEMA.COLUMNS c \
          LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
            ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA AND c.TABLE_NAME = kcu.TABLE_NAME AND c.COLUMN_NAME = kcu.COLUMN_NAME \
@@ -112,6 +116,8 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
             column_default: row.get::<&str, _>(3).map(|s| s.to_string()),
             is_primary_key: row.get::<i32, _>(4).unwrap_or(0) == 1,
             extra: None, comment: None,
+            numeric_precision: row.get::<i32, _>(5),
+            numeric_scale: row.get::<i32, _>(6),
         }
     }).collect())
 }

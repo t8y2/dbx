@@ -41,6 +41,8 @@ export interface ColumnInfo {
   is_primary_key: boolean;
   extra: string | null;
   comment?: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
 }
 
 export interface IndexInfo {

@@ -31,6 +31,8 @@ pub struct ColumnInfo {
     pub is_primary_key: bool,
     pub extra: Option<String>,
     pub comment: Option<String>,
+    pub numeric_precision: Option<i32>,
+    pub numeric_scale: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

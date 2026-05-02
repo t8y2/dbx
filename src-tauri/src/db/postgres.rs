@@ -1,4 +1,5 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use rust_decimal::Decimal;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use std::time::{Duration, Instant};
@@ -48,8 +49,8 @@ fn pg_value_to_json(row: &PgRow, idx: usize, type_name: &str) -> serde_json::Val
 
     if upper == "NUMERIC" || upper == "DECIMAL" || upper == "MONEY" {
         return row
-            .try_get_unchecked::<String, _>(idx)
-            .map(serde_json::Value::String)
+            .try_get::<Decimal, _>(idx)
+            .map(|v: Decimal| serde_json::Value::String(v.to_string()))
             .unwrap_or(serde_json::Value::Null);
     }
 
@@ -145,7 +146,8 @@ pub async fn get_columns(
     let rows: Vec<PgRow> = sqlx::query(
         "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, \
          CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_pk, \
-         col_description((c.table_schema || '.' || c.table_name)::regclass, c.ordinal_position) AS column_comment \
+         col_description((c.table_schema || '.' || c.table_name)::regclass, c.ordinal_position) AS column_comment, \
+         c.numeric_precision, c.numeric_scale \
          FROM information_schema.columns c \
          LEFT JOIN information_schema.key_column_usage kcu \
            ON c.table_schema = kcu.table_schema \
@@ -174,6 +176,8 @@ pub async fn get_columns(
             is_primary_key: row.get::<bool, _>("is_pk"),
             extra: None,
             comment: row.get::<Option<String>, _>("column_comment"),
+            numeric_precision: row.get::<Option<i32>, _>("numeric_precision"),
+            numeric_scale: row.get::<Option<i32>, _>("numeric_scale"),
         })
         .collect())
 }

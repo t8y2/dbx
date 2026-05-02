@@ -69,7 +69,14 @@ const columnTypeMap = computed(() => {
   const map = new Map<string, string>();
   if (props.tableMeta?.columns) {
     for (const col of props.tableMeta.columns) {
-      map.set(col.name, shortTypeName(col.data_type));
+      const typeName = shortTypeName(col.data_type);
+      // Add precision for numeric/decimal types
+      if (col.numeric_precision != null && ["numeric", "decimal"].includes(col.data_type.toLowerCase())) {
+        const scale = col.numeric_scale ?? 0;
+        map.set(col.name, `${typeName}(${col.numeric_precision},${scale})`);
+      } else {
+        map.set(col.name, typeName);
+      }
     }
   }
   return map;
@@ -103,15 +110,16 @@ function shortTypeName(t: string): string {
 }
 
 function typeColorClass(t: string): string {
-  const s = t.toLowerCase();
-  if (["int", "int2", "int4", "int8", "smallint", "bigint", "integer", "serial", "bigserial", "tinyint", "mediumint"].includes(s)) return "text-blue-500";
-  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money"].includes(s)) return "text-cyan-500";
-  if (["varchar", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob"].includes(s)) return "text-green-500";
-  if (["bool", "boolean", "bit"].includes(s)) return "text-orange-500";
-  if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(s)) return "text-purple-500";
-  if (["json", "jsonb", "xml", "array"].includes(s)) return "text-pink-500";
-  if (["uuid", "uniqueidentifier"].includes(s)) return "text-amber-500";
-  if (["bytea", "blob", "binary", "varbinary", "image"].includes(s)) return "text-red-400";
+  // Strip precision/scale suffix like (20,6)
+  const base = t.replace(/\(.*\)$/, "").toLowerCase();
+  if (["int", "int2", "int4", "int8", "smallint", "bigint", "integer", "serial", "bigserial", "tinyint", "mediumint"].includes(base)) return "text-blue-500";
+  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money"].includes(base)) return "text-cyan-500";
+  if (["varchar", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob"].includes(base)) return "text-green-500";
+  if (["bool", "boolean", "bit"].includes(base)) return "text-orange-500";
+  if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(base)) return "text-purple-500";
+  if (["json", "jsonb", "xml", "array"].includes(base)) return "text-pink-500";
+  if (["uuid", "uniqueidentifier"].includes(base)) return "text-amber-500";
+  if (["bytea", "blob", "binary", "varbinary", "image"].includes(base)) return "text-red-400";
   return "text-muted-foreground";
 }
 const contextCell = ref<{ rowId: number; rowIndex: number; col: number } | null>(null);

@@ -27,7 +27,8 @@ serde_json = "1.0"
 log = "0.4"
 tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "mysql", "postgres", "sqlite", "json", "chrono", "uuid"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "mysql", "postgres", "sqlite", "json", "chrono", "uuid", "rust_decimal"] }
+rust_decimal = { version = "1", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
@@ -39,7 +40,7 @@ redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tokio-rus
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 portpicker = "0.1.1"
 duckdb = { version = "1.3.2", features = ["bundled"] }
-tiberius = { version = "0.12.3", features = ["tds73", "chrono"] }
+tiberius = { version = "0.12.3", features = ["tds73", "chrono", "rust_decimal"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"

@@ -112,6 +112,8 @@ pub async fn get_columns(client: &ChClient, database: &str, table: &str) -> Resu
             column_default,
             is_primary_key: is_pk,
             extra: None, comment: None,
+            numeric_precision: None,
+            numeric_scale: None,
         }
     }).collect())
 }

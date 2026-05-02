@@ -1,4 +1,5 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use rust_decimal::Decimal;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use std::time::{Duration, Instant};
@@ -72,8 +73,8 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_jso
 
     if upper_type == "DECIMAL" {
         return row
-            .try_get_unchecked::<String, _>(idx)
-            .map(serde_json::Value::String)
+            .try_get::<Decimal, _>(idx)
+            .map(|v: Decimal| serde_json::Value::String(v.to_string()))
             .unwrap_or(serde_json::Value::Null);
     }
 
@@ -165,7 +166,8 @@ pub async fn get_columns(
 ) -> Result<Vec<ColumnInfo>, String> {
     let rows: Vec<MySqlRow> = sqlx::query(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
-         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK \
+         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
+         c.NUMERIC_PRECISION, c.NUMERIC_SCALE \
          FROM information_schema.COLUMNS c \
          LEFT JOIN information_schema.KEY_COLUMN_USAGE kcu \
            ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
@@ -191,6 +193,8 @@ pub async fn get_columns(
             is_primary_key: row.get::<i32, _>("IS_PK") == 1,
             extra: get_opt_str(row, "EXTRA"),
             comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
+            numeric_precision: row.get::<Option<i32>, _>("NUMERIC_PRECISION"),
+            numeric_scale: row.get::<Option<i32>, _>("NUMERIC_SCALE"),
         })
         .collect())
 }

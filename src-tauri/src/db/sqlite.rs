@@ -53,6 +53,8 @@ pub async fn get_columns(pool: &SqlitePool, _schema: &str, table: &str) -> Resul
             column_default: row.get::<Option<String>, _>("dflt_value"),
             is_primary_key: row.get::<i32, _>("pk") > 0,
             extra: None, comment: None,
+            numeric_precision: None,
+            numeric_scale: None,
         })
         .collect())
 }

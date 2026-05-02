@@ -16,6 +16,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/tauri";
 import type { TransferProgress } from "@/lib/tauri";
 import type { DatabaseType } from "@/types/database";
+import { nextTransferTerminalState } from "@/lib/transferProgressState";
 import {
   ArrowRightLeft, Check, X, Loader2, Square, CheckSquare,
 } from "lucide-vue-next";
@@ -237,11 +238,14 @@ async function startTransfer() {
       transferProgress.value = new Map(transferProgress.value);
       currentTable.value = progress.table;
 
-      if (progress.status === "done") {
-        overallDone.value = true;
-      } else if (progress.status === "cancelled") {
-        overallCancelled.value = true;
-      }
+      const nextState = nextTransferTerminalState({
+        done: overallDone.value,
+        cancelled: overallCancelled.value,
+        error: overallError.value,
+      }, progress);
+      overallDone.value = nextState.done;
+      overallCancelled.value = nextState.cancelled;
+      overallError.value = nextState.error;
     });
   } catch (e: any) {
     overallError.value = true;
@@ -440,6 +444,7 @@ const totalTransferred = computed(() =>
           </span>
           <span v-if="overallDone" class="text-green-600 font-medium">{{ t('transfer.completed') }}</span>
           <span v-else-if="overallCancelled" class="text-yellow-600 font-medium">{{ t('transfer.cancelled') }}</span>
+          <span v-else-if="overallError" class="text-destructive font-medium">{{ t('transfer.failed') }}</span>
         </div>
 
         <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
@@ -496,7 +501,7 @@ const totalTransferred = computed(() =>
             {{ t('transfer.start') }}
           </Button>
         </template>
-        <template v-else-if="overallDone || overallCancelled">
+        <template v-else-if="overallDone || overallCancelled || overallError">
           <Button size="sm" @click="open = false">
             {{ t('common.close') }}
           </Button>

@@ -225,6 +225,13 @@ impl SqlStatementSplitter {
     }
 }
 
+pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut splitter = SqlStatementSplitter::default();
+    let mut statements = splitter.push_chunk(sql);
+    statements.extend(splitter.finish());
+    statements
+}
+
 fn starts_with_chars(chars: &[char], start: usize, needle: &[char]) -> bool {
     start + needle.len() <= chars.len() && chars[start..start + needle.len()] == *needle
 }

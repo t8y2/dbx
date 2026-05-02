@@ -6,6 +6,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::connection::{AppState, PoolKind};
+use crate::commands::sql_file::split_sql_statements;
 use crate::db;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -269,9 +270,8 @@ pub async fn cancel_query(
     Ok(state.running_queries.cancel(&execution_id))
 }
 
-#[tauri::command]
-pub async fn execute_batch(
-    state: State<'_, Arc<AppState>>,
+async fn execute_statements(
+    state: &Arc<AppState>,
     connection_id: String,
     database: String,
     statements: Vec<String>,
@@ -310,6 +310,26 @@ pub async fn execute_batch(
         execution_time_ms: start.elapsed().as_millis(),
         truncated: false,
     })
+}
+
+#[tauri::command]
+pub async fn execute_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    statements: Vec<String>,
+) -> Result<db::QueryResult, String> {
+    execute_statements(&state, connection_id, database, statements).await
+}
+
+#[tauri::command]
+pub async fn execute_script(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    sql: String,
+) -> Result<db::QueryResult, String> {
+    execute_statements(&state, connection_id, database, split_sql_statements(&sql)).await
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { useHistoryStore } from "@/stores/historyStore";
+import { shouldClearHistory, shouldDeleteHistoryEntry } from "@/lib/historyActions";
 
 const { t } = useI18n();
 const store = useHistoryStore();
@@ -34,6 +35,18 @@ function copySql(sql: string) {
   navigator.clipboard.writeText(sql);
 }
 
+function confirmDeleteEntry(id: string) {
+  if (shouldDeleteHistoryEntry(() => window.confirm(t("history.confirmDelete")))) {
+    store.remove(id);
+  }
+}
+
+function confirmClearHistory() {
+  if (shouldClearHistory(store.entries.length, () => window.confirm(t("history.confirmClear")))) {
+    store.clear();
+  }
+}
+
 function formatTime(iso: string): string {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -54,7 +67,7 @@ onMounted(() => store.load());
       <Clock class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
       <span class="text-xs font-medium">{{ t('history.title') }}</span>
       <span class="flex-1" />
-      <Button v-if="store.entries.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="store.clear()">
+      <Button v-if="store.entries.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
         <Trash2 class="h-3 w-3" />
       </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
@@ -94,7 +107,7 @@ onMounted(() => store.load());
         <ContextMenuContent class="w-40">
           <ContextMenuItem @click="restore(entry.sql)">{{ t('history.restore') }}</ContextMenuItem>
           <ContextMenuItem @click="copySql(entry.sql)">{{ t('history.copy') }}</ContextMenuItem>
-          <ContextMenuItem class="text-destructive" @click="store.remove(entry.id)">{{ t('history.delete') }}</ContextMenuItem>
+          <ContextMenuItem class="text-destructive" @click="confirmDeleteEntry(entry.id)">{{ t('history.delete') }}</ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
 

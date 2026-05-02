@@ -4,7 +4,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::commands::connection_secrets::{
-    load_connections_from_file, save_connections_to_file, KeyringConnectionSecretStore,
+    create_secret_store, load_connections_from_file, save_connections_to_file,
 };
 use crate::commands::query_cancel::RunningQueries;
 use crate::db;
@@ -233,15 +233,15 @@ pub async fn save_connections(
     configs: Vec<ConnectionConfig>,
 ) -> Result<(), String> {
     let path = connections_file(&app)?;
-    let store = KeyringConnectionSecretStore;
-    save_connections_to_file(&path, &configs, &store)
+    let store = create_secret_store(&app);
+    save_connections_to_file(&path, &configs, &*store)
 }
 
 #[tauri::command]
 pub async fn load_connections(app: AppHandle) -> Result<Vec<ConnectionConfig>, String> {
     let path = connections_file(&app)?;
-    let store = KeyringConnectionSecretStore;
-    load_connections_from_file(&path, &store)
+    let store = create_secret_store(&app);
+    load_connections_from_file(&path, &*store)
 }
 
 #[tauri::command]

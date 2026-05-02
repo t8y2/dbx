@@ -1,6 +1,8 @@
 use crate::models::connection::ConnectionConfig;
+use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 pub(super) const MAIN_PASSWORD_KEY: &str = "password";
 pub(super) const SSH_PASSWORD_KEY: &str = "ssh_password";
@@ -42,10 +44,60 @@ impl ConnectionSecretStore for KeyringConnectionSecretStore {
     }
 }
 
+pub(super) struct FileSecretStore {
+    path: PathBuf,
+}
+
+impl FileSecretStore {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn read_store(&self) -> HashMap<String, String> {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_store(&self, map: &HashMap<String, String>) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
+        std::fs::write(&self.path, json).map_err(|e| e.to_string())
+    }
+}
+
+impl ConnectionSecretStore for FileSecretStore {
+    fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String> {
+        let mut map = self.read_store();
+        map.insert(secret_account(connection_id, key), secret.to_string());
+        self.write_store(&map)
+    }
+
+    fn get_secret(&self, connection_id: &str, key: &str) -> Result<Option<String>, String> {
+        Ok(self.read_store().get(&secret_account(connection_id, key)).cloned())
+    }
+
+    fn delete_secret(&self, connection_id: &str, key: &str) -> Result<(), String> {
+        let mut map = self.read_store();
+        map.remove(&secret_account(connection_id, key));
+        self.write_store(&map)
+    }
+}
+
+pub(super) fn create_secret_store(app: &AppHandle) -> Box<dyn ConnectionSecretStore> {
+    if cfg!(debug_assertions) {
+        let dir = app.path().app_data_dir().expect("failed to resolve app data dir");
+        std::fs::create_dir_all(&dir).ok();
+        Box::new(FileSecretStore::new(dir.join("secrets.json")))
+    } else {
+        Box::new(KeyringConnectionSecretStore)
+    }
+}
+
 pub(super) fn save_connections_to_file(
     path: &Path,
     configs: &[ConnectionConfig],
-    store: &impl ConnectionSecretStore,
+    store: &dyn ConnectionSecretStore,
 ) -> Result<(), String> {
     delete_removed_connection_secrets(path, configs, store)?;
     for config in configs {
@@ -64,7 +116,7 @@ pub(super) fn save_connections_to_file(
 
 pub(super) fn load_connections_from_file(
     path: &Path,
-    store: &impl ConnectionSecretStore,
+    store: &dyn ConnectionSecretStore,
 ) -> Result<Vec<ConnectionConfig>, String> {
     if !path.exists() {
         return Ok(vec![]);
@@ -118,7 +170,7 @@ pub(super) fn load_connections_from_file(
 fn delete_removed_connection_secrets(
     path: &Path,
     configs: &[ConnectionConfig],
-    store: &impl ConnectionSecretStore,
+    store: &dyn ConnectionSecretStore,
 ) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -141,7 +193,7 @@ fn delete_removed_connection_secrets(
 }
 
 fn persist_secret(
-    store: &impl ConnectionSecretStore,
+    store: &dyn ConnectionSecretStore,
     connection_id: &str,
     key: &str,
     secret: &str,
@@ -154,7 +206,7 @@ fn persist_secret(
 }
 
 fn persist_optional_secret(
-    store: &impl ConnectionSecretStore,
+    store: &dyn ConnectionSecretStore,
     connection_id: &str,
     key: &str,
     secret: Option<&str>,

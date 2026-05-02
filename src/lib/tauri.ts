@@ -409,3 +409,76 @@ export async function startTransfer(
 export async function cancelTransfer(transferId: string): Promise<void> {
   return invoke("cancel_transfer", { transferId });
 }
+
+// --- Table File Import ---
+export type TableImportMode = "append" | "truncate";
+export type TableImportStatus = "running" | "done" | "error" | "cancelled";
+
+export interface TableImportColumnMapping {
+  sourceColumn: string;
+  targetColumn: string;
+}
+
+export interface TableImportPreview {
+  fileName: string;
+  filePath: string;
+  fileType: string;
+  sizeBytes: number;
+  columns: string[];
+  rows: unknown[][];
+  totalRows: number;
+}
+
+export interface TableImportRequest {
+  importId: string;
+  connectionId: string;
+  database: string;
+  schema: string;
+  table: string;
+  filePath: string;
+  mappings: TableImportColumnMapping[];
+  mode: TableImportMode;
+  batchSize: number;
+}
+
+export interface TableImportSummary {
+  importId: string;
+  rowsImported: number;
+  totalRows: number;
+}
+
+export interface TableImportProgress {
+  importId: string;
+  status: TableImportStatus;
+  rowsImported: number;
+  totalRows: number;
+  error?: string | null;
+}
+
+export async function previewTableImportFile(filePath: string): Promise<TableImportPreview> {
+  return invoke("preview_table_import_file", { filePath });
+}
+
+export async function importTableFile(
+  request: TableImportRequest,
+  onProgress: (progress: TableImportProgress) => void,
+): Promise<TableImportSummary> {
+  const unlisten: UnlistenFn = await listen<TableImportProgress>("table-import-progress", (event) => {
+    if (event.payload.importId === request.importId) {
+      onProgress(event.payload);
+      if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
+        unlisten();
+      }
+    }
+  });
+  try {
+    return await invoke("import_table_file", { request });
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
+}
+
+export async function cancelTableImport(importId: string): Promise<boolean> {
+  return invoke("cancel_table_import", { importId });
+}

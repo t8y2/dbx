@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,7 @@ import DataTransferDialog from "@/components/transfer/DataTransferDialog.vue";
 import SchemaDiffDialog from "@/components/diff/SchemaDiffDialog.vue";
 import SqlFileExecutionDialog from "@/components/sql-file/SqlFileExecutionDialog.vue";
 import SchemaDiagramDialog from "@/components/diagram/SchemaDiagramDialog.vue";
+import TableImportDialog from "@/components/import/TableImportDialog.vue";
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -122,6 +123,7 @@ const showTransferDialog = ref(false);
 const showSchemaDiffDialog = ref(false);
 const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
+const showTableImportDialog = ref(false);
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
 const schemaDiffPrefillConnectionId = ref("");
@@ -132,6 +134,10 @@ const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
 const diagramFocusTableName = ref("");
+const tableImportPrefillConnectionId = ref("");
+const tableImportPrefillDatabase = ref("");
+const tableImportPrefillSchema = ref("");
+const tableImportPrefillTable = ref("");
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -194,6 +200,17 @@ watch(() => connectionStore.diagramSource, (v) => {
     diagramFocusTableName.value = v.tableName ?? "";
     showDiagramDialog.value = true;
     connectionStore.diagramSource = null;
+  }
+});
+
+watch(() => connectionStore.tableImportSource, (v) => {
+  if (v) {
+    tableImportPrefillConnectionId.value = v.connectionId;
+    tableImportPrefillDatabase.value = v.database;
+    tableImportPrefillSchema.value = v.schema ?? "";
+    tableImportPrefillTable.value = v.tableName;
+    showTableImportDialog.value = true;
+    connectionStore.tableImportSource = null;
   }
 });
 
@@ -1256,6 +1273,13 @@ async function setupFileDrop() {
         :prefill-database="diagramPrefillDatabase"
         :prefill-schema="diagramPrefillSchema"
         :focus-table-name="diagramFocusTableName"
+      />
+      <TableImportDialog
+        v-model:open="showTableImportDialog"
+        :prefill-connection-id="tableImportPrefillConnectionId"
+        :prefill-database="tableImportPrefillDatabase"
+        :prefill-schema="tableImportPrefillSchema"
+        :prefill-table="tableImportPrefillTable"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

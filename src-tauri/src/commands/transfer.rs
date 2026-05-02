@@ -50,7 +50,7 @@ pub enum TransferStatus {
     Cancelled,
 }
 
-fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
+pub(crate) fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     match db_type {
         DatabaseType::Mysql | DatabaseType::ClickHouse | DatabaseType::Doris | DatabaseType::StarRocks => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
@@ -58,7 +58,7 @@ fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     }
 }
 
-fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType) -> String {
+pub(crate) fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType) -> String {
     let qt = quote_identifier(table, db_type);
     if schema.is_empty() {
         qt
@@ -251,7 +251,7 @@ fn generate_create_table_ddl(
     ddl
 }
 
-fn generate_insert(
+pub(crate) fn generate_insert(
     columns: &[String],
     rows: &[Vec<serde_json::Value>],
     table: &str,
@@ -312,7 +312,7 @@ fn count_sql(table: &str, schema: &str, db_type: &DatabaseType) -> String {
     format!("SELECT COUNT(*) FROM {full_table}")
 }
 
-async fn execute_on_pool(
+pub(crate) async fn execute_on_pool(
     state: &AppState,
     pool_key: &str,
     sql: &str,
@@ -399,7 +399,7 @@ async fn execute_on_pool(
     }
 }
 
-async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
+pub(crate) async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
     let configs = state.configs.lock().await;
     configs
         .get(connection_id)

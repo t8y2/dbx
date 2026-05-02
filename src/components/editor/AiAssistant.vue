@@ -627,8 +627,8 @@ function formatInlineText(text: string): string {
         <div v-if="tempProvider !== 'claude'" class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">API</Label>
           <div class="col-span-2 flex gap-2">
-            <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'bg-accent': tempApiStyle === 'completions' }" @click="tempApiStyle = 'completions'">/chat/completions</Button>
-            <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'bg-accent': tempApiStyle === 'responses' }" @click="tempApiStyle = 'responses'">/responses</Button>
+            <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': tempApiStyle === 'completions' }" @click="tempApiStyle = 'completions'">/chat/completions</Button>
+            <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': tempApiStyle === 'responses' }" @click="tempApiStyle = 'responses'">/responses</Button>
           </div>
         </div>
       </div>

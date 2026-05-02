@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import {
-  ArrowUp, ArrowRightLeft, Bot, Check, Copy, Database, HelpCircle, History,
+  ArrowUp, ArrowRightLeft, Bot, Check, ChevronRight, Copy, Database, HelpCircle, History,
   Loader2, MessageSquarePlus, Replace, Server, Settings, Play, Square, Trash2,
   Wand2, Wrench, X, Zap, TestTube,
 } from "lucide-vue-next";
@@ -38,6 +38,8 @@ const queryStore = useQueryStore();
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  reasoning?: string;
+  isThinking?: boolean;
 }
 
 const props = defineProps<{
@@ -89,7 +91,7 @@ const chatTitle = computed(() => {
 
 const isWaitingForFirstDelta = computed(() => {
   const last = messages.value[messages.value.length - 1];
-  return isGenerating.value && last?.role === "assistant" && !last.content;
+  return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
 });
 
 const activePlaceholder = computed(() => t(`ai.placeholders.${activeAction.value}`));
@@ -145,8 +147,30 @@ const providerDefaults: Record<AiProvider, { endpoint: string; model: string }> 
 };
 
 function appendAssistantDelta(assistantIdx: number, delta: string) {
-  messages.value[assistantIdx].content += delta;
+  const msg = messages.value[assistantIdx];
+  if (msg.isThinking) msg.isThinking = false;
+  msg.content += delta;
   scrollToBottom();
+}
+
+function appendAssistantReasoning(assistantIdx: number, delta: string) {
+  const msg = messages.value[assistantIdx];
+  if (!msg.reasoning) msg.reasoning = "";
+  msg.reasoning += delta;
+  msg.isThinking = true;
+  scrollToBottom();
+}
+
+const expandedReasoning = ref<Set<number>>(new Set());
+
+function toggleReasoning(index: number) {
+  const next = new Set(expandedReasoning.value);
+  if (next.has(index)) {
+    next.delete(index);
+  } else {
+    next.add(index);
+  }
+  expandedReasoning.value = next;
 }
 
 function openSettings() {
@@ -243,10 +267,14 @@ async function send() {
       context,
     }, history, (delta) => {
       appendAssistantDelta(assistantIdx, delta);
-    }, sessionId);
+    }, sessionId, (reasoningDelta) => {
+      appendAssistantReasoning(assistantIdx, reasoningDelta);
+    });
   } catch (e: any) {
     messages.value[assistantIdx].content = `Error: ${e.message || e}`;
   } finally {
+    const msg = messages.value[assistantIdx];
+    if (msg) msg.isThinking = false;
     isGenerating.value = false;
     activeAction.value = "generate";
     currentSessionId.value = "";
@@ -291,7 +319,7 @@ async function persistConversation() {
     title: first ? first.content.slice(0, 50) : "Untitled",
     connectionName: props.connection.name,
     database: props.tab?.database || "",
-    messages: messages.value.map((m) => ({ role: m.role, content: m.content })),
+    messages: messages.value.map((m) => ({ role: m.role, content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}) })),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }).catch(() => {});
@@ -307,6 +335,7 @@ function selectConversation(conv: AiConversation) {
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
+    reasoning: m.reasoning,
   }));
   showConversationList.value = false;
   scrollToBottom();
@@ -433,8 +462,30 @@ function formatInlineText(text: string): string {
             </div>
           </div>
 
-          <div v-else-if="msg.content" class="flex">
+          <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
             <div class="max-w-[95%] rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
+              <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
+                <button
+                  class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                  @click="toggleReasoning(i)"
+                >
+                  <ChevronRight
+                    class="h-3 w-3 transition-transform duration-200"
+                    :class="{ 'rotate-90': expandedReasoning.has(i) || msg.isThinking }"
+                  />
+                  <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
+                  <span>{{ t('ai.reasoningProcess') }}</span>
+                </button>
+                <div
+                  class="overflow-hidden transition-all duration-200 ease-in-out"
+                  :style="{
+                    maxHeight: (expandedReasoning.has(i) || msg.isThinking) ? '2000px' : '0px',
+                    opacity: (expandedReasoning.has(i) || msg.isThinking) ? '1' : '0',
+                  }"
+                >
+                  <div class="mt-1.5 pl-4 border-l-2 border-muted-foreground/20 text-[11px] text-muted-foreground whitespace-pre-wrap">{{ msg.reasoning }}</div>
+                </div>
+              </div>
               <template v-for="(seg, j) in parseMessage(msg.content)" :key="j">
                 <div v-if="seg.type === 'text'" class="whitespace-normal">
                   <span v-html="formatInlineText(seg.content)" />

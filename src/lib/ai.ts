@@ -91,6 +91,7 @@ export async function runAiStream(
   history: api.AiMessage[] | undefined,
   onDelta: (delta: string) => void,
   sessionId?: string,
+  onReasoningDelta?: (delta: string) => void,
 ): Promise<void> {
   const isZh = currentLocale() === "zh-CN";
   const systemPrompt = buildSystemPrompt(input.action, input.context);
@@ -118,7 +119,10 @@ export async function runAiStream(
     maxTokens: params.maxTokens,
     temperature: params.temperature,
   }, (chunk) => {
-    if (!chunk.done && chunk.delta) onDelta(chunk.delta);
+    if (!chunk.done) {
+      if (chunk.reasoning_delta) onReasoningDelta?.(chunk.reasoning_delta);
+      if (chunk.delta) onDelta(chunk.delta);
+    }
   });
 }
 

@@ -185,6 +185,7 @@ export default {
     welcome: "聊聊你想查什么，我来写 SQL",
     newChat: "新对话",
     thinking: "思考中...",
+    reasoningProcess: "思考过程",
     stopGenerating: "停止生成",
     fixWithAi: "用 AI 修复",
     truncated: "上下文已截断",

@@ -32,6 +32,7 @@ export async function aiComplete(request: AiCompletionRequest): Promise<string> 
 export interface AiStreamChunk {
   session_id: string;
   delta: string;
+  reasoning_delta?: string;
   done: boolean;
 }
 
@@ -75,6 +76,7 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
 export interface AiChatMessage {
   role: string;
   content: string;
+  reasoning?: string;
 }
 
 export interface AiConversation {

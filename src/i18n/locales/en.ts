@@ -185,6 +185,7 @@ export default {
     welcome: "Tell me what you'd like to query, and I'll write the SQL",
     newChat: "New Chat",
     thinking: "Thinking...",
+    reasoningProcess: "Thinking process",
     stopGenerating: "Stop generating",
     fixWithAi: "Fix with AI",
     truncated: "Context truncated",

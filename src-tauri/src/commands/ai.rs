@@ -152,6 +152,8 @@ pub async fn ai_complete(request: AiCompletionRequest) -> Result<String, String>
 struct AiStreamChunk {
     session_id: String,
     delta: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_delta: Option<String>,
     done: bool,
 }
 
@@ -269,6 +271,7 @@ async fn stream_claude(app: &AppHandle, client: &reqwest::Client, session_id: &s
     let _ = app.emit("ai-stream-chunk", AiStreamChunk {
         session_id: session_id.to_string(),
         delta: String::new(),
+        reasoning_delta: None,
         done: true,
     });
 
@@ -333,6 +336,9 @@ async fn stream_openai(app: &AppHandle, client: &reqwest::Client, session_id: &s
             }
 
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(reasoning) = openai_stream_reasoning(&event) {
+                    emit_stream_reasoning(app, session_id, reasoning);
+                }
                 if let Some(text) = openai_stream_text(&event) {
                     emit_stream_delta(app, session_id, text);
                 }
@@ -347,6 +353,7 @@ async fn stream_openai(app: &AppHandle, client: &reqwest::Client, session_id: &s
     let _ = app.emit("ai-stream-chunk", AiStreamChunk {
         session_id: session_id.to_string(),
         delta: String::new(),
+        reasoning_delta: None,
         done: true,
     });
 
@@ -488,10 +495,16 @@ fn openai_stream_text(event: &serde_json::Value) -> Option<&str> {
         .and_then(|choice| {
             choice["delta"]["content"]
                 .as_str()
-                .or_else(|| choice["delta"]["reasoning_content"].as_str())
                 .or_else(|| choice["message"]["content"].as_str())
         })
         .or_else(|| event["content"].as_str())
+        .filter(|text| !text.is_empty())
+}
+
+fn openai_stream_reasoning(event: &serde_json::Value) -> Option<&str> {
+    event["choices"]
+        .get(0)
+        .and_then(|choice| choice["delta"]["reasoning_content"].as_str())
         .filter(|text| !text.is_empty())
 }
 
@@ -499,6 +512,16 @@ fn emit_stream_delta(app: &AppHandle, session_id: &str, delta: &str) {
     let _ = app.emit("ai-stream-chunk", AiStreamChunk {
         session_id: session_id.to_string(),
         delta: delta.to_string(),
+        reasoning_delta: None,
+        done: false,
+    });
+}
+
+fn emit_stream_reasoning(app: &AppHandle, session_id: &str, reasoning: &str) {
+    let _ = app.emit("ai-stream-chunk", AiStreamChunk {
+        session_id: session_id.to_string(),
+        delta: String::new(),
+        reasoning_delta: Some(reasoning.to_string()),
         done: false,
     });
 }
@@ -632,6 +655,7 @@ async fn stream_responses_api(app: &AppHandle, client: &reqwest::Client, session
     let _ = app.emit("ai-stream-chunk", AiStreamChunk {
         session_id: session_id.to_string(),
         delta: String::new(),
+        reasoning_delta: None,
         done: true,
     });
 
@@ -649,6 +673,8 @@ fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
 pub struct AiChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

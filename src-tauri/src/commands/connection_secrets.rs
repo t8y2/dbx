@@ -6,6 +6,7 @@ use tauri::{AppHandle, Manager};
 
 pub(super) const MAIN_PASSWORD_KEY: &str = "password";
 pub(super) const SSH_PASSWORD_KEY: &str = "ssh_password";
+pub(super) const SSH_KEY_PASSPHRASE_KEY: &str = "ssh_key_passphrase";
 pub(super) const CONNECTION_STRING_KEY: &str = "connection_string";
 
 const KEYRING_SERVICE: &str = "dev.dbx.connections";
@@ -103,6 +104,7 @@ pub(super) fn save_connections_to_file(
     for config in configs {
         persist_secret(store, &config.id, MAIN_PASSWORD_KEY, &config.password)?;
         persist_secret(store, &config.id, SSH_PASSWORD_KEY, &config.ssh_password)?;
+        persist_secret(store, &config.id, SSH_KEY_PASSPHRASE_KEY, &config.ssh_key_passphrase)?;
         persist_optional_secret(
             store,
             &config.id,
@@ -140,6 +142,15 @@ pub(super) fn load_connections_from_file(
             }
         } else {
             store.set_secret(&config.id, SSH_PASSWORD_KEY, &config.ssh_password)?;
+            needs_rewrite = true;
+        }
+
+        if config.ssh_key_passphrase.is_empty() {
+            if let Some(secret) = store.get_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)? {
+                config.ssh_key_passphrase = secret;
+            }
+        } else {
+            store.set_secret(&config.id, SSH_KEY_PASSPHRASE_KEY, &config.ssh_key_passphrase)?;
             needs_rewrite = true;
         }
 
@@ -187,6 +198,7 @@ fn delete_removed_connection_secrets(
         }
         store.delete_secret(&config.id, MAIN_PASSWORD_KEY)?;
         store.delete_secret(&config.id, SSH_PASSWORD_KEY)?;
+        store.delete_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)?;
         store.delete_secret(&config.id, CONNECTION_STRING_KEY)?;
     }
     Ok(())
@@ -235,6 +247,7 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
         .map(|mut config| {
             config.password.clear();
             config.ssh_password.clear();
+            config.ssh_key_passphrase.clear();
             config.connection_string = None;
             config
         })
@@ -352,6 +365,7 @@ mod tests {
             ssh_user: String::new(),
             ssh_password: ssh_password.to_string(),
             ssh_key_path: String::new(),
+            ssh_key_passphrase: String::new(),
             ssh_expose_lan: false,
             ssl: false,
             connection_string: None,

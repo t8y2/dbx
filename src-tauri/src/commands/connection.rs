@@ -171,6 +171,7 @@ impl AppState {
                 &config.ssh_user,
                 &config.ssh_password,
                 &config.ssh_key_path,
+                &config.ssh_key_passphrase,
                 &config.host,
                 config.port,
                 config.ssh_expose_lan,

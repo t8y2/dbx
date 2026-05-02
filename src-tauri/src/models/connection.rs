@@ -32,6 +32,8 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub ssh_key_path: String,
     #[serde(default)]
+    pub ssh_key_passphrase: String,
+    #[serde(default)]
     pub ssh_expose_lan: bool,
     #[serde(default)]
     pub ssl: bool,

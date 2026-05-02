@@ -19,6 +19,7 @@ export interface ConnectionConfig {
   ssh_user?: string;
   ssh_password?: string;
   ssh_key_path?: string;
+  ssh_key_passphrase?: string;
   ssh_expose_lan?: boolean;
   ssl?: boolean;
   connection_string?: string;

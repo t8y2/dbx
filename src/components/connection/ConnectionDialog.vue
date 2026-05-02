@@ -12,10 +12,13 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuTrigger,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/tauri";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { FolderOpen } from "lucide-vue-next";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
@@ -54,6 +57,7 @@ const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   ssh_user: "",
   ssh_password: "",
   ssh_key_path: "",
+  ssh_key_passphrase: "",
   ssh_expose_lan: false,
   ssl: false,
   connection_string: undefined,
@@ -156,6 +160,7 @@ watch(() => props.editConfig, (config) => {
       ssh_user: config.ssh_user || "",
       ssh_password: config.ssh_password || "",
       ssh_key_path: config.ssh_key_path || "",
+      ssh_key_passphrase: config.ssh_key_passphrase || "",
       ssh_expose_lan: config.ssh_expose_lan || false,
       ssl: config.ssl || false,
       connection_string: config.connection_string,
@@ -298,6 +303,16 @@ const dialogTitle = ref("");
 watch([() => editingId.value, () => open.value], () => {
   dialogTitle.value = editingId.value ? t('connection.editTitle') : t('connection.title');
 });
+
+async function browseSshKeyPath() {
+  const selected = await openFileDialog({
+    title: "Select SSH Private Key",
+    multiple: false,
+  });
+  if (selected && typeof selected === "string") {
+    form.value.ssh_key_path = selected;
+  }
+}
 </script>
 
 <template>
@@ -307,7 +322,7 @@ watch([() => editingId.value, () => open.value], () => {
         <DialogTitle>{{ editingId ? t('connection.editTitle') : t('connection.title') }}</DialogTitle>
       </DialogHeader>
 
-      <div class="grid gap-4 py-4">
+      <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-right">{{ t('connection.name') }}</Label>
           <Input v-model="form.name" class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
@@ -514,7 +529,21 @@ watch([() => editingId.value, () => open.value], () => {
             </div>
             <div class="grid grid-cols-4 items-center gap-4">
               <Label class="text-right text-xs">{{ t('connection.sshKeyPath') }}</Label>
-              <Input v-model="form.ssh_key_path" class="col-span-3" placeholder="~/.ssh/id_rsa" />
+              <div class="col-span-3 flex items-center gap-1">
+                <Input v-model="form.ssh_key_path" class="flex-1" placeholder="~/.ssh/id_rsa" />
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseSshKeyPath">
+                      <FolderOpen class="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{{ t('connection.sshKeyPathBrowse') }}</TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshKeyPassphrase') }}</Label>
+              <Input v-model="form.ssh_key_passphrase" type="password" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" />
             </div>
             <div class="grid grid-cols-4 items-center gap-4">
               <span />

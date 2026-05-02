@@ -18,7 +18,8 @@ const SQL_KEYWORDS = [
   "DESCRIBE", "SHOW", "SUMMARIZE", "PRAGMA",
 ];
 
-const TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into"]);
+const TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into", "table", "describe", "explain"]);
+const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 
 export interface SqlCompletionTable {
   name: string;
@@ -83,7 +84,7 @@ export function buildSqlCompletionItemsFromContext(
     items.push(...buildTableItems(context.prefix, input.tables));
   }
 
-  if (!context.qualifier && !context.suggestTables) {
+  if (!context.qualifier) {
     items.push(...buildKeywordItems(context.prefix));
   }
 
@@ -103,10 +104,14 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
   const referencedTables = extractReferencedTables(sql);
 
+  const afterTableTrigger = TABLE_TRIGGER_KEYWORDS.has(lastWord)
+    || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken))
+    || isInTableListContext(beforeToken);
+
   return {
     prefix,
     qualifier,
-    suggestTables: TABLE_TRIGGER_KEYWORDS.has(lastWord),
+    suggestTables: afterTableTrigger || (!qualifier && prefix.length > 0),
     suggestColumns: !!qualifier || referencedTables.length > 0,
     referencedTables,
   };
@@ -148,6 +153,16 @@ function buildTableItems(prefix: string, tables: SqlCompletionTable[]): SqlCompl
       detail: table.schema ? `${table.schema}.${table.name}` : table.type,
       boost: computeBoost(table.name, prefix) + 1000,
     }));
+}
+
+function isFollowedByJoin(beforeToken: string): boolean {
+  const words = beforeToken.trimEnd().split(/\s+/);
+  const second = words[words.length - 2]?.toLowerCase();
+  return second === "join" || JOIN_MODIFIERS.has(second ?? "");
+}
+
+function isInTableListContext(beforeToken: string): boolean {
+  return /,\s*$/.test(beforeToken) && /\b(?:from|join|update|into)\b/i.test(beforeToken);
 }
 
 function buildColumnItems(

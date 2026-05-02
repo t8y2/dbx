@@ -74,3 +74,46 @@ test("suggests columns from referenced tables in select list", () => {
   assert.equal(items[0]?.label, "name");
   assert.equal(items[0]?.type, "column");
 });
+
+test("suggests tables after LEFT JOIN", () => {
+  const sql = "select * from users left join us";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.ok(items.some((item) => item.label === "users" && item.type === "table"));
+  assert.ok(items.some((item) => item.label === "user_profiles" && item.type === "table"));
+});
+
+test("suggests tables after comma in FROM clause", () => {
+  const sql = "select * from users, or";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.ok(items.some((item) => item.label === "orders" && item.type === "table"));
+});
+
+test("suggests tables as fallback when typing an identifier", () => {
+  const sql = "us";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.ok(items.some((item) => item.label === "users" && item.type === "table"));
+  assert.ok(items.some((item) => item.type === "keyword"));
+});
+
+test("always includes keywords alongside table suggestions", () => {
+  const sql = "select * from us";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.ok(items.some((item) => item.type === "table"));
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "USING"));
+});

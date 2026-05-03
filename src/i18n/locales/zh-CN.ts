@@ -29,6 +29,8 @@ export default {
     import: "导入连接",
     export: "导出连接",
     showMore: "加载更多 ({count})...",
+    filterByType: "按类型筛选",
+    clearFilter: "清除筛选",
   },
   connection: {
     title: "新建连接",

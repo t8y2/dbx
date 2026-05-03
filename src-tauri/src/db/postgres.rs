@@ -305,10 +305,11 @@ pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Ve
         .map(|row| {
             let all_cols: Vec<String> = row.get::<Vec<String>, _>("columns");
             let nkeyatts = row.get::<Option<i16>, _>("nkeyatts").unwrap_or(all_cols.len() as i16) as usize;
+            let key_cols = all_cols[..nkeyatts].to_vec();
             let included = if nkeyatts < all_cols.len() { all_cols[nkeyatts..].to_vec() } else { vec![] };
             IndexInfo {
                 name: row.get::<String, _>("index_name"),
-                columns: all_cols,
+                columns: key_cols,
                 is_unique: row.get::<bool, _>("is_unique"),
                 is_primary: row.get::<bool, _>("is_primary"),
                 filter: row.get::<Option<String>, _>("filter_expr"),

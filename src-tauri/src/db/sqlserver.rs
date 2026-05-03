@@ -125,7 +125,12 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
                 Some(n) => format!("nvarchar({n})"),
                 None => "nvarchar".to_string(),
             },
-            "char" | "nchar" | "binary" | "varbinary" => match max_len {
+            "varbinary" => match max_len {
+                Some(-1) => "varbinary(max)".to_string(),
+                Some(n) if n > 0 => format!("varbinary({n})"),
+                _ => "varbinary".to_string(),
+            },
+            "char" | "nchar" | "binary" => match max_len {
                 Some(n) if n > 0 => format!("{base}({n})"),
                 _ => base,
             }

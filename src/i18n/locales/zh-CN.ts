@@ -164,6 +164,9 @@ export default {
     shortcutsHint: "从这里开始你的下一步。",
     tip: "也可以在左侧展开连接，右键数据库或表查看更多操作。",
     fileOpened: "已打开 {name}",
+    mcpTitle: "AI 编程助手集成",
+    mcpDescription: "除了内置 AI 助手，还可以通过 MCP 让 Claude Code、Cursor 等编程助手直接使用这里的数据库连接。",
+    mcpLearnMore: "了解更多",
   },
   common: {
     language: "语言",

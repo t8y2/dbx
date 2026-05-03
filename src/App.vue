@@ -762,6 +762,10 @@ function openGitHub() {
   open("https://github.com/t8y2/dbx");
 }
 
+function openMcpGuide() {
+  open("https://github.com/t8y2/dbx/blob/main/docs/mcp-guide.md");
+}
+
 async function checkUpdates(options: { silent?: boolean } = {}) {
   if (checkingUpdates.value) return;
   checkingUpdates.value = true;
@@ -1485,6 +1489,21 @@ async function setupFileDrop() {
                     <div class="mt-2 rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
                       <Search class="mr-1 inline h-3.5 w-3.5" />
                       {{ t('welcome.tip') }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- MCP Integration Hint -->
+              <div class="rounded-lg border bg-muted/10 px-5 py-4">
+                <div class="flex items-start gap-3">
+                  <Sparkles class="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                  <div class="min-w-0">
+                    <div class="text-sm font-medium">{{ t('welcome.mcpTitle') }}</div>
+                    <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t('welcome.mcpDescription') }}</p>
+                    <div class="mt-2 flex items-center gap-2">
+                      <code class="rounded bg-muted px-2 py-0.5 text-[11px] select-all">npx @dbx-app/mcp-server</code>
+                      <a href="#" class="text-xs text-primary hover:underline" @click.prevent="openMcpGuide">{{ t('welcome.mcpLearnMore') }}</a>
                     </div>
                   </div>
                 </div>

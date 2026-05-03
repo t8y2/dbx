@@ -164,6 +164,9 @@ export default {
     tipSidebar: "Click a table on the left to view data",
     tipExecute: "to execute query",
     fileOpened: "Opened {name}",
+    mcpTitle: "AI Agent Integration",
+    mcpDescription: "Beyond the built-in AI assistant, you can also use Claude Code, Cursor, and other coding agents to query your databases via MCP.",
+    mcpLearnMore: "Learn more",
   },
   common: {
     language: "Language",

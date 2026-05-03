@@ -33,6 +33,7 @@ pub struct ColumnInfo {
     pub comment: Option<String>,
     pub numeric_precision: Option<i32>,
     pub numeric_scale: Option<i32>,
+    pub character_maximum_length: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,10 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
     pub is_unique: bool,
     pub is_primary: bool,
+    pub filter: Option<String>,
+    pub index_type: Option<String>,
+    pub included_columns: Option<Vec<String>>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

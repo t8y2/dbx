@@ -442,6 +442,7 @@ async fn get_columns_for_transfer(
                     comment: None,
                     numeric_precision: None,
                     numeric_scale: None,
+                    character_maximum_length: None,
                 })
             }).map_err(|e| e.to_string())?;
             Ok(rows.filter_map(|r| r.ok()).collect())

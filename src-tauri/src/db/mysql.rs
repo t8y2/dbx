@@ -215,9 +215,9 @@ pub async fn get_columns(
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
     let sql = format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
+        "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
          CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
-         c.NUMERIC_PRECISION, c.NUMERIC_SCALE \
+         c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH \
          FROM information_schema.COLUMNS c \
          LEFT JOIN information_schema.KEY_COLUMN_USAGE kcu \
            ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
@@ -238,7 +238,7 @@ pub async fn get_columns(
         .iter()
         .map(|row| ColumnInfo {
             name: get_str_by_name(row, "COLUMN_NAME"),
-            data_type: get_str_by_name(row, "DATA_TYPE"),
+            data_type: get_str_by_name(row, "COLUMN_TYPE"),
             is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
             column_default: get_opt_str(row, "COLUMN_DEFAULT"),
             is_primary_key: row.get::<i32, _>("IS_PK") == 1,
@@ -246,6 +246,7 @@ pub async fn get_columns(
             comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
             numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
             numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
+            character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
         })
         .collect())
 }
@@ -331,10 +332,11 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let sql = format!(
         "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
-         NOT NON_UNIQUE AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary \
+         MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary, \
+         INDEX_TYPE \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         GROUP BY INDEX_NAME, NON_UNIQUE \
+         GROUP BY INDEX_NAME, INDEX_TYPE \
          ORDER BY INDEX_NAME",
         quote_value(database),
         quote_value(table),
@@ -350,9 +352,13 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
             let cols_str = get_str_by_name(row, "columns");
             IndexInfo {
                 name: get_str_by_name(row, "INDEX_NAME"),
-                columns: cols_str.split(',').map(|s| s.to_string()).collect(),
+                columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
                 is_unique: row.get::<bool, _>("is_unique"),
                 is_primary: row.get::<bool, _>("is_primary"),
+                filter: None,
+                index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
+                included_columns: None,
+                comment: None,
             }
         })
         .collect())

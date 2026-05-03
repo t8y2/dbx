@@ -81,7 +81,7 @@ pub async fn get_columns(conn: &OracleClient, schema: &str, table: &str) -> Resu
 
     let col_result = conn.query(
         &format!(
-            "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_PRECISION, DATA_SCALE \
+            "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_PRECISION, DATA_SCALE, DATA_LENGTH, CHAR_LENGTH \
              FROM ALL_TAB_COLUMNS \
              WHERE OWNER = '{s}' AND TABLE_NAME = '{t}' \
              ORDER BY COLUMN_ID"
@@ -91,15 +91,40 @@ pub async fn get_columns(conn: &OracleClient, schema: &str, table: &str) -> Resu
 
     Ok(col_result.rows.iter().map(|row| {
         let name = row.get_string(0).unwrap_or("").to_string();
+        let base = row.get_string(1).unwrap_or("").to_string();
+        let data_len = row.get_i64(5).map(|v| v as i32);
+        let char_len = row.get_i64(6).map(|v| v as i32);
+        let num_prec = row.get_i64(3).map(|v| v as i32);
+        let num_scale = row.get_i64(4).map(|v| v as i32);
+        let data_type = match base.to_uppercase().as_str() {
+            "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => {
+                let len = char_len.or(data_len);
+                match len {
+                    Some(n) => format!("{base}({n})"),
+                    None => base,
+                }
+            }
+            "NUMBER" => match (num_prec, num_scale) {
+                (Some(p), Some(s)) if s > 0 => format!("NUMBER({p},{s})"),
+                (Some(p), _) if p > 0 => format!("NUMBER({p})"),
+                _ => "NUMBER".to_string(),
+            },
+            "RAW" => match data_len {
+                Some(n) => format!("RAW({n})"),
+                None => "RAW".to_string(),
+            },
+            _ => base,
+        };
         ColumnInfo {
             is_primary_key: pk_names.contains(&name),
             name,
-            data_type: row.get_string(1).unwrap_or("").to_string(),
+            data_type,
             is_nullable: row.get_string(2).unwrap_or("N") == "Y",
             column_default: None,
             extra: None, comment: None,
-            numeric_precision: row.get_i64(3).map(|v| v as i32),
-            numeric_scale: row.get_i64(4).map(|v| v as i32),
+            numeric_precision: num_prec,
+            numeric_scale: num_scale,
+            character_maximum_length: char_len,
         }
     }).collect())
 }
@@ -109,13 +134,14 @@ pub async fn list_indexes(conn: &OracleClient, schema: &str, table: &str) -> Res
         "SELECT i.INDEX_NAME, \
          LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS columns, \
          i.UNIQUENESS, \
-         CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK \
+         CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK, \
+         i.INDEX_TYPE \
          FROM ALL_INDEXES i \
-         JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.TABLE_OWNER = ic.TABLE_OWNER \
+         JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER \
          LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER \
            AND c.CONSTRAINT_TYPE = 'P' \
          WHERE i.TABLE_OWNER = '{s}' AND i.TABLE_NAME = '{t}' \
-         GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE \
+         GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE \
          ORDER BY i.INDEX_NAME",
         s = schema.replace('\'', "''"), t = table.replace('\'', "''")
     );
@@ -124,9 +150,13 @@ pub async fn list_indexes(conn: &OracleClient, schema: &str, table: &str) -> Res
         let cols_str = row.get_string(1).unwrap_or("");
         IndexInfo {
             name: row.get_string(0).unwrap_or("").to_string(),
-            columns: cols_str.split(',').map(|s| s.to_string()).collect(),
+            columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
             is_unique: row.get_string(2).unwrap_or("") == "UNIQUE",
             is_primary: row.get_i64(3).unwrap_or(0) == 1,
+            filter: None,
+            index_type: row.get_string(4).map(|s| s.to_string()),
+            included_columns: None,
+            comment: None,
         }
     }).collect())
 }

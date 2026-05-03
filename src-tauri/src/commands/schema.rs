@@ -51,6 +51,7 @@ fn duckdb_query_columns(con: &duckdb::Connection, table: &str) -> Result<Vec<db:
             extra: None, comment: None,
             numeric_precision: None,
             numeric_scale: None,
+            character_maximum_length: None,
         })
     }).map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -443,7 +444,13 @@ async fn pg_ddl(pool: &sqlx::postgres::PgPool, schema: &str, table: &str) -> Res
         if idx.is_primary { continue; }
         let unique = if idx.is_unique { "UNIQUE " } else { "" };
         let cols = idx.columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
-        ddl.push_str(&format!("\nCREATE {unique}INDEX \"{}\" ON \"{schema}\".\"{table}\" ({cols});", idx.name));
+        let using = idx.index_type.as_deref().map(|t| format!(" USING {t}")).unwrap_or_default();
+        let include = idx.included_columns.as_deref().filter(|c| !c.is_empty()).map(|cols| format!(" INCLUDE ({})", cols.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+        let filter = idx.filter.as_deref().map(|f| format!(" WHERE {f}")).unwrap_or_default();
+        ddl.push_str(&format!("\nCREATE {unique}INDEX \"{}\" ON \"{schema}\".\"{table}\"{using} ({cols}){include}{filter};", idx.name));
+        if let Some(ref c) = idx.comment {
+            ddl.push_str(&format!("\nCOMMENT ON INDEX \"{schema}\".\"{}\" IS '{}';", idx.name, c.replace('\'', "''")));
+        }
     }
     Ok(ddl)
 }
@@ -474,8 +481,11 @@ async fn build_sqlserver_ddl(client: &mut db::sqlserver::SqlServerClient, schema
     for idx in &indexes {
         if idx.is_primary { continue; }
         let unique = if idx.is_unique { "UNIQUE " } else { "" };
+        let idx_type = idx.index_type.as_deref().map(|t| format!("{t} ")).unwrap_or_default();
         let cols = idx.columns.iter().map(|c| format!("[{c}]")).collect::<Vec<_>>().join(", ");
-        ddl.push_str(&format!("\nCREATE {unique}INDEX [{}] ON [{schema}].[{table}] ({cols});", idx.name));
+        let include = idx.included_columns.as_deref().filter(|c| !c.is_empty()).map(|cols| format!(" INCLUDE ({})", cols.iter().map(|c| format!("[{c}]")).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+        let filter = idx.filter.as_deref().map(|f| format!(" WHERE {f}")).unwrap_or_default();
+        ddl.push_str(&format!("\nCREATE {unique}{idx_type}INDEX [{}] ON [{schema}].[{table}] ({cols}){include}{filter};", idx.name));
     }
     Ok(ddl)
 }

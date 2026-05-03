@@ -55,12 +55,14 @@ pub async fn get_columns(pool: &SqlitePool, _schema: &str, table: &str) -> Resul
             extra: None, comment: None,
             numeric_precision: None,
             numeric_scale: None,
+            character_maximum_length: None,
         })
         .collect())
 }
 
 pub async fn list_indexes(pool: &SqlitePool, _schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    let idx_rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA index_list(\"{}\")", table))
+    let safe_table = table.replace('"', "\"\"");
+    let idx_rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA index_list(\"{safe_table}\")"))
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -69,8 +71,11 @@ pub async fn list_indexes(pool: &SqlitePool, _schema: &str, table: &str) -> Resu
     for idx_row in &idx_rows {
         let name: String = idx_row.get("name");
         let is_unique: bool = idx_row.get::<i32, _>("unique") != 0;
+        let origin: String = idx_row.get::<String, _>("origin");
+        let is_primary = origin == "pk";
 
-        let col_rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA index_info(\"{}\")", name))
+        let safe_name = name.replace('"', "\"\"");
+        let col_rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA index_info(\"{safe_name}\")"))
             .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -81,7 +86,11 @@ pub async fn list_indexes(pool: &SqlitePool, _schema: &str, table: &str) -> Resu
             name,
             columns,
             is_unique,
-            is_primary: false,
+            is_primary,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
         });
     }
     Ok(indexes)

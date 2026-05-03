@@ -44,6 +44,7 @@ export interface ColumnInfo {
   comment?: string | null;
   numeric_precision?: number | null;
   numeric_scale?: number | null;
+  character_maximum_length?: number | null;
 }
 
 export interface IndexInfo {
@@ -51,6 +52,10 @@ export interface IndexInfo {
   columns: string[];
   is_unique: boolean;
   is_primary: boolean;
+  filter?: string | null;
+  index_type?: string | null;
+  included_columns?: string[] | null;
+  comment?: string | null;
 }
 
 export interface ForeignKeyInfo {

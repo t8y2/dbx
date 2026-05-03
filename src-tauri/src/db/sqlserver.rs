@@ -97,7 +97,7 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
     let sql = format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
          CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
-         c.NUMERIC_PRECISION, c.NUMERIC_SCALE \
+         c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, c.DATETIME_PRECISION \
          FROM INFORMATION_SCHEMA.COLUMNS c \
          LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
            ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA AND c.TABLE_NAME = kcu.TABLE_NAME AND c.COLUMN_NAME = kcu.COLUMN_NAME \
@@ -109,28 +109,67 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| {
+        let base = row.get::<&str, _>(1).unwrap_or("").to_string();
+        let max_len = row.get::<i32, _>(7);
+        let dt_prec = row.get::<i32, _>(8);
+        let num_prec = row.get::<i32, _>(5);
+        let num_scale = row.get::<i32, _>(6);
+        let data_type = match base.to_lowercase().as_str() {
+            "varchar" => match max_len {
+                Some(-1) => "varchar(max)".to_string(),
+                Some(n) => format!("varchar({n})"),
+                None => "varchar".to_string(),
+            },
+            "nvarchar" => match max_len {
+                Some(-1) => "nvarchar(max)".to_string(),
+                Some(n) => format!("nvarchar({n})"),
+                None => "nvarchar".to_string(),
+            },
+            "varbinary" => match max_len {
+                Some(-1) => "varbinary(max)".to_string(),
+                Some(n) if n > 0 => format!("varbinary({n})"),
+                _ => "varbinary".to_string(),
+            },
+            "char" | "nchar" | "binary" => match max_len {
+                Some(n) if n > 0 => format!("{base}({n})"),
+                _ => base,
+            }
+            "decimal" | "numeric" => match (num_prec, num_scale) {
+                (Some(p), Some(s)) => format!("{base}({p},{s})"),
+                _ => base,
+            },
+            "datetime2" | "datetimeoffset" | "time" => match dt_prec {
+                Some(p) => format!("{base}({p})"),
+                _ => base,
+            },
+            _ => base,
+        };
         ColumnInfo {
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
-            data_type: row.get::<&str, _>(1).unwrap_or("").to_string(),
+            data_type,
             is_nullable: row.get::<&str, _>(2).unwrap_or("NO") == "YES",
             column_default: row.get::<&str, _>(3).map(|s| s.to_string()),
             is_primary_key: row.get::<i32, _>(4).unwrap_or(0) == 1,
             extra: None, comment: None,
-            numeric_precision: row.get::<i32, _>(5),
-            numeric_scale: row.get::<i32, _>(6),
+            numeric_precision: num_prec,
+            numeric_scale: num_scale,
+            character_maximum_length: max_len,
         }
     }).collect())
 }
 
 pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let sql = format!(
-        "SELECT i.name, STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns, \
-         i.is_unique, i.is_primary_key \
+        "SELECT i.name, \
+         STRING_AGG(CASE WHEN ic.is_included_column = 0 THEN c.name END, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns, \
+         i.is_unique, i.is_primary_key, i.type_desc, \
+         STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, ',') AS included_cols, \
+         i.filter_definition \
          FROM sys.indexes i \
          JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
          JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
          WHERE i.object_id = OBJECT_ID('{s}.{t}') AND i.name IS NOT NULL \
-         GROUP BY i.name, i.is_unique, i.is_primary_key \
+         GROUP BY i.name, i.is_unique, i.is_primary_key, i.type_desc, i.filter_definition \
          ORDER BY i.name",
         s = schema.replace('\'', "''"), t = table.replace('\'', "''")
     );
@@ -138,11 +177,16 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| {
         let cols_str = row.get::<&str, _>(1).unwrap_or("");
+        let inc_str = row.get::<&str, _>(5).unwrap_or("");
         IndexInfo {
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
-            columns: cols_str.split(',').map(|s| s.to_string()).collect(),
+            columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
             is_unique: row.get::<bool, _>(2).unwrap_or(false),
             is_primary: row.get::<bool, _>(3).unwrap_or(false),
+            filter: row.get::<&str, _>(6).map(|s| s.to_string()),
+            index_type: row.get::<&str, _>(4).map(|s| s.to_string()),
+            included_columns: if inc_str.is_empty() { None } else { Some(inc_str.split(',').map(|s| s.to_string()).collect()) },
+            comment: None,
         }
     }).collect())
 }

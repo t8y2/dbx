@@ -154,21 +154,29 @@ pub async fn get_columns(
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
     let rows: Vec<PgRow> = sqlx::query(
-        "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, \
-         CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_pk, \
-         col_description((c.table_schema || '.' || c.table_name)::regclass, c.ordinal_position) AS column_comment, \
-         c.numeric_precision, c.numeric_scale \
-         FROM information_schema.columns c \
-         LEFT JOIN information_schema.key_column_usage kcu \
-           ON c.table_schema = kcu.table_schema \
-           AND c.table_name = kcu.table_name \
-           AND c.column_name = kcu.column_name \
-         LEFT JOIN information_schema.table_constraints tc \
-           ON kcu.constraint_name = tc.constraint_name \
-           AND kcu.table_schema = tc.table_schema \
-           AND tc.constraint_type = 'PRIMARY KEY' \
-         WHERE c.table_schema = $1 AND c.table_name = $2 \
-         ORDER BY c.ordinal_position",
+        "SELECT a.attname AS column_name, \
+         format_type(a.atttypid, a.atttypmod) AS full_type, \
+         NOT a.attnotnull AS is_nullable, \
+         pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
+         EXISTS ( \
+           SELECT 1 FROM pg_constraint co \
+           JOIN pg_index i ON i.indrelid = co.conrelid AND co.conindid = i.indexrelid \
+           WHERE co.conrelid = a.attrelid AND co.contype = 'p' \
+           AND a.attnum = ANY(i.indkey) \
+         ) AS is_pk, \
+         col_description(a.attrelid, a.attnum) AS column_comment, \
+         CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
+           THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, \
+         CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
+           THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, \
+         CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 \
+           THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length \
+         FROM pg_attribute a \
+         JOIN pg_type t ON t.oid = a.atttypid \
+         LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+         WHERE a.attrelid = ($1 || '.' || $2)::regclass \
+         AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum",
     )
     .bind(schema)
     .bind(table)
@@ -178,16 +186,20 @@ pub async fn get_columns(
 
     Ok(rows
         .iter()
-        .map(|row| ColumnInfo {
-            name: row.get::<String, _>("column_name"),
-            data_type: row.get::<String, _>("data_type"),
-            is_nullable: row.get::<String, _>("is_nullable") == "YES",
-            column_default: row.get::<Option<String>, _>("column_default"),
-            is_primary_key: row.get::<bool, _>("is_pk"),
-            extra: None,
-            comment: row.get::<Option<String>, _>("column_comment"),
-            numeric_precision: row.get::<Option<i32>, _>("numeric_precision"),
-            numeric_scale: row.get::<Option<i32>, _>("numeric_scale"),
+        .map(|row| {
+            let full_type = row.get::<Option<String>, _>("full_type").unwrap_or_default();
+            ColumnInfo {
+                name: row.get::<String, _>("column_name"),
+                data_type: full_type,
+                is_nullable: row.get::<bool, _>("is_nullable"),
+                column_default: row.get::<Option<String>, _>("column_default"),
+                is_primary_key: row.get::<bool, _>("is_pk"),
+                extra: None,
+                comment: row.get::<Option<String>, _>("column_comment"),
+                numeric_precision: row.get::<Option<i32>, _>("numeric_precision"),
+                numeric_scale: row.get::<Option<i32>, _>("numeric_scale"),
+                character_maximum_length: row.get::<Option<i32>, _>("character_maximum_length"),
+            }
         })
         .collect())
 }
@@ -202,18 +214,25 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
         || trimmed.starts_with("WITH")
         || trimmed.starts_with("TABLE")
     {
-        let desc = pool.describe(sql).await.map_err(|e| e.to_string())?;
-        let columns: Vec<String> = desc.columns().iter().map(|c| c.name().to_string()).collect();
-        let column_types: Vec<String> = desc
-            .columns()
-            .iter()
-            .map(|c| c.type_info().name().to_string())
-            .collect();
-
         let rows: Vec<PgRow> = sqlx::query(sql)
+            .persistent(false)
             .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
+
+        let (columns, column_types): (Vec<String>, Vec<String>) = if let Some(first) = rows.first() {
+            let cols = first.columns();
+            (
+                cols.iter().map(|c| c.name().to_string()).collect(),
+                cols.iter().map(|c| c.type_info().name().to_string()).collect(),
+            )
+        } else {
+            let desc = pool.describe(sql).await.map_err(|e| e.to_string())?;
+            (
+                desc.columns().iter().map(|c| c.name().to_string()).collect(),
+                desc.columns().iter().map(|c| c.type_info().name().to_string()).collect(),
+            )
+        };
 
         let result_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
@@ -256,17 +275,23 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
 pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let rows: Vec<PgRow> = sqlx::query(
         "SELECT i.relname AS index_name, \
-         array_agg(a.attname ORDER BY k.n) AS columns, \
+         array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) ORDER BY k.n) AS columns, \
          ix.indisunique AS is_unique, \
-         ix.indisprimary AS is_primary \
+         ix.indisprimary AS is_primary, \
+         pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
+         am.amname AS index_type, \
+         ix.indnkeyatts AS nkeyatts, \
+         ix.indkey AS indkey, \
+         obj_description(i.oid, 'pg_class') AS index_comment \
          FROM pg_index ix \
          JOIN pg_class t ON t.oid = ix.indrelid \
          JOIN pg_class i ON i.oid = ix.indexrelid \
          JOIN pg_namespace n ON n.oid = t.relnamespace \
+         JOIN pg_am am ON am.oid = i.relam \
          JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
-         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+         LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
          WHERE n.nspname = $1 AND t.relname = $2 \
-         GROUP BY i.relname, ix.indisunique, ix.indisprimary \
+         GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
          ORDER BY i.relname",
     )
     .bind(schema)
@@ -277,11 +302,21 @@ pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Ve
 
     Ok(rows
         .iter()
-        .map(|row| IndexInfo {
-            name: row.get::<String, _>("index_name"),
-            columns: row.get::<Vec<String>, _>("columns"),
-            is_unique: row.get::<bool, _>("is_unique"),
-            is_primary: row.get::<bool, _>("is_primary"),
+        .map(|row| {
+            let all_cols: Vec<String> = row.get::<Vec<String>, _>("columns");
+            let nkeyatts = row.get::<Option<i16>, _>("nkeyatts").unwrap_or(all_cols.len() as i16) as usize;
+            let key_cols = all_cols[..nkeyatts].to_vec();
+            let included = if nkeyatts < all_cols.len() { all_cols[nkeyatts..].to_vec() } else { vec![] };
+            IndexInfo {
+                name: row.get::<String, _>("index_name"),
+                columns: key_cols,
+                is_unique: row.get::<bool, _>("is_unique"),
+                is_primary: row.get::<bool, _>("is_primary"),
+                filter: row.get::<Option<String>, _>("filter_expr"),
+                index_type: row.get::<Option<String>, _>("index_type"),
+                included_columns: if included.is_empty() { None } else { Some(included) },
+                comment: row.get::<Option<String>, _>("index_comment"),
+            }
         })
         .collect())
 }

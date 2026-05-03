@@ -168,7 +168,7 @@ pub async fn get_columns(
          CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
            THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, \
          CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
-           THEN ((a.atttypmod - 4) & 2047) - 1024 ELSE NULL END AS numeric_scale, \
+           THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, \
          CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 \
            THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length \
          FROM pg_attribute a \

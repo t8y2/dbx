@@ -185,3 +185,272 @@ test("quotes SQL Server table, column, and index names with brackets", () => {
     "CREATE INDEX [idx_users_email] ON [dbo].[users] ([email]);",
   ]);
 });
+
+test("PostgreSQL index with INCLUDE clause", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "orders",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_orders_status",
+        columns: ["status"],
+        includedColumns: ["total", "created_at"],
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE INDEX "idx_orders_status" ON "public"."orders" ("status") INCLUDE ("total", "created_at");',
+  ]);
+});
+
+test("PostgreSQL index with USING clause (index type)", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "docs",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_docs_body",
+        columns: ["body"],
+        indexType: "GIN",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE INDEX "idx_docs_body" ON "public"."docs" USING GIN ("body");',
+  ]);
+});
+
+test("PostgreSQL index with WHERE filter", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "users",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_users_active",
+        columns: ["email"],
+        filter: "deleted_at IS NULL",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE INDEX "idx_users_active" ON "public"."users" ("email") WHERE deleted_at IS NULL;',
+  ]);
+});
+
+test("PostgreSQL index with COMMENT", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "users",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_users_email",
+        columns: ["email"],
+        comment: "Fast lookup by email",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE INDEX "idx_users_email" ON "public"."users" ("email");',
+    "COMMENT ON INDEX \"idx_users_email\" IS 'Fast lookup by email';",
+  ]);
+});
+
+test("PostgreSQL index with single quote in comment is escaped", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "users",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_users_email",
+        columns: ["email"],
+        comment: "User's primary email",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE INDEX "idx_users_email" ON "public"."users" ("email");',
+    "COMMENT ON INDEX \"idx_users_email\" IS 'User''s primary email';",
+  ]);
+});
+
+test("PostgreSQL index with all options combined (unique + type + include + filter + comment)", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "orders",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_orders_covering",
+        columns: ["user_id", "status"],
+        isUnique: true,
+        indexType: "BTREE",
+        includedColumns: ["total"],
+        filter: "status = 'active'",
+        comment: "Covering index for active orders",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE UNIQUE INDEX "idx_orders_covering" ON "public"."orders" USING BTREE ("user_id", "status") INCLUDE ("total") WHERE status = \'active\';',
+    "COMMENT ON INDEX \"idx_orders_covering\" IS 'Covering index for active orders';",
+  ]);
+});
+
+test("SQL Server index with type prefix", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "sqlserver",
+    schema: "dbo",
+    tableName: "logs",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_logs_message",
+        columns: ["message"],
+        indexType: "CLUSTERED",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    "CREATE CLUSTERED INDEX [idx_logs_message] ON [dbo].[logs] ([message]);",
+  ]);
+});
+
+test("SQL Server index with INCLUDE clause", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "sqlserver",
+    schema: "dbo",
+    tableName: "orders",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_orders_status",
+        columns: ["status"],
+        includedColumns: ["total", "created_at"],
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    "CREATE INDEX [idx_orders_status] ON [dbo].[orders] ([status]) INCLUDE ([total], [created_at]);",
+  ]);
+});
+
+test("SQL Server index with type + include combined", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "sqlserver",
+    schema: "dbo",
+    tableName: "orders",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_orders_covering",
+        columns: ["user_id"],
+        indexType: "NONCLUSTERED",
+        includedColumns: ["total", "status"],
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    "CREATE NONCLUSTERED INDEX [idx_orders_covering] ON [dbo].[orders] ([user_id]) INCLUDE ([total], [status]);",
+  ]);
+});
+
+test("MySQL index does not emit USING or type prefix, but INCLUDE and WHERE are passed through", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "mysql",
+    tableName: "orders",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_orders_status",
+        columns: ["status"],
+        indexType: "BTREE",
+        includedColumns: ["total"],
+        filter: "deleted = 0",
+        comment: "Some comment",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    "CREATE INDEX `idx_orders_status` ON `orders` (`status`) INCLUDE (`total`) WHERE deleted = 0;",
+  ]);
+});
+
+test("SQLite index with filter (partial index)", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "sqlite",
+    tableName: "users",
+    columns: [],
+    indexes: [
+      index({
+        id: "new",
+        name: "idx_users_active",
+        columns: ["email"],
+        filter: "deleted_at IS NULL",
+      }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'CREATE INDEX "idx_users_active" ON "users" ("email") WHERE deleted_at IS NULL;',
+  ]);
+});
+
+test("index with empty name and columns produces warnings and no statements", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "postgres",
+    schema: "public",
+    tableName: "users",
+    columns: [],
+    indexes: [
+      index({ id: "empty", name: "", columns: [] }),
+    ],
+  });
+
+  assert.deepEqual(result.warnings, [
+    'Index name cannot be empty.',
+    'Index "(new)" needs at least one column.',
+  ]);
+  assert.deepEqual(result.statements, []);
+});

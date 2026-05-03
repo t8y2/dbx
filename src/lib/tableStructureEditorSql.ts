@@ -18,6 +18,10 @@ export interface EditableStructureIndex {
   columns: string[];
   isUnique: boolean;
   isPrimary: boolean;
+  filter: string;
+  indexType: string;
+  includedColumns: string[];
+  comment: string;
   original?: IndexInfo;
   markedForDrop: boolean;
 }
@@ -245,7 +249,18 @@ function buildIndexSql(options: BuildTableStructureChangeSqlOptions, warnings: s
     if (!name || columns.length === 0) continue;
     const unique = index.isUnique ? "UNIQUE " : "";
     const cols = columns.map((column) => quoteIdent(databaseType, column)).join(", ");
-    statements.push(`CREATE ${unique}INDEX ${quoteIdent(databaseType, name)} ON ${table} (${cols});`);
+    const idxType = clean(index.indexType);
+    const usingClause = idxType && databaseType === "postgres" ? ` USING ${idxType}` : "";
+    const typePrefix = idxType && databaseType === "sqlserver" ? `${idxType} ` : "";
+    const incCols = index.includedColumns.map(clean).filter(Boolean);
+    const includeClause = incCols.length > 0 ? ` INCLUDE (${incCols.map((c) => quoteIdent(databaseType, c)).join(", ")})` : "";
+    const filter = clean(index.filter);
+    const whereClause = filter ? ` WHERE ${filter}` : "";
+    statements.push(`CREATE ${unique}${typePrefix}INDEX ${quoteIdent(databaseType, name)} ON ${table}${usingClause} (${cols})${includeClause}${whereClause};`);
+    const comment = clean(index.comment);
+    if (comment && databaseType === "postgres") {
+      statements.push(`COMMENT ON INDEX ${quoteIdent(databaseType, name)} IS ${quoteString(comment)};`);
+    }
   }
 
   return statements;

@@ -52,6 +52,10 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
     pub is_unique: bool,
     pub is_primary: bool,
+    pub filter: Option<String>,
+    pub index_type: Option<String>,
+    pub included_columns: Option<Vec<String>>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

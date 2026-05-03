@@ -275,17 +275,23 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
 pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let rows: Vec<PgRow> = sqlx::query(
         "SELECT i.relname AS index_name, \
-         array_agg(a.attname ORDER BY k.n) AS columns, \
+         array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n, true)) ORDER BY k.n) AS columns, \
          ix.indisunique AS is_unique, \
-         ix.indisprimary AS is_primary \
+         ix.indisprimary AS is_primary, \
+         pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
+         am.amname AS index_type, \
+         ix.indnkeyatts AS nkeyatts, \
+         ix.indkey AS indkey, \
+         obj_description(i.oid, 'pg_class') AS index_comment \
          FROM pg_index ix \
          JOIN pg_class t ON t.oid = ix.indrelid \
          JOIN pg_class i ON i.oid = ix.indexrelid \
          JOIN pg_namespace n ON n.oid = t.relnamespace \
+         JOIN pg_am am ON am.oid = i.relam \
          JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
-         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+         LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
          WHERE n.nspname = $1 AND t.relname = $2 \
-         GROUP BY i.relname, ix.indisunique, ix.indisprimary \
+         GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
          ORDER BY i.relname",
     )
     .bind(schema)
@@ -296,11 +302,20 @@ pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Ve
 
     Ok(rows
         .iter()
-        .map(|row| IndexInfo {
-            name: row.get::<String, _>("index_name"),
-            columns: row.get::<Vec<String>, _>("columns"),
-            is_unique: row.get::<bool, _>("is_unique"),
-            is_primary: row.get::<bool, _>("is_primary"),
+        .map(|row| {
+            let all_cols: Vec<String> = row.get::<Vec<String>, _>("columns");
+            let nkeyatts = row.get::<Option<i16>, _>("nkeyatts").unwrap_or(all_cols.len() as i16) as usize;
+            let included = if nkeyatts < all_cols.len() { all_cols[nkeyatts..].to_vec() } else { vec![] };
+            IndexInfo {
+                name: row.get::<String, _>("index_name"),
+                columns: all_cols,
+                is_unique: row.get::<bool, _>("is_unique"),
+                is_primary: row.get::<bool, _>("is_primary"),
+                filter: row.get::<Option<String>, _>("filter_expr"),
+                index_type: row.get::<Option<String>, _>("index_type"),
+                included_columns: if included.is_empty() { None } else { Some(included) },
+                comment: row.get::<Option<String>, _>("index_comment"),
+            }
         })
         .collect())
 }

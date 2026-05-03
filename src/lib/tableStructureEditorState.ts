@@ -22,16 +22,13 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     columns: [...index.columns],
     isUnique: index.is_unique,
     isPrimary: index.is_primary,
+    filter: index.filter ?? "",
+    indexType: index.index_type ?? "",
+    includedColumns: index.included_columns ? [...index.included_columns] : [],
+    comment: index.comment ?? "",
     original: index,
     markedForDrop: false,
   }));
-}
-
-export function splitIndexColumns(value: string): string[] {
-  return value
-    .split(/[,\s]+/g)
-    .map((part) => part.trim())
-    .filter(Boolean);
 }
 
 export function toColumnNames(columns: string[]): string {

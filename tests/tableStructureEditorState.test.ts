@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   createColumnDrafts,
   createIndexDrafts,
-  splitIndexColumns,
   toColumnNames,
 } from "../src/lib/tableStructureEditorState.ts";
 import type { ColumnInfo, IndexInfo } from "../src/types/database.ts";
@@ -101,6 +100,5 @@ test("creates editable index drafts and splits pasted column lists", () => {
       originalName: "idx_name",
     },
   ]);
-  assert.deepEqual(splitIndexColumns("id, name  email"), ["id", "name", "email"]);
   assert.equal(toColumnNames(["id", "name"]), "id, name");
 });

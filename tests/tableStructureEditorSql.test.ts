@@ -27,6 +27,10 @@ function index(overrides: Partial<EditableStructureIndex>): EditableStructureInd
     columns: overrides.columns ?? ["name"],
     isUnique: overrides.isUnique ?? false,
     isPrimary: overrides.isPrimary ?? false,
+    filter: overrides.filter ?? "",
+    indexType: overrides.indexType ?? "",
+    includedColumns: overrides.includedColumns ?? [],
+    comment: overrides.comment ?? "",
     original: overrides.original,
     markedForDrop: overrides.markedForDrop ?? false,
   };

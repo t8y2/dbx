@@ -180,7 +180,13 @@ export function generateSyncSql(
           if (idx.type === "added" && idx.source) {
             const cols = idx.source.columns.map((c) => quoteId(c, dbType)).join(", ");
             const unique = idx.source.is_unique ? "UNIQUE " : "";
-            lines.push(`CREATE ${unique}INDEX ${quoteId(idx.name, dbType)} ON ${qt} (${cols});`);
+            const idxType = idx.source.index_type ?? "";
+            const usingClause = idxType && dbType === "postgres" ? ` USING ${idxType}` : "";
+            const typePrefix = idxType && dbType === "sqlserver" ? `${idxType} ` : "";
+            const incCols = idx.source.included_columns ?? [];
+            const includeClause = incCols.length > 0 ? ` INCLUDE (${incCols.map((c) => quoteId(c, dbType)).join(", ")})` : "";
+            const filter = idx.source.filter ? ` WHERE ${idx.source.filter}` : "";
+            lines.push(`CREATE ${unique}${typePrefix}INDEX ${quoteId(idx.name, dbType)} ON ${qt}${usingClause} (${cols})${includeClause}${filter};`);
           } else if (idx.type === "removed") {
             if (isMySQL) {
               lines.push(`DROP INDEX ${quoteId(idx.name, dbType)} ON ${qt};`);

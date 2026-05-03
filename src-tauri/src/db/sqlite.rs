@@ -87,6 +87,10 @@ pub async fn list_indexes(pool: &SqlitePool, _schema: &str, table: &str) -> Resu
             columns,
             is_unique,
             is_primary,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
         });
     }
     Ok(indexes)

@@ -332,10 +332,11 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let sql = format!(
         "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
-         MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary \
+         MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary, \
+         INDEX_TYPE \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         GROUP BY INDEX_NAME \
+         GROUP BY INDEX_NAME, INDEX_TYPE \
          ORDER BY INDEX_NAME",
         quote_value(database),
         quote_value(table),
@@ -354,6 +355,10 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 columns: cols_str.split(',').map(|s| s.to_string()).collect(),
                 is_unique: row.get::<bool, _>("is_unique"),
                 is_primary: row.get::<bool, _>("is_primary"),
+                filter: None,
+                index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
+                included_columns: None,
+                comment: None,
             }
         })
         .collect())

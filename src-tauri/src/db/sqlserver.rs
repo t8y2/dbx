@@ -155,13 +155,16 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
 
 pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let sql = format!(
-        "SELECT i.name, STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns, \
-         i.is_unique, i.is_primary_key \
+        "SELECT i.name, \
+         STRING_AGG(CASE WHEN ic.is_included_column = 0 THEN c.name END, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns, \
+         i.is_unique, i.is_primary_key, i.type_desc, \
+         STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, ',') AS included_cols, \
+         i.filter_definition \
          FROM sys.indexes i \
          JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
          JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
          WHERE i.object_id = OBJECT_ID('{s}.{t}') AND i.name IS NOT NULL \
-         GROUP BY i.name, i.is_unique, i.is_primary_key \
+         GROUP BY i.name, i.is_unique, i.is_primary_key, i.type_desc, i.filter_definition \
          ORDER BY i.name",
         s = schema.replace('\'', "''"), t = table.replace('\'', "''")
     );
@@ -169,11 +172,16 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| {
         let cols_str = row.get::<&str, _>(1).unwrap_or("");
+        let inc_str = row.get::<&str, _>(5).unwrap_or("");
         IndexInfo {
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             columns: cols_str.split(',').map(|s| s.to_string()).collect(),
             is_unique: row.get::<bool, _>(2).unwrap_or(false),
             is_primary: row.get::<bool, _>(3).unwrap_or(false),
+            filter: row.get::<&str, _>(6).map(|s| s.to_string()),
+            index_type: row.get::<&str, _>(4).map(|s| s.to_string()),
+            included_columns: if inc_str.is_empty() { None } else { Some(inc_str.split(',').map(|s| s.to_string()).collect()) },
+            comment: None,
         }
     }).collect())
 }

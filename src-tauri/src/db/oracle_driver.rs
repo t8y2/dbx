@@ -134,13 +134,14 @@ pub async fn list_indexes(conn: &OracleClient, schema: &str, table: &str) -> Res
         "SELECT i.INDEX_NAME, \
          LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS columns, \
          i.UNIQUENESS, \
-         CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK \
+         CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK, \
+         i.INDEX_TYPE \
          FROM ALL_INDEXES i \
          JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER \
          LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER \
            AND c.CONSTRAINT_TYPE = 'P' \
          WHERE i.TABLE_OWNER = '{s}' AND i.TABLE_NAME = '{t}' \
-         GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE \
+         GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE \
          ORDER BY i.INDEX_NAME",
         s = schema.replace('\'', "''"), t = table.replace('\'', "''")
     );
@@ -152,6 +153,10 @@ pub async fn list_indexes(conn: &OracleClient, schema: &str, table: &str) -> Res
             columns: cols_str.split(',').map(|s| s.to_string()).collect(),
             is_unique: row.get_string(2).unwrap_or("") == "UNIQUE",
             is_primary: row.get_i64(3).unwrap_or(0) == 1,
+            filter: None,
+            index_type: row.get_string(4).map(|s| s.to_string()),
+            included_columns: None,
+            comment: None,
         }
     }).collect())
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "dbx",
+  "productName": "DBX",
   "version": "0.3.9",
   "identifier": "com.dbx.app",
   "build": {

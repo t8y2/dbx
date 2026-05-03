@@ -22,6 +22,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const diagramSource = ref<{ connectionId: string; database: string; schema?: string; tableName?: string } | null>(null);
   const tableImportSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
   const structureEditorSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
+  const fieldLineageSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string; columnName: string } | null>(null);
 
   function startEditing(id: string) {
     editingConnectionId.value = id;
@@ -416,6 +417,7 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         database,
         schema,
+        tableName: table,
         meta: col,
       })));
       node.isExpanded = true;
@@ -661,5 +663,6 @@ export const useConnectionStore = defineStore("connection", () => {
     diagramSource,
     tableImportSource,
     structureEditorSource,
+    fieldLineageSource,
   };
 });

@@ -36,7 +36,9 @@ import {
   type CellPosition,
   type CellSelectionRange,
 } from "@/lib/gridSelection";
-import { buildTableSelectSql, normalizeWhereInput } from "@/lib/tableSelectSql";
+import { buildTableSelectSql, normalizeWhereInput, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { buildDataGridSaveStatements, formatGridSqlLiteral } from "@/lib/dataGridSql";
+import { formatMarkdownTable } from "@/lib/markdownTable";
 import {
   matchesRowStatusFilter,
   rowStatusFilterAfterAddingRow,
@@ -537,6 +539,14 @@ function formatCell(value: CellValue): string {
   return String(value);
 }
 
+function quoteIdent(name: string): string {
+  return quoteTableIdentifier(props.databaseType, name);
+}
+
+function escapeVal(value: CellValue): string {
+  return formatGridSqlLiteral(value);
+}
+
 function isNull(value: unknown): boolean { return value === null; }
 
 function rowNumberStatusClass(item: RowItem): string {
@@ -741,65 +751,17 @@ function deleteSelectedRow() {
   requestDeleteRow(contextCell.value.rowId);
 }
 
-function escapeVal(v: CellValue): string {
-  if (v === null || v === undefined) return "NULL";
-  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-  if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  const s = String(v);
-  if (s === "") return "''";
-  return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
-}
-
-function quoteIdent(name: string): string {
-  if (props.databaseType === "mysql") {
-    return `\`${name.replace(/`/g, "``")}\``;
-  }
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
-function qualifiedTableName(): string {
-  if (!props.tableMeta) return "";
-  const { schema, tableName } = props.tableMeta;
-  if ((props.databaseType === "postgres" || props.databaseType === "oracle") && schema) {
-    return `${quoteIdent(schema)}.${quoteIdent(tableName)}`;
-  }
-  return quoteIdent(tableName);
-}
-
 function generateSaveStatements(): string[] {
   if (!props.tableMeta) return [];
-  const { primaryKeys } = props.tableMeta;
-  const cols = props.result.columns;
-  const stmts: string[] = [];
-  const tbl = qualifiedTableName();
-
-  for (const [rowIdx, changes] of dirtyRows.value) {
-    const row = props.result.rows[rowIdx];
-    if (!row) continue;
-    const sets = Array.from(changes.entries())
-      .map(([colIdx, val]) => `${quoteIdent(cols[colIdx])} = ${escapeVal(val)}`)
-      .join(", ");
-    const where = primaryKeys
-      .map((pk) => `${quoteIdent(pk)} = ${escapeVal(row[cols.indexOf(pk)])}`)
-      .join(" AND ");
-    stmts.push(`UPDATE ${tbl} SET ${sets} WHERE ${where};`);
-  }
-
-  for (const rowIdx of deletedRows.value) {
-    const row = props.result.rows[rowIdx];
-    if (!row) continue;
-    const where = primaryKeys
-      .map((pk) => `${quoteIdent(pk)} = ${escapeVal(row[cols.indexOf(pk)])}`)
-      .join(" AND ");
-    stmts.push(`DELETE FROM ${tbl} WHERE ${where};`);
-  }
-
-  for (const newRow of newRows.value) {
-    const colNames = cols.map((c) => quoteIdent(c)).join(", ");
-    const vals = newRow.map((v) => escapeVal(v)).join(", ");
-    stmts.push(`INSERT INTO ${tbl} (${colNames}) VALUES (${vals});`);
-  }
-  return stmts;
+  return buildDataGridSaveStatements({
+    databaseType: props.databaseType,
+    tableMeta: props.tableMeta,
+    columns: props.result.columns,
+    rows: props.result.rows,
+    dirtyRows: [...dirtyRows.value.entries()].map(([rowIndex, changes]) => [rowIndex, [...changes.entries()]]),
+    deletedRows: [...deletedRows.value],
+    newRows: newRows.value,
+  });
 }
 
 async function saveChanges() {
@@ -1012,16 +974,9 @@ async function exportJson() {
 }
 
 async function exportMarkdown() {
-  const pad = (s: string, len: number) => s.padEnd(len);
   const cols = props.result.columns;
   const visibleRows = displayItems.value.map((item) => item.data);
-  const widths = cols.map((c, i) => Math.max(c.length, ...visibleRows.map((r) => formatCell(r[i]).length), 3));
-  const header = `| ${cols.map((c, i) => pad(c, widths[i])).join(" | ")} |`;
-  const sep = `| ${widths.map((w) => "-".repeat(w)).join(" | ")} |`;
-  const body = visibleRows.map((row) =>
-    `| ${row.map((c, i) => pad(formatCell(c), widths[i])).join(" | ")} |`
-  ).join("\n");
-  const md = `${header}\n${sep}\n${body}\n`;
+  const md = formatMarkdownTable({ columns: cols, rows: visibleRows });
   const path = await savePath({ filters: [{ name: "Markdown", extensions: ["md"] }] });
   if (path) await writeTextFile(path, md);
 }

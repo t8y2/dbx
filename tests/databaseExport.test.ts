@@ -53,7 +53,7 @@ test("builds capped export page queries", () => {
       tableName: "accounts",
       limit: DATABASE_EXPORT_ROW_LIMIT,
     }),
-    `SELECT TOP ${DATABASE_EXPORT_ROW_LIMIT} * FROM "dbo"."accounts"`,
+    `SELECT * FROM [dbo].[accounts] ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT ${DATABASE_EXPORT_ROW_LIMIT} ROWS ONLY`,
   );
 });
 

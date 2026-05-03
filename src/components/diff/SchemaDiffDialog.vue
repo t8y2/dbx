@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -161,14 +162,7 @@ async function executeSql() {
   executing.value = true;
   try {
     await store.ensureConnected(targetConnectionId.value);
-    const statements = syncSql.value
-      .split(";")
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith("--"));
-
-    for (const sql of statements) {
-      await api.executeQuery(targetConnectionId.value, targetDatabase.value, sql);
-    }
+    await api.executeScript(targetConnectionId.value, targetDatabase.value, syncSql.value);
     toast(t("diff.syncSuccess"), 2000);
     open.value = false;
   } catch (e: any) {

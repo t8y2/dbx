@@ -41,6 +41,7 @@ const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diag
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const TableStructureEditorDialog = defineAsyncComponent(() => import("@/components/structure/TableStructureEditorDialog.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
+const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -55,6 +56,7 @@ import * as api from "@/lib/tauri";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCloseTabShortcut, isExecuteSqlShortcut } from "@/lib/keyboardShortcuts";
 
@@ -128,6 +130,7 @@ const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showStructureEditorDialog = ref(false);
+const showFieldLineageDialog = ref(false);
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
 const schemaDiffPrefillConnectionId = ref("");
@@ -146,6 +149,18 @@ const structurePrefillConnectionId = ref("");
 const structurePrefillDatabase = ref("");
 const structurePrefillSchema = ref("");
 const structurePrefillTable = ref("");
+const lineagePrefillConnectionId = ref("");
+const lineagePrefillDatabase = ref("");
+const lineagePrefillSchema = ref("");
+const lineagePrefillTable = ref("");
+const lineagePrefillColumn = ref("");
+type LineageNavigationTarget = {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  tableName: string;
+  columnName?: string;
+};
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
 const checkingUpdates = ref(false);
@@ -233,6 +248,18 @@ watch(() => connectionStore.structureEditorSource, (v) => {
   }
 });
 
+watch(() => connectionStore.fieldLineageSource, (v) => {
+  if (v) {
+    lineagePrefillConnectionId.value = v.connectionId;
+    lineagePrefillDatabase.value = v.database;
+    lineagePrefillSchema.value = v.schema ?? "";
+    lineagePrefillTable.value = v.tableName;
+    lineagePrefillColumn.value = v.columnName;
+    showFieldLineageDialog.value = true;
+    connectionStore.fieldLineageSource = null;
+  }
+});
+
 async function onStructureEditorSaved() {
   const tab = activeTab.value;
   if (tab?.mode === "data" && tab.tableMeta?.tableName === structurePrefillTable.value) {
@@ -252,6 +279,42 @@ async function onStructureEditorSaved() {
     } catch (e: any) {
       toast(e?.message || String(e), 5000);
     }
+  }
+}
+
+async function openLineageTarget(target: LineageNavigationTarget) {
+  showFieldLineageDialog.value = false;
+  connectionStore.activeConnectionId = target.connectionId;
+  const config = connectionStore.getConfig(target.connectionId);
+  const tabTitle = target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
+  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data");
+  queryStore.setExecuting(tabId, true);
+
+  try {
+    await connectionStore.ensureConnected(target.connectionId);
+    if (!config) throw new Error("Connection config not found");
+
+    const querySchema = target.schema || target.database;
+    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
+    const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
+    const sql = buildTableSelectSql({
+      databaseType: config.db_type,
+      schema: target.schema,
+      tableName: target.tableName,
+      primaryKeys,
+    });
+
+    queryStore.updateSql(tabId, sql);
+    queryStore.setTableMeta(tabId, {
+      schema: target.schema,
+      tableName: target.tableName,
+      columns,
+      primaryKeys,
+    });
+
+    await queryStore.executeTabSql(tabId, sql);
+  } catch (e: any) {
+    queryStore.setErrorResult(tabId, e);
   }
 }
 
@@ -593,11 +656,15 @@ function buildTableSql(
   options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {},
 ): string {
   const config = connectionStore.getConfig(tab.connectionId);
+  const fallbackOrderColumns = config?.db_type === "sqlserver" && !tab.tableMeta?.primaryKeys?.length
+    ? tab.tableMeta?.columns.slice(0, 1).map((column) => column.name)
+    : undefined;
   return buildTableSelectSql({
     databaseType: config?.db_type,
     schema: tab.tableMeta?.schema,
     tableName: tab.tableMeta?.tableName ?? "",
     primaryKeys: tab.tableMeta?.primaryKeys,
+    fallbackOrderColumns,
     ...options,
   });
 }
@@ -628,7 +695,10 @@ const isDark = ref(localStorage.getItem("dbx-theme") === "dark");
 
 function applyTheme() {
   document.documentElement.classList.toggle("dark", isDark.value);
-  getCurrentWindow().setTheme(isDark.value ? "dark" as Theme : "light" as Theme);
+  if (!isTauriRuntime()) return;
+  getCurrentWindow()
+    .setTheme(isDark.value ? "dark" as Theme : "light" as Theme)
+    .catch(() => {});
 }
 
 function toggleTheme() {
@@ -710,9 +780,11 @@ onMounted(() => {
   });
   settingsStore.initAiConfig();
   window.addEventListener("keydown", handleKeydown, true);
-  setupFileDrop();
-  checkUpdates({ silent: true });
-  getVersion().then((v) => { appVersion.value = v; });
+  if (isTauriRuntime()) {
+    setupFileDrop().catch(() => {});
+    checkUpdates({ silent: true });
+    getVersion().then((v) => { appVersion.value = v; }).catch(() => {});
+  }
 });
 
 onUnmounted(() => {
@@ -1410,6 +1482,15 @@ async function setupFileDrop() {
         :prefill-schema="structurePrefillSchema"
         :prefill-table="structurePrefillTable"
         @saved="onStructureEditorSaved"
+      />
+      <FieldLineageDialog
+        v-model:open="showFieldLineageDialog"
+        :prefill-connection-id="lineagePrefillConnectionId"
+        :prefill-database="lineagePrefillDatabase"
+        :prefill-schema="lineagePrefillSchema"
+        :prefill-table="lineagePrefillTable"
+        :prefill-column="lineagePrefillColumn"
+        @open-target="openLineageTarget"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

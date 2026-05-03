@@ -5,6 +5,7 @@ export interface BuildTableSelectSqlOptions {
   schema?: string;
   tableName: string;
   primaryKeys?: string[];
+  fallbackOrderColumns?: string[];
   orderBy?: string;
   limit?: number;
   offset?: number;
@@ -13,6 +14,7 @@ export interface BuildTableSelectSqlOptions {
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
   if (databaseType === "mysql") return `\`${name.replace(/`/g, "``")}\``;
+  if (databaseType === "sqlserver") return `[${name.replace(/\]/g, "]]")}]`;
   return `"${name.replace(/"/g, '""')}"`;
 }
 
@@ -37,6 +39,8 @@ export function buildTableSelectSql(options: BuildTableSelectSqlOptions): string
   const where = predicate ? ` WHERE (${predicate})` : "";
   const defaultOrderBy = options.primaryKeys?.length
     ? options.primaryKeys.map((pk) => `${quoteTableIdentifier(databaseType, pk)} ASC`).join(", ")
+    : options.fallbackOrderColumns?.length
+    ? options.fallbackOrderColumns.map((column) => `${quoteTableIdentifier(databaseType, column)} ASC`).join(", ")
     : undefined;
   const orderBy = options.orderBy ?? defaultOrderBy;
   const order = orderBy ? ` ORDER BY ${orderBy}` : "";
@@ -47,7 +51,8 @@ export function buildTableSelectSql(options: BuildTableSelectSqlOptions): string
   }
 
   if (databaseType === "sqlserver") {
-    return `SELECT TOP ${limit} * FROM ${table}${where}${order}`;
+    const stableOrder = order || " ORDER BY (SELECT NULL)";
+    return `SELECT * FROM ${table}${where}${stableOrder} OFFSET ${options.offset ?? 0} ROWS FETCH NEXT ${limit} ROWS ONLY`;
   }
 
   const offset = options.offset ? ` OFFSET ${options.offset}` : "";

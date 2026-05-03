@@ -146,6 +146,10 @@ export async function executeBatch(connectionId: string, database: string, state
   return invoke("execute_batch", { connectionId, database, statements });
 }
 
+export async function executeScript(connectionId: string, database: string, sql: string): Promise<QueryResult> {
+  return invoke("execute_script", { connectionId, database, sql });
+}
+
 export async function listIndexes(connectionId: string, database: string, schema: string, table: string): Promise<IndexInfo[]> {
   return invoke("list_indexes", { connectionId, database, schema, table });
 }
@@ -394,9 +398,7 @@ export async function startTransfer(
     if (event.payload.transferId === request.transferId) {
       onProgress(event.payload);
       if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
-        if (event.payload.tableIndex === event.payload.totalTables - 1 || event.payload.status !== "error") {
-          unlisten();
-        }
+        unlisten();
       }
     }
   });

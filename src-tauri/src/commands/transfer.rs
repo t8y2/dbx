@@ -707,6 +707,8 @@ pub async fn start_transfer(
                         status: TransferStatus::Error,
                         error: Some(e),
                     });
+                    CANCELLED.write().await.remove(&transfer_id);
+                    return;
                 }
             }
         }

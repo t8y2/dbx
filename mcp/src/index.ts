@@ -2,12 +2,27 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir, platform } from "node:os";
 import { loadConnections, findConnection } from "./connections.js";
 import { listTables, describeTable, executeQuery } from "./database.js";
 
+function text(s: string) {
+  return { content: [{ type: "text" as const, text: s }] };
+}
+
+function mdTable(headers: string[], rows: string[][]): string {
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] || "").length), 3));
+  const header = `| ${headers.map((h, i) => h.padEnd(widths[i])).join(" | ")} |`;
+  const sep = `| ${widths.map((w) => "-".repeat(w)).join(" | ")} |`;
+  const body = rows.map((r) => `| ${r.map((c, i) => (c || "").padEnd(widths[i])).join(" | ")} |`).join("\n");
+  return `${header}\n${sep}\n${body}`;
+}
+
 const server = new McpServer({
   name: "dbx",
-  version: "0.1.0",
+  version: "0.1.1",
 });
 
 server.tool(
@@ -16,14 +31,9 @@ server.tool(
   {},
   async () => {
     const connections = await loadConnections();
-    const list = connections.map((c) => ({
-      name: c.name,
-      type: c.db_type,
-      host: c.host,
-      port: c.port,
-      database: c.database || "",
-    }));
-    return { content: [{ type: "text" as const, text: JSON.stringify(list, null, 2) }] };
+    if (connections.length === 0) return text("No connections configured in DBX.");
+    const rows = connections.map((c) => [c.name, c.db_type, c.host, String(c.port), c.database || ""]);
+    return text(mdTable(["Name", "Type", "Host", "Port", "Database"], rows));
   },
 );
 
@@ -36,9 +46,11 @@ server.tool(
   },
   async ({ connection_name, schema }) => {
     const config = await findConnection(connection_name);
-    if (!config) return { content: [{ type: "text" as const, text: `Connection "${connection_name}" not found` }] };
+    if (!config) return text(`Connection "${connection_name}" not found`);
     const tables = await listTables(config, schema);
-    return { content: [{ type: "text" as const, text: JSON.stringify(tables, null, 2) }] };
+    if (tables.length === 0) return text("No tables found.");
+    const rows = tables.map((t) => [t.name, t.type]);
+    return text(mdTable(["Table", "Type"], rows));
   },
 );
 
@@ -52,9 +64,17 @@ server.tool(
   },
   async ({ connection_name, table, schema }) => {
     const config = await findConnection(connection_name);
-    if (!config) return { content: [{ type: "text" as const, text: `Connection "${connection_name}" not found` }] };
+    if (!config) return text(`Connection "${connection_name}" not found`);
     const columns = await describeTable(config, table, schema);
-    return { content: [{ type: "text" as const, text: JSON.stringify(columns, null, 2) }] };
+    if (columns.length === 0) return text("No columns found.");
+    const rows = columns.map((c) => [
+      c.is_primary_key ? `${c.name} (PK)` : c.name,
+      c.data_type,
+      c.is_nullable ? "YES" : "NO",
+      c.column_default ?? "",
+      c.comment ?? "",
+    ]);
+    return text(mdTable(["Column", "Type", "Nullable", "Default", "Comment"], rows));
   },
 );
 
@@ -67,20 +87,24 @@ server.tool(
   },
   async ({ connection_name, sql }) => {
     const config = await findConnection(connection_name);
-    if (!config) return { content: [{ type: "text" as const, text: `Connection "${connection_name}" not found` }] };
+    if (!config) return text(`Connection "${connection_name}" not found`);
     try {
       const result = await executeQuery(config, sql);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      if (result.columns.length === 0) return text(`Query executed. ${result.row_count} row(s) affected.`);
+      const rows = result.rows.map((r) => result.columns.map((c) => formatCell(r[c])));
+      return text(`${mdTable(result.columns, rows)}\n\n${result.row_count} row(s)`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      return { content: [{ type: "text" as const, text: `Query error: ${msg}` }] };
+      return text(`Query error: ${msg}`);
     }
   },
 );
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir, platform } from "node:os";
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
 
 function appDataDir(): string {
   const home = homedir();
@@ -117,13 +141,10 @@ server.tool(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ connection_name, table, database, schema }),
       });
-      if (res.ok) {
-        return { content: [{ type: "text" as const, text: `Opened ${table} in DBX` }] };
-      }
-      const text = await res.text();
-      return { content: [{ type: "text" as const, text: `Failed: ${text}` }] };
+      if (res.ok) return text(`Opened ${table} in DBX`);
+      return text(`Failed: ${await res.text()}`);
     } catch {
-      return { content: [{ type: "text" as const, text: "DBX is not running. Please start DBX first." }] };
+      return text("DBX is not running. Please start DBX first.");
     }
   },
 );

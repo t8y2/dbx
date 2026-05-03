@@ -11,12 +11,15 @@ import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
 import {
-  AlertTriangle, Check, Database, KeyRound, Loader2, Plus, RefreshCw, Save, TableProperties, Trash2, X,
+  AlertTriangle, Check, ChevronDown, Database, KeyRound, Loader2, Plus, RefreshCw, Save, TableProperties, Trash2, X,
 } from "lucide-vue-next";
+import {
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { buildTableStructureChangeSql, type EditableStructureColumn, type EditableStructureIndex } from "@/lib/tableStructureEditorSql";
-import { createColumnDrafts, createIndexDrafts, splitIndexColumns, toColumnNames } from "@/lib/tableStructureEditorState";
+import { createColumnDrafts, createIndexDrafts, toColumnNames } from "@/lib/tableStructureEditorState";
 import type { ForeignKeyInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/tauri";
 
@@ -44,6 +47,26 @@ const columns = ref<EditableStructureColumn[]>([]);
 const indexes = ref<EditableStructureIndex[]>([]);
 const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const triggers = ref<TriggerInfo[]>([]);
+
+const indexColWidths = ref([160, 240, 80, 112, 160, 192, 160, 96]);
+const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
+
+function onIndexColResize(e: MouseEvent, col: number) {
+  e.preventDefault();
+  resizing.value = { col, startX: e.clientX, startW: indexColWidths.value[col] };
+  const onMove = (ev: MouseEvent) => {
+    if (!resizing.value) return;
+    const delta = ev.clientX - resizing.value.startX;
+    indexColWidths.value[col] = Math.max(60, resizing.value.startW + delta);
+  };
+  const onUp = () => {
+    resizing.value = null;
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
 
 const connection = computed(() =>
   props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined
@@ -138,12 +161,35 @@ function addIndex() {
     columns: [],
     isUnique: false,
     isPrimary: false,
+    filter: "",
+    indexType: "",
+    includedColumns: [],
+    comment: "",
     markedForDrop: false,
   });
 }
 
-function updateIndexColumns(index: EditableStructureIndex, value: string) {
-  index.columns = splitIndexColumns(value);
+const availableColumnNames = computed(() =>
+  columns.value.filter((c) => !c.markedForDrop).map((c) => c.name).filter(Boolean)
+);
+
+const colSearch = ref("");
+const filteredColumnNames = computed(() => {
+  const q = colSearch.value.toLowerCase().trim();
+  if (!q) return availableColumnNames.value;
+  return availableColumnNames.value.filter((c) => c.toLowerCase().includes(q));
+});
+
+function toggleIndexColumn(index: EditableStructureIndex, col: string) {
+  const i = index.columns.indexOf(col);
+  if (i >= 0) index.columns.splice(i, 1);
+  else index.columns.push(col);
+}
+
+function toggleIncludedColumn(index: EditableStructureIndex, col: string) {
+  const i = index.includedColumns.indexOf(col);
+  if (i >= 0) index.includedColumns.splice(i, 1);
+  else index.includedColumns.push(col);
 }
 
 function removeNewIndex(index: EditableStructureIndex) {
@@ -294,30 +340,120 @@ watch(open, (value) => {
                 <table class="min-w-full border-separate border-spacing-0 text-xs">
                   <thead class="sticky top-0 z-10 bg-background">
                     <tr>
-                      <th class="min-w-40 border-b border-r px-2 py-2 text-left">{{ t('structureEditor.indexName') }}</th>
-                      <th class="min-w-60 border-b border-r px-2 py-2 text-left">{{ t('structureEditor.indexColumns') }}</th>
-                      <th class="w-20 border-b border-r px-2 py-2 text-left">{{ t('structureEditor.unique') }}</th>
-                      <th class="w-24 border-b px-2 py-2 text-left">{{ t('structureEditor.actions') }}</th>
+                      <th
+                        v-for="(label, i) in [
+                          t('structureEditor.indexName'),
+                          t('structureEditor.indexColumns'),
+                          t('structureEditor.unique'),
+                          t('structureEditor.indexType'),
+                          t('structureEditor.includedColumns'),
+                          t('structureEditor.filter'),
+                          t('structureEditor.comment'),
+                          t('structureEditor.actions'),
+                        ]"
+                        :key="i"
+                        class="relative border-b border-r px-2 py-2 text-left"
+                        :style="{ width: indexColWidths[i] + 'px', minWidth: indexColWidths[i] + 'px' }"
+                      >
+                        {{ label }}
+                        <div
+                          v-if="i < 7"
+                          class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30"
+                          :class="resizing?.col === i ? 'bg-primary/30' : ''"
+                          @mousedown="onIndexColResize($event, i)"
+                        />
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr v-for="index in indexes" :key="index.id" :class="index.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
                       <td class="border-b border-r px-2 py-1.5">
-                        <Input v-model="index.name" class="h-7 min-w-36 text-xs" :disabled="!!index.original || index.markedForDrop" />
+                        <Input v-model="index.name" class="h-7 text-xs" :disabled="!!index.original || index.markedForDrop" />
                       </td>
-                      <td class="border-b border-r px-2 py-1.5">
-                        <Input
-                          :model-value="toColumnNames(index.columns)"
-                          class="h-7 min-w-56 font-mono text-xs"
-                          :disabled="!!index.original || index.markedForDrop"
-                          @update:model-value="(value: any) => updateIndexColumns(index, String(value))"
-                        />
+                      <td class="overflow-hidden border-b border-r px-2 py-1.5">
+                        <DropdownMenu v-if="!index.original && !index.markedForDrop">
+                          <DropdownMenuTrigger as-child>
+                            <Button variant="outline" class="h-7 w-full justify-between font-mono text-xs">
+                              <span class="truncate">{{ toColumnNames(index.columns) || t('structureEditor.indexColumnsPlaceholder') }}</span>
+                              <ChevronDown class="ml-1 h-3 w-3 shrink-0 opacity-50" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent class="max-h-60 min-w-48 overflow-y-auto" side="bottom" :side-offset="2" :avoid-collisions="false" @interactOutside="colSearch = ''">
+                            <div class="px-1.5 pb-1 pt-0.5">
+                              <Input v-model="colSearch" class="h-6 text-xs" :placeholder="t('grid.search')" @click.stop />
+                            </div>
+                            <DropdownMenuCheckboxItem
+                              v-for="col in filteredColumnNames"
+                              :key="col"
+                              :checked="index.columns.includes(col)"
+                              :class="index.columns.includes(col) ? 'bg-primary/10' : ''"
+                              @select.prevent
+                              @click="toggleIndexColumn(index, col)"
+                            >
+                              {{ col }}
+                            </DropdownMenuCheckboxItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <span v-else class="font-mono text-xs text-muted-foreground">{{ toColumnNames(index.columns) }}</span>
                       </td>
                       <td class="border-b border-r px-2 py-1.5">
                         <label class="flex items-center gap-1.5">
                           <input v-model="index.isUnique" type="checkbox" class="h-3.5 w-3.5" :disabled="!!index.original || index.markedForDrop" />
                           <span>{{ index.isUnique ? t('structureEditor.yes') : t('structureEditor.no') }}</span>
                         </label>
+                      </td>
+                      <td class="border-b border-r px-2 py-1.5">
+                        <span v-if="index.original" class="text-muted-foreground">{{ index.indexType || 'BTREE' }}</span>
+                        <Input
+                          v-else
+                          v-model="index.indexType"
+                          class="h-7 font-mono text-xs"
+                          placeholder="BTREE"
+                          :disabled="index.markedForDrop"
+                        />
+                      </td>
+                      <td class="overflow-hidden border-b border-r px-2 py-1.5">
+                        <DropdownMenu v-if="!index.original && !index.markedForDrop">
+                          <DropdownMenuTrigger as-child>
+                            <Button variant="outline" class="h-7 w-full justify-between font-mono text-xs">
+                              <span class="truncate">{{ index.includedColumns.join(', ') || t('structureEditor.includedColumnsPlaceholder') }}</span>
+                              <ChevronDown class="ml-1 h-3 w-3 shrink-0 opacity-50" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent class="max-h-60 min-w-48 overflow-y-auto" side="bottom" :side-offset="2" :avoid-collisions="false" @interactOutside="colSearch = ''">
+                            <div class="px-1.5 pb-1 pt-0.5">
+                              <Input v-model="colSearch" class="h-6 text-xs" :placeholder="t('grid.search')" @click.stop />
+                            </div>
+                            <DropdownMenuCheckboxItem
+                              v-for="col in filteredColumnNames"
+                              :key="col"
+                              :checked="index.includedColumns.includes(col)"
+                              :class="index.includedColumns.includes(col) ? 'bg-primary/10' : ''"
+                              @select.prevent
+                              @click="toggleIncludedColumn(index, col)"
+                            >
+                              {{ col }}
+                            </DropdownMenuCheckboxItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <span v-else class="text-muted-foreground text-xs">{{ index.includedColumns.join(', ') }}</span>
+                      </td>
+                      <td class="border-b border-r px-2 py-1.5">
+                        <Input
+                          v-model="index.filter"
+                          class="h-7 font-mono text-xs"
+                          :placeholder="index.original?.filter || ''"
+                          :disabled="!!index.original || index.markedForDrop"
+                        />
+                      </td>
+                      <td class="border-b border-r px-2 py-1.5">
+                        <span v-if="index.original" class="text-muted-foreground text-xs">{{ index.comment }}</span>
+                        <Input
+                          v-else
+                          v-model="index.comment"
+                          class="h-7 text-xs"
+                          :disabled="index.markedForDrop"
+                        />
                       </td>
                       <td class="border-b px-2 py-1.5">
                         <Badge v-if="index.isPrimary" variant="outline">{{ t('structureEditor.primary') }}</Badge>

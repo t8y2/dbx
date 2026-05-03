@@ -1,4 +1,4 @@
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column, Executor, Row};
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,20 @@ pub async fn connect(url: &str) -> Result<SqlitePool, String> {
         .acquire_timeout(Duration::from_secs(10))
         .idle_timeout(Duration::from_secs(300))
         .connect(url)
+        .await
+        .map_err(|e| format!("SQLite connection failed: {e}"))
+}
+
+pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true);
+
+    SqlitePoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(Duration::from_secs(300))
+        .connect_with(options)
         .await
         .map_err(|e| format!("SQLite connection failed: {e}"))
 }

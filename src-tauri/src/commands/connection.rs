@@ -93,7 +93,7 @@ impl AppState {
             DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?, false),
             DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(db::mysql::connect_bare(&url).await?, true),
             DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),
-            DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect(&url).await?),
+            DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&db_config.host).await?),
             DatabaseType::Redis => {
                 let con = db::redis_driver::connect(&url).await?;
                 PoolKind::Redis(tokio::sync::Mutex::new(con))
@@ -302,7 +302,7 @@ pub async fn test_connection(
             }
             Err(e) => Err(e),
         },
-        DatabaseType::Sqlite => match db::sqlite::connect(&url).await {
+        DatabaseType::Sqlite => match db::sqlite::connect_path(&config.host).await {
             Ok(pool) => {
                 pool.close().await;
                 Ok("Connection successful".to_string())
@@ -387,7 +387,7 @@ pub async fn connect_db(
         DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?, false),
         DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(db::mysql::connect_bare(&url).await?, true),
         DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),
-        DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect(&url).await?),
+        DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&config.host).await?),
         DatabaseType::Redis => {
             let con = db::redis_driver::connect(&url).await?;
             PoolKind::Redis(tokio::sync::Mutex::new(con))

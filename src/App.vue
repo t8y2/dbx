@@ -42,6 +42,7 @@ const TableImportDialog = defineAsyncComponent(() => import("@/components/import
 const TableStructureEditorDialog = defineAsyncComponent(() => import("@/components/structure/TableStructureEditorDialog.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
+const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -131,6 +132,10 @@ const showDiagramDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showStructureEditorDialog = ref(false);
 const showFieldLineageDialog = ref(false);
+const showConfigPassphraseDialog = ref(false);
+const configPassphraseMode = ref<"export" | "import">("export");
+const configPassphraseError = ref("");
+const pendingImportContent = ref("");
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
 const schemaDiffPrefillConnectionId = ref("");
@@ -315,6 +320,50 @@ async function openLineageTarget(target: LineageNavigationTarget) {
     await queryStore.executeTabSql(tabId, sql);
   } catch (e: any) {
     queryStore.setErrorResult(tabId, e);
+  }
+}
+
+function onExportClick() {
+  configPassphraseMode.value = "export";
+  configPassphraseError.value = "";
+  showConfigPassphraseDialog.value = true;
+}
+
+async function onExportConfirm(passphrase: string) {
+  try {
+    await connectionStore.exportConnectionsToFile(passphrase);
+    showConfigPassphraseDialog.value = false;
+    toast(t("configExport.exportSuccess"), 2000);
+  } catch (e: any) {
+    configPassphraseError.value = e?.message || String(e);
+  }
+}
+
+async function onImportClick() {
+  try {
+    const result = await connectionStore.readImportFile();
+    if (!result) return;
+    pendingImportContent.value = result.content;
+    if (result.encrypted) {
+      configPassphraseMode.value = "import";
+      configPassphraseError.value = "";
+      showConfigPassphraseDialog.value = true;
+    } else {
+      const count = await connectionStore.importConnectionsFromFile(result.content, null);
+      toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
+    }
+  } catch (e: any) {
+    toast(e?.message || String(e), 4000);
+  }
+}
+
+async function onImportConfirm(passphrase: string) {
+  try {
+    const count = await connectionStore.importConnectionsFromFile(pendingImportContent.value, passphrase);
+    showConfigPassphraseDialog.value = false;
+    toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
+  } catch (e: any) {
+    configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : (e?.message || String(e));
   }
 }
 
@@ -969,7 +1018,7 @@ async function setupFileDrop() {
               <span class="flex-1" />
               <Tooltip>
                 <TooltipTrigger as-child>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="connectionStore.importConnectionsFromFile()">
+                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="onImportClick">
                     <Upload class="h-3 w-3" />
                   </Button>
                 </TooltipTrigger>
@@ -977,7 +1026,7 @@ async function setupFileDrop() {
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger as-child>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="connectionStore.exportConnectionsToFile()">
+                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="onExportClick">
                     <Download class="h-3 w-3" />
                   </Button>
                 </TooltipTrigger>
@@ -1393,7 +1442,7 @@ async function setupFileDrop() {
                     <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="showHistory = true">
                       <History class="h-4 w-4" /> {{ t('history.title') }}
                     </button>
-                    <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="connectionStore.importConnectionsFromFile()">
+                    <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="onImportClick">
                       <Upload class="h-4 w-4" /> {{ t('sidebar.import') }}
                     </button>
                     <div class="mt-2 rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
@@ -1491,6 +1540,12 @@ async function setupFileDrop() {
         :prefill-table="lineagePrefillTable"
         :prefill-column="lineagePrefillColumn"
         @open-target="openLineageTarget"
+      />
+      <ConfigPassphraseDialog
+        v-model:open="showConfigPassphraseDialog"
+        :mode="configPassphraseMode"
+        :external-error="configPassphraseError"
+        @confirm="configPassphraseMode === 'export' ? onExportConfirm($event) : onImportConfirm($event)"
       />
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">

@@ -577,29 +577,55 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.saveConnections(nextConnections);
   }
 
-  async function exportConnectionsToFile() {
+  async function exportConnectionsToFile(passphrase: string) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const { encryptConfig } = await import("@/lib/configCrypto");
     const path = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "dbx-connections.json" });
     if (!path) return;
-    const data = connections.value.map((c) => ({ ...c, password: "", ssh_password: "", connection_string: undefined }));
-    await writeTextFile(path, JSON.stringify(data, null, 2));
+    const json = JSON.stringify(connections.value);
+    const payload = await encryptConfig(json, passphrase);
+    await writeTextFile(path, JSON.stringify(payload, null, 2));
   }
 
-  async function importConnectionsFromFile() {
+  async function readImportFile(): Promise<{ content: string; encrypted: boolean } | null> {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const { readTextFile } = await import("@tauri-apps/plugin-fs");
     const path = await open({ filters: [{ name: "JSON", extensions: ["json"] }], multiple: false });
-    if (!path) return;
-    const json = await readTextFile(path as string);
-    const imported: ConnectionConfig[] = JSON.parse(json);
+    if (!path) return null;
+    const content = await readTextFile(path as string);
+    const { isEncryptedConfig } = await import("@/lib/configCrypto");
+    const parsed = JSON.parse(content);
+    return { content, encrypted: isEncryptedConfig(parsed) };
+  }
+
+  async function importConnectionsFromFile(content: string, passphrase: string | null): Promise<number> {
+    let imported: ConnectionConfig[];
+    const parsed = JSON.parse(content);
+
+    if (passphrase) {
+      const { decryptConfig } = await import("@/lib/configCrypto");
+      const json = await decryptConfig(parsed, passphrase);
+      imported = JSON.parse(json);
+    } else if (Array.isArray(parsed)) {
+      imported = parsed;
+    } else if (parsed.format === "dbx-config" && Array.isArray(parsed.connections)) {
+      imported = parsed.connections;
+    } else {
+      imported = [];
+    }
+
+    let count = 0;
     for (const config of imported) {
-      if (!connections.value.find((c) => c.id === config.id)) {
+      const duplicate = connections.value.find((c) => c.name === config.name && c.host === config.host && c.port === config.port);
+      if (!duplicate) {
         config.id = crypto.randomUUID();
         const normalized = normalizeConnection(config);
         await addConnection(normalized);
+        count++;
       }
     }
+    return count;
   }
 
   async function initFromDisk() {
@@ -656,6 +682,7 @@ export const useConnectionStore = defineStore("connection", () => {
     listCompletionTables,
     listCompletionColumns,
     exportConnectionsToFile,
+    readImportFile,
     importConnectionsFromFile,
     transferSource,
     schemaDiffSource,

@@ -253,9 +253,10 @@ function buildIndexSql(options: BuildTableStructureChangeSqlOptions, warnings: s
     const usingClause = idxType && databaseType === "postgres" ? ` USING ${idxType}` : "";
     const typePrefix = idxType && databaseType === "sqlserver" ? `${idxType} ` : "";
     const incCols = index.includedColumns.map(clean).filter(Boolean);
-    const includeClause = incCols.length > 0 ? ` INCLUDE (${incCols.map((c) => quoteIdent(databaseType, c)).join(", ")})` : "";
+    const includeClause = incCols.length > 0 && (databaseType === "postgres" || databaseType === "sqlserver") ? ` INCLUDE (${incCols.map((c) => quoteIdent(databaseType, c)).join(", ")})` : "";
     const filter = clean(index.filter);
-    const whereClause = filter ? ` WHERE ${filter}` : "";
+    const supportsWhere = databaseType === "postgres" || databaseType === "sqlserver" || databaseType === "sqlite";
+    const whereClause = filter && supportsWhere ? ` WHERE ${filter}` : "";
     statements.push(`CREATE ${unique}${typePrefix}INDEX ${quoteIdent(databaseType, name)} ON ${table}${usingClause} (${cols})${includeClause}${whereClause};`);
     const comment = clean(index.comment);
     if (comment && databaseType === "postgres") {

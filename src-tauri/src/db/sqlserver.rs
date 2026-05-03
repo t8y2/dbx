@@ -175,7 +175,7 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
         let inc_str = row.get::<&str, _>(5).unwrap_or("");
         IndexInfo {
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
-            columns: cols_str.split(',').map(|s| s.to_string()).collect(),
+            columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
             is_unique: row.get::<bool, _>(2).unwrap_or(false),
             is_primary: row.get::<bool, _>(3).unwrap_or(false),
             filter: row.get::<&str, _>(6).map(|s| s.to_string()),

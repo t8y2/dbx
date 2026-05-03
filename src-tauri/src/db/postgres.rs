@@ -275,7 +275,7 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
 pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let rows: Vec<PgRow> = sqlx::query(
         "SELECT i.relname AS index_name, \
-         array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n, true)) ORDER BY k.n) AS columns, \
+         array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) ORDER BY k.n) AS columns, \
          ix.indisunique AS is_unique, \
          ix.indisprimary AS is_primary, \
          pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \

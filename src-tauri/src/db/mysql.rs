@@ -352,7 +352,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
             let cols_str = get_str_by_name(row, "columns");
             IndexInfo {
                 name: get_str_by_name(row, "INDEX_NAME"),
-                columns: cols_str.split(',').map(|s| s.to_string()).collect(),
+                columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
                 is_unique: row.get::<bool, _>("is_unique"),
                 is_primary: row.get::<bool, _>("is_primary"),
                 filter: None,

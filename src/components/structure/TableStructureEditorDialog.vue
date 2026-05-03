@@ -16,6 +16,9 @@ import {
 import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { buildTableStructureChangeSql, type EditableStructureColumn, type EditableStructureIndex } from "@/lib/tableStructureEditorSql";
@@ -72,6 +75,26 @@ const connection = computed(() =>
   props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined
 );
 const databaseType = computed(() => connection.value?.db_type);
+
+const indexTypesByDb: Record<string, string[]> = {
+  postgres: ["BTREE", "HASH", "GIST", "SPGIST", "GIN", "BRIN"],
+  mysql: ["BTREE", "HASH", "FULLTEXT", "SPATIAL", "RTREE"],
+  sqlserver: ["CLUSTERED", "NONCLUSTERED", "COLUMNSTORE", "NONCLUSTERED COLUMNSTORE", "XML", "SPATIAL"],
+  oracle: ["NORMAL", "BITMAP", "FUNCTION-BASED NORMAL", "FUNCTION-BASED DOMAIN", "DOMAIN", "CLUSTER"],
+  sqlite: ["BTREE"],
+};
+const indexTypeOptions = computed(() => indexTypesByDb[databaseType.value ?? ""] ?? []);
+
+const indexColLabels = computed(() => [
+  t('structureEditor.indexName'),
+  t('structureEditor.indexColumns'),
+  t('structureEditor.unique'),
+  t('structureEditor.indexType'),
+  t('structureEditor.includedColumns'),
+  t('structureEditor.filter'),
+  t('structureEditor.comment'),
+  t('structureEditor.actions'),
+]);
 const targetSchema = computed(() => props.prefillSchema || props.prefillDatabase || "");
 const targetLabel = computed(() => [
   connection.value?.name,
@@ -341,23 +364,14 @@ watch(open, (value) => {
                   <thead class="sticky top-0 z-10 bg-background">
                     <tr>
                       <th
-                        v-for="(label, i) in [
-                          t('structureEditor.indexName'),
-                          t('structureEditor.indexColumns'),
-                          t('structureEditor.unique'),
-                          t('structureEditor.indexType'),
-                          t('structureEditor.includedColumns'),
-                          t('structureEditor.filter'),
-                          t('structureEditor.comment'),
-                          t('structureEditor.actions'),
-                        ]"
+                        v-for="(label, i) in indexColLabels"
                         :key="i"
                         class="relative border-b border-r px-2 py-2 text-left"
                         :style="{ width: indexColWidths[i] + 'px', minWidth: indexColWidths[i] + 'px' }"
                       >
                         {{ label }}
                         <div
-                          v-if="i < 7"
+                          v-if="i < indexColLabels.length - 1"
                           class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30"
                           :class="resizing?.col === i ? 'bg-primary/30' : ''"
                           @mousedown="onIndexColResize($event, i)"
@@ -404,6 +418,19 @@ watch(open, (value) => {
                       </td>
                       <td class="border-b border-r px-2 py-1.5">
                         <span v-if="index.original" class="text-muted-foreground">{{ index.indexType || 'BTREE' }}</span>
+                        <Select
+                          v-else-if="indexTypeOptions.length > 0"
+                          :model-value="index.indexType || 'BTREE'"
+                          :disabled="index.markedForDrop"
+                          @update:model-value="(v: string) => index.indexType = v"
+                        >
+                          <SelectTrigger class="h-7 font-mono text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt">{{ opt }}</SelectItem>
+                          </SelectContent>
+                        </Select>
                         <Input
                           v-else
                           v-model="index.indexType"

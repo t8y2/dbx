@@ -392,7 +392,7 @@ test("SQL Server index with type + include combined", () => {
   ]);
 });
 
-test("MySQL index does not emit USING or type prefix, but INCLUDE and WHERE are passed through", () => {
+test("MySQL index omits USING, type prefix, INCLUDE, and WHERE (unsupported)", () => {
   const result = buildTableStructureChangeSql({
     databaseType: "mysql",
     tableName: "orders",
@@ -412,7 +412,7 @@ test("MySQL index does not emit USING or type prefix, but INCLUDE and WHERE are 
 
   assert.deepEqual(result.warnings, []);
   assert.deepEqual(result.statements, [
-    "CREATE INDEX `idx_orders_status` ON `orders` (`status`) INCLUDE (`total`) WHERE deleted = 0;",
+    "CREATE INDEX `idx_orders_status` ON `orders` (`status`);",
   ]);
 });
 

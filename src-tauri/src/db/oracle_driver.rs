@@ -150,7 +150,7 @@ pub async fn list_indexes(conn: &OracleClient, schema: &str, table: &str) -> Res
         let cols_str = row.get_string(1).unwrap_or("");
         IndexInfo {
             name: row.get_string(0).unwrap_or("").to_string(),
-            columns: cols_str.split(',').map(|s| s.to_string()).collect(),
+            columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
             is_unique: row.get_string(2).unwrap_or("") == "UNIQUE",
             is_primary: row.get_i64(3).unwrap_or(0) == 1,
             filter: None,

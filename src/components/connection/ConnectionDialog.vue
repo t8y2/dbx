@@ -18,7 +18,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/tauri";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { FolderOpen } from "lucide-vue-next";
+import { Copy, FolderOpen } from "lucide-vue-next";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
@@ -315,6 +315,10 @@ async function browseSshKeyPath() {
     form.value.ssh_key_path = selected;
   }
 }
+
+function copyFilePath() {
+  if (form.value.host) navigator.clipboard.writeText(form.value.host);
+}
 </script>
 
 <template>
@@ -409,7 +413,23 @@ async function browseSshKeyPath() {
         <template v-if="form.db_type === 'sqlite' || form.db_type === 'duckdb'">
           <div class="grid grid-cols-4 items-center gap-4">
             <Label class="text-right">{{ t('connection.filePath') }}</Label>
-            <Input v-model="form.host" class="col-span-3" placeholder="/path/to/database.db" />
+            <div class="col-span-3 space-y-1.5">
+              <div class="flex items-center gap-1">
+                <Input v-model="form.host" class="flex-1" :placeholder="t('connection.filePathPlaceholder')" />
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.host" @click="copyFilePath">
+                      <Copy class="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{{ t('connection.copyFilePath') }}</TooltipContent>
+                </Tooltip>
+              </div>
+              <p class="text-xs text-muted-foreground leading-relaxed">
+                {{ t('connection.filePathHint') }}
+                <code class="rounded bg-muted px-1 py-0.5">\\wsl.localhost\Ubuntu\home\xxx\data.db</code>
+              </p>
+            </div>
           </div>
         </template>
 

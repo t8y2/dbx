@@ -27,6 +27,15 @@ export interface EditorSettings {
   theme: EditorTheme;
 }
 
+export type AppThemeMode = "system" | "light" | "dark";
+export type DensityMode = "comfortable" | "compact";
+
+export interface AppSettings {
+  themeMode: AppThemeMode;
+  density: DensityMode;
+  syncEditorTheme: boolean;
+}
+
 export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }[] = [
   { value: "one-dark", label: "One Dark", dark: true },
   { value: "vscode-dark", label: "VS Dark+", dark: true },
@@ -55,7 +64,14 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   theme: "one-dark",
 };
 
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+  themeMode: "system",
+  density: "comfortable",
+  syncEditorTheme: true,
+};
+
 export const STORAGE_KEY = "dbx-editor-settings";
+export const APP_SETTINGS_STORAGE_KEY = "dbx-app-settings";
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
 
 function loadEditorSettings(): EditorSettings {
@@ -96,11 +112,37 @@ function saveEditorSettings(settings: EditorSettings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
 
+function loadAppSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(APP_SETTINGS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<AppSettings>;
+      return {
+        themeMode: parsed.themeMode ?? DEFAULT_APP_SETTINGS.themeMode,
+        density: parsed.density ?? DEFAULT_APP_SETTINGS.density,
+        syncEditorTheme: parsed.syncEditorTheme ?? DEFAULT_APP_SETTINGS.syncEditorTheme,
+      };
+    }
+
+    const legacyTheme = localStorage.getItem("dbx-theme");
+    if (legacyTheme === "dark" || legacyTheme === "light") {
+      return { ...DEFAULT_APP_SETTINGS, themeMode: legacyTheme };
+    }
+  } catch { /* ignore */ }
+
+  return { ...DEFAULT_APP_SETTINGS };
+}
+
+function saveAppSettings(settings: AppSettings) {
+  localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+}
+
 export const useSettingsStore = defineStore("settings", () => {
   const aiConfig = ref<AiConfig>({ ...defaultConfigs.claude, apiKey: "", apiStyle: "completions" });
   const isAiConfigLoaded = ref(false);
 
   const editorSettings = ref<EditorSettings>(loadEditorSettings());
+  const appSettings = ref<AppSettings>(loadAppSettings());
 
   async function initAiConfig() {
     if (isAiConfigLoaded.value) return;
@@ -134,8 +176,14 @@ export const useSettingsStore = defineStore("settings", () => {
     saveEditorSettings(editorSettings.value);
   }
 
+  function updateAppSettings(partial: Partial<AppSettings>) {
+    Object.assign(appSettings.value, partial);
+    saveAppSettings(appSettings.value);
+  }
+
   return {
     aiConfig, isAiConfigLoaded, initAiConfig, updateAiConfig, isConfigured,
     editorSettings, updateEditorSettings,
+    appSettings, updateAppSettings,
   };
 });

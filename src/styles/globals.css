@@ -196,3 +196,24 @@
   background-color: oklch(0.205 0 0 / 0.82) !important;
   border-color: oklch(1 0 0 / 0.1) !important;
 }
+
+.compact {
+  --dbx-row-padding-y: 0.125rem;
+}
+
+.compact .h-10 {
+  height: 2rem;
+}
+
+.compact .h-9 {
+  height: 2rem;
+}
+
+.compact .py-1 {
+  padding-top: var(--dbx-row-padding-y);
+  padding-bottom: var(--dbx-row-padding-y);
+}
+
+.compact .text-sm {
+  font-size: 0.8125rem;
+}

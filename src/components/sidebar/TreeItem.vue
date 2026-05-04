@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
-  Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
+  Copy, AlertCircle, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
   Pin, ArrowRightLeft, Download, FileCode, Network, FileUp, PencilRuler,
 } from "lucide-vue-next";
 import {
@@ -266,6 +266,13 @@ async function confirmDelete() {
 
 function copyName() {
   navigator.clipboard.writeText(props.node.label);
+}
+
+function copyConnectionPath() {
+  const path = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId)?.host : "";
+  if (!path) return;
+  navigator.clipboard.writeText(path);
+  toast(t("contextMenu.copyPathSuccess"), 2000);
 }
 
 async function collectDatabaseExportTables(): Promise<Array<{ schema?: string; name: string; displayName: string }>> {
@@ -578,6 +585,10 @@ const hasTypeMenu = computed(() => {
   const t = props.node.type;
   return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || isGroupLabel(props.node);
 });
+const canCopyConnectionPath = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return props.node.type === "connection" && !!config && (config.db_type === "sqlite" || config.db_type === "duckdb") && !!config.host;
+});
 const columnComment = computed(() => props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null);
 const paddingLeft = `${props.depth * 16 + 8}px`;
 const isConnected = computed(() =>
@@ -651,6 +662,14 @@ async function showMore() {
           </button>
         </div>
         <template v-if="node.isExpanded && node.children">
+          <div
+            v-if="node.error"
+            class="flex min-w-0 items-start gap-1.5 px-2 py-1.5 text-xs text-destructive"
+            :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
+          >
+            <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span class="min-w-0 break-words">{{ node.error }}</span>
+          </div>
           <TreeItem v-for="child in visibleChildren" :key="child.id" :node="child" :depth="depth + 1" />
           <div
             v-if="hasMoreChildren"
@@ -681,6 +700,9 @@ async function showMore() {
         </ContextMenuItem>
         <ContextMenuItem @click="newQuery">
           <TerminalSquare class="w-4 h-4" /> {{ t('contextMenu.newQuery') }}
+        </ContextMenuItem>
+        <ContextMenuItem v-if="canCopyConnectionPath" @click="copyConnectionPath">
+          <Copy class="w-4 h-4" /> {{ t('contextMenu.copyPath') }}
         </ContextMenuItem>
         <ContextMenuItem v-if="canOpenSqlFileExecution" @click="openSqlFileExecution">
           <FileCode class="w-4 h-4" /> {{ t('sqlFile.title') }}

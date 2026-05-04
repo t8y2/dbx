@@ -10,6 +10,7 @@ permissions:
 
 env:
   APP_NAME: dbx
+  PRODUCT_NAME: DBX
   REPO_OWNER: t8y2
 
 jobs:
@@ -39,9 +40,9 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
 
           ASSETS=(
-            "dbx_${VERSION}_aarch64.dmg"
-            "dbx_${VERSION}_x64.dmg"
-            "dbx_${VERSION}_x64-setup.exe"
+            "${PRODUCT_NAME}_${VERSION}_aarch64.dmg"
+            "${PRODUCT_NAME}_${VERSION}_x64.dmg"
+            "${PRODUCT_NAME}_${VERSION}_x64-setup.exe"
           )
 
           for ASSET in "${ASSETS[@]}"; do
@@ -74,9 +75,9 @@ jobs:
           }
 
           echo "SHA256 hashes:"
-          compute_hash "artifacts/dbx_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
-          compute_hash "artifacts/dbx_${VERSION}_x64.dmg" "sha_dmg_x64"
-          compute_hash "artifacts/dbx_${VERSION}_x64-setup.exe" "sha_exe"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64.dmg" "sha_dmg_x64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe"
 
       - name: Publish Homebrew Cask
         env:
@@ -97,13 +98,13 @@ jobs:
             version "__VERSION__"
 
             on_arm do
-              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__APP___#{version}_aarch64.dmg",
+              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_aarch64.dmg",
                   verified: "github.com/__OWNER__/__APP__/"
               sha256 "__SHA_ARM64__"
             end
 
             on_intel do
-              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__APP___#{version}_x64.dmg",
+              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_x64.dmg",
                   verified: "github.com/__OWNER__/__APP__/"
               sha256 "__SHA_X64__"
             end
@@ -135,6 +136,7 @@ jobs:
           sed -i "s/__VERSION__/${VERSION}/g" Casks/dbx.rb
           sed -i "s/__OWNER__/${REPO_OWNER}/g" Casks/dbx.rb
           sed -i "s/__APP__/${APP_NAME}/g" Casks/dbx.rb
+          sed -i "s/__PRODUCT__/${PRODUCT_NAME}/g" Casks/dbx.rb
           sed -i "s/__SHA_ARM64__/${SHA_ARM64}/g" Casks/dbx.rb
           sed -i "s/__SHA_X64__/${SHA_X64}/g" Casks/dbx.rb
 
@@ -170,7 +172,7 @@ jobs:
               "license": "MIT",
               "architecture": {
                   "64bit": {
-                      "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/dbx_${VERSION}_x64-setup.exe",
+                      "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/${PRODUCT_NAME}_${VERSION}_x64-setup.exe",
                       "hash": "${SHA_EXE}"
                   }
               },
@@ -188,7 +190,7 @@ jobs:
               "autoupdate": {
                   "architecture": {
                       "64bit": {
-                          "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/dbx_\$version_x64-setup.exe"
+                          "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/${PRODUCT_NAME}_\$version_x64-setup.exe"
                       }
                   }
               }

@@ -15,7 +15,6 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/tauri";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -35,7 +34,6 @@ const emit = defineEmits<{
 }>();
 
 const store = useConnectionStore();
-const { toast } = useToast();
 const isTesting = ref(false);
 const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);

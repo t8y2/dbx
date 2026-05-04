@@ -1106,6 +1106,9 @@ function escapeAndHighlightKeywords(s: string): string {
             <input
               ref="searchInputRef"
               v-model="searchText"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
               class="flex-1 h-5 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
               :placeholder="canUseWhereSearch ? t('grid.searchOrWhere') : t('grid.search')"
               @keydown="onSearchKeydown"
@@ -1266,6 +1269,9 @@ function escapeAndHighlightKeywords(s: string): string {
                   <template v-if="editingCell?.rowId === item.id && editingCell?.col === colIdx">
                     <input
                       v-model="editValue"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck="false"
                       class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2 py-0.5 text-xs outline-none z-10"
                       @blur="commitEdit"
                       @click.stop

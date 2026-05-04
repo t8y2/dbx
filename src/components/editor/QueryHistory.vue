@@ -79,6 +79,9 @@ onMounted(() => store.load());
       <Search class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
       <input
         v-model="searchText"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
         class="flex-1 h-5 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
         :placeholder="t('history.search')"
       />

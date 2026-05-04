@@ -29,6 +29,8 @@ export default {
     import: "Import Connections",
     export: "Export Connections",
     showMore: "Show {count} more...",
+    filterByType: "Filter by type",
+    clearFilter: "Clear filter",
   },
   connection: {
     title: "New Connection",
@@ -93,6 +95,11 @@ export default {
     tableData: "Table Data",
     redis: "Redis",
     mongo: "Mongo",
+    tooltipConnection: "Connection:",
+    tooltipDatabase: "Database:",
+    tooltipTable: "Table:",
+    tooltipCollection: "Collection:",
+    resultN: "Result {n}",
   },
   grid: {
     rows: "{count} rows",

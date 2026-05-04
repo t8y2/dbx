@@ -29,6 +29,8 @@ export default {
     import: "导入连接",
     export: "导出连接",
     showMore: "加载更多 ({count})...",
+    filterByType: "按类型筛选",
+    clearFilter: "清除筛选",
   },
   connection: {
     title: "新建连接",
@@ -95,6 +97,11 @@ export default {
     tableData: "数据表",
     redis: "Redis",
     mongo: "Mongo",
+    tooltipConnection: "连接：",
+    tooltipDatabase: "数据库：",
+    tooltipTable: "表：",
+    tooltipCollection: "集合：",
+    resultN: "结果 {n}",
   },
   grid: {
     rows: "{count} 行",

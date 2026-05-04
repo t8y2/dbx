@@ -114,6 +114,9 @@ function confirmRemoveChild() {
           <span class="json-edit-quote">"</span>
           <input
             v-model="node.keyName"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
             class="json-edit-key-input"
             :disabled="node.readonlyKey"
             :placeholder="t('mongo.fieldPlaceholder')"

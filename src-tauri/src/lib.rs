@@ -63,6 +63,7 @@ pub fn run() {
             commands::schema::list_triggers,
             commands::schema::get_table_ddl,
             commands::query::execute_query,
+            commands::query::execute_multi,
             commands::query::cancel_query,
             commands::query::execute_batch,
             commands::query::execute_script,

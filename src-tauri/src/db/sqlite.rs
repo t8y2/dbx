@@ -4,16 +4,6 @@ use std::time::{Duration, Instant};
 
 use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
-pub async fn connect(url: &str) -> Result<SqlitePool, String> {
-    SqlitePoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(10))
-        .idle_timeout(Duration::from_secs(300))
-        .connect(url)
-        .await
-        .map_err(|e| format!("SQLite connection failed: {e}"))
-}
-
 pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
     let options = SqliteConnectOptions::new()
         .filename(path)

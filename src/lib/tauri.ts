@@ -138,6 +138,10 @@ export async function executeQuery(connectionId: string, database: string, sql: 
   return invoke("execute_query", { connectionId, database, sql, executionId });
 }
 
+export async function executeMulti(connectionId: string, database: string, sql: string, executionId?: string): Promise<QueryResult[]> {
+  return invoke("execute_multi", { connectionId, database, sql, executionId });
+}
+
 export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
 }

@@ -103,7 +103,7 @@ scoop install dbx
 DBX 未使用 Apple 开发者证书签名，首次打开时 macOS 会阻止运行。解决方法：
 
 ```bash
-xattr -cr /Applications/dbx.app
+xattr -cr /Applications/DBX.app
 ```
 
 或者：**系统设置 → 隐私与安全性 → 仍要打开**。

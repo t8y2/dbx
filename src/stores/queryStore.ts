@@ -174,11 +174,25 @@ export const useQueryStore = defineStore("query", () => {
     tab.executionId = executionId;
     tab.lastExecutedSql = sql;
     try {
-      tab.result = await api.executeQuery(tab.connectionId, tab.database, sql, executionId);
+      const results = await api.executeMulti(tab.connectionId, tab.database, sql, executionId);
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.executionId === executionId) {
+        if (results.length > 1) {
+          current.results = results;
+          current.activeResultIndex = 0;
+          current.result = results[0];
+        } else {
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          current.result = results[0];
+        }
+      }
     } catch (e: any) {
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
         current.result = toErrorResult(e);
+        current.results = undefined;
+        current.activeResultIndex = undefined;
       }
     } finally {
       const current = tabs.value.find((t) => t.id === id);
@@ -277,6 +291,13 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function setActiveResultIndex(id: string, index: number) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab?.results || index < 0 || index >= tab.results.length) return;
+    tab.activeResultIndex = index;
+    tab.result = tab.results[index];
+  }
+
   function trimResultCache() {
     const inactive = tabs.value.filter((t) => t.id !== activeTabId.value && t.result);
     if (inactive.length > MAX_CACHED_RESULTS) {
@@ -299,6 +320,7 @@ export const useQueryStore = defineStore("query", () => {
     setTableMeta,
     setExecuting,
     setErrorResult,
+    setActiveResultIndex,
     executeCurrentTab,
     executeCurrentSql,
     executeTabSql,

@@ -111,6 +111,8 @@ export interface QueryTab {
   lastExecutedSql?: string;
   pinned?: boolean;
   result?: QueryResult;
+  results?: QueryResult[];
+  activeResultIndex?: number;
   explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;

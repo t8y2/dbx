@@ -103,7 +103,7 @@ scoop install dbx
 DBX is not signed with an Apple Developer certificate. On first launch, macOS will block the app. To fix this:
 
 ```bash
-xattr -cr /Applications/dbx.app
+xattr -cr /Applications/DBX.app
 ```
 
 Or: **System Settings → Privacy & Security → Open Anyway**.

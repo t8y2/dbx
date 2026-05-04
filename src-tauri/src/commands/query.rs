@@ -263,6 +263,60 @@ pub async fn execute_query(
 }
 
 #[tauri::command]
+pub async fn execute_multi(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    sql: String,
+    execution_id: Option<String>,
+) -> Result<Vec<db::QueryResult>, String> {
+    let registered_query = execution_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| state.running_queries.register(id.clone()));
+    let cancel_token = registered_query.as_ref().map(|query| query.token());
+
+    let statements = split_sql_statements(&sql);
+    if statements.len() <= 1 {
+        let single_sql = statements.into_iter().next().unwrap_or_default();
+        let result = execute_sql_statement(
+            &state, &connection_id, &database, &single_sql, cancel_token,
+        ).await?;
+        return Ok(vec![result]);
+    }
+
+    let mut results = Vec::with_capacity(statements.len());
+    for stmt in &statements {
+        if is_canceled(&cancel_token) {
+            results.push(db::QueryResult {
+                columns: vec!["Error".to_string()],
+                rows: vec![vec![serde_json::Value::String(canceled_error())]],
+                affected_rows: 0,
+                execution_time_ms: 0,
+                truncated: false,
+            });
+            break;
+        }
+        match execute_sql_statement(
+            &state, &connection_id, &database, stmt, cancel_token.clone(),
+        ).await {
+            Ok(r) => results.push(r),
+            Err(e) => {
+                results.push(db::QueryResult {
+                    columns: vec!["Error".to_string()],
+                    rows: vec![vec![serde_json::Value::String(e)]],
+                    affected_rows: 0,
+                    execution_time_ms: 0,
+                    truncated: false,
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
 pub async fn cancel_query(
     state: State<'_, Arc<AppState>>,
     execution_id: String,

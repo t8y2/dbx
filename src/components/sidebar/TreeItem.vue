@@ -4,8 +4,8 @@ import { useI18n } from "vue-i18n";
 import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
   Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
-  Copy, AlertCircle, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
-  Pin, ArrowRightLeft, Download, FileCode, Network, FileUp, PencilRuler,
+  Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
+  Pin, ArrowRightLeft, Download, FileCode, Network, FileUp, PencilRuler, Search,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
@@ -25,6 +25,7 @@ import {
   type ExportedTableSql,
 } from "@/lib/databaseExport";
 import { qualifiedTableName as buildQualifiedTableName, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { treeNodeRowAction } from "@/lib/treeNodeClick";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -43,6 +44,7 @@ const props = defineProps<{
 
 const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
 const diagramSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
+const databaseSearchSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift", "duckdb", "clickhouse"]);
 const tableImportSupportedTypes = new Set(["mysql", "postgres", "sqlite", "duckdb", "clickhouse", "sqlserver", "oracle", "doris", "starrocks", "redshift"]);
 const tableStructureSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver"]);
 const fieldLineageSupportedTypes = new Set(["mysql", "postgres", "sqlite", "sqlserver", "oracle", "redshift"]);
@@ -178,14 +180,10 @@ async function toggle() {
 
 function onClick() {
   const node = props.node;
-  if (node.type === "table" || node.type === "view") {
+  const action = treeNodeRowAction(node.type, canExpand);
+  if (action === "open-data") {
     openData();
-    toggle();
-  } else if (node.type === "redis-db") {
-    toggle();
-  } else if (node.type === "mongo-collection") {
-    toggle();
-  } else if (canExpand) {
+  } else if (action === "toggle") {
     toggle();
   }
 }
@@ -523,6 +521,16 @@ function openDiagram() {
   };
 }
 
+function openDatabaseSearch() {
+  const node = props.node;
+  if (!node.connectionId || !node.database) return;
+  connectionStore.databaseSearchSource = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.type === "schema" ? node.schema : undefined,
+  };
+}
+
 function openTableImport() {
   const node = props.node;
   if (node.type !== "table" || !node.connectionId || !node.database) return;
@@ -567,6 +575,10 @@ const canOpenSqlFileExecution = computed(() => {
 const canOpenDiagram = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return !!props.node.database && !!config && diagramSupportedTypes.has(config.db_type);
+});
+const canOpenDatabaseSearch = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return !!props.node.database && !!config && databaseSearchSupportedTypes.has(config.db_type);
 });
 const canOpenTableImport = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
@@ -640,9 +652,15 @@ async function showMore() {
           @click="onClick"
         >
           <template v-if="canExpand">
-            <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground" />
-            <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-            <ChevronRight v-else class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+            <button
+              type="button"
+              class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+              @click.stop="toggle"
+            >
+              <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
+              <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5" />
+              <ChevronRight v-else class="w-3.5 h-3.5" />
+            </button>
           </template>
           <span v-else class="w-3.5 h-3.5 shrink-0" />
           <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
@@ -729,6 +747,9 @@ async function showMore() {
         </ContextMenuItem>
         <ContextMenuItem v-if="canOpenDiagram" @click="openDiagram">
           <Network class="w-4 h-4" /> {{ t('diagram.open') }}
+        </ContextMenuItem>
+        <ContextMenuItem v-if="canOpenDatabaseSearch" @click="openDatabaseSearch">
+          <Search class="w-4 h-4" /> {{ t('databaseSearch.open') }}
         </ContextMenuItem>
         <ContextMenuItem @click="refresh">
           <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}

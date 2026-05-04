@@ -23,6 +23,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const tableImportSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
   const structureEditorSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
   const fieldLineageSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string; columnName: string } | null>(null);
+  const databaseSearchSource = ref<{ connectionId: string; database: string; schema?: string } | null>(null);
 
   function startEditing(id: string) {
     editingConnectionId.value = id;
@@ -728,5 +729,6 @@ export const useConnectionStore = defineStore("connection", () => {
     tableImportSource,
     structureEditorSource,
     fieldLineageSource,
+    databaseSearchSource,
   };
 });

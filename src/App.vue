@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch, Monitor, Rows3 } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -43,6 +43,7 @@ const TableStructureEditorDialog = defineAsyncComponent(() => import("@/componen
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
+const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -55,6 +56,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getVersion } from "@tauri-apps/api/app";
 import * as api from "@/lib/tauri";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
+import { connectionDriverLabel, connectionIconType, connectionOptionSubtitle } from "@/lib/connectionPresentation";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -132,6 +134,7 @@ const showDiagramDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showStructureEditorDialog = ref(false);
 const showFieldLineageDialog = ref(false);
+const showDatabaseSearchDialog = ref(false);
 const showConfigPassphraseDialog = ref(false);
 const configPassphraseMode = ref<"export" | "import">("export");
 const configPassphraseError = ref("");
@@ -159,12 +162,22 @@ const lineagePrefillDatabase = ref("");
 const lineagePrefillSchema = ref("");
 const lineagePrefillTable = ref("");
 const lineagePrefillColumn = ref("");
+const databaseSearchPrefillConnectionId = ref("");
+const databaseSearchPrefillDatabase = ref("");
+const databaseSearchPrefillSchema = ref("");
 type LineageNavigationTarget = {
   connectionId: string;
   database: string;
   schema?: string;
   tableName: string;
   columnName?: string;
+};
+type DatabaseSearchNavigationTarget = {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  tableName: string;
+  whereInput?: string;
 };
 const databaseOptions = ref<Record<string, string[]>>({});
 const loadingDatabaseOptions = ref<Record<string, boolean>>({});
@@ -265,6 +278,16 @@ watch(() => connectionStore.fieldLineageSource, (v) => {
   }
 });
 
+watch(() => connectionStore.databaseSearchSource, (v) => {
+  if (v) {
+    databaseSearchPrefillConnectionId.value = v.connectionId;
+    databaseSearchPrefillDatabase.value = v.database;
+    databaseSearchPrefillSchema.value = v.schema ?? "";
+    showDatabaseSearchDialog.value = true;
+    connectionStore.databaseSearchSource = null;
+  }
+});
+
 async function onStructureEditorSaved() {
   const tab = activeTab.value;
   if (tab?.mode === "data" && tab.tableMeta?.tableName === structurePrefillTable.value) {
@@ -307,6 +330,43 @@ async function openLineageTarget(target: LineageNavigationTarget) {
       schema: target.schema,
       tableName: target.tableName,
       primaryKeys,
+    });
+
+    queryStore.updateSql(tabId, sql);
+    queryStore.setTableMeta(tabId, {
+      schema: target.schema,
+      tableName: target.tableName,
+      columns,
+      primaryKeys,
+    });
+
+    await queryStore.executeTabSql(tabId, sql);
+  } catch (e: any) {
+    queryStore.setErrorResult(tabId, e);
+  }
+}
+
+async function openDatabaseSearchTarget(target: DatabaseSearchNavigationTarget) {
+  showDatabaseSearchDialog.value = false;
+  connectionStore.activeConnectionId = target.connectionId;
+  const config = connectionStore.getConfig(target.connectionId);
+  const tabTitle = target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
+  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data");
+  queryStore.setExecuting(tabId, true);
+
+  try {
+    await connectionStore.ensureConnected(target.connectionId);
+    if (!config) throw new Error("Connection config not found");
+
+    const querySchema = target.schema || target.database;
+    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
+    const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
+    const sql = buildTableSelectSql({
+      databaseType: config.db_type,
+      schema: target.schema,
+      tableName: target.tableName,
+      primaryKeys,
+      whereInput: target.whereInput,
     });
 
     queryStore.updateSql(tabId, sql);
@@ -436,14 +496,6 @@ const recentConnections = computed(() => connectionStore.connections.slice(0, 5)
 
 function connectionDisplayName(connectionId: string): string {
   return connectionStore.getConfig(connectionId)?.name || connectionId;
-}
-
-function connectionDriverLabel(connection?: ConnectionConfig): string {
-  return connection?.driver_label || connection?.db_type.toUpperCase() || "";
-}
-
-function connectionIconType(connection?: ConnectionConfig): string {
-  return connection?.driver_profile || connection?.db_type || "postgres";
 }
 
 function connectionColor(connectionId: string): string {
@@ -1288,25 +1340,31 @@ async function setupFileDrop() {
               <div class="flex items-center gap-2">
                 <div class="flex items-center gap-1">
                   <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-                  <Server class="h-3.5 w-3.5 shrink-0" />
                   <Select
                     :model-value="activeConnectionValue"
                     @update:model-value="changeActiveConnection"
                   >
-                    <SelectTrigger class="h-6 w-auto max-w-48 border-0 bg-transparent px-1 text-xs font-medium text-foreground shadow-none focus:ring-0">
-                      <SelectValue :placeholder="t('editor.selectConnection')">
-                        {{ connectionDisplayName(activeConnectionValue) }}
-                      </SelectValue>
+                    <SelectTrigger class="h-6 w-auto max-w-56 border-0 bg-transparent px-1 text-xs font-medium text-foreground shadow-none focus:ring-0">
+                      <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
+                        <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
+                        <span class="truncate">{{ connectionDisplayName(activeConnectionValue) }}</span>
+                      </div>
+                      <SelectValue v-else :placeholder="t('editor.selectConnection')" />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent class="min-w-64">
                       <SelectItem
                         v-for="connection in connectionStore.connections"
                         :key="connection.id"
                         :value="connection.id"
                       >
-                        <div class="flex items-center gap-2">
+                        <div class="flex min-w-0 items-center gap-2">
                           <span v-if="connection.color" class="h-3.5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color }" />
-                          <span>{{ connection.name }}</span>
+                          <span v-else class="h-3.5 w-1 shrink-0" />
+                          <DatabaseIcon :db-type="connectionIconType(connection)" class="h-3.5 w-3.5 shrink-0" />
+                          <div class="min-w-0 flex-1">
+                            <div class="truncate">{{ connection.name }}</div>
+                            <div class="truncate text-[11px] font-normal text-muted-foreground">{{ connectionOptionSubtitle(connection) }}</div>
+                          </div>
                         </div>
                       </SelectItem>
                     </SelectContent>
@@ -1556,7 +1614,7 @@ async function setupFileDrop() {
                       <div class="min-w-0 flex-1">
                         <div class="truncate text-sm font-medium">{{ connection.name }}</div>
                         <div class="truncate text-xs text-muted-foreground">
-                          {{ connectionDriverLabel(connection) }} · {{ connection.host || connection.database || 'local' }}{{ connection.port ? ':' + connection.port : '' }}
+                          {{ connectionOptionSubtitle(connection) || connectionDriverLabel(connection) }}
                         </div>
                       </div>
                       <FilePlus2 class="h-4 w-4 text-muted-foreground" />
@@ -1694,6 +1752,13 @@ async function setupFileDrop() {
         :prefill-table="lineagePrefillTable"
         :prefill-column="lineagePrefillColumn"
         @open-target="openLineageTarget"
+      />
+      <DatabaseSearchDialog
+        v-model:open="showDatabaseSearchDialog"
+        :prefill-connection-id="databaseSearchPrefillConnectionId"
+        :prefill-database="databaseSearchPrefillDatabase"
+        :prefill-schema="databaseSearchPrefillSchema"
+        @open-target="openDatabaseSearchTarget"
       />
       <ConfigPassphraseDialog
         v-model:open="showConfigPassphraseDialog"

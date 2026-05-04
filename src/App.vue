@@ -48,7 +48,7 @@ import type { ConnectionConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { useSettingsStore, EDITOR_THEMES } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { setLocale, currentLocale, type Locale } from "@/i18n";
 import { getCurrentWindow, type Theme } from "@tauri-apps/api/window";
@@ -819,7 +819,6 @@ const activeStatusDatabase = computed(() => activeTab.value?.database || "");
 
 function applyTheme() {
   document.documentElement.classList.toggle("dark", isDark.value);
-  document.documentElement.classList.toggle("compact", isCompact.value);
   if (!isTauriRuntime()) return;
   getCurrentWindow()
     .setTheme(isDark.value ? "dark" as Theme : "light" as Theme)
@@ -837,7 +836,7 @@ function toggleDensity() {
 function syncEditorThemeWithApp() {
   if (!settingsStore.appSettings.syncEditorTheme) return;
   const currentTheme = settingsStore.editorSettings.theme;
-  const lightThemes = new Set(["vscode-light", "duotone-light", "xcode"]);
+  const lightThemes = new Set(EDITOR_THEMES.filter(t => !t.dark).map(t => t.value));
   const targetTheme = isDark.value ? "one-dark" : "vscode-light";
   if ((isDark.value && lightThemes.has(currentTheme)) || (!isDark.value && !lightThemes.has(currentTheme))) {
     settingsStore.updateEditorSettings({ theme: targetTheme });
@@ -1065,7 +1064,7 @@ async function setupFileDrop() {
 
 <template>
   <TooltipProvider :delay-duration="300">
-    <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden" :class="{ compact: isCompact }">
+    <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-compact': isCompact }">
       <!-- Toolbar -->
       <div class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0">
         <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="showConnectionDialog = true">
@@ -1088,16 +1087,6 @@ async function setupFileDrop() {
           {{ t('sqlFile.title') }}
         </Button>
 
-        <div class="mx-2 hidden min-w-0 flex-1 items-center justify-center gap-2 text-xs text-muted-foreground md:flex">
-          <span class="inline-flex max-w-[220px] items-center gap-1 truncate rounded border bg-background/60 px-2 py-0.5">
-            <span class="h-1.5 w-1.5 rounded-full" :class="activeStatusConnection && connectionStore.connectedIds.has(activeStatusConnection.id) ? 'bg-green-500' : 'bg-muted-foreground/40'" />
-            <span class="truncate">{{ activeStatusConnection?.name || t('editor.selectConnection') }}</span>
-          </span>
-          <span class="inline-flex max-w-[180px] items-center gap-1 truncate rounded border bg-background/60 px-2 py-0.5">
-            <Database class="h-3 w-3" />
-            <span class="truncate">{{ activeStatusDatabase || t('editor.noDatabase') }}</span>
-          </span>
-        </div>
         <div class="flex-1 md:hidden" />
 
         <Tooltip>
@@ -1396,6 +1385,16 @@ async function setupFileDrop() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+              <div class="flex items-center gap-2 ml-4">
+                <span class="inline-flex max-w-[180px] items-center gap-1 truncate rounded border bg-background/60 px-2 py-0.5 text-xs">
+                  <span class="h-1.5 w-1.5 rounded-full" :class="activeStatusConnection && connectionStore.connectedIds.has(activeStatusConnection.id) ? 'bg-green-500' : 'bg-muted-foreground/40'" />
+                  <span class="truncate">{{ activeStatusConnection?.name || t('editor.selectConnection') }}</span>
+                </span>
+                <span class="inline-flex max-w-[140px] items-center gap-1 truncate rounded border bg-background/60 px-2 py-0.5 text-xs">
+                  <Database class="h-3 w-3" />
+                  <span class="truncate">{{ activeStatusDatabase || t('editor.noDatabase') }}</span>
+                </span>
               </div>
               <div v-if="activeTab.tableMeta" class="flex min-w-0 items-center gap-1 ml-2">
                 <Table2 class="h-3.5 w-3.5 shrink-0" />

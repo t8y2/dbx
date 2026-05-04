@@ -15,10 +15,11 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/tauri";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { Copy, FolderOpen } from "lucide-vue-next";
+import { Copy, FolderOpen, Check } from "lucide-vue-next";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
@@ -34,10 +35,12 @@ const emit = defineEmits<{
 }>();
 
 const store = useConnectionStore();
+const { toast } = useToast();
 const isTesting = ref(false);
 const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const editingId = ref<string | null>(null);
+const filePathCopied = ref(false);
 
 const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   name: "",
@@ -317,7 +320,13 @@ async function browseSshKeyPath() {
 }
 
 function copyFilePath() {
-  if (form.value.host) navigator.clipboard.writeText(form.value.host);
+  if (form.value.host) {
+    navigator.clipboard.writeText(form.value.host);
+    filePathCopied.value = true;
+    setTimeout(() => {
+      filePathCopied.value = false;
+    }, 2000);
+  }
 }
 </script>
 
@@ -419,16 +428,13 @@ function copyFilePath() {
                 <Tooltip>
                   <TooltipTrigger as-child>
                     <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.host" @click="copyFilePath">
-                      <Copy class="h-4 w-4" />
+                      <Check v-if="filePathCopied" class="h-4 w-4 text-green-600" />
+                      <Copy v-else class="h-4 w-4" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>{{ t('connection.copyFilePath') }}</TooltipContent>
+                  <TooltipContent>{{ filePathCopied ? t('contextMenu.copyPathSuccess') : t('connection.copyFilePath') }}</TooltipContent>
                 </Tooltip>
               </div>
-              <p class="text-xs text-muted-foreground leading-relaxed">
-                {{ t('connection.filePathHint') }}
-                <code class="rounded bg-muted px-1 py-0.5">\\wsl.localhost\Ubuntu\home\xxx\data.db</code>
-              </p>
             </div>
           </div>
         </template>

@@ -1242,7 +1242,7 @@ function escapeAndHighlightKeywords(s: string): string {
                 :style="{ height: '26px', width: 'var(--total-w)' }"
               >
                 <div
-                  class="shrink-0 px-2 py-1 border-r border-border text-center select-none"
+                  class="shrink-0 px-2 py-1 border-r border-border text-center select-none flex items-center"
                   :class="rowNumberStatusClass(item)"
                   :style="{ width: 'var(--row-num-w)' }"
                 >
@@ -1251,7 +1251,7 @@ function escapeAndHighlightKeywords(s: string): string {
                 <div
                   v-for="(cell, colIdx) in item.data"
                   :key="colIdx"
-                  class="group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none"
+                  class="group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none flex items-center"
                   :style="{ width: `var(--col-w-${colIdx})` }"
                   :class="{
                     'text-muted-foreground italic': isNull(cell),
@@ -1279,7 +1279,9 @@ function escapeAndHighlightKeywords(s: string): string {
                     />
                   </template>
                   <template v-else>
-                    {{ formatCell(cell) }}
+                    <span class="inline-block w-full h-full flex items-center">
+                      {{ formatCell(cell) }}
+                    </span>
                     <button
                       class="absolute right-0.5 top-0.5 hidden h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground group-hover/cell:flex"
                       :title="t('grid.cellDetails')"

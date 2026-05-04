@@ -92,6 +92,7 @@ export interface TreeNode {
   type: TreeNodeType;
   children?: TreeNode[];
   isLoading?: boolean;
+  error?: string;
   isExpanded?: boolean;
   pinned?: boolean;
   connectionId?: string;

@@ -103,7 +103,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function setChildren(parent: TreeNode, children: TreeNode[]) {
+    parent.error = undefined;
     parent.children = orderPinnedFirst(children.map(pinTreeNode), (node) => !!node.pinned);
+  }
+
+  function setNodeError(node: TreeNode, error: unknown) {
+    node.error = error instanceof Error ? error.message : String(error);
+    node.children = [];
+    node.isExpanded = true;
   }
 
   function findParentNode(nodes: TreeNode[], id: string, parent: TreeNode | null = null): TreeNode | null {
@@ -259,6 +266,9 @@ export const useConnectionStore = defineStore("connection", () => {
         children: [],
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -282,6 +292,9 @@ export const useConnectionStore = defineStore("connection", () => {
         children: [],
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -305,6 +318,9 @@ export const useConnectionStore = defineStore("connection", () => {
         children: [],
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -327,6 +343,9 @@ export const useConnectionStore = defineStore("connection", () => {
         isExpanded: false,
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -351,6 +370,9 @@ export const useConnectionStore = defineStore("connection", () => {
         children: [],
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -378,6 +400,9 @@ export const useConnectionStore = defineStore("connection", () => {
         children: [],
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -421,6 +446,9 @@ export const useConnectionStore = defineStore("connection", () => {
         meta: col,
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -447,6 +475,9 @@ export const useConnectionStore = defineStore("connection", () => {
         meta: idx,
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -473,6 +504,9 @@ export const useConnectionStore = defineStore("connection", () => {
         meta: fk,
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }
@@ -499,6 +533,9 @@ export const useConnectionStore = defineStore("connection", () => {
         meta: tr,
       })));
       node.isExpanded = true;
+    } catch (e) {
+      setNodeError(node, e);
+      throw e;
     } finally {
       node.isLoading = false;
     }

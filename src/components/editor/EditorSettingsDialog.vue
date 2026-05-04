@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import {
-  useSettingsStore, EDITOR_THEMES, FONT_FAMILIES, DEFAULT_EDITOR_SETTINGS,
+  useSettingsStore, EDITOR_THEMES, FONT_FAMILIES, DEFAULT_EDITOR_SETTINGS, DEFAULT_APP_SETTINGS,
+  type AppThemeMode, type DensityMode,
 } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
 
@@ -32,6 +33,9 @@ const emit = defineEmits<{
 const editFontFamily = ref(settingsStore.editorSettings.fontFamily);
 const editFontSize = ref(settingsStore.editorSettings.fontSize);
 const editTheme = ref(settingsStore.editorSettings.theme);
+const editAppThemeMode = ref(settingsStore.appSettings.themeMode);
+const editDensity = ref(settingsStore.appSettings.density);
+const editSyncEditorTheme = ref(settingsStore.appSettings.syncEditorTheme);
 
 // Sync from store when dialog opens
 watch(() => props.open, (open) => {
@@ -39,6 +43,9 @@ watch(() => props.open, (open) => {
     editFontFamily.value = settingsStore.editorSettings.fontFamily;
     editFontSize.value = settingsStore.editorSettings.fontSize;
     editTheme.value = settingsStore.editorSettings.theme;
+    editAppThemeMode.value = settingsStore.appSettings.themeMode;
+    editDensity.value = settingsStore.appSettings.density;
+    editSyncEditorTheme.value = settingsStore.appSettings.syncEditorTheme;
   }
 });
 
@@ -46,7 +53,10 @@ function hasChanges(): boolean {
   return (
     editFontFamily.value !== settingsStore.editorSettings.fontFamily ||
     editFontSize.value !== settingsStore.editorSettings.fontSize ||
-    editTheme.value !== settingsStore.editorSettings.theme
+    editTheme.value !== settingsStore.editorSettings.theme ||
+    editAppThemeMode.value !== settingsStore.appSettings.themeMode ||
+    editDensity.value !== settingsStore.appSettings.density ||
+    editSyncEditorTheme.value !== settingsStore.appSettings.syncEditorTheme
   );
 }
 
@@ -56,6 +66,11 @@ function applySettings() {
     fontSize: editFontSize.value,
     theme: editTheme.value,
   });
+  settingsStore.updateAppSettings({
+    themeMode: editAppThemeMode.value,
+    density: editDensity.value,
+    syncEditorTheme: editSyncEditorTheme.value,
+  });
   emit("update:open", false);
 }
 
@@ -63,6 +78,9 @@ function resetDefaults() {
   editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
   editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
   editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
+  editAppThemeMode.value = DEFAULT_APP_SETTINGS.themeMode;
+  editDensity.value = DEFAULT_APP_SETTINGS.density;
+  editSyncEditorTheme.value = DEFAULT_APP_SETTINGS.syncEditorTheme;
 }
 
 function onFontFamilyChange(v: any) {
@@ -71,6 +89,14 @@ function onFontFamilyChange(v: any) {
 
 function onThemeChange(v: any) {
   if (typeof v === 'string') editTheme.value = v as typeof DEFAULT_EDITOR_SETTINGS.theme;
+}
+
+function onAppThemeModeChange(v: any) {
+  if (v === "system" || v === "light" || v === "dark") editAppThemeMode.value = v as AppThemeMode;
+}
+
+function onDensityChange(v: any) {
+  if (v === "comfortable" || v === "compact") editDensity.value = v as DensityMode;
 }
 
 // ---------- CodeMirror preview ----------
@@ -169,6 +195,43 @@ watch(() => props.open, (open) => {
       </DialogHeader>
 
       <div class="space-y-5 py-2">
+        <div class="space-y-2">
+          <Label>{{ t('settings.appTheme') }}</Label>
+          <Select :model-value="editAppThemeMode" @update:model-value="onAppThemeModeChange">
+            <SelectTrigger>
+              <SelectValue :placeholder="t('settings.selectAppTheme')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">{{ t('settings.themeSystem') }}</SelectItem>
+              <SelectItem value="light">{{ t('settings.themeLight') }}</SelectItem>
+              <SelectItem value="dark">{{ t('settings.themeDark') }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div class="space-y-2">
+          <Label>{{ t('settings.density') }}</Label>
+          <Select :model-value="editDensity" @update:model-value="onDensityChange">
+            <SelectTrigger>
+              <SelectValue :placeholder="t('settings.selectDensity')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="comfortable">{{ t('settings.comfortableDensity') }}</SelectItem>
+              <SelectItem value="compact">{{ t('settings.compactDensity') }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <label class="flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+          <input v-model="editSyncEditorTheme" type="checkbox" class="mt-1" />
+          <span>
+            <span class="block font-medium">{{ t('settings.syncEditorTheme') }}</span>
+            <span class="block text-xs text-muted-foreground">{{ t('settings.syncEditorThemeHint') }}</span>
+          </span>
+        </label>
+
+        <Separator />
+
         <!-- Font Family -->
         <div class="space-y-2">
           <Label>{{ t('settings.fontFamily') }}</Label>

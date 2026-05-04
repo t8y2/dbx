@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Server, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch, Monitor, Rows3 } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -756,10 +756,18 @@ function toggleLocale() {
   setLocale(next);
 }
 
-const isDark = ref(localStorage.getItem("dbx-theme") === "dark");
+const systemPrefersDark = ref(
+  (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches) ?? false
+);
+const themeMode = computed(() => settingsStore.appSettings.themeMode);
+const isDark = computed(() => themeMode.value === "dark" || (themeMode.value === "system" && systemPrefersDark.value));
+const isCompact = computed(() => settingsStore.appSettings.density === "compact");
+const activeStatusConnection = computed(() => activeConnection.value || (connectionStore.activeConnectionId ? connectionStore.getConfig(connectionStore.activeConnectionId) : undefined));
+const activeStatusDatabase = computed(() => activeTab.value?.database || "");
 
 function applyTheme() {
   document.documentElement.classList.toggle("dark", isDark.value);
+  document.documentElement.classList.toggle("compact", isCompact.value);
   if (!isTauriRuntime()) return;
   getCurrentWindow()
     .setTheme(isDark.value ? "dark" as Theme : "light" as Theme)
@@ -767,10 +775,25 @@ function applyTheme() {
 }
 
 function toggleTheme() {
-  isDark.value = !isDark.value;
-  localStorage.setItem("dbx-theme", isDark.value ? "dark" : "light");
-  applyTheme();
+  settingsStore.updateAppSettings({ themeMode: isDark.value ? "light" : "dark" });
 }
+
+function toggleDensity() {
+  settingsStore.updateAppSettings({ density: isCompact.value ? "comfortable" : "compact" });
+}
+
+function syncEditorThemeWithApp() {
+  if (!settingsStore.appSettings.syncEditorTheme) return;
+  const currentTheme = settingsStore.editorSettings.theme;
+  const lightThemes = new Set(["vscode-light", "duotone-light", "xcode"]);
+  const targetTheme = isDark.value ? "one-dark" : "vscode-light";
+  if ((isDark.value && lightThemes.has(currentTheme)) || (!isDark.value && !lightThemes.has(currentTheme))) {
+    settingsStore.updateEditorSettings({ theme: targetTheme });
+  }
+}
+
+let systemThemeMedia: MediaQueryList | null = null;
+let systemThemeListener: ((event: MediaQueryListEvent) => void) | null = null;
 
 import { open } from "@tauri-apps/plugin-shell";
 
@@ -844,6 +867,13 @@ function handleKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   applyTheme();
+  syncEditorThemeWithApp();
+  systemThemeMedia = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+  systemThemeListener = (event: MediaQueryListEvent) => {
+    systemPrefersDark.value = event.matches;
+    applyTheme();
+  };
+  systemThemeMedia?.addEventListener?.("change", systemThemeListener);
   connectionStore.initFromDisk().catch((e: any) => {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
   });
@@ -895,7 +925,16 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", handleKeydown, true);
+  if (systemThemeMedia && systemThemeListener) {
+    systemThemeMedia.removeEventListener?.("change", systemThemeListener);
+  }
 });
+
+watch(() => settingsStore.appSettings, () => {
+  applyTheme();
+  syncEditorThemeWithApp();
+}, { deep: true });
+watch(isDark, syncEditorThemeWithApp);
 
 const DB_EXTENSIONS = [".db", ".sqlite", ".sqlite3", ".duckdb"];
 
@@ -974,7 +1013,7 @@ async function setupFileDrop() {
 
 <template>
   <TooltipProvider :delay-duration="300">
-    <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden">
+    <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden" :class="{ compact: isCompact }">
       <!-- Toolbar -->
       <div class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0">
         <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="showConnectionDialog = true">
@@ -997,7 +1036,17 @@ async function setupFileDrop() {
           {{ t('sqlFile.title') }}
         </Button>
 
-        <div class="flex-1" />
+        <div class="mx-2 hidden min-w-0 flex-1 items-center justify-center gap-2 text-xs text-muted-foreground md:flex">
+          <span class="inline-flex max-w-[220px] items-center gap-1 truncate rounded border bg-background/60 px-2 py-0.5">
+            <span class="h-1.5 w-1.5 rounded-full" :class="activeStatusConnection && connectionStore.connectedIds.has(activeStatusConnection.id) ? 'bg-green-500' : 'bg-muted-foreground/40'" />
+            <span class="truncate">{{ activeStatusConnection?.name || t('editor.selectConnection') }}</span>
+          </span>
+          <span class="inline-flex max-w-[180px] items-center gap-1 truncate rounded border bg-background/60 px-2 py-0.5">
+            <Database class="h-3 w-3" />
+            <span class="truncate">{{ activeStatusDatabase || t('editor.noDatabase') }}</span>
+          </span>
+        </div>
+        <div class="flex-1 md:hidden" />
 
         <Tooltip>
           <TooltipTrigger as-child>
@@ -1030,11 +1079,21 @@ async function setupFileDrop() {
         <Tooltip>
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-7 w-7" @click="toggleTheme">
-              <Moon v-if="!isDark" class="h-4 w-4" />
+              <Monitor v-if="themeMode === 'system'" class="h-4 w-4" />
+              <Moon v-else-if="!isDark" class="h-4 w-4" />
               <Sun v-else class="h-4 w-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{{ isDark ? 'Light' : 'Dark' }}</TooltipContent>
+          <TooltipContent>{{ isDark ? t('settings.lightMode') : t('settings.darkMode') }}</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-7" :class="{ 'bg-accent': isCompact }" @click="toggleDensity">
+              <Rows3 class="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ isCompact ? t('settings.comfortableDensity') : t('settings.compactDensity') }}</TooltipContent>
         </Tooltip>
 
         <Tooltip>

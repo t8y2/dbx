@@ -100,6 +100,8 @@ export default {
     tooltipTable: "Table:",
     tooltipCollection: "Collection:",
     resultN: "Result {n}",
+    scrollLeft: "Scroll tabs left",
+    scrollRight: "Scroll tabs right",
   },
   grid: {
     rows: "{count} rows",

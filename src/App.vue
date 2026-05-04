@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch } from "lucide-vue-next";
+import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch, ChevronRight } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -643,6 +643,44 @@ async function openConnectionQuery(connectionId: string) {
   queryStore.createTab(connectionId, database);
 }
 
+const tabsContainerRef = ref<HTMLElement | null>(null);
+const canScrollLeft = ref(false);
+const canScrollRight = ref(false);
+
+function updateScrollButtons() {
+  const el = tabsContainerRef.value;
+  if (!el) {
+    canScrollLeft.value = false;
+    canScrollRight.value = false;
+    return;
+  }
+  canScrollLeft.value = el.scrollLeft > 0;
+  canScrollRight.value = el.scrollLeft < el.scrollWidth - el.clientWidth - 1;
+}
+
+function scrollTabs(direction: "left" | "right") {
+  const el = tabsContainerRef.value;
+  if (!el) return;
+  const scrollAmount = el.clientWidth * 0.8;
+  el.scrollBy({ left: direction === "left" ? -scrollAmount : scrollAmount, behavior: "smooth" });
+}
+
+watch(() => queryStore.tabs.length, () => {
+  nextTick(updateScrollButtons);
+});
+
+watch(() => queryStore.activeTabId, () => {
+  nextTick(() => {
+    const container = tabsContainerRef.value;
+    if (!container) return;
+    const activeEl = container.querySelector('[data-active-tab="true"]');
+    if (activeEl) {
+      activeEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    }
+    updateScrollButtons();
+  });
+});
+
 const DANGER_RE = /\b(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
 function stripSqlComments(sql: string): string {
@@ -948,6 +986,7 @@ onMounted(() => {
   });
   settingsStore.initAiConfig();
   window.addEventListener("keydown", handleKeydown, true);
+  window.addEventListener("resize", updateScrollButtons);
   if (isTauriRuntime()) {
     setupFileDrop().catch(() => {});
     checkUpdates({ silent: true });
@@ -994,9 +1033,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", handleKeydown, true);
-  if (systemThemeMedia && systemThemeListener) {
-    systemThemeMedia.removeEventListener?.("change", systemThemeListener);
-  }
+  window.removeEventListener("resize", updateScrollButtons);
 });
 
 watch(() => settingsStore.appSettings, () => {
@@ -1223,7 +1260,21 @@ async function setupFileDrop() {
         <div class="flex-1 min-w-0">
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
-          <div v-if="queryStore.tabs.length > 0" class="dbx-query-tabs h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0" style="-ms-overflow-style:none;scrollbar-width:none;-webkit-overflow-scrolling:touch">
+          <div v-if="queryStore.tabs.length > 0" class="relative h-9 flex items-center border-b bg-muted/20 shrink-0">
+            <button
+              v-if="canScrollLeft"
+              class="absolute left-0 z-10 h-full px-1 bg-linear-to-r from-background via-background/80 to-transparent text-muted-foreground hover:text-foreground"
+              :aria-label="t('tabs.scrollLeft')"
+              @click="scrollTabs('left')"
+            >
+              <ChevronRight class="h-4 w-4 rotate-180" />
+            </button>
+            <div
+              ref="tabsContainerRef"
+              class="flex-1 flex items-center overflow-x-auto min-w-0"
+              style="-ms-overflow-style:none;scrollbar-width:none;-webkit-overflow-scrolling:touch"
+              @scroll="updateScrollButtons"
+            >
             <ContextMenu
               v-for="tab in queryStore.tabs"
               :key="tab.id"
@@ -1232,37 +1283,33 @@ async function setupFileDrop() {
                 <Tooltip>
                 <TooltipTrigger as-child>
                 <div
-                  class="group flex min-w-36 items-center gap-1 px-3 h-full text-xs cursor-pointer border-r hover:bg-accent transition-colors whitespace-nowrap"
-                  :class="{ 'bg-background font-medium': tab.id === queryStore.activeTabId }"
+                  class="group flex min-w-38 items-center gap-1 px-1 h-full text-xs cursor-pointer border-r border-b-2 hover:bg-accent transition-colors whitespace-nowrap"
+                  :class="tab.id === queryStore.activeTabId ? 'bg-background font-medium border-b-primary' : 'font-normal text-muted-foreground border-b-transparent'"
+                  :data-active-tab="tab.id === queryStore.activeTabId"
                   @click="queryStore.activeTabId = tab.id"
                 >
                   <span class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: connectionColor(tab.connectionId) || '#9ca3af' }" />
-                  <component
-                    :is="tab.mode === 'data' ? Table2 : FileCode"
-                    class="h-3.5 w-3.5 shrink-0"
-                    :class="tab.mode === 'data' ? 'text-emerald-600' : 'text-blue-600'"
-                  />
-                  <span class="min-w-0 truncate">{{ tabDisplayTitle(tab) }}</span>
-                  <span
-                    class="shrink-0 rounded border px-1 text-[10px] leading-4"
-                    :class="tab.mode === 'data' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300'"
-                  >
-                    {{ tabModeLabel(tab) }}
-                  </span>
+                  <span class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab) }}</span>
                   <Tooltip>
                     <TooltipTrigger as-child>
                       <button
-                        class="rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
-                        :class="tab.pinned ? 'opacity-100 text-primary' : 'hidden group-hover:inline-flex'"
-                        @click.stop="queryStore.togglePinnedTab(tab.id)"
+                          class="inline-flex rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
+                          :class="tab.pinned ? 'visible text-primary' : 'invisible group-hover:visible'"
+                          @click.stop="queryStore.togglePinnedTab(tab.id)"
                       >
                         <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
                       </button>
                     </TooltipTrigger>
                     <TooltipContent>{{ tab.pinned ? t('contextMenu.unpin') : t('contextMenu.pin') }}</TooltipContent>
                   </Tooltip>
+                  <span
+                    class="shrink-0 rounded border px-1 text-[10px] leading-4"
+                    :class="tab.mode === 'data' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300' : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300'"
+                  >
+                    {{ tabModeLabel(tab) }}
+                  </span>
                   <button
-                    class="rounded hover:bg-muted-foreground/20 p-0.5"
+                    class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0"
                     @click.stop="queryStore.closeTab(tab.id)"
                   >
                     <X class="h-3 w-3" />
@@ -1301,6 +1348,15 @@ async function setupFileDrop() {
                 </ContextMenuItem>
               </ContextMenuContent>
             </ContextMenu>
+            </div>
+            <button
+              v-if="canScrollRight"
+              class="absolute right-0 z-10 h-full px-1 bg-linear-to-l from-background via-background/80 to-transparent text-muted-foreground hover:text-foreground"
+              :aria-label="t('tabs.scrollRight')"
+              @click="scrollTabs('right')"
+            >
+              <ChevronRight class="h-4 w-4" />
+            </button>
           </div>
 
           <!-- Editor Panel -->

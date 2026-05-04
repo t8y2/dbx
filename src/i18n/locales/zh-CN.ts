@@ -102,6 +102,8 @@ export default {
     tooltipTable: "表：",
     tooltipCollection: "集合：",
     resultN: "结果 {n}",
+    scrollLeft: "向左滚动标签页",
+    scrollRight: "向右滚动标签页",
   },
   grid: {
     rows: "{count} 行",

@@ -135,6 +135,8 @@ const showTableImportDialog = ref(false);
 const showStructureEditorDialog = ref(false);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
+const showImportLayoutConfirm = ref(false);
+const pendingImportLayout = ref<import("@/types/database").SidebarLayout | null>(null);
 const showConfigPassphraseDialog = ref(false);
 const configPassphraseMode = ref<"export" | "import">("export");
 const configPassphraseError = ref("");
@@ -409,8 +411,12 @@ async function onImportClick() {
       configPassphraseError.value = "";
       showConfigPassphraseDialog.value = true;
     } else {
-      const count = await connectionStore.importConnectionsFromFile(result.content, null);
+      const { count, layout } = await connectionStore.importConnectionsFromFile(result.content, null);
       toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
+      if (layout && count > 0) {
+        pendingImportLayout.value = layout;
+        showImportLayoutConfirm.value = true;
+      }
     }
   } catch (e: any) {
     toast(e?.message || String(e), 4000);
@@ -419,9 +425,13 @@ async function onImportClick() {
 
 async function onImportConfirm(passphrase: string) {
   try {
-    const count = await connectionStore.importConnectionsFromFile(pendingImportContent.value, passphrase);
+    const { count, layout } = await connectionStore.importConnectionsFromFile(pendingImportContent.value, passphrase);
     showConfigPassphraseDialog.value = false;
     toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
+    if (layout && count > 0) {
+      pendingImportLayout.value = layout;
+      showImportLayoutConfirm.value = true;
+    }
   } catch (e: any) {
     configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : (e?.message || String(e));
   }
@@ -1765,6 +1775,18 @@ async function setupFileDrop() {
         :external-error="configPassphraseError"
         @confirm="configPassphraseMode === 'export' ? onExportConfirm($event) : onImportConfirm($event)"
       />
+      <Dialog v-model:open="showImportLayoutConfirm">
+        <DialogContent class="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>{{ t('configExport.importLayoutTitle') }}</DialogTitle>
+          </DialogHeader>
+          <p class="text-sm text-muted-foreground">{{ t('configExport.importLayoutConfirm') }}</p>
+          <DialogFooter>
+            <Button variant="outline" @click="showImportLayoutConfirm = false">{{ t('dangerDialog.cancel') }}</Button>
+            <Button @click="showImportLayoutConfirm = false; pendingImportLayout && connectionStore.applySidebarLayout(pendingImportLayout)">{{ t('configExport.importLayoutApply') }}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog v-model:open="showUpdateDialog">
         <DialogContent class="sm:max-w-[520px]">
           <DialogHeader>

@@ -54,6 +54,8 @@ pub fn run() {
             commands::connection::disconnect_db,
             commands::connection::save_connections,
             commands::connection::load_connections,
+            commands::connection::save_sidebar_layout,
+            commands::connection::load_sidebar_layout,
             commands::schema::list_databases,
             commands::schema::list_tables,
             commands::schema::list_schemas,

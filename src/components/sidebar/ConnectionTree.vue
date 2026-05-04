@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, Check } from "lucide-vue-next";
+import { Search, X, ListFilter, Check, FolderPlus } from "lucide-vue-next";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { TreeNode } from "@/types/database";
 import TreeItem from "./TreeItem.vue";
@@ -19,6 +19,8 @@ const { t } = useI18n();
 const store = useConnectionStore();
 const searchQuery = ref("");
 const selectedTypes = ref<string[]>([]);
+
+const isFiltering = computed(() => !!searchQuery.value.trim() || hasTypeFilter.value);
 
 const typeStats = computed(() => {
   const map = new Map<string, { profile: string; label: string; count: number }>();
@@ -69,6 +71,9 @@ function filterTree(nodes: TreeNode[], q: string): TreeNode[] {
 }
 
 function matchesType(node: TreeNode): boolean {
+  if (node.type === "connection-group") {
+    return node.children?.some(matchesType) ?? false;
+  }
   if (node.type !== "connection" || !node.connectionId) return true;
   const config = store.getConfig(node.connectionId);
   if (!config) return true;
@@ -80,7 +85,12 @@ const filteredNodes = computed(() => {
   let nodes = store.treeNodes;
 
   if (hasTypeFilter.value) {
-    nodes = nodes.filter(matchesType);
+    nodes = nodes.filter(matchesType).map((node) => {
+      if (node.type === "connection-group" && node.children) {
+        return { ...node, children: node.children.filter(matchesType) };
+      }
+      return node;
+    });
   }
 
   const q = searchQuery.value.trim().toLowerCase();
@@ -90,6 +100,13 @@ const filteredNodes = computed(() => {
 
   return nodes;
 });
+
+const pendingRenameGroupId = ref<string | null>(null);
+
+function createNewGroup() {
+  const groupId = store.createConnectionGroup(t("connectionGroup.newGroupDefault"));
+  pendingRenameGroupId.value = groupId;
+}
 </script>
 
 <template>
@@ -114,6 +131,13 @@ const filteredNodes = computed(() => {
             <X class="h-3 w-3" />
           </button>
         </div>
+        <button
+          class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+          :title="t('connectionGroup.createGroup')"
+          @click="createNewGroup"
+        >
+          <FolderPlus class="h-3.5 w-3.5" />
+        </button>
         <DropdownMenu v-if="typeStats.length > 1">
           <DropdownMenuTrigger as-child>
             <button
@@ -150,7 +174,15 @@ const filteredNodes = computed(() => {
         </DropdownMenu>
       </div>
     </div>
-    <TreeItem v-for="node in filteredNodes" :key="node.id" :node="node" :depth="0" />
+    <TreeItem
+      v-for="node in filteredNodes"
+      :key="node.id"
+      :node="node"
+      :depth="0"
+      :drag-disabled="isFiltering"
+      :pending-rename="pendingRenameGroupId === node.id"
+      @rename-started="pendingRenameGroupId = null"
+    />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t('sidebar.noConnections') }}
     </div>

@@ -178,6 +178,14 @@ export async function loadConnections(): Promise<ConnectionConfig[]> {
   return invoke("load_connections");
 }
 
+export async function saveSidebarLayout(layout: import("@/types/database").SidebarLayout): Promise<void> {
+  return invoke("save_sidebar_layout", { layout });
+}
+
+export async function loadSidebarLayout(): Promise<import("@/types/database").SidebarLayout | null> {
+  return invoke("load_sidebar_layout");
+}
+
 // --- Updates ---
 export interface UpdateInfo {
   current_version: string;

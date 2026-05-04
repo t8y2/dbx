@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Database, Table, Columns3, Eye, ChevronRight, ChevronDown,
-  Loader2, FolderOpen, Trash2, TerminalSquare, RefreshCw,
+  Loader2, FolderOpen, FolderClosed, Trash2, TerminalSquare, RefreshCw,
   Copy, TableProperties, Key, Link, Zap, ListTree, Pencil, Plug, Unplug,
   Pin, ArrowRightLeft, Download, FileCode, Network, FileUp, PencilRuler, Search,
+  FolderInput, FolderPlus,
 } from "lucide-vue-next";
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem,
@@ -31,6 +32,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -40,6 +42,12 @@ const { toast } = useToast();
 const props = defineProps<{
   node: TreeNode;
   depth: number;
+  dragDisabled?: boolean;
+  pendingRename?: boolean;
+}>();
+
+const emit = defineEmits<{
+  "rename-started": [];
 }>();
 
 const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
@@ -78,6 +86,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   switch (node.type) {
     case "connection":
       return null;
+    case "connection-group":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-500" };
     case "database":
       return { icon: Database, colorClass: "text-yellow-500" };
     case "schema":
@@ -116,6 +126,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
 const leafTypes: Set<TreeNodeType> = new Set(["column", "index", "fkey", "trigger", "redis-db", "mongo-collection"]);
 const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers"]);
 const pinnableTypes: Set<TreeNodeType> = new Set([
+  "connection-group",
   "database",
   "schema",
   "table",
@@ -132,6 +143,13 @@ function isGroupLabel(node: TreeNode): boolean {
 async function toggle() {
   const node = props.node;
   if (node.isLoading) return;
+
+  if (node.type === "connection-group") {
+    node.isExpanded = !node.isExpanded;
+    connectionStore.toggleConnectionGroupCollapsed(node.id);
+    return;
+  }
+
   if (node.isExpanded) { node.isExpanded = false; return; }
 
   try {
@@ -640,6 +658,109 @@ async function showMore() {
     displayLimit.value += CHILDREN_PAGE_SIZE;
   }
 }
+
+// --- Connection Group Management ---
+const isRenamingGroup = ref(false);
+const renameInput = ref("");
+
+function startRenameGroup() {
+  renameInput.value = props.node.label;
+  isRenamingGroup.value = true;
+  emit("rename-started");
+}
+
+watch(() => props.pendingRename, (val) => {
+  if (val && props.node.type === "connection-group") {
+    startRenameGroup();
+  }
+}, { immediate: true });
+
+function finishRenameGroup() {
+  isRenamingGroup.value = false;
+  const trimmed = renameInput.value.trim();
+  if (!trimmed) {
+    connectionStore.deleteConnectionGroup(props.node.id);
+    return;
+  }
+  if (trimmed !== props.node.label) {
+    connectionStore.renameConnectionGroup(props.node.id, trimmed);
+  }
+}
+
+function deleteConnectionGroup() {
+  showDeleteGroupConfirm.value = true;
+}
+
+function confirmDeleteGroup() {
+  connectionStore.deleteConnectionGroup(props.node.id);
+  showDeleteGroupConfirm.value = false;
+}
+
+const showDeleteGroupConfirm = ref(false);
+
+function moveToGroup(groupId: string | null) {
+  if (props.node.connectionId) {
+    connectionStore.moveConnectionToGroup(props.node.connectionId, groupId);
+  }
+}
+
+const showMoveToNewGroupDialog = ref(false);
+const moveToNewGroupName = ref("");
+
+function moveToNewGroup() {
+  moveToNewGroupName.value = "";
+  showMoveToNewGroupDialog.value = true;
+}
+
+function confirmMoveToNewGroup() {
+  const name = moveToNewGroupName.value.trim();
+  if (name && props.node.connectionId) {
+    const groupId = connectionStore.createConnectionGroup(name);
+    connectionStore.moveConnectionToGroup(props.node.connectionId, groupId);
+  }
+  showMoveToNewGroupDialog.value = false;
+}
+
+const availableGroups = computed(() => connectionStore.sidebarLayout.groups);
+
+const currentGroupId = computed(() => {
+  if (props.node.type !== "connection" || !props.node.connectionId) return null;
+  for (const entry of connectionStore.sidebarLayout.order) {
+    if (entry.type === "group" && entry.connectionIds.includes(props.node.connectionId)) {
+      return entry.id;
+    }
+  }
+  return null;
+});
+
+// --- Drag and Drop ---
+import { useDragSort } from "@/composables/useDragSort";
+
+const { state: dragState, startDrag, updateTarget, clearTarget } = useDragSort(
+  (draggedId, targetId, position) => connectionStore.reorderSidebarEntry(draggedId, targetId, position),
+);
+
+const isDraggable = computed(() => {
+  if (props.dragDisabled) return false;
+  return props.node.type === "connection" || props.node.type === "connection-group";
+});
+
+const isDropTarget = computed(() =>
+  props.node.type === "connection" || props.node.type === "connection-group",
+);
+
+const showDropBefore = computed(() =>
+  dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "before",
+);
+const showDropAfter = computed(() =>
+  dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "after",
+);
+const showDropInside = computed(() =>
+  dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "inside",
+);
+const isDragging = computed(() =>
+  dragState.active && dragState.draggedId === props.node.id,
+);
 </script>
 
 <template>
@@ -647,10 +768,19 @@ async function showMore() {
     <ContextMenuTrigger as-child>
       <div>
         <div
-          class="group flex min-w-0 items-center gap-1.5 py-1 px-2 rounded-sm cursor-pointer hover:bg-accent transition-colors"
+          class="group flex min-w-0 items-center gap-1.5 py-1 px-2 rounded-sm cursor-pointer hover:bg-accent transition-colors relative"
+          :class="{
+            'ring-1 ring-primary/50 bg-primary/5': showDropInside,
+            'opacity-50': isDragging,
+          }"
           :style="{ paddingLeft }"
           @click="onClick"
+          @mousedown="isDraggable ? startDrag($event, node.id, node.type) : undefined"
+          @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
+          @mouseleave="clearTarget(node.id)"
         >
+          <div v-if="showDropBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+          <div v-if="showDropAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
           <template v-if="canExpand">
             <button
               type="button"
@@ -666,7 +796,17 @@ async function showMore() {
           <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="getIconInfo(node)?.colorClass" />
           <span v-if="node.type === 'connection'" class="h-3 w-1.5 rounded-full shrink-0" :style="{ backgroundColor: connectionColor || '#9ca3af' }" />
-          <span class="min-w-0 flex-1 truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>
+          <input
+            v-if="isRenamingGroup"
+            v-model="renameInput"
+            class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 text-xs outline-none"
+            @blur="finishRenameGroup"
+            @keydown.enter.prevent="finishRenameGroup"
+            @keydown.escape.prevent="isRenamingGroup = false"
+            @click.stop
+            @vue:mounted="($event: any) => $event.el.focus()"
+          />
+          <span v-else class="min-w-0 flex-1 truncate">{{ isGroupLabel(node) ? t(node.label) : node.label }}</span>
           <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{ columnComment }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
           <button
@@ -680,15 +820,7 @@ async function showMore() {
           </button>
         </div>
         <template v-if="node.isExpanded && node.children">
-          <div
-            v-if="node.error"
-            class="flex min-w-0 items-start gap-1.5 px-2 py-1.5 text-xs text-destructive"
-            :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
-          >
-            <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span class="min-w-0 break-words">{{ node.error }}</span>
-          </div>
-          <TreeItem v-for="child in visibleChildren" :key="child.id" :node="child" :depth="depth + 1" />
+          <TreeItem v-for="child in visibleChildren" :key="child.id" :node="child" :depth="depth + 1" :drag-disabled="dragDisabled" />
           <div
             v-if="hasMoreChildren"
             class="flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent text-xs text-muted-foreground"
@@ -726,6 +858,32 @@ async function showMore() {
           <FileCode class="w-4 h-4" /> {{ t('sqlFile.title') }}
         </ContextMenuItem>
         <ContextMenuSeparator />
+        <ContextMenuSub v-if="availableGroups.length > 0 || currentGroupId">
+          <ContextMenuSubTrigger>
+            <FolderInput class="w-4 h-4" /> {{ t('connectionGroup.moveToGroup') }}
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            <ContextMenuItem
+              v-for="group in availableGroups"
+              :key="group.id"
+              :disabled="group.id === currentGroupId"
+              @click="moveToGroup(group.id)"
+            >
+              <FolderOpen class="w-4 h-4" /> {{ group.name }}
+            </ContextMenuItem>
+            <ContextMenuSeparator v-if="currentGroupId" />
+            <ContextMenuItem v-if="currentGroupId" @click="moveToGroup(null)">
+              {{ t('connectionGroup.ungrouped') }}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem @click="moveToNewGroup">
+              <FolderPlus class="w-4 h-4" /> {{ t('connectionGroup.newGroup') }}
+            </ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+        <ContextMenuItem v-else @click="moveToNewGroup">
+          <FolderPlus class="w-4 h-4" /> {{ t('connectionGroup.moveToNewGroup') }}
+        </ContextMenuItem>
         <ContextMenuItem @click="refresh">
           <RefreshCw class="w-4 h-4" /> {{ t('contextMenu.refreshChildren') }}
         </ContextMenuItem>
@@ -735,6 +893,16 @@ async function showMore() {
         <ContextMenuSeparator />
         <ContextMenuItem class="text-destructive" @click="deleteConnection">
           <Trash2 class="w-4 h-4" /> {{ t('contextMenu.deleteConnection') }}
+        </ContextMenuItem>
+      </template>
+
+      <template v-if="node.type === 'connection-group'">
+        <ContextMenuItem @click="startRenameGroup">
+          <Pencil class="w-4 h-4" /> {{ t('connectionGroup.renameGroup') }}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem class="text-destructive" @click="deleteConnectionGroup">
+          <Trash2 class="w-4 h-4" /> {{ t('connectionGroup.deleteGroup') }}
         </ContextMenuItem>
       </template>
 
@@ -832,6 +1000,36 @@ async function showMore() {
       <DialogFooter>
         <Button variant="outline" @click="showDeleteConfirm = false">{{ t('dangerDialog.cancel') }}</Button>
         <Button variant="destructive" @click="showDeleteConfirm = false; confirmDelete()">{{ t('contextMenu.deleteConnection') }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showMoveToNewGroupDialog">
+    <DialogContent class="sm:max-w-[360px]">
+      <DialogHeader>
+        <DialogTitle>{{ t('connectionGroup.createGroup') }}</DialogTitle>
+      </DialogHeader>
+      <Input
+        v-model="moveToNewGroupName"
+        :placeholder="t('connectionGroup.groupNamePlaceholder')"
+        @keydown.enter.prevent="confirmMoveToNewGroup"
+      />
+      <DialogFooter>
+        <Button variant="outline" @click="showMoveToNewGroupDialog = false">{{ t('dangerDialog.cancel') }}</Button>
+        <Button :disabled="!moveToNewGroupName.trim()" @click="confirmMoveToNewGroup">{{ t('connectionGroup.createGroup') }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showDeleteGroupConfirm">
+    <DialogContent class="sm:max-w-[400px]">
+      <DialogHeader>
+        <DialogTitle>{{ t('connectionGroup.deleteGroupConfirmTitle') }}</DialogTitle>
+      </DialogHeader>
+      <p class="text-sm text-muted-foreground">{{ t('connectionGroup.deleteGroupConfirmMessage', { name: node.label }) }}</p>
+      <DialogFooter>
+        <Button variant="outline" @click="showDeleteGroupConfirm = false">{{ t('dangerDialog.cancel') }}</Button>
+        <Button variant="destructive" @click="confirmDeleteGroup">{{ t('connectionGroup.deleteGroup') }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

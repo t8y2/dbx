@@ -80,11 +80,26 @@ export interface QueryResult {
 }
 
 export type TreeNodeType =
-  | "connection" | "database" | "schema" | "table" | "view"
+  | "connection" | "connection-group" | "database" | "schema" | "table" | "view"
   | "group-columns" | "group-indexes" | "group-fkeys" | "group-triggers"
   | "column" | "index" | "fkey" | "trigger"
   | "redis-db"
   | "mongo-db" | "mongo-collection";
+
+export interface ConnectionGroup {
+  id: string;
+  name: string;
+  collapsed: boolean;
+}
+
+export type SidebarOrderEntry =
+  | { type: "group"; id: string; connectionIds: string[] }
+  | { type: "connection"; id: string };
+
+export interface SidebarLayout {
+  groups: ConnectionGroup[];
+  order: SidebarOrderEntry[];
+}
 
 export interface TreeNode {
   id: string;

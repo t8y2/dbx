@@ -248,6 +248,33 @@ pub async fn load_connections(app: AppHandle) -> Result<Vec<ConnectionConfig>, S
     load_connections_from_file(&path, &*store)
 }
 
+fn sidebar_layout_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("sidebar_layout.json"))
+}
+
+#[tauri::command]
+pub async fn save_sidebar_layout(
+    app: AppHandle,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    let path = sidebar_layout_file(&app)?;
+    let json = serde_json::to_string_pretty(&layout).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn load_sidebar_layout(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let path = sidebar_layout_file(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(Some(value))
+}
+
 #[tauri::command]
 pub async fn test_connection(
     state: State<'_, Arc<AppState>>,

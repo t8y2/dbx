@@ -1,7 +1,21 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import type { ColumnInfo, ConnectionConfig, TreeNode } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
+import {
+  reconcileLayout,
+  buildTreeNodesFromLayout,
+  emptyLayout,
+  appendConnectionToLayout,
+  removeConnectionFromSidebarLayout,
+  createGroup as createGroupOp,
+  renameGroup as renameGroupOp,
+  deleteGroup as deleteGroupOp,
+  toggleGroupCollapsed as toggleGroupCollapsedOp,
+  moveConnectionToGroup as moveConnectionToGroupOp,
+  reorderEntry as reorderEntryOp,
+  type DropPosition,
+} from "@/lib/sidebarLayout";
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletion";
 import * as api from "@/lib/tauri";
 
@@ -24,6 +38,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const structureEditorSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
   const fieldLineageSource = ref<{ connectionId: string; database: string; schema?: string; tableName: string; columnName: string } | null>(null);
   const databaseSearchSource = ref<{ connectionId: string; database: string; schema?: string } | null>(null);
+  const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
 
   function startEditing(id: string) {
     editingConnectionId.value = id;
@@ -59,23 +75,6 @@ export const useConnectionStore = defineStore("connection", () => {
       driver_label: config.driver_label || labelMap[config.driver_profile || config.db_type] || config.db_type,
       url_params: config.url_params || "",
     };
-  }
-
-  function upsertConnectionNode(config: ConnectionConfig) {
-    const node: TreeNode = {
-      id: config.id,
-      label: config.name,
-      type: "connection",
-      connectionId: config.id,
-      isExpanded: false,
-      children: [],
-    };
-    const existing = treeNodes.value.findIndex((n) => n.id === config.id);
-    if (existing >= 0) {
-      treeNodes.value[existing] = { ...treeNodes.value[existing], ...node };
-    } else {
-      treeNodes.value.push(node);
-    }
   }
 
   function loadPinnedTreeNodeIds(): Set<string> {
@@ -135,11 +134,15 @@ export const useConnectionStore = defineStore("connection", () => {
     const node = findNode(treeNodes.value, id);
     if (node) node.pinned = next.has(id);
 
-    const parent = findParentNode(treeNodes.value, id);
-    if (parent?.children) {
-      parent.children = orderPinnedFirst(parent.children, (child) => !!child.pinned);
+    const isConnectionOrGroup = treeNodes.value.some((n) => n.id === id) ||
+      treeNodes.value.some((n) => n.type === "connection-group" && n.children?.some((c) => c.id === id));
+    if (isConnectionOrGroup) {
+      rebuildTreeNodes();
     } else {
-      treeNodes.value = orderPinnedFirst(treeNodes.value, (child) => !!child.pinned);
+      const parent = findParentNode(treeNodes.value, id);
+      if (parent?.children) {
+        parent.children = orderPinnedFirst(parent.children, (child) => !!child.pinned);
+      }
     }
   }
 
@@ -151,10 +154,12 @@ export const useConnectionStore = defineStore("connection", () => {
       nextConnections[existing] = normalized;
     } else {
       nextConnections.push(normalized);
+      sidebarLayout.value = appendConnectionToLayout(sidebarLayout.value, normalized.id);
     }
     await persistConnections(nextConnections);
     connections.value = nextConnections;
-    upsertConnectionNode(normalized);
+    rebuildTreeNodes();
+    persistSidebarLayoutDebounced();
   }
 
   function invalidateCompletionCache(connectionId: string) {
@@ -171,7 +176,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = connections.value.filter((c) => c.id !== id);
     await persistConnections(nextConnections);
     connections.value = nextConnections;
-    treeNodes.value = treeNodes.value.filter((n) => n.id !== id);
+    sidebarLayout.value = removeConnectionFromSidebarLayout(sidebarLayout.value, id);
+    rebuildTreeNodes();
+    persistSidebarLayoutDebounced();
     if (activeConnectionId.value === id) {
       activeConnectionId.value = null;
     }
@@ -186,12 +193,7 @@ export const useConnectionStore = defineStore("connection", () => {
     nextConnections[idx] = config;
     await persistConnections(nextConnections);
     connections.value = nextConnections;
-    const node = findNode(treeNodes.value, config.id);
-    if (node) {
-      node.label = config.name;
-      node.isExpanded = false;
-      node.children = [];
-    }
+    rebuildTreeNodes();
     connectedIds.value.delete(config.id);
     invalidateCompletionCache(config.id);
   }
@@ -615,13 +617,53 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.saveConnections(nextConnections);
   }
 
+  function persistSidebarLayoutDebounced() {
+    if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
+    layoutPersistTimer = setTimeout(() => {
+      api.saveSidebarLayout(sidebarLayout.value).catch(() => {});
+      layoutPersistTimer = null;
+    }, 300);
+  }
+
+  function rebuildTreeNodes() {
+    const existingNodesMap = new Map<string, TreeNode>();
+    const collectExisting = (nodes: TreeNode[]) => {
+      for (const node of nodes) {
+        existingNodesMap.set(node.id, node);
+        if (node.children) collectExisting(node.children);
+      }
+    };
+    collectExisting(treeNodes.value);
+
+    const freshNodes = buildTreeNodesFromLayout(sidebarLayout.value, connections.value, pinnedTreeNodeIds.value);
+    const mergeState = (nodes: TreeNode[]): TreeNode[] =>
+      nodes.map((node) => {
+        const existing = existingNodesMap.get(node.id);
+        if (node.type === "connection-group") {
+          return { ...node, children: mergeState(node.children || []) };
+        }
+        if (existing && node.type === "connection") {
+          return { ...existing, label: node.label, pinned: node.pinned };
+        }
+        return node;
+      });
+    treeNodes.value = mergeState(freshNodes);
+  }
+
+  function updateLayoutAndRebuild(nextLayout: SidebarLayout) {
+    sidebarLayout.value = nextLayout;
+    rebuildTreeNodes();
+    persistSidebarLayoutDebounced();
+  }
+
   async function exportConnectionsToFile(passphrase: string) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     const { encryptConfig } = await import("@/lib/configCrypto");
     const path = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "dbx-connections.json" });
     if (!path) return;
-    const json = JSON.stringify(connections.value);
+    const exportData = { connections: connections.value, layout: sidebarLayout.value };
+    const json = JSON.stringify(exportData);
     const payload = await encryptConfig(json, passphrase);
     await writeTextFile(path, JSON.stringify(payload, null, 2));
   }
@@ -637,18 +679,34 @@ export const useConnectionStore = defineStore("connection", () => {
     return { content, encrypted: isEncryptedConfig(parsed) };
   }
 
-  async function importConnectionsFromFile(content: string, passphrase: string | null): Promise<number> {
+  async function importConnectionsFromFile(content: string, passphrase: string | null): Promise<{ count: number; layout?: SidebarLayout }> {
     let imported: ConnectionConfig[];
+    let importedLayout: SidebarLayout | undefined;
     const parsed = JSON.parse(content);
 
     if (passphrase) {
       const { decryptConfig } = await import("@/lib/configCrypto");
       const json = await decryptConfig(parsed, passphrase);
-      imported = JSON.parse(json);
+      const decrypted = JSON.parse(json);
+      if (Array.isArray(decrypted)) {
+        imported = decrypted;
+      } else if (decrypted.connections) {
+        imported = decrypted.connections;
+        if (decrypted.layout?.groups && decrypted.layout?.order) {
+          importedLayout = decrypted.layout;
+        }
+      } else {
+        imported = [];
+      }
     } else if (Array.isArray(parsed)) {
       imported = parsed;
     } else if (parsed.format === "dbx-config" && Array.isArray(parsed.connections)) {
       imported = parsed.connections;
+    } else if (parsed.connections && Array.isArray(parsed.connections)) {
+      imported = parsed.connections;
+      if (parsed.layout?.groups && parsed.layout?.order) {
+        importedLayout = parsed.layout;
+      }
     } else {
       imported = [];
     }
@@ -663,20 +721,26 @@ export const useConnectionStore = defineStore("connection", () => {
         count++;
       }
     }
-    return count;
+    return { count, layout: importedLayout };
+  }
+
+  function applySidebarLayout(layout: SidebarLayout) {
+    const reconciledLayout = reconcileLayout(
+      connections.value.map((c) => c.id),
+      layout,
+    );
+    updateLayoutAndRebuild(reconciledLayout);
   }
 
   async function initFromDisk() {
     const saved = await api.loadConnections();
     connections.value = saved.map(normalizeConnection);
-    treeNodes.value = saved.map((config) => ({
-      id: config.id,
-      label: config.name,
-      type: "connection" as const,
-      connectionId: config.id,
-      isExpanded: false,
-      children: [],
-    }));
+    const savedLayout = await api.loadSidebarLayout();
+    sidebarLayout.value = reconcileLayout(
+      connections.value.map((c) => c.id),
+      savedLayout,
+    );
+    rebuildTreeNodes();
   }
 
   function addEphemeralConnection(config: ConnectionConfig) {
@@ -692,6 +756,7 @@ export const useConnectionStore = defineStore("connection", () => {
     activeConnectionId,
     treeNodes,
     connectedIds,
+    sidebarLayout,
     getConfig,
     isTreeNodePinned,
     toggleTreeNodePin,
@@ -722,6 +787,7 @@ export const useConnectionStore = defineStore("connection", () => {
     exportConnectionsToFile,
     readImportFile,
     importConnectionsFromFile,
+    applySidebarLayout,
     transferSource,
     schemaDiffSource,
     sqlFileSource,
@@ -730,5 +796,25 @@ export const useConnectionStore = defineStore("connection", () => {
     structureEditorSource,
     fieldLineageSource,
     databaseSearchSource,
+    createConnectionGroup(name: string) {
+      const result = createGroupOp(sidebarLayout.value, name);
+      updateLayoutAndRebuild(result.layout);
+      return result.groupId;
+    },
+    renameConnectionGroup(groupId: string, name: string) {
+      updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));
+    },
+    deleteConnectionGroup(groupId: string) {
+      updateLayoutAndRebuild(deleteGroupOp(sidebarLayout.value, groupId));
+    },
+    toggleConnectionGroupCollapsed(groupId: string) {
+      updateLayoutAndRebuild(toggleGroupCollapsedOp(sidebarLayout.value, groupId));
+    },
+    moveConnectionToGroup(connectionId: string, groupId: string | null) {
+      updateLayoutAndRebuild(moveConnectionToGroupOp(sidebarLayout.value, connectionId, groupId));
+    },
+    reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
+      updateLayoutAndRebuild(reorderEntryOp(sidebarLayout.value, draggedId, targetId, position));
+    },
   };
 });

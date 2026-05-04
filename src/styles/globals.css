@@ -198,22 +198,27 @@
 }
 
 .dbx-compact {
-  --dbx-row-padding-y: 0.125rem;
+  --dbx-compact-height-10: 2rem;
+  --dbx-compact-height-9: 2rem;
+  --dbx-compact-padding-y: 0.125rem;
+  --dbx-compact-text-sm: 0.8125rem;
 }
 
-.dbx-compact .h-10 {
-  height: 2rem;
+.dbx-compact .dbx-toolbar.h-10 {
+  height: var(--dbx-compact-height-10);
 }
 
-.dbx-compact .h-9 {
-  height: 2rem;
+.dbx-compact .dbx-query-tabs.h-9,
+.dbx-compact .dbx-query-header.h-9,
+.dbx-compact .dbx-grid-toolbar.h-9 {
+  height: var(--dbx-compact-height-9);
 }
 
-.dbx-compact .py-1 {
-  padding-top: var(--dbx-row-padding-y);
-  padding-bottom: var(--dbx-row-padding-y);
+.dbx-compact .dbx-compact-padding-y {
+  padding-top: var(--dbx-compact-padding-y);
+  padding-bottom: var(--dbx-compact-padding-y);
 }
 
-.dbx-compact .text-sm {
-  font-size: 0.8125rem;
+.dbx-compact .dbx-compact-text-sm {
+  font-size: var(--dbx-compact-text-sm);
 }

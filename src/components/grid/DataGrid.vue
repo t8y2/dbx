@@ -1335,7 +1335,7 @@ function escapeAndHighlightKeywords(s: string): string {
               v-if="showCellDetail && activeCellDetail"
               class="relative w-80 shrink-0 border-l flex flex-col bg-background min-w-0"
             >
-              <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
+              <div class="dbx-grid-toolbar h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
                 <Info class="w-3.5 h-3.5 text-muted-foreground" />
                 <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t('grid.cellDetails') }}</span>
                 <Button variant="ghost" size="icon" class="h-5 w-5" @click="showCellDetail = false">
@@ -1399,7 +1399,7 @@ function escapeAndHighlightKeywords(s: string): string {
               v-if="showTranspose && transposeData"
               class="relative w-80 shrink-0 border-l flex flex-col bg-background min-w-0"
             >
-              <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
+              <div class="dbx-grid-toolbar h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
                 <Rows3 class="w-3.5 h-3.5 text-muted-foreground" />
                 <span class="text-xs font-medium">{{ t('grid.transpose') }}</span>
                 <span class="text-xs text-muted-foreground">{{ t('grid.rowNumber') }} {{ (transposeRowIndex ?? 0) + 1 }}</span>

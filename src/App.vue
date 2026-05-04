@@ -836,7 +836,12 @@ function applyTheme() {
 }
 
 function toggleTheme() {
-  settingsStore.updateAppSettings({ themeMode: isDark.value ? "light" : "dark" });
+  const current = themeMode.value;
+  let next: "system" | "light" | "dark";
+  if (current === "system") next = "light";
+  else if (current === "light") next = "dark";
+  else next = "system";
+  settingsStore.updateAppSettings({ themeMode: next });
 }
 
 function toggleDensity() {
@@ -847,8 +852,11 @@ function syncEditorThemeWithApp() {
   if (!settingsStore.appSettings.syncEditorTheme) return;
   const currentTheme = settingsStore.editorSettings.theme;
   const lightThemes = new Set(EDITOR_THEMES.filter(t => !t.dark).map(t => t.value));
-  const targetTheme = isDark.value ? "one-dark" : "vscode-light";
-  if ((isDark.value && lightThemes.has(currentTheme)) || (!isDark.value && !lightThemes.has(currentTheme))) {
+  const darkThemes = new Set(EDITOR_THEMES.filter(t => t.dark).map(t => t.value));
+  const defaultDarkTheme = EDITOR_THEMES.find(t => t.dark)?.value ?? "one-dark";
+  const defaultLightTheme = EDITOR_THEMES.find(t => !t.dark)?.value ?? "vscode-light";
+  const targetTheme = isDark.value ? defaultDarkTheme : defaultLightTheme;
+  if ((isDark.value && lightThemes.has(currentTheme)) || (!isDark.value && darkThemes.has(currentTheme))) {
     settingsStore.updateEditorSettings({ theme: targetTheme });
   }
 }
@@ -1076,7 +1084,7 @@ async function setupFileDrop() {
   <TooltipProvider :delay-duration="300">
     <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-compact': isCompact }">
       <!-- Toolbar -->
-      <div class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0">
+      <div class="dbx-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0">
         <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="showConnectionDialog = true">
           <DatabaseZap class="h-3.5 w-3.5" />
           {{ t('toolbar.newConnection') }}
@@ -1097,7 +1105,7 @@ async function setupFileDrop() {
           {{ t('sqlFile.title') }}
         </Button>
 
-        <div class="flex-1 md:hidden" />
+        <div class="flex-1" />
 
         <Tooltip>
           <TooltipTrigger as-child>
@@ -1135,7 +1143,11 @@ async function setupFileDrop() {
               <Sun v-else class="h-4 w-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{{ isDark ? t('settings.lightMode') : t('settings.darkMode') }}</TooltipContent>
+          <TooltipContent>
+            <span v-if="themeMode === 'system'">{{ t('settings.themeLight') }}</span>
+            <span v-else-if="themeMode === 'light'">{{ t('settings.themeDark') }}</span>
+            <span v-else>{{ t('settings.themeSystem') }}</span>
+          </TooltipContent>
         </Tooltip>
 
         <Tooltip>
@@ -1211,7 +1223,7 @@ async function setupFileDrop() {
         <div class="flex-1 min-w-0">
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
-          <div v-if="queryStore.tabs.length > 0" class="h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0" style="-ms-overflow-style:none;scrollbar-width:none;-webkit-overflow-scrolling:touch">
+          <div v-if="queryStore.tabs.length > 0" class="dbx-query-tabs h-9 flex items-center border-b bg-muted/20 overflow-x-auto shrink-0" style="-ms-overflow-style:none;scrollbar-width:none;-webkit-overflow-scrolling:touch">
             <ContextMenu
               v-for="tab in queryStore.tabs"
               :key="tab.id"
@@ -1293,7 +1305,7 @@ async function setupFileDrop() {
 
           <!-- Editor Panel -->
           <div v-if="activeTab" class="flex flex-col flex-1 min-h-0">
-            <div v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground">
+            <div v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)" class="dbx-query-header h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground">
               <div class="flex items-center gap-0.5">
                 <Tooltip>
                   <TooltipTrigger as-child>

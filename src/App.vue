@@ -1283,8 +1283,8 @@ async function setupFileDrop() {
                 <Tooltip>
                 <TooltipTrigger as-child>
                 <div
-                  class="group flex min-w-38 items-center gap-1 px-1 h-full text-xs cursor-pointer border-r border-b-2 hover:bg-accent transition-colors whitespace-nowrap"
-                  :class="tab.id === queryStore.activeTabId ? 'bg-background font-medium border-b-primary' : 'font-normal text-muted-foreground border-b-transparent'"
+                  class="group flex min-w-38 items-center gap-1 px-1 h-full text-xs cursor-pointer border-r transition-colors whitespace-nowrap"
+                  :class="tab.id === queryStore.activeTabId ? 'bg-background font-medium' : 'font-normal text-muted-foreground'"
                   :data-active-tab="tab.id === queryStore.activeTabId"
                   @click="queryStore.activeTabId = tab.id"
                 >

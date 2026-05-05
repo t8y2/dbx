@@ -5,9 +5,14 @@ use std::time::{Duration, Instant};
 use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
 pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
+    // Check if the file exists (for non-memory databases)
+    if path != ":memory:" && !std::path::Path::new(path).exists() {
+        return Err(format!("SQLite database file not found: {}", path));
+    }
+
     let mut options = SqliteConnectOptions::new()
         .filename(path)
-        .create_if_missing(true);
+        .create_if_missing(false);
 
     if is_network_path(path) {
         options = options.vfs("unix-nolock");

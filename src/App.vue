@@ -269,6 +269,8 @@ async function checkUpdates(options: { silent?: boolean } = {}) {
   } finally {
     checkingUpdates.value = false;
   }
+}
+
 function onAiReplaceSql(sql: string) {
   const tabId = ensureQueryTab();
   queryStore.updateSql(tabId, sql);
@@ -371,6 +373,8 @@ function getDbType(path: string): "sqlite" | "duckdb" | null {
   if (lower.endsWith(".duckdb")) return "duckdb";
   if (DB_EXTENSIONS.some((ext) => lower.endsWith(ext))) return "sqlite";
   return null;
+}
+
 function initApp() {
   connectionStore.initFromDisk().then(() => {
     reconnectRestoredTabs();

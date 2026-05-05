@@ -58,7 +58,7 @@ function hasChanges(): boolean {
     editTheme.value !== settingsStore.editorSettings.theme ||
     editAppThemeMode.value !== settingsStore.appSettings.themeMode ||
     editDensity.value !== settingsStore.appSettings.density ||
-    editSyncEditorTheme.value !== settingsStore.appSettings.syncEditorTheme
+    editSyncEditorTheme.value !== settingsStore.appSettings.syncEditorTheme ||
     editExecuteMode.value !== settingsStore.editorSettings.executeMode
   );
 }

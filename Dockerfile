@@ -29,6 +29,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Stage 3: Final image
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /usr/local/bin/dbx-web /usr/local/bin/
 COPY --from=frontend /app/dist /app/static
 ENV DBX_STATIC_DIR=/app/static

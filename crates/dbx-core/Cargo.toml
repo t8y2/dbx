@@ -8,6 +8,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 percent-encoding = "2"
 log = "0.4"
+tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -32,3 +33,5 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+hex = "0.4"
+keyring = "2.1"

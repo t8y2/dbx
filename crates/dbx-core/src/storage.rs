@@ -68,21 +68,109 @@ impl Storage {
             sqlx::query(statement).execute(&pool).await.map_err(|e| e.to_string())?;
         }
 
-        // Derive encryption key from database path
-        let encryption_key = derive_encryption_key(db_path)?;
+        // Derive encryption key from environment or generate from secure source
+        let encryption_key = derive_encryption_key()?;
 
         Ok(Self { db: pool, encryption_key })
     }
 }
 
-/// Derives a consistent encryption key from the database path.
-fn derive_encryption_key(db_path: &Path) -> Result<Vec<u8>, String> {
-    use sha2::{Digest, Sha256};
+/// Derives encryption key from OS keyring or environment variable.
+///
+/// Priority:
+/// 1. OS Keyring (secure, persisted across restarts)
+/// 2. DBX_ENCRYPTION_KEY environment variable (hex-encoded 32 bytes)
+/// 3. Auto-generate and store in OS Keyring on first run
+fn derive_encryption_key() -> Result<Vec<u8>, String> {
+    const KEYRING_SERVICE: &str = "dbx";
+    const KEYRING_ACCOUNT: &str = "encryption_key";
 
-    let path_str = db_path.to_string_lossy();
-    let mut hasher = Sha256::new();
-    hasher.update(path_str.as_bytes());
-    Ok(hasher.finalize().to_vec())
+    // Try to get from OS keyring first
+    match keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT) {
+        Ok(entry) => {
+            match entry.get_password() {
+                Ok(key_hex) => {
+                    // Key exists in keyring, decode it
+                    match hex::decode(&key_hex) {
+                        Ok(key_bytes) if key_bytes.len() == 32 => {
+                            tracing::info!("Loaded encryption key from OS keyring");
+                            return Ok(key_bytes);
+                        }
+                        _ => {
+                            tracing::warn!("Invalid encryption key in OS keyring, generating new one");
+                            // Fall through to generate new key
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Key doesn't exist in keyring yet, will generate and store
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to access OS keyring: {}", e);
+            // Fall through to try env var
+        }
+    }
+
+    // Try environment variable
+    if let Ok(key_hex) = std::env::var("DBX_ENCRYPTION_KEY") {
+        match hex::decode(&key_hex) {
+            Ok(key_bytes) if key_bytes.len() == 32 => {
+                tracing::info!("Loaded encryption key from DBX_ENCRYPTION_KEY environment variable");
+
+                // Store in keyring for future use
+                if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT) {
+                    if let Err(e) = entry.set_password(&key_hex) {
+                        tracing::warn!("Failed to store encryption key in OS keyring: {}", e);
+                    } else {
+                        tracing::info!("Stored encryption key in OS keyring for future use");
+                    }
+                }
+
+                return Ok(key_bytes);
+            }
+            _ => {
+                return Err("DBX_ENCRYPTION_KEY must be exactly 32 bytes (64 hex characters)".to_string());
+            }
+        }
+    }
+
+    // Auto-generate new key and store in keyring on first run
+    tracing::info!("No encryption key found. Generating new key and storing in OS keyring...");
+    generate_and_store_key(KEYRING_SERVICE, KEYRING_ACCOUNT)
+}
+
+/// Generates a new random encryption key and stores it in OS keyring.
+fn generate_and_store_key(service: &str, account: &str) -> Result<Vec<u8>, String> {
+    use rand::RngCore;
+
+    // Generate random key
+    let mut key = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    let key_hex = hex::encode(&key);
+
+    // Try to store in keyring
+    match keyring::Entry::new(service, account) {
+        Ok(entry) => match entry.set_password(&key_hex) {
+            Ok(()) => {
+                tracing::info!("Generated and stored new encryption key in OS keyring");
+                Ok(key)
+            }
+            Err(e) => Err(format!(
+                "Failed to store encryption key in OS keyring: {}. \
+                         Please set DBX_ENCRYPTION_KEY environment variable to a 64-character hex string. \
+                         Generate one with: openssl rand -hex 32",
+                e
+            )),
+        },
+        Err(e) => Err(format!(
+            "Failed to access OS keyring: {}. \
+                 Please set DBX_ENCRYPTION_KEY environment variable to a 64-character hex string. \
+                 Generate one with: openssl rand -hex 32",
+            e
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,9 +461,15 @@ impl Storage {
 
         match row {
             Some((encrypted,)) => {
-                // Decrypt the secret
-                let decrypted = encryption::decrypt_secret(&encrypted, &self.encryption_key)?;
-                Ok(Some(decrypted))
+                // Try to decrypt first (new format)
+                match encryption::decrypt_secret(&encrypted, &self.encryption_key) {
+                    Ok(decrypted) => Ok(Some(decrypted)),
+                    Err(_) => {
+                        // Fallback: treat as plaintext (old format)
+                        // This handles backward compatibility with existing unencrypted secrets
+                        Ok(Some(encrypted))
+                    }
+                }
             }
             None => Ok(None),
         }

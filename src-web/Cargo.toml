@@ -25,6 +25,3 @@ futures = "0.3"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-util = "0.7"
 argon2 = "0.5"
-aes-gcm = "0.10"
-rand = "0.8"
-base64 = "0.22"

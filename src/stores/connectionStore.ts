@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import type { ColumnInfo, ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
 import {
@@ -17,13 +17,21 @@ import {
   type DropPosition,
 } from "@/lib/sidebarLayout";
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletion";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 
 export const useConnectionStore = defineStore("connection", () => {
   const connections = ref<ConnectionConfig[]>([]);
-  const activeConnectionId = ref<string | null>(null);
+  const isDesktop = isTauriRuntime();
+  const activeConnectionId = ref<string | null>(!isDesktop ? localStorage.getItem("dbx-active-connection") : null);
+
+  watch(activeConnectionId, (id) => {
+    if (isDesktop) return;
+    if (id) localStorage.setItem("dbx-active-connection", id);
+    else localStorage.removeItem("dbx-active-connection");
+  });
   const treeNodes = ref<TreeNode[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(loadPinnedTreeNodeIds());
   const connectedIds = ref<Set<string>>(new Set());
@@ -657,23 +665,55 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function exportConnectionsToFile(passphrase: string) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
     const { encryptConfig } = await import("@/lib/configCrypto");
-    const path = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "dbx-connections.json" });
-    if (!path) return;
     const exportData = { connections: connections.value, layout: sidebarLayout.value };
     const json = JSON.stringify(exportData);
     const payload = await encryptConfig(json, passphrase);
-    await writeTextFile(path, JSON.stringify(payload, null, 2));
+    const content = JSON.stringify(payload, null, 2);
+
+    if (isTauriRuntime()) {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      const path = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "dbx-connections.json" });
+      if (!path) return;
+      await writeTextFile(path, content);
+    } else {
+      const blob = new Blob([content], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "dbx-connections.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
   }
 
   async function readImportFile(): Promise<{ content: string; encrypted: boolean } | null> {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const { readTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await open({ filters: [{ name: "JSON", extensions: ["json"] }], multiple: false });
-    if (!path) return null;
-    const content = await readTextFile(path as string);
+    let content: string;
+
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const path = await open({ filters: [{ name: "JSON", extensions: ["json"] }], multiple: false });
+      if (!path) return null;
+      content = await readTextFile(path as string);
+    } else {
+      content = await new Promise<string>((resolve, reject) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json";
+        input.onchange = () => {
+          const file = input.files?.[0];
+          if (!file) { reject(new Error("No file selected")); return; }
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(reader.error);
+          reader.readAsText(file);
+        };
+        input.click();
+      });
+    }
+
     const { isEncryptedConfig } = await import("@/lib/configCrypto");
     const parsed = JSON.parse(content);
     return { content, encrypted: isEncryptedConfig(parsed) };

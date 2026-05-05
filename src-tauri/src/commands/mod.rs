@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod connection;
+#[allow(dead_code, unused_imports)]
 mod connection_secrets;
 pub mod history;
 pub mod mcp_bridge;

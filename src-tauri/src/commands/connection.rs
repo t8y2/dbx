@@ -1,278 +1,41 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
-use tokio::sync::Mutex;
+use tauri::State;
 
-use crate::commands::connection_secrets::{
-    create_secret_store, load_connections_from_file, save_connections_to_file,
+pub use dbx_core::connection::{
+    connection_url_for_endpoint, expand_tilde, redacted_connection_url_for_endpoint, AppState,
+    PoolKind,
 };
-use crate::commands::query_cancel::RunningQueries;
-use crate::db;
-use crate::db::ssh_tunnel::TunnelManager;
-use crate::models::connection::{ConnectionConfig, DatabaseType};
-
-pub enum PoolKind {
-    Mysql(sqlx::mysql::MySqlPool, bool),
-    Postgres(sqlx::postgres::PgPool),
-    Sqlite(sqlx::sqlite::SqlitePool),
-    Redis(tokio::sync::Mutex<redis::aio::MultiplexedConnection>),
-    DuckDb(std::sync::Arc<std::sync::Mutex<duckdb::Connection>>),
-    MongoDb(mongodb::Client),
-    ClickHouse(db::clickhouse_driver::ChClient),
-    SqlServer(std::sync::Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
-    Oracle(std::sync::Arc<tokio::sync::Mutex<db::oracle_driver::OracleClient>>),
-    Elasticsearch(db::elasticsearch_driver::EsClient),
-}
-
-pub struct AppState {
-    pub connections: Mutex<HashMap<String, PoolKind>>,
-    pub configs: Mutex<HashMap<String, ConnectionConfig>>,
-    pub running_queries: RunningQueries,
-    pub tunnels: TunnelManager,
-}
-
-impl AppState {
-    pub fn new() -> Self {
-        Self {
-            connections: Mutex::new(HashMap::new()),
-            configs: Mutex::new(HashMap::new()),
-            running_queries: RunningQueries::default(),
-            tunnels: TunnelManager::new(),
-        }
-    }
-
-    pub async fn get_or_create_pool(
-        &self,
-        connection_id: &str,
-        database: Option<&str>,
-    ) -> Result<String, String> {
-        let db_type = {
-            let configs = self.configs.lock().await;
-            configs.get(connection_id).map(|c| c.db_type.clone())
-        };
-
-        let is_embedded = matches!(db_type, Some(DatabaseType::Sqlite) | Some(DatabaseType::DuckDb));
-        if is_embedded {
-            return Ok(connection_id.to_string());
-        }
-
-        let is_single_conn = matches!(db_type, Some(DatabaseType::Oracle));
-        let pool_key = if is_single_conn {
-            connection_id.to_string()
-        } else {
-            match database {
-                Some(db) => format!("{connection_id}:{db}"),
-                None => connection_id.to_string(),
-            }
-        };
-
-        let conns = self.connections.lock().await;
-        if conns.contains_key(&pool_key) {
-            return Ok(pool_key);
-        }
-        drop(conns);
-
-        let configs = self.configs.lock().await;
-        let config = configs
-            .get(connection_id)
-            .ok_or("Connection config not found")?
-            .clone();
-        drop(configs);
-
-        let mut db_config = config.clone();
-        if let Some(db) = database {
-            if db_config.db_type != DatabaseType::Oracle {
-                db_config.database = Some(db.to_string());
-            }
-        }
-
-        let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
-        let url = connection_url_for_endpoint(&db_config, &host, port);
-        let pool = match db_config.db_type {
-            DatabaseType::Mysql if db_config.needs_bare_mysql() => PoolKind::Mysql(db::mysql::connect_bare(&url).await?, true),
-            DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?, false),
-            DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(db::mysql::connect_bare(&url).await?, true),
-            DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),
-            DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&db_config.host).await?),
-            DatabaseType::Redis => {
-                let con = db::redis_driver::connect(&url).await?;
-                PoolKind::Redis(tokio::sync::Mutex::new(con))
-            }
-            DatabaseType::DuckDb => {
-                let con = duckdb::Connection::open(&db_config.host).map_err(|e| e.to_string())?;
-                PoolKind::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(con)))
-            }
-            DatabaseType::MongoDb => {
-                let client = mongodb::Client::with_uri_str(&url).await.map_err(|e| e.to_string())?;
-                PoolKind::MongoDb(client)
-            }
-            DatabaseType::ClickHouse => {
-                let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
-                let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
-                let client = db::clickhouse_driver::ChClient::new(&url, username, password);
-                db::clickhouse_driver::test_connection(&client).await?;
-                PoolKind::ClickHouse(client)
-            }
-            DatabaseType::SqlServer => {
-                let client = db::sqlserver::connect(
-                    &host,
-                    port,
-                    &db_config.username,
-                    &db_config.password,
-                    db_config.database.as_deref(),
-                )
-                .await?;
-                PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
-            }
-            DatabaseType::Oracle => {
-                let client = db::oracle_driver::connect(
-                    &host,
-                    port,
-                    db_config.database.as_deref().unwrap_or("ORCL"),
-                    &db_config.username, &db_config.password,
-                )
-                .await?;
-                PoolKind::Oracle(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
-            }
-            DatabaseType::Elasticsearch => {
-                let client = db::elasticsearch_driver::EsClient::new(
-                    &url,
-                    Some(&db_config.username),
-                    Some(&db_config.password),
-                );
-                db::elasticsearch_driver::test_connection(&client).await?;
-                PoolKind::Elasticsearch(client)
-            }
-        };
-
-        self.connections.lock().await.insert(pool_key.clone(), pool);
-        Ok(pool_key)
-    }
-
-    async fn connection_host_port(
-        &self,
-        connection_id: &str,
-        config: &ConnectionConfig,
-    ) -> Result<(String, u16), String> {
-        if !config.ssh_enabled || config.ssh_host.is_empty() {
-            return Ok((config.host.clone(), config.port));
-        }
-
-        if let Some(local_port) = self.tunnels.local_port(connection_id).await {
-            return Ok(("127.0.0.1".to_string(), local_port));
-        }
-
-        let local_port = self
-            .tunnels
-            .start_tunnel(
-                connection_id,
-                &config.ssh_host,
-                config.ssh_port,
-                &config.ssh_user,
-                &config.ssh_password,
-                &config.ssh_key_path,
-                &config.ssh_key_passphrase,
-                &config.host,
-                config.port,
-                config.ssh_expose_lan,
-            )
-            .await?;
-
-        Ok(("127.0.0.1".to_string(), local_port))
-    }
-
-    pub async fn reconnect_pool(
-        &self,
-        connection_id: &str,
-        database: Option<&str>,
-    ) -> Result<String, String> {
-        let is_single_conn = {
-            let configs = self.configs.lock().await;
-            configs.get(connection_id)
-                .map(|c| c.db_type == DatabaseType::Oracle || c.db_type == DatabaseType::Elasticsearch)
-                .unwrap_or(false)
-        };
-        let pool_key = if is_single_conn {
-            connection_id.to_string()
-        } else {
-            match database {
-                Some(db) => format!("{connection_id}:{db}"),
-                None => connection_id.to_string(),
-            }
-        };
-        self.connections.lock().await.remove(&pool_key);
-        self.get_or_create_pool(connection_id, database).await
-    }
-}
-
-fn connections_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("connections.json"))
-}
-
-fn connection_url_for_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> String {
-    if host == config.host && port == config.port {
-        config.connection_url()
-    } else {
-        config.connection_url_with_host(host, port)
-    }
-}
-
-fn redacted_connection_url_for_endpoint(
-    config: &ConnectionConfig,
-    host: &str,
-    port: u16,
-) -> String {
-    if host == config.host && port == config.port {
-        config.redacted_connection_url()
-    } else {
-        config.redacted_connection_url_with_host(host, port)
-    }
-}
+use dbx_core::db;
+use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 
 #[tauri::command]
 pub async fn save_connections(
-    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
     configs: Vec<ConnectionConfig>,
 ) -> Result<(), String> {
-    let path = connections_file(&app)?;
-    let store = create_secret_store(&app);
-    save_connections_to_file(&path, &configs, &*store)
+    state.storage.save_connections(&configs).await
 }
 
 #[tauri::command]
-pub async fn load_connections(app: AppHandle) -> Result<Vec<ConnectionConfig>, String> {
-    let path = connections_file(&app)?;
-    let store = create_secret_store(&app);
-    load_connections_from_file(&path, &*store)
-}
-
-fn sidebar_layout_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("sidebar_layout.json"))
+pub async fn load_connections(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ConnectionConfig>, String> {
+    state.storage.load_connections().await
 }
 
 #[tauri::command]
 pub async fn save_sidebar_layout(
-    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
     layout: serde_json::Value,
 ) -> Result<(), String> {
-    let path = sidebar_layout_file(&app)?;
-    let json = serde_json::to_string_pretty(&layout).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    state.storage.save_sidebar_layout(&layout).await
 }
 
 #[tauri::command]
-pub async fn load_sidebar_layout(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let path = sidebar_layout_file(&app)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    Ok(Some(value))
+pub async fn load_sidebar_layout(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_sidebar_layout().await
 }
 
 #[tauri::command]
@@ -329,7 +92,7 @@ pub async fn test_connection(
             }
             Err(e) => Err(e),
         },
-        DatabaseType::Sqlite => match db::sqlite::connect_path(&config.host).await {
+        DatabaseType::Sqlite => match db::sqlite::connect_path(&expand_tilde(&config.host)).await {
             Ok(pool) => {
                 pool.close().await;
                 Ok("Connection successful".to_string())
@@ -342,7 +105,7 @@ pub async fn test_connection(
                 .map(|_| "Connection successful".to_string())
         }
         DatabaseType::DuckDb => {
-            duckdb::Connection::open(&config.host)
+            duckdb::Connection::open(&expand_tilde(&config.host))
                 .map(|_| "Connection successful".to_string())
                 .map_err(|e| e.to_string())
         }
@@ -414,13 +177,13 @@ pub async fn connect_db(
         DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?, false),
         DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(db::mysql::connect_bare(&url).await?, true),
         DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),
-        DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&config.host).await?),
+        DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&expand_tilde(&config.host)).await?),
         DatabaseType::Redis => {
             let con = db::redis_driver::connect(&url).await?;
             PoolKind::Redis(tokio::sync::Mutex::new(con))
         }
         DatabaseType::DuckDb => {
-            let con = duckdb::Connection::open(&config.host).map_err(|e| e.to_string())?;
+            let con = duckdb::Connection::open(&expand_tilde(&config.host)).map_err(|e| e.to_string())?;
             PoolKind::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(con)))
         }
         DatabaseType::MongoDb => {

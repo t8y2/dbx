@@ -3,6 +3,7 @@ mod db;
 mod models;
 
 use commands::connection::AppState;
+use dbx_core::storage::Storage;
 use std::sync::Arc;
 use tauri::{Manager, RunEvent};
 
@@ -12,13 +13,12 @@ pub fn run() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let state = Arc::new(AppState::new());
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(state)
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -27,9 +27,28 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())
+                .expect("Failed to resolve app data dir");
+            std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
+            let db_path = data_dir.join("dbx.db");
+
+            let storage = tauri::async_runtime::block_on(async {
+                let s = Storage::open(&db_path).await.expect("Failed to open storage");
+                s.migrate_from_json(&data_dir)
+                    .await
+                    .expect("Failed to migrate JSON data");
+                s
+            });
+
+            let state = Arc::new(AppState::new(storage));
+            app.manage(state.clone());
+
             let app_handle = app.handle().clone();
-            let state: tauri::State<Arc<AppState>> = app.state();
-            commands::mcp_bridge::start(app_handle, state.inner().clone());
+            commands::mcp_bridge::start(app_handle, state);
             Ok(())
         })
         .on_window_event(|window, event| {

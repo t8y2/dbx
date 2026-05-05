@@ -1,7 +1,7 @@
 use oracle_rs::{Config, Connection};
 use std::time::Instant;
 
-use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
 pub type OracleClient = Connection;
 

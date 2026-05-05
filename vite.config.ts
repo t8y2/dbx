@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 const host = process.env.TAURI_DEV_HOST;
+const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
 
 export default defineConfig(async () => ({
   plugins: [vue(), tailwindcss()],
@@ -31,8 +32,8 @@ export default defineConfig(async () => ({
     },
   },
   server: {
-    port: 1420,
-    strictPort: true,
+    port: isTauri ? 1420 : undefined,
+    strictPort: isTauri,
     host: host || false,
     hmr: host
       ? {
@@ -41,6 +42,12 @@ export default defineConfig(async () => ({
           port: 1421,
         }
       : undefined,
+    proxy: isTauri ? undefined : {
+      "/api": {
+        target: "http://localhost:4224",
+        changeOrigin: true,
+      },
+    },
     watch: {
       ignored: ["**/src-tauri/**"],
     },

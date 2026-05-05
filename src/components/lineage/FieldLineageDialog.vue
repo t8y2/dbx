@@ -8,7 +8,7 @@ import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } 
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 import {
   analyzeFieldLineage,
   summarizeLineageCounts,

@@ -22,6 +22,10 @@ export default {
     failed: "检查更新失败：{error}",
     rateLimited: "GitHub 更新检查暂时触发频率限制。你仍然可以打开下载页手动查看。",
     openRelease: "打开下载页",
+    downloadAndInstall: "下载并安装",
+    downloading: "下载中 {progress}%",
+    downloadFailed: "更新下载失败：{error}",
+    restart: "立即重启",
   },
   sidebar: {
     connections: "连接",
@@ -613,6 +617,9 @@ export default {
     selectTheme: "选择主题...",
     apply: "应用",
     resetDefaults: "恢复默认",
+    executeMode: "执行模式 (Cmd+Enter)",
+    executeModeAll: "执行全部 SQL",
+    executeModeCurrent: "执行光标所在语句",
     preview: "实时预览",
   },
 };

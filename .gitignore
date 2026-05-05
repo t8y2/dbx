@@ -5,8 +5,7 @@ node_modules/
 
 # Build output
 dist/
-
-# Tauri build output is handled by src-tauri/.gitignore
+/target/
 
 # OS files
 .DS_Store

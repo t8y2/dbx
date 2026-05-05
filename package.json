@@ -1,10 +1,13 @@
 {
   "name": "dbx",
   "private": true,
-  "version": "0.3.10",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:tauri": "tauri dev",
+    "dev:web": "vite --port 5173 --mode web",
+    "dev:backend": "RUST_LOG=info cargo watch -x 'run -p dbx-web'",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -19,7 +22,9 @@
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@uiw/codemirror-theme-duotone": "^4.25.9",
     "@uiw/codemirror-theme-material": "^4.25.9",
     "@uiw/codemirror-theme-nord": "^4.25.9",

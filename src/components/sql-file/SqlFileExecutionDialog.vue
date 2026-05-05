@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 import {
   Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle,
 } from "@/components/ui/dialog";
@@ -23,7 +23,7 @@ import {
   type SqlFilePreview,
   type SqlFileProgress,
   type SqlFileStatus,
-} from "@/lib/tauri";
+} from "@/lib/api";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "lucide-vue-next";
 
 const { t } = useI18n();
@@ -214,9 +214,11 @@ async function loadPreview(path: string) {
 
 async function selectFile() {
   if (running.value) return;
+  if (!isTauriRuntime()) return;
   selectingFile.value = true;
   try {
-    const selected = await openDialog({
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
       multiple: false,
       filters: [{ name: "SQL", extensions: ["sql"] }],
     });

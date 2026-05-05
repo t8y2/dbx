@@ -2,12 +2,16 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRo
 use sqlx::{Column, Executor, Row};
 use std::time::{Duration, Instant};
 
-use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
 pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
-    let options = SqliteConnectOptions::new()
+    let mut options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true);
+
+    if is_network_path(path) {
+        options = options.vfs("unix-nolock");
+    }
 
     SqlitePoolOptions::new()
         .max_connections(5)
@@ -16,6 +20,10 @@ pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
         .connect_with(options)
         .await
         .map_err(|e| format!("SQLite connection failed: {e}"))
+}
+
+fn is_network_path(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//") || path.contains("wsl.localhost") || path.contains("wsl$")
 }
 
 pub async fn list_databases(_pool: &SqlitePool) -> Result<Vec<DatabaseInfo>, String> {

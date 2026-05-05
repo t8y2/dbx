@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 import {
   diffColumns, diffIndexes, diffTables, generateSyncSql,
   type TableDiff,

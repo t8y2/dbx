@@ -2,7 +2,7 @@ use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::time::Instant;
 
-use super::{ColumnInfo, DatabaseInfo, QueryResult, TableInfo};
+use crate::types::{ColumnInfo, DatabaseInfo, QueryResult, TableInfo};
 
 pub struct ChClient {
     http: HttpClient,

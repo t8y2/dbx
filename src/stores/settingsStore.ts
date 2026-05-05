@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 
 export type AiProvider = "claude" | "openai" | "custom";
 export type AiApiStyle = "completions" | "responses";
@@ -25,6 +25,7 @@ export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
   theme: EditorTheme;
+  executeMode: "all" | "current";
 }
 
 export type AppThemeMode = "system" | "light" | "dark";
@@ -62,6 +63,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
   fontSize: 13,
   theme: "one-dark",
+  executeMode: "all",
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -84,6 +86,7 @@ function loadEditorSettings(): EditorSettings {
         fontFamily: parsed.fontFamily ?? DEFAULT_EDITOR_SETTINGS.fontFamily,
         fontSize: parsed.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
         theme: parsed.theme ?? DEFAULT_EDITOR_SETTINGS.theme,
+        executeMode: parsed.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
       };
     }
   } catch { /* ignore */ }

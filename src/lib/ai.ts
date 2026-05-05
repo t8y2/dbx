@@ -1,6 +1,6 @@
 import type { AiConfig } from "@/stores/settingsStore";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 import { currentLocale } from "@/i18n";
 
 export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData";

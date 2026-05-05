@@ -22,9 +22,8 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { QueryResult, ColumnInfo, DatabaseType } from "@/types/database";
-import { save as savePath } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
-import * as api from "@/lib/tauri";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
+import * as api from "@/lib/api";
 import {
   extractSelection,
   formatSelectionAsCsv,
@@ -953,14 +952,30 @@ function copyAll() {
   copyText(`${header}\n${body}`);
 }
 
+async function saveFileContent(content: string, defaultFileName: string, filterName: string, filterExt: string) {
+  if (isTauriRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({ defaultPath: defaultFileName, filters: [{ name: filterName, extensions: [filterExt] }] });
+    if (path) await writeTextFile(path, content);
+  } else {
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = defaultFileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function exportCsv() {
   const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
   const header = props.result.columns.map(escape).join(",");
   const body = displayItems.value
     .map((item) => item.data.map((c) => escape(formatCell(c))).join(","))
     .join("\n");
-  const path = await savePath({ filters: [{ name: "CSV", extensions: ["csv"] }] });
-  if (path) await writeTextFile(path, `${header}\n${body}`);
+  await saveFileContent(`${header}\n${body}`, "export.csv", "CSV", "csv");
 }
 
 async function exportJson() {
@@ -969,16 +984,14 @@ async function exportJson() {
     props.result.columns.forEach((col, i) => { obj[col] = item.data[i]; });
     return obj;
   });
-  const path = await savePath({ filters: [{ name: "JSON", extensions: ["json"] }] });
-  if (path) await writeTextFile(path, JSON.stringify(data, null, 2));
+  await saveFileContent(JSON.stringify(data, null, 2), "export.json", "JSON", "json");
 }
 
 async function exportMarkdown() {
   const cols = props.result.columns;
   const visibleRows = displayItems.value.map((item) => item.data);
   const md = formatMarkdownTable({ columns: cols, rows: visibleRows });
-  const path = await savePath({ filters: [{ name: "Markdown", extensions: ["md"] }] });
-  if (path) await writeTextFile(path, md);
+  await saveFileContent(md, "export.md", "Markdown", "md");
 }
 
 const sqlOneLiner = computed(() => props.sql?.replace(/\s+/g, " ").trim() || "");

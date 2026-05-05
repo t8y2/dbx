@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 import {
   Dialog, DialogHeader, DialogTitle, DialogFooter, DialogScrollContent,
 } from "@/components/ui/dialog";
@@ -18,7 +18,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { autoMapImportColumns } from "@/lib/tableImport";
 import type { ColumnInfo } from "@/types/database";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -119,7 +119,9 @@ async function loadTargetColumns() {
 }
 
 async function selectFile() {
-  const selected = await openFileDialog({
+  if (!isTauriRuntime()) return;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
     multiple: false,
     filters: [
       { name: "Data files", extensions: ["csv", "tsv", "json", "xlsx", "xlsm", "xls"] },

@@ -1,7 +1,7 @@
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 
-use super::mongo_driver::MongoDocumentResult;
+use crate::db::mongo_driver::MongoDocumentResult;
 
 pub struct EsClient {
     http: HttpClient,

@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, AppHandle, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::connection::AppState;
-use super::connection_secrets::{create_secret_store, load_connections_from_file};
 
 const BIND_ADDR: &str = "127.0.0.1:0";
 
@@ -39,7 +38,7 @@ pub struct McpExecuteQueryEvent {
     pub sql: String,
 }
 
-pub fn start(app_handle: AppHandle, _state: Arc<AppState>) {
+pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let listener = match TcpListener::bind(BIND_ADDR).await {
             Ok(l) => l,
@@ -60,6 +59,7 @@ pub fn start(app_handle: AppHandle, _state: Arc<AppState>) {
                 Err(_) => continue,
             };
             let app = app_handle.clone();
+            let st = state.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 16384];
                 let n = match stream.read(&mut buf).await {
@@ -71,22 +71,15 @@ pub fn start(app_handle: AppHandle, _state: Arc<AppState>) {
                 let first_line = request.lines().next().unwrap_or("");
 
                 if first_line.starts_with("POST /open-table") {
-                    handle_open_table(&app, body, &mut stream).await;
+                    handle_open_table(&app, &st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /execute-query") {
-                    handle_execute_query(&app, body, &mut stream).await;
+                    handle_execute_query(&app, &st, body, &mut stream).await;
                 } else {
                     let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
                 }
             });
         }
     });
-}
-
-fn load_configs_from_disk(app: &AppHandle) -> Result<Vec<crate::models::connection::ConnectionConfig>, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let path = dir.join("connections.json");
-    let store = create_secret_store(app);
-    load_connections_from_file(&path, &*store)
 }
 
 fn find_config_by_name<'a>(configs: &'a [crate::models::connection::ConnectionConfig], name: &str) -> Option<&'a crate::models::connection::ConnectionConfig> {
@@ -98,12 +91,12 @@ async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
     let _ = stream.write_all(resp.as_bytes()).await;
 }
 
-async fn handle_open_table(app: &AppHandle, body: &str, stream: &mut tokio::net::TcpStream) {
+async fn handle_open_table(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
     let req: OpenTableRequest = match serde_json::from_str(body) {
         Ok(r) => r,
         Err(_) => { respond(stream, "400 Bad Request", "").await; return; }
     };
-    let configs = match load_configs_from_disk(app) {
+    let configs = match state.storage.load_connections().await {
         Ok(c) => c,
         Err(_) => { respond(stream, "500 Internal Server Error", "").await; return; }
     };
@@ -120,12 +113,12 @@ async fn handle_open_table(app: &AppHandle, body: &str, stream: &mut tokio::net:
     respond(stream, "200 OK", "ok").await;
 }
 
-async fn handle_execute_query(app: &AppHandle, body: &str, stream: &mut tokio::net::TcpStream) {
+async fn handle_execute_query(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
     let req: ExecuteQueryRequest = match serde_json::from_str(body) {
         Ok(r) => r,
         Err(_) => { respond(stream, "400 Bad Request", "").await; return; }
     };
-    let configs = match load_configs_from_disk(app) {
+    let configs = match state.storage.load_connections().await {
         Ok(c) => c,
         Err(_) => { respond(stream, "500 Internal Server Error", "").await; return; }
     };

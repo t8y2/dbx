@@ -4,7 +4,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use std::time::{Duration, Instant};
 
-use super::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
 fn pg_temporal_to_json_value(row: &PgRow, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<DateTime<Utc>, _>(idx) {

@@ -24,7 +24,7 @@ import { useToast } from "@/composables/useToast";
 import { buildTableStructureChangeSql, type EditableStructureColumn, type EditableStructureIndex } from "@/lib/tableStructureEditorSql";
 import { createColumnDrafts, createIndexDrafts, toColumnNames } from "@/lib/tableStructureEditorState";
 import type { ForeignKeyInfo, TriggerInfo } from "@/types/database";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 
 const { t } = useI18n();
 const store = useConnectionStore();

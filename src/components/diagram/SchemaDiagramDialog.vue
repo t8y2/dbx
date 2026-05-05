@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 import type { DatabaseType } from "@/types/database";
 import {
   buildDiagramRelationships,
@@ -38,6 +38,7 @@ import {
   ZoomIn, ZoomOut,
 } from "lucide-vue-next";
 import { useToast } from "@/composables/useToast";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -571,10 +572,6 @@ function currentDiagramSvg(): string {
 
 async function exportSvg() {
   try {
-    const [{ save }, { writeTextFile }] = await Promise.all([
-      import("@tauri-apps/plugin-dialog"),
-      import("@tauri-apps/plugin-fs"),
-    ]);
     const scopeName = isSchemaAware.value && schema.value
       ? `${database.value}-${schema.value}`
       : database.value;
@@ -583,13 +580,28 @@ async function exportSvg() {
       scopeName,
       diagramMode.value,
     );
-    const path = await save({
-      defaultPath,
-      filters: [{ name: "SVG", extensions: ["svg"] }],
-    });
-    if (!path) return;
+    const svgContent = currentDiagramSvg();
 
-    await writeTextFile(path, currentDiagramSvg());
+    if (isTauriRuntime()) {
+      const [{ save }, { writeTextFile }] = await Promise.all([
+        import("@tauri-apps/plugin-dialog"),
+        import("@tauri-apps/plugin-fs"),
+      ]);
+      const path = await save({
+        defaultPath,
+        filters: [{ name: "SVG", extensions: ["svg"] }],
+      });
+      if (!path) return;
+      await writeTextFile(path, svgContent);
+    } else {
+      const blob = new Blob([svgContent], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = defaultPath;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
     toast(t("diagram.exportedSvg"));
   } catch (e: any) {
     toast(t("diagram.exportSvgFailed", { message: e?.message || String(e) }), 5000);

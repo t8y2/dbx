@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
-import * as api from "@/lib/tauri";
-import type { RedisValue } from "@/lib/tauri";
+import * as api from "@/lib/api";
+import type { RedisValue } from "@/lib/api";
 
 const { t } = useI18n();
 

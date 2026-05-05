@@ -17,7 +17,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import type { DatabaseType, QueryResult, TreeNode, TreeNodeType } from "@/types/database";
-import * as api from "@/lib/tauri";
+import * as api from "@/lib/api";
 import {
   DATABASE_EXPORT_PAGE_SIZE,
   DATABASE_EXPORT_ROW_LIMIT,
@@ -27,6 +27,7 @@ import {
 } from "@/lib/databaseExport";
 import { qualifiedTableName as buildQualifiedTableName, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { treeNodeRowAction } from "@/lib/treeNodeClick";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -364,6 +365,23 @@ async function fetchExportTableRows(
   };
 }
 
+async function saveFileContent(content: string, defaultFileName: string, filterName: string, filterExt: string) {
+  if (isTauriRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({ defaultPath: defaultFileName, filters: [{ name: filterName, extensions: [filterExt] }] });
+    if (path) await writeTextFile(path, content);
+  } else {
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = defaultFileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function exportDatabase() {
   const node = props.node;
   if (!(node.type === "database" || node.type === "schema") || !node.connectionId || !node.database) return;
@@ -400,15 +418,7 @@ async function exportDatabase() {
       rowLimitPerTable: DATABASE_EXPORT_ROW_LIMIT,
     });
 
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: `${safeFileName(scopeName)}.sql`,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
-    });
-    if (!path) return;
-
-    await writeTextFile(path, content);
+    await saveFileContent(content, `${safeFileName(scopeName)}.sql`, "SQL", "sql");
     toast(t("contextMenu.exportDatabaseSuccess", { count: exportedTables.length, limit: DATABASE_EXPORT_ROW_LIMIT }), 3000);
   } catch (e: any) {
     console.error("Export database failed:", e);
@@ -424,10 +434,7 @@ async function exportStructure() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const ddl = await api.getTableDdl(node.connectionId, node.database, node.schema || node.database, node.label);
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({ defaultPath: `${node.label}.sql`, filters: [{ name: "SQL", extensions: ["sql"] }] });
-    if (path) await writeTextFile(path, ddl + "\n");
+    await saveFileContent(ddl + "\n", `${node.label}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
   }
@@ -445,9 +452,6 @@ async function exportData(format: "csv" | "json" | "sql") {
       ? `${quoteIdent(node.schema)}.${quoteIdent(node.label)}`
       : quoteIdent(node.label);
     const result = await api.executeQuery(node.connectionId, node.database, `SELECT * FROM ${qualifiedName}`);
-
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
 
     let content: string;
     let ext: string;
@@ -480,8 +484,7 @@ async function exportData(format: "csv" | "json" | "sql") {
       content = lines.join("\n");
     }
 
-    const path = await save({ defaultPath: `${node.label}.${ext}`, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
-    if (path) await writeTextFile(path, content);
+    await saveFileContent(content, `${node.label}.${ext}`, ext.toUpperCase(), ext);
   } catch (e: any) {
     console.error("Export data failed:", e);
   }

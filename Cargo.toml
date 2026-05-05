@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/dbx-core", "src-web"]
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

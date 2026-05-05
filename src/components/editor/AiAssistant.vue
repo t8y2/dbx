@@ -21,14 +21,17 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSettingsStore, type AiProvider, type AiApiStyle } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIconType } from "@/lib/connectionPresentation";
+import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { buildAiContext, runAiStream, type AiAction } from "@/lib/ai";
 import {
-  listDatabases, redisListDatabases, mongoListDatabases, aiTestConnection, aiCancelStream,
+  aiTestConnection, aiCancelStream,
   saveAiConversation, loadAiConversations, deleteAiConversation, type AiConversation,
-} from "@/lib/tauri";
-import type { AiMessage } from "@/lib/tauri";
+} from "@/lib/api";
+import type { AiMessage } from "@/lib/api";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
+import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -97,23 +100,16 @@ const isWaitingForFirstDelta = computed(() => {
 const activePlaceholder = computed(() => t(`ai.placeholders.${activeAction.value}`));
 
 
-const databaseOptions = ref<string[]>([]);
+const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
+
+const dbOptions = computed(() => {
+  if (!props.connection) return [];
+  return allDbOptions.value[props.connection.id] || [];
+});
 
 async function loadDatabases() {
   if (!props.connection) return;
-  try {
-    if (props.connection.db_type === "redis") {
-      const dbs = await redisListDatabases(props.connection.id);
-      databaseOptions.value = dbs.map(String);
-    } else if (props.connection.db_type === "mongodb") {
-      databaseOptions.value = await mongoListDatabases(props.connection.id);
-    } else {
-      const list = await listDatabases(props.connection.id);
-      databaseOptions.value = list.map((d: { name: string }) => d.name);
-    }
-  } catch {
-    databaseOptions.value = [];
-  }
+  await loadDatabaseOptions(props.connection.id);
 }
 
 function changeConnection(connectionId: string) {
@@ -525,14 +521,18 @@ function formatInlineText(text: string): string {
     <div class="p-2">
       <div class="rounded-lg border bg-background px-2 pb-2 pt-1">
         <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
-          <Server class="h-3 w-3 shrink-0" />
+          <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+          <Server v-else class="h-3 w-3 shrink-0" />
           <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
             <SelectTrigger class="h-5 w-auto border-0 rounded-none bg-transparent p-0 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
               <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t('editor.selectConnection') }}</SelectValue>
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent class="min-w-48">
               <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
-                {{ conn.name }}
+                <div class="flex min-w-0 items-center gap-2">
+                  <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
+                  <span class="truncate">{{ conn.name }}</span>
+                </div>
               </SelectItem>
             </SelectContent>
           </Select>
@@ -543,8 +543,8 @@ function formatInlineText(text: string): string {
                 <SelectValue :placeholder="t('editor.selectDatabase')">{{ tab?.database || t('editor.selectDatabase') }}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
-                <SelectItem v-if="!databaseOptions.length && tab?.database" :value="tab.database">{{ tab.database }}</SelectItem>
+                <SelectItem v-for="db in dbOptions" :key="db" :value="db">{{ db }}</SelectItem>
+                <SelectItem v-if="!dbOptions.length && tab?.database" :value="tab.database">{{ tab.database }}</SelectItem>
               </SelectContent>
             </Select>
           </template>
@@ -614,15 +614,15 @@ function formatInlineText(text: string): string {
         </div>
         <div class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">API Key</Label>
-          <Input v-model="tempApiKey" type="password" class="col-span-2 h-8 text-xs" />
+          <Input v-model="tempApiKey" type="password" autocomplete="off" class="col-span-2 h-8 text-xs" />
         </div>
         <div class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">Endpoint</Label>
-          <Input v-model="tempEndpoint" placeholder="https://api.openai.com/v1" class="col-span-2 h-8 text-xs" />
+          <Input v-model="tempEndpoint" placeholder="https://api.openai.com/v1" autocomplete="off" class="col-span-2 h-8 text-xs" />
         </div>
         <div class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">Model</Label>
-          <Input v-model="tempModel" class="col-span-2 h-8 text-xs" />
+          <Input v-model="tempModel" autocomplete="off" class="col-span-2 h-8 text-xs" />
         </div>
         <div v-if="tempProvider !== 'claude'" class="grid grid-cols-3 items-center gap-3">
           <Label class="text-right text-xs">API</Label>
@@ -634,7 +634,7 @@ function formatInlineText(text: string): string {
       </div>
       <DialogFooter class="flex items-center gap-2">
         <div class="flex-1 flex items-center gap-2">
-          <Button size="sm" variant="outline" :disabled="testingAi || !tempApiKey.trim() || !tempEndpoint.trim() || !tempModel.trim()" @click="testAiConnection">
+          <Button size="sm" variant="outline" :disabled="testingAi || !tempApiKey?.trim() || !tempEndpoint?.trim() || !tempModel?.trim()" @click="testAiConnection">
             <Loader2 v-if="testingAi" class="h-3 w-3 animate-spin mr-1" />
             {{ t('connection.test') }}
           </Button>

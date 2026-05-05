@@ -13,8 +13,8 @@ import {
 } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import * as api from "@/lib/tauri";
-import type { TransferProgress } from "@/lib/tauri";
+import * as api from "@/lib/api";
+import type { TransferProgress } from "@/lib/api";
 import type { DatabaseType } from "@/types/database";
 import { nextTransferTerminalState } from "@/lib/transferProgressState";
 import {

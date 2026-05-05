@@ -5,8 +5,38 @@ import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
-import { loadConnections, findConnection } from "./connections.js";
-import { listTables, describeTable, executeQuery } from "./database.js";
+import { loadConnections as desktopLoadConnections, findConnection as desktopFindConnection } from "./connections.js";
+import {
+  listTables as desktopListTables,
+  describeTable as desktopDescribeTable,
+  executeQuery as desktopExecuteQuery,
+} from "./database.js";
+import type { ConnectionConfig } from "./connections.js";
+import type { TableInfo, ColumnInfo, QueryResult } from "./database.js";
+
+const isWebMode = !!process.env.DBX_WEB_URL;
+
+interface Backend {
+  loadConnections(): Promise<ConnectionConfig[]>;
+  findConnection(name: string): Promise<ConnectionConfig | undefined>;
+  listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]>;
+  describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]>;
+  executeQuery(config: ConnectionConfig, sql: string): Promise<QueryResult>;
+}
+
+let backend: Backend;
+if (isWebMode) {
+  const web = await import("./web-backend.js");
+  backend = web;
+} else {
+  backend = {
+    loadConnections: desktopLoadConnections,
+    findConnection: desktopFindConnection,
+    listTables: desktopListTables,
+    describeTable: desktopDescribeTable,
+    executeQuery: desktopExecuteQuery,
+  };
+}
 
 function text(s: string) {
   return { content: [{ type: "text" as const, text: s }] };
@@ -30,7 +60,7 @@ server.tool(
   "List all database connections configured in DBX",
   {},
   async () => {
-    const connections = await loadConnections();
+    const connections = await backend.loadConnections();
     if (connections.length === 0) return text("No connections configured in DBX.");
     const rows = connections.map((c) => [c.name, c.db_type, c.host, String(c.port), c.database || ""]);
     return text(mdTable(["Name", "Type", "Host", "Port", "Database"], rows));
@@ -45,9 +75,9 @@ server.tool(
     schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
   },
   async ({ connection_name, schema }) => {
-    const config = await findConnection(connection_name);
+    const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
-    const tables = await listTables(config, schema);
+    const tables = await backend.listTables(config, schema);
     if (tables.length === 0) return text("No tables found.");
     const rows = tables.map((t) => [t.name, t.type]);
     return text(mdTable(["Table", "Type"], rows));
@@ -63,9 +93,9 @@ server.tool(
     schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
   },
   async ({ connection_name, table, schema }) => {
-    const config = await findConnection(connection_name);
+    const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
-    const columns = await describeTable(config, table, schema);
+    const columns = await backend.describeTable(config, table, schema);
     if (columns.length === 0) return text("No columns found.");
     const rows = columns.map((c) => [
       c.is_primary_key ? `${c.name} (PK)` : c.name,
@@ -86,10 +116,10 @@ server.tool(
     sql: z.string().describe("SQL query to execute"),
   },
   async ({ connection_name, sql }) => {
-    const config = await findConnection(connection_name);
+    const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
     try {
-      const result = await executeQuery(config, sql);
+      const result = await backend.executeQuery(config, sql);
       if (result.columns.length === 0) return text(`Query executed. ${result.row_count} row(s) affected.`);
       const rows = result.rows.map((r) => result.columns.map((c) => formatCell(r[c])));
       return text(`${mdTable(result.columns, rows)}\n\n${result.row_count} row(s)`);
@@ -124,32 +154,35 @@ async function getBridgeUrl(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-server.tool(
-  "dbx_open_table",
-  "Open a table in DBX desktop app UI. Requires DBX to be running.",
-  {
-    connection_name: z.string().describe("Name of the DBX connection"),
-    table: z.string().describe("Table name to open"),
-    database: z.string().optional().describe("Database name"),
-    schema: z.string().optional().describe("Schema name"),
-  },
-  async ({ connection_name, table, database, schema }) => {
-    return bridgeRequest("/open-table", { connection_name, table, database, schema }, `Opened ${table} in DBX`);
-  },
-);
+// Desktop-only tools: open table and execute-and-show require the Tauri bridge
+if (!isWebMode) {
+  server.tool(
+    "dbx_open_table",
+    "Open a table in DBX desktop app UI. Requires DBX to be running.",
+    {
+      connection_name: z.string().describe("Name of the DBX connection"),
+      table: z.string().describe("Table name to open"),
+      database: z.string().optional().describe("Database name"),
+      schema: z.string().optional().describe("Schema name"),
+    },
+    async ({ connection_name, table, database, schema }) => {
+      return bridgeRequest("/open-table", { connection_name, table, database, schema }, `Opened ${table} in DBX`);
+    },
+  );
 
-server.tool(
-  "dbx_execute_and_show",
-  "Execute a SQL query in DBX desktop app UI and show results there. Requires DBX to be running.",
-  {
-    connection_name: z.string().describe("Name of the DBX connection"),
-    sql: z.string().describe("SQL query to execute"),
-    database: z.string().optional().describe("Database name"),
-  },
-  async ({ connection_name, sql, database }) => {
-    return bridgeRequest("/execute-query", { connection_name, sql, database }, "Query sent to DBX");
-  },
-);
+  server.tool(
+    "dbx_execute_and_show",
+    "Execute a SQL query in DBX desktop app UI and show results there. Requires DBX to be running.",
+    {
+      connection_name: z.string().describe("Name of the DBX connection"),
+      sql: z.string().describe("SQL query to execute"),
+      database: z.string().optional().describe("Database name"),
+    },
+    async ({ connection_name, sql, database }) => {
+      return bridgeRequest("/execute-query", { connection_name, sql, database }, "Query sent to DBX");
+    },
+  );
+}
 
 async function bridgeRequest(path: string, body: Record<string, unknown>, successMsg: string) {
   try {

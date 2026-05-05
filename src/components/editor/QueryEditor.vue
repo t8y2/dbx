@@ -24,6 +24,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   "selectionChange": [value: string];
+  "cursorChange": [pos: number];
   "formatError": [message: string];
   execute: [sql: string];
 }>();
@@ -245,6 +246,7 @@ onMounted(async () => {
         }
         if (update.selectionSet || update.docChanged) {
           emit("selectionChange", selectedSqlFromView(update.view));
+          emit("cursorChange", update.state.selection.main.head);
         }
       }),
       fontThemeComp.of(

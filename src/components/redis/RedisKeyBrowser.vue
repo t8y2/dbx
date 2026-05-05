@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import RedisValueViewer from "./RedisValueViewer.vue";
-import * as api from "@/lib/tauri";
-import type { RedisKeyInfo } from "@/lib/tauri";
+import * as api from "@/lib/api";
+import type { RedisKeyInfo } from "@/lib/api";
 
 const { t } = useI18n();
 

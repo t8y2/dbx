@@ -22,6 +22,10 @@ export default {
     failed: "Failed to check updates: {error}",
     rateLimited: "GitHub update checks are temporarily rate limited. You can still open the release page to check manually.",
     openRelease: "Open Release",
+    downloadAndInstall: "Download & Install",
+    downloading: "Downloading {progress}%",
+    downloadFailed: "Update download failed: {error}",
+    restart: "Restart Now",
   },
   sidebar: {
     connections: "CONNECTIONS",
@@ -613,6 +617,9 @@ export default {
     selectTheme: "Select theme...",
     apply: "Apply",
     resetDefaults: "Reset Defaults",
+    executeMode: "Execute Mode (Cmd+Enter)",
+    executeModeAll: "Execute all SQL",
+    executeModeCurrent: "Execute statement at cursor",
     preview: "Live Preview",
   },
 };

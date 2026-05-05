@@ -1,83 +1,119 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, type Ref } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Play, Loader2, Square, X, Globe, Moon, Sun, Upload, Download, Plus, History, Table2, Database, Search, ShieldCheck, Bot, Pin, AlignLeft, CloudDownload, ArrowLeftRight, FileCode, Settings, Sparkles, GitBranch, ChevronRight } from "lucide-vue-next";
-import { Splitpanes, Pane } from "splitpanes";
-import "splitpanes/dist/splitpanes.css";
-import { Button } from "@/components/ui/button";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-} from "@/components/ui/dialog";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
-import ConnectionDialog from "@/components/connection/ConnectionDialog.vue";
-import QueryEditor from "@/components/editor/QueryEditor.vue";
-import DataGrid from "@/components/grid/DataGrid.vue";
-import RedisKeyBrowser from "@/components/redis/RedisKeyBrowser.vue";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import AiAssistant from "@/components/editor/AiAssistant.vue";
-import MongoDocBrowser from "@/components/mongo/MongoDocBrowser.vue";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import QueryHistory from "@/components/editor/QueryHistory.vue";
-import EditorSettingsDialog from "@/components/editor/EditorSettingsDialog.vue";
-import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
-const DataTransferDialog = defineAsyncComponent(() => import("@/components/transfer/DataTransferDialog.vue"));
-const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/SchemaDiffDialog.vue"));
-const SqlFileExecutionDialog = defineAsyncComponent(() => import("@/components/sql-file/SqlFileExecutionDialog.vue"));
-const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diagram/SchemaDiagramDialog.vue"));
-const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
-const TableStructureEditorDialog = defineAsyncComponent(() => import("@/components/structure/TableStructureEditorDialog.vue"));
-const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
-const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
-const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
-const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
-import type { ConnectionConfig } from "@/types/database";
+import AppToolbar from "@/components/layout/AppToolbar.vue";
+import AppTabBar from "@/components/layout/AppTabBar.vue";
+import AppSidebar from "@/components/layout/AppSidebar.vue";
+import EditorToolbar from "@/components/layout/EditorToolbar.vue";
+import ContentArea from "@/components/layout/ContentArea.vue";
+import AppDialogs from "@/components/layout/AppDialogs.vue";
+import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
+import UpdateDialog from "@/components/layout/UpdateDialog.vue";
+import LoginPage from "@/components/auth/LoginPage.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSettingsStore, EDITOR_THEMES } from "@/stores/settingsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { setLocale, currentLocale, type Locale } from "@/i18n";
-import { getCurrentWindow, type Theme } from "@tauri-apps/api/window";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { getVersion } from "@tauri-apps/api/app";
-import * as api from "@/lib/tauri";
-import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
-import { connectionDriverLabel, connectionIconType, connectionOptionSubtitle } from "@/lib/connectionPresentation";
+import { useTheme } from "@/composables/useTheme";
+import { useAppUpdater } from "@/composables/useAppUpdater";
+import { useFileDrop } from "@/composables/useFileDrop";
+import { usePanelResize } from "@/composables/usePanelResize";
+import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
+import { useSqlExecution } from "@/composables/useSqlExecution";
+import { useDialogSources } from "@/composables/useDialogSources";
+import { useNavigationTargets } from "@/composables/useNavigationTargets";
+import { useDataGridActions } from "@/composables/useDataGridActions";
+import { useTauriEvents } from "@/composables/useTauriEvents";
+import { setLocale, currentLocale } from "@/i18n";
+import * as api from "@/lib/api";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
-import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
-import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCloseTabShortcut, isExecuteSqlShortcut } from "@/lib/keyboardShortcuts";
+import { isPreviewTab } from "@/lib/tabPresentation";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
-const historyStore = useHistoryStore();
 const settingsStore = useSettingsStore();
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
+const { isDark, applyTheme, toggleTheme } = useTheme();
+const {
+  checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog,
+  isDownloadingUpdate, downloadProgress, updateReady,
+  openUrl, checkUpdates, openLatestRelease,
+  downloadAndInstallUpdate, restartApp,
+} = useAppUpdater();
+const { setupFileDrop } = useFileDrop();
+
+const isDesktop = isTauriRuntime();
+const needsAuth = ref(!isDesktop);
+const authenticated = ref(isDesktop);
 
 const showConnectionDialog = ref(false);
 const showSettingsDialog = ref(false);
 const showHistory = ref(false);
 const showAiPanel = ref(localStorage.getItem("dbx-ai-panel-open") !== "false");
-const aiPanelWidth = ref(Number(localStorage.getItem("dbx-ai-panel-width")) || 360);
+const {
+  sidebarWidth, aiPanelWidth, historyWidth,
+  startSidebarResize, startAiPanelResize, startHistoryResize,
+} = usePanelResize();
 const aiAssistantRef = ref<InstanceType<typeof AiAssistant> | null>(null);
-const sidebarWidth = ref(Number(localStorage.getItem("dbx-sidebar-width")) || 260);
-const historyWidth = ref(Number(localStorage.getItem("dbx-history-width")) || 288);
+
+const selectedSql = ref("");
+const cursorPos = ref(0);
+const formatSqlRequestId = ref(0);
+const activeOutputView = ref<"result" | "explain">("result");
+
+const activeTab = computed(() =>
+  queryStore.tabs.find((t) => t.id === queryStore.activeTabId)
+);
+
+const activeConnection = computed(() => {
+  const tab = activeTab.value;
+  return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
+});
+
+const executableSql = computed(() => {
+  const tab = activeTab.value;
+  return tab ? resolveExecutableSql(tab.sql, selectedSql.value, {
+    mode: settingsStore.editorSettings.executeMode,
+    cursorPos: cursorPos.value,
+  }) : "";
+});
+
+const {
+  dangerSql, showDangerDialog,
+  tryExecute, cancelActiveExecution, tryExplain, onDangerConfirm,
+} = useSqlExecution({ activeTab, activeConnection, executableSql, activeOutputView });
+
+const dialogs = useDialogSources();
+const { getDatabaseOptions } = useDatabaseOptions();
+const { openLineageTarget, openDatabaseSearchTarget, onStructureEditorSaved, openTableTarget } =
+  useNavigationTargets(dialogs);
+const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
+const { setupTauriListeners } = useTauriEvents({ openTableTarget });
+
+const appVersion = ref("");
+const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
+const hasSqlFileConnections = computed(() =>
+  connectionStore.connections.some((c) => !sqlFileUnsupportedTypes.has(c.db_type))
+);
+const connectionStats = computed(() => ({
+  total: connectionStore.connections.length,
+  connected: connectionStore.connectedIds.size,
+  types: new Set(connectionStore.connections.map((c) => c.driver_profile || c.db_type)).size,
+}));
+const recentConnections = computed(() => connectionStore.connections.slice(0, 5));
+
+watch(() => queryStore.activeTabId, () => {
+  selectedSql.value = "";
+  activeOutputView.value = "result";
+});
 
 function toggleAiPanel() {
   showAiPanel.value = !showAiPanel.value;
@@ -89,540 +125,13 @@ function fixWithAi(errorMessage: string) {
     showAiPanel.value = true;
     localStorage.setItem("dbx-ai-panel-open", "true");
   }
-  nextTick(() => {
-    aiAssistantRef.value?.triggerAction("fix", errorMessage);
-  });
-}
-
-function startPanelResize(widthRef: Ref<number>, storageKey: string, direction: 'left' | 'right') {
-  return (e: MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = widthRef.value;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      const delta = ev.clientX - startX;
-      widthRef.value = Math.max(180, Math.min(800, startWidth + (direction === 'right' ? delta : -delta)));
-    };
-
-    const onMouseUp = () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      localStorage.setItem(storageKey, String(widthRef.value));
-    };
-
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  };
-}
-
-const startSidebarResize = startPanelResize(sidebarWidth, "dbx-sidebar-width", 'right');
-const startAiPanelResize = startPanelResize(aiPanelWidth, "dbx-ai-panel-width", 'left');
-const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", 'left');
-
-const showUpdateDialog = ref(false);
-const dangerSql = ref("");
-const pendingDangerSql = ref("");
-const selectedSql = ref("");
-const formatSqlRequestId = ref(0);
-const activeOutputView = ref<"result" | "explain">("result");
-const showDangerDialog = ref(false);
-const showTransferDialog = ref(false);
-const showSchemaDiffDialog = ref(false);
-const showSqlFileDialog = ref(false);
-const showDiagramDialog = ref(false);
-const showTableImportDialog = ref(false);
-const showStructureEditorDialog = ref(false);
-const showFieldLineageDialog = ref(false);
-const showDatabaseSearchDialog = ref(false);
-const showImportLayoutConfirm = ref(false);
-const pendingImportLayout = ref<import("@/types/database").SidebarLayout | null>(null);
-const showConfigPassphraseDialog = ref(false);
-const configPassphraseMode = ref<"export" | "import">("export");
-const configPassphraseError = ref("");
-const pendingImportContent = ref("");
-const transferPrefillConnectionId = ref("");
-const transferPrefillDatabase = ref("");
-const schemaDiffPrefillConnectionId = ref("");
-const schemaDiffPrefillDatabase = ref("");
-const sqlFilePrefillConnectionId = ref("");
-const sqlFilePrefillDatabase = ref("");
-const diagramPrefillConnectionId = ref("");
-const diagramPrefillDatabase = ref("");
-const diagramPrefillSchema = ref("");
-const diagramFocusTableName = ref("");
-const tableImportPrefillConnectionId = ref("");
-const tableImportPrefillDatabase = ref("");
-const tableImportPrefillSchema = ref("");
-const tableImportPrefillTable = ref("");
-const structurePrefillConnectionId = ref("");
-const structurePrefillDatabase = ref("");
-const structurePrefillSchema = ref("");
-const structurePrefillTable = ref("");
-const lineagePrefillConnectionId = ref("");
-const lineagePrefillDatabase = ref("");
-const lineagePrefillSchema = ref("");
-const lineagePrefillTable = ref("");
-const lineagePrefillColumn = ref("");
-const databaseSearchPrefillConnectionId = ref("");
-const databaseSearchPrefillDatabase = ref("");
-const databaseSearchPrefillSchema = ref("");
-type LineageNavigationTarget = {
-  connectionId: string;
-  database: string;
-  schema?: string;
-  tableName: string;
-  columnName?: string;
-};
-type DatabaseSearchNavigationTarget = {
-  connectionId: string;
-  database: string;
-  schema?: string;
-  tableName: string;
-  whereInput?: string;
-};
-const databaseOptions = ref<Record<string, string[]>>({});
-const loadingDatabaseOptions = ref<Record<string, boolean>>({});
-const checkingUpdates = ref(false);
-const updateInfo = ref<api.UpdateInfo | null>(null);
-const updateCheckMessage = ref("");
-const appVersion = ref("");
-const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
-const sqlFileUnsupportedTypes = new Set(["redis", "mongodb", "elasticsearch"]);
-
-const hasSqlFileConnections = computed(() =>
-  connectionStore.connections.some((connection) => !sqlFileUnsupportedTypes.has(connection.db_type))
-);
-
-const editConfig = computed(() => {
-  const id = connectionStore.editingConnectionId;
-  if (!id) return undefined;
-  return connectionStore.getConfig(id);
-});
-
-watch(editConfig, (v) => {
-  if (v) showConnectionDialog.value = true;
-});
-
-watch(showConnectionDialog, (v) => {
-  if (!v) connectionStore.stopEditing();
-});
-
-watch(() => connectionStore.transferSource, (v) => {
-  if (v) {
-    transferPrefillConnectionId.value = v.connectionId;
-    transferPrefillDatabase.value = v.database;
-    showTransferDialog.value = true;
-    connectionStore.transferSource = null;
-  }
-});
-
-watch(() => connectionStore.schemaDiffSource, (v) => {
-  if (v) {
-    schemaDiffPrefillConnectionId.value = v.connectionId;
-    schemaDiffPrefillDatabase.value = v.database;
-    showSchemaDiffDialog.value = true;
-    connectionStore.schemaDiffSource = null;
-  }
-});
-
-watch(() => connectionStore.sqlFileSource, (v) => {
-  if (v) {
-    sqlFilePrefillConnectionId.value = v.connectionId;
-    sqlFilePrefillDatabase.value = v.database;
-    showSqlFileDialog.value = true;
-    connectionStore.sqlFileSource = null;
-  }
-});
-
-watch(() => connectionStore.diagramSource, (v) => {
-  if (v) {
-    diagramPrefillConnectionId.value = v.connectionId;
-    diagramPrefillDatabase.value = v.database;
-    diagramPrefillSchema.value = v.schema ?? "";
-    diagramFocusTableName.value = v.tableName ?? "";
-    showDiagramDialog.value = true;
-    connectionStore.diagramSource = null;
-  }
-});
-
-watch(() => connectionStore.tableImportSource, (v) => {
-  if (v) {
-    tableImportPrefillConnectionId.value = v.connectionId;
-    tableImportPrefillDatabase.value = v.database;
-    tableImportPrefillSchema.value = v.schema ?? "";
-    tableImportPrefillTable.value = v.tableName;
-    showTableImportDialog.value = true;
-    connectionStore.tableImportSource = null;
-  }
-});
-
-watch(() => connectionStore.structureEditorSource, (v) => {
-  if (v) {
-    structurePrefillConnectionId.value = v.connectionId;
-    structurePrefillDatabase.value = v.database;
-    structurePrefillSchema.value = v.schema ?? "";
-    structurePrefillTable.value = v.tableName;
-    showStructureEditorDialog.value = true;
-    connectionStore.structureEditorSource = null;
-  }
-});
-
-watch(() => connectionStore.fieldLineageSource, (v) => {
-  if (v) {
-    lineagePrefillConnectionId.value = v.connectionId;
-    lineagePrefillDatabase.value = v.database;
-    lineagePrefillSchema.value = v.schema ?? "";
-    lineagePrefillTable.value = v.tableName;
-    lineagePrefillColumn.value = v.columnName;
-    showFieldLineageDialog.value = true;
-    connectionStore.fieldLineageSource = null;
-  }
-});
-
-watch(() => connectionStore.databaseSearchSource, (v) => {
-  if (v) {
-    databaseSearchPrefillConnectionId.value = v.connectionId;
-    databaseSearchPrefillDatabase.value = v.database;
-    databaseSearchPrefillSchema.value = v.schema ?? "";
-    showDatabaseSearchDialog.value = true;
-    connectionStore.databaseSearchSource = null;
-  }
-});
-
-async function onStructureEditorSaved() {
-  const tab = activeTab.value;
-  if (tab?.mode === "data" && tab.tableMeta?.tableName === structurePrefillTable.value) {
-    try {
-      const columns = await api.getColumns(
-        tab.connectionId,
-        tab.database,
-        tab.tableMeta.schema || tab.database,
-        tab.tableMeta.tableName,
-      );
-      queryStore.setTableMeta(tab.id, {
-        ...tab.tableMeta,
-        columns,
-        primaryKeys: columns.filter((column) => column.is_primary_key).map((column) => column.name),
-      });
-      await onReloadData();
-    } catch (e: any) {
-      toast(e?.message || String(e), 5000);
-    }
-  }
-}
-
-async function openLineageTarget(target: LineageNavigationTarget) {
-  showFieldLineageDialog.value = false;
-  connectionStore.activeConnectionId = target.connectionId;
-  const config = connectionStore.getConfig(target.connectionId);
-  const tabTitle = target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
-  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data");
-  queryStore.setExecuting(tabId, true);
-
-  try {
-    await connectionStore.ensureConnected(target.connectionId);
-    if (!config) throw new Error("Connection config not found");
-
-    const querySchema = target.schema || target.database;
-    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
-    const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
-    const sql = buildTableSelectSql({
-      databaseType: config.db_type,
-      schema: target.schema,
-      tableName: target.tableName,
-      primaryKeys,
-    });
-
-    queryStore.updateSql(tabId, sql);
-    queryStore.setTableMeta(tabId, {
-      schema: target.schema,
-      tableName: target.tableName,
-      columns,
-      primaryKeys,
-    });
-
-    await queryStore.executeTabSql(tabId, sql);
-  } catch (e: any) {
-    queryStore.setErrorResult(tabId, e);
-  }
-}
-
-async function openDatabaseSearchTarget(target: DatabaseSearchNavigationTarget) {
-  showDatabaseSearchDialog.value = false;
-  connectionStore.activeConnectionId = target.connectionId;
-  const config = connectionStore.getConfig(target.connectionId);
-  const tabTitle = target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
-  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data");
-  queryStore.setExecuting(tabId, true);
-
-  try {
-    await connectionStore.ensureConnected(target.connectionId);
-    if (!config) throw new Error("Connection config not found");
-
-    const querySchema = target.schema || target.database;
-    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
-    const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
-    const sql = buildTableSelectSql({
-      databaseType: config.db_type,
-      schema: target.schema,
-      tableName: target.tableName,
-      primaryKeys,
-      whereInput: target.whereInput,
-    });
-
-    queryStore.updateSql(tabId, sql);
-    queryStore.setTableMeta(tabId, {
-      schema: target.schema,
-      tableName: target.tableName,
-      columns,
-      primaryKeys,
-    });
-
-    await queryStore.executeTabSql(tabId, sql);
-  } catch (e: any) {
-    queryStore.setErrorResult(tabId, e);
-  }
-}
-
-function onExportClick() {
-  configPassphraseMode.value = "export";
-  configPassphraseError.value = "";
-  showConfigPassphraseDialog.value = true;
-}
-
-async function onExportConfirm(passphrase: string) {
-  try {
-    await connectionStore.exportConnectionsToFile(passphrase);
-    showConfigPassphraseDialog.value = false;
-    toast(t("configExport.exportSuccess"), 2000);
-  } catch (e: any) {
-    configPassphraseError.value = e?.message || String(e);
-  }
-}
-
-async function onImportClick() {
-  try {
-    const result = await connectionStore.readImportFile();
-    if (!result) return;
-    pendingImportContent.value = result.content;
-    if (result.encrypted) {
-      configPassphraseMode.value = "import";
-      configPassphraseError.value = "";
-      showConfigPassphraseDialog.value = true;
-    } else {
-      const { count, layout } = await connectionStore.importConnectionsFromFile(result.content, null);
-      toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
-      if (layout && count > 0) {
-        pendingImportLayout.value = layout;
-        showImportLayoutConfirm.value = true;
-      }
-    }
-  } catch (e: any) {
-    toast(e?.message || String(e), 4000);
-  }
-}
-
-async function onImportConfirm(passphrase: string) {
-  try {
-    const { count, layout } = await connectionStore.importConnectionsFromFile(pendingImportContent.value, passphrase);
-    showConfigPassphraseDialog.value = false;
-    toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
-    if (layout && count > 0) {
-      pendingImportLayout.value = layout;
-      showImportLayoutConfirm.value = true;
-    }
-  } catch (e: any) {
-    configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : (e?.message || String(e));
-  }
-}
-
-function onConnectionConnectStarted(name: string) {
-  toast(t("connection.connecting", { name }), 30000);
-}
-
-function onConnectionConnectSucceeded(name: string) {
-  toast(t("connection.connectSuccess", { name }), 2000);
-}
-
-function onConnectionConnectFailed(message: string) {
-  toast(t("connection.connectFailed", { message }), 5000);
-}
-
-const activeTab = computed(() =>
-  queryStore.tabs.find((t) => t.id === queryStore.activeTabId)
-);
-
-const executableSql = computed(() => {
-  const tab = activeTab.value;
-  return tab ? resolveExecutableSql(tab.sql, selectedSql.value) : "";
-});
-
-watch(() => queryStore.activeTabId, () => {
-  selectedSql.value = "";
-  pendingDangerSql.value = "";
-  activeOutputView.value = "result";
-});
-
-const activeConnection = computed(() => {
-  const tab = activeTab.value;
-  return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
-});
-
-const activeSqlFormatDialect = computed<SqlFormatDialect>(() => {
-  switch (activeConnection.value?.db_type) {
-    case "mysql":
-      return "mysql";
-    case "postgres":
-      return "postgres";
-    case "sqlite":
-      return "sqlite";
-    case "sqlserver":
-      return "sqlserver";
-    default:
-      return "generic";
-  }
-});
-
-const editorDialect = computed<"mysql" | "postgres">(() =>
-  activeConnection.value?.db_type === "postgres" ? "postgres" : "mysql"
-);
-
-const activeDatabaseOptions = computed(() => {
-  const connection = activeConnection.value;
-  return connection ? databaseOptions.value[connection.id] ?? [] : [];
-});
-
-const activeDatabaseValue = computed(() => activeTab.value?.database || "");
-const activeConnectionValue = computed(() => activeConnection.value?.id || "");
-const connectionStats = computed(() => {
-  const total = connectionStore.connections.length;
-  const connected = connectionStore.connectedIds.size;
-  const types = new Set(connectionStore.connections.map((connection) => connection.driver_profile || connection.db_type)).size;
-  return { total, connected, types };
-});
-
-const recentConnections = computed(() => connectionStore.connections.slice(0, 5));
-
-function connectionDisplayName(connectionId: string): string {
-  return connectionStore.getConfig(connectionId)?.name || connectionId;
-}
-
-function connectionColor(connectionId: string): string {
-  return connectionStore.getConfig(connectionId)?.color || "";
-}
-
-function databaseDisplayName(database: string): string {
-  const connection = activeConnection.value;
-  if (connection?.db_type === "redis" && database !== "") return `db${database}`;
-  return database || t("editor.noDatabase");
-}
-
-function isPreviewTab(tab: typeof queryStore.tabs[number]): boolean {
-  const config = connectionStore.getConfig(tab.connectionId);
-  return !!config?.name.startsWith("[Preview]");
-}
-
-function tabDisplayTitle(tab: typeof queryStore.tabs[number]): string {
-  if (isPreviewTab(tab)) return tab.title;
-  const database = databaseDisplayNameForTab(tab.connectionId, tab.database);
-  if (tab.mode === "data" && tab.tableMeta?.tableName) {
-    return tab.tableMeta.tableName;
-  }
-  if (tab.mode === "query") {
-    return `${connectionDisplayName(tab.connectionId)} | ${database}`;
-  }
-  if (tab.mode === "mongo" && tab.sql) {
-    return `${database} | ${tab.sql}`;
-  }
-  if (tab.mode === "redis") {
-    return `${connectionDisplayName(tab.connectionId)} | ${database}`;
-  }
-  return tab.title;
-}
-
-function tabTooltipLines(tab: typeof queryStore.tabs[number]): { label: string; value: string }[] {
-  const connName = connectionDisplayName(tab.connectionId);
-  const database = databaseDisplayNameForTab(tab.connectionId, tab.database);
-  const lines: { label: string; value: string }[] = [
-    { label: t("tabs.tooltipConnection"), value: connName },
-    { label: t("tabs.tooltipDatabase"), value: database },
-  ];
-  if (tab.mode === "data" && tab.tableMeta?.tableName) {
-    lines.push({ label: t("tabs.tooltipTable"), value: tab.tableMeta.tableName });
-  }
-  if (tab.mode === "mongo" && tab.sql) {
-    lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });
-  }
-  return lines;
-}
-
-function tabModeLabel(tab: typeof queryStore.tabs[number]): string {
-  if (tab.mode === "data") return t("tabs.table");
-  if (tab.mode === "query") return t("tabs.sql");
-  if (tab.mode === "mongo") return t("tabs.mongo");
-  if (tab.mode === "redis") return t("tabs.redis");
-  return tab.mode;
-}
-
-function databaseDisplayNameForTab(connectionId: string, database: string): string {
-  const connection = connectionStore.getConfig(connectionId);
-  if (connection?.db_type === "redis" && database !== "") return `db${database}`;
-  return database || t("editor.noDatabase");
-}
-
-async function loadDatabaseOptions(connectionId: string) {
-  const connection = connectionStore.getConfig(connectionId);
-  if (!connection || loadingDatabaseOptions.value[connectionId]) return;
-
-  loadingDatabaseOptions.value[connectionId] = true;
-  try {
-    await connectionStore.ensureConnected(connectionId);
-    if (connection.db_type === "redis") {
-      const dbs = await api.redisListDatabases(connectionId);
-      databaseOptions.value[connectionId] = dbs.map(String);
-    } else if (connection.db_type === "mongodb") {
-      databaseOptions.value[connectionId] = await api.mongoListDatabases(connectionId);
-    } else {
-      const dbs = await api.listDatabases(connectionId);
-      databaseOptions.value[connectionId] = dbs.map((db) => db.name);
-    }
-  } finally {
-    loadingDatabaseOptions.value[connectionId] = false;
-  }
-}
-
-async function getDatabaseOptions(connectionId: string): Promise<string[]> {
-  if (!databaseOptions.value[connectionId]) {
-    await loadDatabaseOptions(connectionId);
-  }
-  return databaseOptions.value[connectionId] ?? [];
-}
-
-watch(activeConnection, (connection) => {
-  if (connection && !databaseOptions.value[connection.id]) {
-    loadDatabaseOptions(connection.id).catch(() => {});
-  }
-}, { immediate: true });
-
-function onEditorUpdate(val: string) {
-  if (queryStore.activeTabId) {
-    queryStore.updateSql(queryStore.activeTabId, val);
-  }
-}
-
-function onEditorSelectionChange(val: string) {
-  selectedSql.value = val;
+  nextTick(() => aiAssistantRef.value?.triggerAction("fix", errorMessage));
 }
 
 function formatActiveSql() {
   const tab = activeTab.value;
   if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
   formatSqlRequestId.value++;
-}
-
-function onFormatSqlError() {
-  toast(t("toolbar.formatSqlFailed"));
 }
 
 function newQuery() {
@@ -638,208 +147,35 @@ async function openConnectionQuery(connectionId: string) {
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
   const options = await getDatabaseOptions(connectionId);
-  const database = connection.database || options[0] || "";
   connectionStore.activeConnectionId = connectionId;
-  queryStore.createTab(connectionId, database);
+  queryStore.createTab(connectionId, connection.database || options[0] || "");
 }
 
-const tabsContainerRef = ref<HTMLElement | null>(null);
-const canScrollLeft = ref(false);
-const canScrollRight = ref(false);
-
-function updateScrollButtons() {
-  const el = tabsContainerRef.value;
-  if (!el) {
-    canScrollLeft.value = false;
-    canScrollRight.value = false;
-    return;
-  }
-  canScrollLeft.value = el.scrollLeft > 0;
-  canScrollRight.value = el.scrollLeft < el.scrollWidth - el.clientWidth - 1;
-}
-
-function scrollTabs(direction: "left" | "right") {
-  const el = tabsContainerRef.value;
-  if (!el) return;
-  const scrollAmount = el.clientWidth * 0.8;
-  el.scrollBy({ left: direction === "left" ? -scrollAmount : scrollAmount, behavior: "smooth" });
-}
-
-watch(() => queryStore.tabs.length, () => {
-  nextTick(updateScrollButtons);
-});
-
-watch(() => queryStore.activeTabId, () => {
-  nextTick(() => {
-    const container = tabsContainerRef.value;
-    if (!container) return;
-    const activeEl = container.querySelector('[data-active-tab="true"]');
-    if (activeEl) {
-      activeEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-    }
-    updateScrollButtons();
-  });
-});
-
-const DANGER_RE = /\b(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
-
-function stripSqlComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--.*$/gm, " ")
-    .replace(/#.*$/gm, " ");
-}
-
-function isDangerousSql(sql: string): boolean {
-  return DANGER_RE.test(stripSqlComments(sql));
-}
-
-function tryExecute(sqlOverride?: string) {
-  const tab = activeTab.value;
-  const sql = sqlOverride ?? executableSql.value;
-  if (!tab || !sql.trim()) return;
-  if (isDangerousSql(sql)) {
-    dangerSql.value = sql;
-    pendingDangerSql.value = sql;
-    showDangerDialog.value = true;
-  } else {
-    doExecute(sql);
-  }
-}
-
-async function doExecute(sql = executableSql.value) {
-  const tab = activeTab.value;
-  if (!tab || !sql.trim()) return;
-  activeOutputView.value = "result";
-  const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
-  const start = Date.now();
-  await queryStore.executeCurrentSql(sql);
-  const elapsed = Date.now() - start;
-  const success = !tab.result?.columns.includes("Error");
-  historyStore.add({
-    connection_name: connName,
-    database: tab.database,
-    sql,
-    execution_time_ms: elapsed,
-    success,
-    error: success ? undefined : String(tab.result?.rows?.[0]?.[0] ?? ""),
-  });
-}
-
-function cancelActiveExecution() {
+async function changeActiveConnection(connectionId: string) {
   const tab = activeTab.value;
   if (!tab) return;
-  if (tab.isExecuting) void queryStore.cancelTabExecution(tab.id);
-  else if (tab.isExplaining) void queryStore.cancelTabExplain(tab.id);
-}
-
-function explainReasonMessage(reason: string): string {
-  if (reason === "unsupported") return t("explain.unsupported");
-  if (reason === "unsafe") return t("explain.unsafe");
-  return t("explain.emptySql");
-}
-
-async function tryExplain(sqlOverride?: string) {
-  const tab = activeTab.value;
-  const sql = sqlOverride ?? executableSql.value;
-  if (!tab || !sql.trim()) {
-    toast(t("explain.emptySql"));
-    return;
-  }
-
-  activeOutputView.value = "explain";
-  const result = await queryStore.explainTabSql(tab.id, sql, activeConnection.value?.db_type);
-  if (!result.ok) {
-    toast(explainReasonMessage(result.reason), 5000);
-    return;
-  }
-
-  const current = activeTab.value;
-  if (current?.explainError) toast(current.explainError, 5000);
-}
-
-function onDangerConfirm() {
-  const sql = pendingDangerSql.value || executableSql.value;
-  pendingDangerSql.value = "";
-  doExecute(sql);
-}
-
-function onHistoryRestore(sql: string) {
-  if (queryStore.activeTabId) {
-    queryStore.updateSql(queryStore.activeTabId, sql);
-  }
-}
-
-function replaceActiveSql(sql: string) {
-  const tab = activeTab.value;
-  if (!tab) return;
-  queryStore.updateSql(tab.id, sql);
-}
-
-function changeActiveDatabase(database: any) {
-  const tab = activeTab.value;
-  if (!tab || typeof database !== "string") return;
-  queryStore.updateDatabase(tab.id, database);
-}
-
-async function changeActiveConnection(connectionId: any) {
-  const tab = activeTab.value;
-  if (!tab || typeof connectionId !== "string") return;
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
   const options = await getDatabaseOptions(connectionId);
-  const database = connection.database || options[0] || "";
-  queryStore.updateConnection(tab.id, connectionId, database);
+  queryStore.updateConnection(tab.id, connectionId, connection.database || options[0] || "");
   connectionStore.activeConnectionId = connectionId;
 }
 
-async function onExecuteSql(sql: string) {
+function changeActiveDatabase(database: string) {
   const tab = activeTab.value;
-  if (!tab) return;
-  queryStore.updateSql(tab.id, sql);
-  await queryStore.executeTabSql(tab.id, sql);
+  if (tab) queryStore.updateDatabase(tab.id, database);
 }
 
-async function onReloadData() {
+function toggleLocale() { setLocale(currentLocale() === "zh-CN" ? "en" : "zh-CN"); }
+function openGitHub() { openUrl("https://github.com/t8y2/dbx"); }
+function openMcpGuide() { openUrl("https://github.com/t8y2/dbx/blob/main/docs/mcp-guide.md"); }
+
+function ensureQueryTab(): string {
   const tab = activeTab.value;
-  if (!tab) return;
-  if (tab.mode === "data" && tab.tableMeta) {
-    queryStore.updateSql(tab.id, buildTableSql(tab));
-  }
-  queryStore.executeCurrentTab();
-}
-
-type ActiveTab = NonNullable<typeof activeTab.value>;
-
-function quoteIdent(tab: ActiveTab, name: string): string {
-  const config = connectionStore.getConfig(tab.connectionId);
-  return quoteTableIdentifier(config?.db_type, name);
-}
-
-function buildTableSql(
-  tab: NonNullable<typeof activeTab.value>,
-  options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {},
-): string {
-  const config = connectionStore.getConfig(tab.connectionId);
-  const fallbackOrderColumns = config?.db_type === "sqlserver" && !tab.tableMeta?.primaryKeys?.length
-    ? tab.tableMeta?.columns.slice(0, 1).map((column) => column.name)
-    : undefined;
-  return buildTableSelectSql({
-    databaseType: config?.db_type,
-    schema: tab.tableMeta?.schema,
-    tableName: tab.tableMeta?.tableName ?? "",
-    primaryKeys: tab.tableMeta?.primaryKeys,
-    fallbackOrderColumns,
-    ...options,
-  });
-}
-
-async function onPaginate(offset: number, limit: number, whereInput?: string) {
-  const tab = activeTab.value;
-  if (!tab?.tableMeta) return;
-  const sql = buildTableSql(tab, { limit, offset, whereInput });
-  queryStore.updateSql(tab.id, sql);
-  await queryStore.executeCurrentTab();
+  if (tab && tab.mode === "query") return tab.id;
+  const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
+  const db = tab?.database || "";
+  return queryStore.createTab(connId, db, undefined, "query");
 }
 
 async function onSort(column: string, direction: "asc" | "desc" | null, whereInput?: string) {
@@ -933,39 +269,25 @@ async function checkUpdates(options: { silent?: boolean } = {}) {
   } finally {
     checkingUpdates.value = false;
   }
+function onAiReplaceSql(sql: string) {
+  const tabId = ensureQueryTab();
+  queryStore.updateSql(tabId, sql);
 }
 
-function formatUpdateError(message: string): string {
-  const lower = message.toLowerCase();
-  if (lower.includes("403") || lower.includes("rate limit")) {
-    return t("updates.rateLimited");
-  }
-  return t("updates.failed", { error: message });
-}
-
-function openLatestRelease() {
-  const url = updateInfo.value?.release_url || latestReleaseUrl;
-  open(url);
-}
-
-function isQueryEditorTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest("[data-query-editor-root]");
+function onAiExecuteSql(sql: string) {
+  const tabId = ensureQueryTab();
+  queryStore.updateSql(tabId, sql);
+  nextTick(() => tryExecute());
 }
 
 function handleKeydown(e: KeyboardEvent) {
   if (isCloseTabShortcut(e)) {
     e.preventDefault();
-    if (queryStore.activeTabId) {
-      queryStore.closeTab(queryStore.activeTabId);
-    }
+    if (queryStore.activeTabId) queryStore.closeTab(queryStore.activeTabId);
     return;
   }
-
-  if (
-    activeTab.value?.mode === "query"
-    && isExecuteSqlShortcut(e)
-    && isQueryEditorTarget(e.target)
-  ) {
+  if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e)
+    && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
     tryExecute();
@@ -1049,72 +371,54 @@ function getDbType(path: string): "sqlite" | "duckdb" | null {
   if (lower.endsWith(".duckdb")) return "duckdb";
   if (DB_EXTENSIONS.some((ext) => lower.endsWith(ext))) return "sqlite";
   return null;
-}
-
-function getDataFileQuery(path: string): string | null {
-  const lower = path.toLowerCase();
-  const escaped = path.replace(/'/g, "''");
-  if (lower.endsWith(".parquet")) return `SELECT * FROM read_parquet('${escaped}') LIMIT 1000`;
-  if (lower.endsWith(".csv")) return `SELECT * FROM read_csv('${escaped}') LIMIT 1000`;
-  if (lower.endsWith(".tsv")) return `SELECT * FROM read_csv('${escaped}', delim='\t') LIMIT 1000`;
-  if (lower.endsWith(".json")) return `SELECT * FROM read_json('${escaped}') LIMIT 1000`;
-  return null;
-}
-
-async function setupFileDrop() {
-  const webview = getCurrentWebview();
-  await webview.onDragDropEvent(async (event) => {
-    if (event.payload.type !== "drop") return;
-    for (const path of event.payload.paths) {
-      const name = path.split("/").pop()?.split("\\").pop() || path;
-
-      const dataQuery = getDataFileQuery(path);
-      if (dataQuery) {
-        const config: ConnectionConfig = {
-          id: crypto.randomUUID(),
-          name: `[Preview] ${name}`,
-          db_type: "duckdb",
-          driver_profile: "duckdb",
-          driver_label: "DuckDB",
-          url_params: "",
-          host: ":memory:",
-          port: 0,
-          username: "",
-          password: "",
-        };
-        const connectionId = await api.connectDb(config);
-        connectionStore.addEphemeralConnection({ ...config, id: connectionId });
-        const tabId = queryStore.createTab(connectionId, "", name, "query");
-        queryStore.updateSql(tabId, dataQuery);
-        queryStore.executeCurrentTab();
-        toast(t("welcome.fileOpened", { name }));
-        continue;
-      }
-
-      const dbType = getDbType(path);
-      if (!dbType) continue;
-      const config: ConnectionConfig = {
-        id: crypto.randomUUID(),
-        name,
-        db_type: dbType,
-        driver_profile: dbType,
-        driver_label: dbType === "duckdb" ? "DuckDB" : "SQLite",
-        url_params: "",
-        host: path,
-        port: 0,
-        username: "",
-        password: "",
-      };
-      try {
-        await connectionStore.addConnection(config);
-        void connectionStore.connect(config);
-        toast(t("welcome.fileOpened", { name }));
-      } catch (e: any) {
-        toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
-      }
-    }
+function initApp() {
+  connectionStore.initFromDisk().then(() => {
+    reconnectRestoredTabs();
+  }).catch((e: any) => {
+    toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
   });
+  settingsStore.initAiConfig();
 }
+
+async function reconnectRestoredTabs() {
+  if (isDesktop) return;
+  const connectionIds = new Set(queryStore.tabs.map(t => t.connectionId).filter(Boolean));
+  for (const id of connectionIds) {
+    try {
+      await connectionStore.ensureConnected(id);
+    } catch {}
+  }
+  for (const tab of queryStore.tabs) {
+    if (tab.mode === "data" && tab.tableMeta && tab.sql) {
+      queryStore.executeTabSql(tab.id, tab.sql).catch(() => {});
+    }
+  }
+}
+
+onMounted(async () => {
+  applyTheme();
+  window.addEventListener("keydown", handleKeydown, true);
+  if (!isDesktop) {
+    try {
+      const res = await fetch("/api/auth/check");
+      const data = await res.json();
+      needsAuth.value = data.required;
+      authenticated.value = data.authenticated;
+    } catch { /* server unreachable */ }
+    if (!needsAuth.value || authenticated.value) initApp();
+    api.checkForUpdates().then((info) => { appVersion.value = info.current_version; }).catch(() => {});
+    return;
+  }
+  initApp();
+  setupFileDrop().catch(() => {});
+  checkUpdates({ silent: true });
+  import("@tauri-apps/api/app").then(({ getVersion }) => {
+    getVersion().then((v) => { appVersion.value = v; }).catch(() => {});
+  }).catch(() => {});
+  setupTauriListeners();
+});
+
+onUnmounted(() => { window.removeEventListener("keydown", handleKeydown, true); });
 </script>
 
 <template>
@@ -1223,40 +527,30 @@ async function setupFileDrop() {
           <TooltipContent>{{ t('settings.title') }}</TooltipContent>
         </Tooltip>
       </div>
+  <LoginPage v-if="needsAuth && !authenticated" @authenticated="authenticated = true; initApp()" />
+  <TooltipProvider v-show="!needsAuth || authenticated" :delay-duration="300">
+    <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden">
+      <AppToolbar
+        :is-dark="isDark" :show-ai-panel="showAiPanel" :show-history="showHistory"
+        :checking-updates="checkingUpdates"
+        :has-connections="connectionStore.connections.length > 0"
+        :has-sql-file-connections="hasSqlFileConnections"
+        @new-connection="showConnectionDialog = true" @new-query="newQuery"
+        @toggle-theme="toggleTheme" @toggle-locale="toggleLocale"
+        @toggle-ai="toggleAiPanel" @toggle-history="showHistory = !showHistory"
+        @open-github="openGitHub" @open-settings="showSettingsDialog = true"
+        @check-updates="checkUpdates()"
+        @open-transfer="dialogs.showTransferDialog.value = true"
+        @open-sql-file="dialogs.showSqlFileDialog.value = true"
+      />
 
-      <!-- Main Content -->
       <div class="flex-1 flex min-h-0">
-      <!-- Sidebar (fixed pixel width) -->
-      <div class="h-full shrink-0 relative select-none" :style="{ width: sidebarWidth + 'px' }">
-          <div class="h-full flex flex-col overflow-hidden">
-            <div class="h-9 flex items-center px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20">
-              {{ t('sidebar.connections') }}
-              <span class="flex-1" />
-              <Tooltip>
-                <TooltipTrigger as-child>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="onImportClick">
-                    <Upload class="h-3 w-3" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{{ t('sidebar.import') }}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger as-child>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="onExportClick">
-                    <Download class="h-3 w-3" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{{ t('sidebar.export') }}</TooltipContent>
-              </Tooltip>
-            </div>
-            <div class="flex-1 overflow-y-auto">
-              <ConnectionTree />
-            </div>
-          </div>
-          <div class="panel-resize-handle panel-resize-handle--right" @mousedown="startSidebarResize" />
-      </div>
+        <AppSidebar
+          :sidebar-width="sidebarWidth"
+          @import="dialogs.onImportClick" @export="dialogs.onExportClick"
+          @start-resize="startSidebarResize"
+        />
 
-        <!-- Editor + Results -->
         <div class="flex-1 min-w-0">
           <div class="h-full flex flex-col min-w-0">
           <!-- Tabs Bar -->
@@ -1348,16 +642,39 @@ async function setupFileDrop() {
                 </ContextMenuItem>
               </ContextMenuContent>
             </ContextMenu>
+            <AppTabBar />
+            <div v-if="activeTab" class="flex flex-col flex-1 min-h-0">
+              <EditorToolbar
+                v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)"
+                :active-tab="activeTab" :active-connection="activeConnection" :executable-sql="executableSql"
+                @execute="tryExecute()" @cancel="cancelActiveExecution()" @explain="tryExplain()"
+                @format-sql="formatActiveSql"
+                @change-connection="changeActiveConnection" @change-database="changeActiveDatabase"
+              />
+              <ContentArea
+                :active-tab="activeTab" :active-connection="activeConnection" :executable-sql="executableSql"
+                :active-output-view="activeOutputView" :format-sql-request-id="formatSqlRequestId"
+                :selected-sql="selectedSql" :cursor-pos="cursorPos"
+                @update:active-output-view="activeOutputView = $event"
+                @fix-with-ai="fixWithAi" @execute="tryExecute()" @cancel="cancelActiveExecution()"
+                @explain="tryExplain()"
+                @editor-update="(v: string) => { if (queryStore.activeTabId) queryStore.updateSql(queryStore.activeTabId, v) }"
+                @editor-selection-change="(v: string) => selectedSql = v"
+                @editor-cursor-change="(p: number) => cursorPos = p"
+                @format-error="toast(t('toolbar.formatSqlFailed'))"
+                @reload="onReloadData" @paginate="onPaginate" @sort="onSort" @execute-sql="onExecuteSql"
+              />
             </div>
-            <button
-              v-if="canScrollRight"
-              class="absolute right-0 z-10 h-full px-1 bg-linear-to-l from-background via-background/80 to-transparent text-muted-foreground hover:text-foreground"
-              :aria-label="t('tabs.scrollRight')"
-              @click="scrollTabs('right')"
-            >
-              <ChevronRight class="h-4 w-4" />
-            </button>
+            <WelcomeScreen
+              v-else
+              :connection-stats="connectionStats" :recent-connections="recentConnections"
+              :app-version="appVersion" :has-connections="connectionStore.connections.length > 0"
+              @open-connection-query="openConnectionQuery" @new-connection="showConnectionDialog = true"
+              @new-query="newQuery" @show-history="showHistory = true"
+              @import-config="dialogs.onImportClick" @open-github="openGitHub" @open-mcp-guide="openMcpGuide"
+            />
           </div>
+        </div>
 
           <!-- Editor Panel -->
           <div v-if="activeTab" class="flex flex-col flex-1 min-h-0">
@@ -1750,135 +1067,42 @@ async function setupFileDrop() {
               </div>
             </div>
           </div>
+        <div v-if="showAiPanel" class="h-full shrink-0 relative bg-background" :style="{ width: aiPanelWidth + 'px' }">
+          <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startAiPanelResize" />
+          <div class="h-full min-h-0 overflow-hidden">
+            <AiAssistant ref="aiAssistantRef" :tab="activeTab" :connection="activeConnection"
+              @replace-sql="onAiReplaceSql"
+              @execute-sql="onAiExecuteSql" @close="toggleAiPanel"
+            />
           </div>
         </div>
 
-      <!-- AI Panel (outside Splitpanes, pixel-based width) -->
-      <div v-if="showAiPanel" class="h-full shrink-0 relative bg-background" :style="{ width: aiPanelWidth + 'px' }">
-        <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startAiPanelResize" />
-        <div class="h-full min-h-0 overflow-hidden">
-          <AiAssistant
-            ref="aiAssistantRef"
-            :tab="activeTab"
-            :connection="activeConnection"
-            @replace-sql="replaceActiveSql"
-            @execute-sql="tryExecute"
-            @close="toggleAiPanel"
-          />
+        <div v-if="showHistory" class="h-full shrink-0 relative bg-background" :style="{ width: historyWidth + 'px' }">
+          <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
+          <QueryHistory @restore="(sql: string) => { if (queryStore.activeTabId) queryStore.updateSql(queryStore.activeTabId, sql) }" @close="showHistory = false" />
         </div>
       </div>
 
-      <!-- History Panel -->
-      <div v-if="showHistory" class="h-full shrink-0 relative bg-background" :style="{ width: historyWidth + 'px' }">
-        <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
-        <QueryHistory @restore="onHistoryRestore" @close="showHistory = false" />
-      </div>
-      </div>
+      <AppDialogs
+        :show-connection-dialog="showConnectionDialog" :show-settings-dialog="showSettingsDialog"
+        :show-danger-dialog="showDangerDialog" :danger-sql="dangerSql"
+        @update:show-connection-dialog="showConnectionDialog = $event"
+        @update:show-settings-dialog="showSettingsDialog = $event"
+        @update:show-danger-dialog="showDangerDialog = $event"
+        @danger-confirm="onDangerConfirm"
+        @connect-started="(name: string) => toast(t('connection.connecting', { name }), 30000)"
+        @connect-succeeded="(name: string) => toast(t('connection.connectSuccess', { name }), 2000)"
+        @connect-failed="(msg: string) => toast(t('connection.connectFailed', { message: msg }), 5000)"
+        @structure-editor-saved="onStructureEditorSaved(onReloadData, toast)"
+        @open-lineage-target="openLineageTarget"
+        @open-database-search-target="openDatabaseSearchTarget"
+      />
+      <UpdateDialog
+        v-model:open="showUpdateDialog" :update-info="updateInfo" :update-check-message="updateCheckMessage"
+        :is-downloading-update="isDownloadingUpdate" :download-progress="downloadProgress" :update-ready="updateReady"
+        @open-latest-release="openLatestRelease" @download-and-install="downloadAndInstallUpdate" @restart="restartApp"
+      />
 
-      <ConnectionDialog
-        v-model:open="showConnectionDialog"
-        :edit-config="editConfig"
-        @connect-started="onConnectionConnectStarted"
-        @connect-succeeded="onConnectionConnectSucceeded"
-        @connect-failed="onConnectionConnectFailed"
-      />
-      <EditorSettingsDialog v-model:open="showSettingsDialog" />
-      <DangerConfirmDialog v-model:open="showDangerDialog" :sql="dangerSql" @confirm="onDangerConfirm" />
-      <DataTransferDialog
-        v-model:open="showTransferDialog"
-        :prefill-connection-id="transferPrefillConnectionId"
-        :prefill-database="transferPrefillDatabase"
-      />
-      <SchemaDiffDialog
-        v-model:open="showSchemaDiffDialog"
-        :prefill-connection-id="schemaDiffPrefillConnectionId"
-        :prefill-database="schemaDiffPrefillDatabase"
-      />
-      <SqlFileExecutionDialog
-        v-model:open="showSqlFileDialog"
-        :prefill-connection-id="sqlFilePrefillConnectionId"
-        :prefill-database="sqlFilePrefillDatabase"
-      />
-      <SchemaDiagramDialog
-        v-model:open="showDiagramDialog"
-        :prefill-connection-id="diagramPrefillConnectionId"
-        :prefill-database="diagramPrefillDatabase"
-        :prefill-schema="diagramPrefillSchema"
-        :focus-table-name="diagramFocusTableName"
-      />
-      <TableImportDialog
-        v-model:open="showTableImportDialog"
-        :prefill-connection-id="tableImportPrefillConnectionId"
-        :prefill-database="tableImportPrefillDatabase"
-        :prefill-schema="tableImportPrefillSchema"
-        :prefill-table="tableImportPrefillTable"
-      />
-      <TableStructureEditorDialog
-        v-model:open="showStructureEditorDialog"
-        :prefill-connection-id="structurePrefillConnectionId"
-        :prefill-database="structurePrefillDatabase"
-        :prefill-schema="structurePrefillSchema"
-        :prefill-table="structurePrefillTable"
-        @saved="onStructureEditorSaved"
-      />
-      <FieldLineageDialog
-        v-model:open="showFieldLineageDialog"
-        :prefill-connection-id="lineagePrefillConnectionId"
-        :prefill-database="lineagePrefillDatabase"
-        :prefill-schema="lineagePrefillSchema"
-        :prefill-table="lineagePrefillTable"
-        :prefill-column="lineagePrefillColumn"
-        @open-target="openLineageTarget"
-      />
-      <DatabaseSearchDialog
-        v-model:open="showDatabaseSearchDialog"
-        :prefill-connection-id="databaseSearchPrefillConnectionId"
-        :prefill-database="databaseSearchPrefillDatabase"
-        :prefill-schema="databaseSearchPrefillSchema"
-        @open-target="openDatabaseSearchTarget"
-      />
-      <ConfigPassphraseDialog
-        v-model:open="showConfigPassphraseDialog"
-        :mode="configPassphraseMode"
-        :external-error="configPassphraseError"
-        @confirm="configPassphraseMode === 'export' ? onExportConfirm($event) : onImportConfirm($event)"
-      />
-      <Dialog v-model:open="showImportLayoutConfirm">
-        <DialogContent class="sm:max-w-[400px]">
-          <DialogHeader>
-            <DialogTitle>{{ t('configExport.importLayoutTitle') }}</DialogTitle>
-          </DialogHeader>
-          <p class="text-sm text-muted-foreground">{{ t('configExport.importLayoutConfirm') }}</p>
-          <DialogFooter>
-            <Button variant="outline" @click="showImportLayoutConfirm = false">{{ t('dangerDialog.cancel') }}</Button>
-            <Button @click="showImportLayoutConfirm = false; pendingImportLayout && connectionStore.applySidebarLayout(pendingImportLayout)">{{ t('configExport.importLayoutApply') }}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog v-model:open="showUpdateDialog">
-        <DialogContent class="sm:max-w-[520px]">
-          <DialogHeader>
-            <DialogTitle>{{ updateInfo?.update_available ? t('updates.availableTitle') : t('updates.title') }}</DialogTitle>
-          </DialogHeader>
-          <div class="space-y-3 text-sm">
-            <p v-if="updateInfo?.update_available">
-              {{ t('updates.availableMessage', { current: updateInfo.current_version, latest: updateInfo.latest_version }) }}
-            </p>
-            <p v-else class="text-muted-foreground">
-              {{ updateCheckMessage || t('updates.upToDate', { version: updateInfo?.current_version || '' }) }}
-            </p>
-            <div v-if="updateInfo?.update_available && updateInfo.release_notes" class="max-h-48 overflow-auto rounded-md border bg-muted/30 p-3 text-xs whitespace-pre-wrap">
-              {{ updateInfo.release_notes }}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" @click="showUpdateDialog = false">{{ t('dangerDialog.cancel') }}</Button>
-            <Button v-if="updateInfo?.update_available || updateCheckMessage" @click="openLatestRelease">{{ t('updates.openRelease') }}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <!-- Global Toast -->
       <Transition name="toast">
         <div v-if="toastVisible" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg">
           {{ toastMessage }}
@@ -1889,11 +1113,6 @@ async function setupFileDrop() {
 </template>
 
 <style scoped>
-.toast-enter-active, .toast-leave-active {
-  transition: all 0.25s ease;
-}
-.toast-enter-from, .toast-leave-to {
-  opacity: 0;
-  transform: translate(-50%, 8px);
-}
+.toast-enter-active, .toast-leave-active { transition: all 0.25s ease; }
+.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 8px); }
 </style>

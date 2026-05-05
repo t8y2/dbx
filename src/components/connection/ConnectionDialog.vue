@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -8,24 +8,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuTrigger,
+  DropdownMenuLabel,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/tauri";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, ChevronRight, Copy, FolderOpen, Grid3X3, List, Search } from "lucide-vue-next";
-
-type DbOption = { value: string; label: string };
-type DbCategory = { key: string; title: string; options: DbOption[] };
-type DialogStep = "select" | "config";
-type DbPickerView = "icon" | "list";
-type ConfigTab = "connection" | "ssh";
+import { Copy, FolderOpen, Check } from "lucide-vue-next";
 
 const { t } = useI18n();
-const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 
 const props = defineProps<{
@@ -43,7 +38,7 @@ const isTesting = ref(false);
 const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const editingId = ref<string | null>(null);
-let testRunId = 0;
+const filePathCopied = ref(false);
 
 const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   name: "",
@@ -73,10 +68,6 @@ const form = ref(defaultForm());
 const selectedType = ref("mysql");
 const customDriverName = ref("");
 const mongoUseUrl = ref(false);
-const dialogStep = ref<DialogStep>("select");
-const dbPickerView = ref<DbPickerView>("icon");
-const dbSearchQuery = ref("");
-const configTab = ref<ConfigTab>("connection");
 
 const colorOptions = [
   { value: "", class: "bg-transparent border-dashed", labelKey: "connection.colorNone" },
@@ -179,26 +170,24 @@ watch(() => props.editConfig, (config) => {
     selectedType.value = profile;
     mongoUseUrl.value = !!config.connection_string;
     customDriverName.value = isCustomCompatibleProfile() ? (config.driver_label || "") : "";
-    dialogStep.value = "config";
-    configTab.value = "connection";
   } else {
     editingId.value = null;
     form.value = defaultForm();
     selectedType.value = "mysql";
     customDriverName.value = "";
-    dialogStep.value = "select";
-    configTab.value = "connection";
   }
-  resetTestState();
+  testResult.value = null;
 });
 
 const isEditing = ref(false);
 watch(() => editingId.value, (v) => { isEditing.value = !!v; });
 
+const dbTypeMenuOpen = ref(false);
+
 function onDbTypeChange(val: string) {
   customDriverName.value = "";
   applyProfile(val, !!editingId.value);
-  resetTestState();
+  dbTypeMenuOpen.value = false;
 }
 
 const iconTypeMap: Record<string, string> = {
@@ -249,55 +238,6 @@ const pgCompat = [
   { value: "custom_postgres", label: "Custom" },
 ];
 
-const dbCategories = computed<DbCategory[]>(() => [
-  { key: "mainstream", title: t("connection.mainstream"), options: dbOptions },
-  { key: "mysql", title: `MySQL ${t("connection.compatible")}`, options: mysqlCompat },
-  { key: "postgres", title: `PostgreSQL ${t("connection.compatible")}`, options: pgCompat },
-]);
-
-const filteredDbCategories = computed<DbCategory[]>(() => {
-  const keyword = dbSearchQuery.value.trim().toLowerCase();
-  if (!keyword) return dbCategories.value;
-
-  return dbCategories.value
-    .map((category) => ({
-      ...category,
-      options: category.options.filter((option) => {
-        const profile = driverProfiles[option.value];
-        return [
-          option.label,
-          option.value,
-          profile?.label,
-          profile?.type,
-          category.title,
-        ].some((value) => String(value || "").toLowerCase().includes(keyword));
-      }),
-    }))
-    .filter((category) => category.options.length > 0);
-});
-
-const hasDbPickerResults = computed(() => filteredDbCategories.value.some((category) => category.options.length > 0));
-const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value);
-const canUseSsh = computed(() => form.value.db_type !== "sqlite");
-const testResultMessage = computed(() => {
-  if (!testResult.value) return "";
-  return testResult.value.ok ? t("connection.testSuccess") : testResult.value.message;
-});
-
-function goToConnectionStep(value = selectedType.value) {
-  if (value !== selectedType.value) {
-    onDbTypeChange(value);
-  }
-  dialogStep.value = "config";
-  configTab.value = "connection";
-  dbSearchQuery.value = "";
-}
-
-function backToDatabasePicker() {
-  dialogStep.value = "select";
-  resetTestState();
-}
-
 watch(customDriverName, (value) => {
   if (isCustomCompatibleProfile()) {
     form.value.driver_label = value.trim() || selectedProfile().label;
@@ -305,69 +245,35 @@ watch(customDriverName, (value) => {
 });
 
 async function testConnection() {
-  const runId = ++testRunId;
   isTesting.value = true;
   testResult.value = null;
   try {
     const config: ConnectionConfig = { ...form.value, id: editingId.value || crypto.randomUUID() };
     const msg = await api.testConnection(config);
-    if (runId !== testRunId) return;
     testResult.value = { ok: true, message: msg };
   } catch (e: any) {
-    if (runId !== testRunId) return;
     testResult.value = { ok: false, message: String(e) };
   } finally {
-    if (runId === testRunId) {
-      isTesting.value = false;
-    }
+    isTesting.value = false;
   }
-}
-
-function resetTestState() {
-  testRunId += 1;
-  isTesting.value = false;
-  testResult.value = null;
-}
-
-async function copyTestResult() {
-  if (!testResultMessage.value) return;
-  await navigator.clipboard.writeText(testResultMessage.value);
-  toast(t("grid.copied"));
 }
 
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
   selectedType.value = "mysql";
-  customDriverName.value = "";
   mongoUseUrl.value = false;
-  dialogStep.value = "select";
-  dbPickerView.value = "icon";
-  dbSearchQuery.value = "";
-  configTab.value = "connection";
-  resetTestState();
+  testResult.value = null;
 }
 
 watch(open, (value) => {
-  if (!value) {
-    resetForm();
-    return;
-  }
-  if (!props.editConfig) {
-    resetForm();
-  }
-});
-
-watch(canUseSsh, (value) => {
-  if (!value && configTab.value === "ssh") {
-    configTab.value = "connection";
-  }
+  if (!value) resetForm();
 });
 
 async function save() {
   if (isSaving.value) return;
   isSaving.value = true;
-  resetTestState();
+  testResult.value = null;
   try {
     if (editingId.value) {
       const updated: ConnectionConfig = { ...form.value, id: editingId.value };
@@ -424,119 +330,11 @@ function copyFilePath() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :class="dialogStep === 'select' ? 'sm:max-w-[760px]' : 'sm:max-w-[560px]'">
+    <DialogContent class="sm:max-w-[480px]">
       <DialogHeader>
         <DialogTitle>{{ editingId ? t('connection.editTitle') : t('connection.title') }}</DialogTitle>
       </DialogHeader>
 
-      <template v-if="dialogStep === 'select'">
-        <div class="space-y-4">
-          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
-            <div class="flex items-center gap-2">
-              <div class="flex shrink-0 rounded-lg border bg-muted/40 p-0.5">
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  :variant="dbPickerView === 'icon' ? 'secondary' : 'ghost'"
-                  :title="t('connection.iconView')"
-                  :aria-label="t('connection.iconView')"
-                  @click="dbPickerView = 'icon'"
-                >
-                  <Grid3X3 class="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  :variant="dbPickerView === 'list' ? 'secondary' : 'ghost'"
-                  :title="t('connection.listView')"
-                  :aria-label="t('connection.listView')"
-                  @click="dbPickerView = 'list'"
-                >
-                  <List class="h-3.5 w-3.5" />
-                </Button>
-              </div>
-              <div class="relative w-full sm:w-64">
-                <Search class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  v-model="dbSearchQuery"
-                  class="h-9 pl-8"
-                  :placeholder="t('connection.searchDatabasePlaceholder')"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div class="max-h-[58vh] space-y-5 overflow-y-auto pr-2">
-            <section v-for="category in filteredDbCategories" :key="category.key" class="space-y-2">
-              <div class="flex items-center">
-                <h3 class="text-sm font-medium">{{ category.title }}</h3>
-              </div>
-
-              <div v-if="dbPickerView === 'icon'" class="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
-                <button
-                  v-for="opt in category.options"
-                  :key="opt.value"
-                  type="button"
-                  class="group flex min-h-24 flex-col items-center justify-center gap-2 rounded-xl border bg-background/70 p-3 text-center transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  :class="selectedType === opt.value ? 'border-primary bg-primary/10 shadow-sm ring-1 ring-primary/30' : 'border-border'"
-                  :aria-pressed="selectedType === opt.value"
-                  @click="onDbTypeChange(opt.value)"
-                  @dblclick="goToConnectionStep(opt.value)"
-                >
-                  <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-muted/60 transition group-hover:bg-background">
-                    <DatabaseIcon :db-type="iconTypeMap[opt.value]" class="h-6 w-6" />
-                  </span>
-                  <span class="max-w-full truncate text-sm font-medium">{{ opt.label }}</span>
-                </button>
-              </div>
-
-              <div v-else class="grid gap-2">
-                <button
-                  v-for="opt in category.options"
-                  :key="opt.value"
-                  type="button"
-                  class="flex items-center gap-3 rounded-lg border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  :class="selectedType === opt.value ? 'border-primary bg-primary/10 ring-1 ring-primary/30' : 'border-border'"
-                  :aria-pressed="selectedType === opt.value"
-                  @click="onDbTypeChange(opt.value)"
-                  @dblclick="goToConnectionStep(opt.value)"
-                >
-                  <DatabaseIcon :db-type="iconTypeMap[opt.value]" class="h-5 w-5 shrink-0" />
-                  <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ opt.label }}</span>
-                  <span class="text-xs text-muted-foreground">{{ category.title }}</span>
-                </button>
-              </div>
-            </section>
-
-            <div v-if="!hasDbPickerResults" class="rounded-xl border border-dashed py-12 text-center text-sm text-muted-foreground">
-              {{ t('connection.noDatabaseMatches') }}
-            </div>
-          </div>
-        </div>
-
-        <DialogFooter class="flex items-center gap-2">
-          <div class="mr-auto flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
-            <DatabaseIcon :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
-            <span class="truncate">{{ t('connection.selectedDatabase') }}: {{ selectedProfile().label }}</span>
-          </div>
-          <Button :disabled="!hasDbPickerResults" @click="goToConnectionStep()">
-            {{ t('connection.next') }}
-            <ChevronRight class="h-4 w-4" />
-          </Button>
-        </DialogFooter>
-      </template>
-
-      <template v-else>
-      <div class="space-y-3">
-        <Tabs v-model="configTab" class="min-h-0">
-          <div class="flex items-center justify-between border-b pb-2">
-            <TabsList>
-              <TabsTrigger value="connection">{{ t('connection.basicTab') }}</TabsTrigger>
-              <TabsTrigger v-if="canUseSsh" value="ssh">{{ t('connection.sshTunnel') }}</TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent value="connection" class="m-0">
       <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-right">{{ t('connection.name') }}</Label>
@@ -545,10 +343,57 @@ function copyFilePath() {
 
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-right">{{ t('connection.type') }}</Label>
-          <div class="col-span-3 flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2">
-            <DatabaseIcon :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
-            <span class="min-w-0 flex-1 truncate text-sm">{{ selectedProfile().label }}</span>
-          </div>
+          <DropdownMenu v-model:open="dbTypeMenuOpen">
+            <DropdownMenuTrigger as-child>
+              <Button variant="outline" class="col-span-3 justify-start gap-2 font-normal">
+                <DatabaseIcon :db-type="iconTypeMap[selectedType] || selectedType" class="w-4 h-4" />
+                {{ selectedProfile().label }}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent class="w-auto p-3" align="start">
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <DropdownMenuLabel class="text-xs text-muted-foreground px-1 pb-1">{{ t('connection.mainstream') }}</DropdownMenuLabel>
+                  <button
+                    v-for="opt in dbOptions"
+                    :key="opt.value"
+                    class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-accent cursor-default"
+                    :class="{ 'bg-accent': selectedType === opt.value }"
+                    @click="onDbTypeChange(opt.value)"
+                  >
+                    <DatabaseIcon :db-type="iconTypeMap[opt.value]" class="w-3.5 h-3.5" />
+                    {{ opt.label }}
+                  </button>
+                </div>
+                <div>
+                  <DropdownMenuLabel class="text-xs text-muted-foreground px-1 pb-1">MySQL {{ t('connection.compatible') }}</DropdownMenuLabel>
+                  <button
+                    v-for="opt in mysqlCompat"
+                    :key="opt.value"
+                    class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-accent cursor-default"
+                    :class="{ 'bg-accent': selectedType === opt.value }"
+                    @click="onDbTypeChange(opt.value)"
+                  >
+                    <DatabaseIcon :db-type="iconTypeMap[opt.value]" class="w-3.5 h-3.5" />
+                    {{ opt.label }}
+                  </button>
+                </div>
+                <div>
+                  <DropdownMenuLabel class="text-xs text-muted-foreground px-1 pb-1">PostgreSQL {{ t('connection.compatible') }}</DropdownMenuLabel>
+                  <button
+                    v-for="opt in pgCompat"
+                    :key="opt.value"
+                    class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-accent cursor-default"
+                    :class="{ 'bg-accent': selectedType === opt.value }"
+                    @click="onDbTypeChange(opt.value)"
+                  >
+                    <DatabaseIcon :db-type="iconTypeMap[opt.value]" class="w-3.5 h-3.5" />
+                    {{ opt.label }}
+                  </button>
+                </div>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <div v-if="isCustomCompatibleProfile()" class="grid grid-cols-4 items-center gap-4">
@@ -690,100 +535,69 @@ function copyFilePath() {
           </div>
         </template>
 
-      </div>
-          </TabsContent>
-
-          <TabsContent v-if="canUseSsh" value="ssh" class="m-0">
-            <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
-              <div class="grid grid-cols-4 items-center gap-4">
-                <Label class="text-right text-xs">{{ t('connection.sshTunnel') }}</Label>
-                <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" v-model="form.ssh_enabled" class="mr-0" />
-                  <span class="text-xs text-muted-foreground">{{ t('connection.sshEnable') }}</span>
-                </label>
-              </div>
-              <div class="grid grid-cols-4 items-center gap-4">
-                <Label class="text-right text-xs">{{ t('connection.sshHost') }}</Label>
-                <Input v-model="form.ssh_host" class="col-span-2" placeholder="ssh.example.com" :disabled="!form.ssh_enabled" />
-                <Input v-model.number="form.ssh_port" type="number" class="col-span-1" :disabled="!form.ssh_enabled" />
-              </div>
-              <div class="grid grid-cols-4 items-center gap-4">
-                <Label class="text-right text-xs">{{ t('connection.sshUser') }}</Label>
-                <Input v-model="form.ssh_user" class="col-span-3" placeholder="root" :disabled="!form.ssh_enabled" />
-              </div>
-              <div class="grid grid-cols-4 items-center gap-4">
-                <Label class="text-right text-xs">{{ t('connection.sshPassword') }}</Label>
-                <Input v-model="form.ssh_password" type="password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="!form.ssh_enabled" />
-              </div>
-              <div class="grid grid-cols-4 items-center gap-4">
-                <Label class="text-right text-xs">{{ t('connection.sshKeyPath') }}</Label>
-                <div class="col-span-3 flex items-center gap-1">
-                  <Input v-model="form.ssh_key_path" class="flex-1" placeholder="~/.ssh/id_rsa" :disabled="!form.ssh_enabled" />
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssh_enabled" @click="browseSshKeyPath">
-                        <FolderOpen class="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{{ t('connection.sshKeyPathBrowse') }}</TooltipContent>
-                  </Tooltip>
-                </div>
-              </div>
-              <div class="grid grid-cols-4 items-center gap-4">
-                <Label class="text-right text-xs">{{ t('connection.sshKeyPassphrase') }}</Label>
-                <Input v-model="form.ssh_key_passphrase" type="password" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="!form.ssh_enabled" />
-              </div>
-              <div class="grid grid-cols-4 items-center gap-4">
-                <span />
-                <label
-                  class="col-span-3 flex items-center gap-2"
-                  :class="form.ssh_enabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'"
-                >
-                  <input type="checkbox" v-model="form.ssh_expose_lan" class="mr-0" :disabled="!form.ssh_enabled" />
-                  <span class="text-xs text-muted-foreground">{{ t('connection.sshExposeLan') }}</span>
-                </label>
+        <!-- SSH Tunnel (not for SQLite) -->
+        <template v-if="form.db_type !== 'sqlite'">
+          <div class="grid grid-cols-4 items-center gap-4 pt-2 border-t">
+            <Label class="text-right text-xs">{{ t('connection.sshTunnel') }}</Label>
+            <div class="col-span-3">
+              <input type="checkbox" v-model="form.ssh_enabled" class="mr-2" />
+              <span class="text-xs text-muted-foreground">{{ t('connection.sshEnable') }}</span>
+            </div>
+          </div>
+          <template v-if="form.ssh_enabled">
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshHost') }}</Label>
+              <Input v-model="form.ssh_host" class="col-span-2" placeholder="ssh.example.com" />
+              <Input v-model.number="form.ssh_port" type="number" class="col-span-1" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshUser') }}</Label>
+              <Input v-model="form.ssh_user" class="col-span-3" placeholder="root" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshPassword') }}</Label>
+              <Input v-model="form.ssh_password" type="password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshKeyPath') }}</Label>
+              <div class="col-span-3 flex items-center gap-1">
+                <Input v-model="form.ssh_key_path" class="flex-1" placeholder="~/.ssh/id_rsa" />
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseSshKeyPath">
+                      <FolderOpen class="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{{ t('connection.sshKeyPathBrowse') }}</TooltipContent>
+                </Tooltip>
               </div>
             </div>
-          </TabsContent>
-        </Tabs>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <Label class="text-right text-xs">{{ t('connection.sshKeyPassphrase') }}</Label>
+              <Input v-model="form.ssh_key_passphrase" type="password" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" />
+            </div>
+            <div class="grid grid-cols-4 items-center gap-4">
+              <span />
+              <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" v-model="form.ssh_expose_lan" class="mr-0" />
+                <span class="text-xs text-muted-foreground">{{ t('connection.sshExposeLan') }}</span>
+              </label>
+            </div>
+          </template>
+        </template>
       </div>
 
-      <DialogFooter class="flex min-w-0 items-center gap-2 sm:flex-nowrap">
-        <div class="mr-auto flex min-w-0 flex-1 basis-0 items-center gap-2 overflow-hidden">
-          <Button v-if="!editingId" variant="outline" class="shrink-0" :disabled="isSaving" @click="backToDatabasePicker">
-            <ArrowLeft class="h-4 w-4" />
-            {{ t('connection.back') }}
-          </Button>
-          <template v-if="testResult">
-            <span
-              class="block min-w-0 flex-1 basis-0 truncate text-xs"
-              :class="testResult.ok ? 'text-green-600' : 'text-red-600'"
-              :title="testResultMessage"
-              role="status"
-              aria-live="polite"
-            >
-              {{ testResultMessage }}
-            </span>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              class="h-5 w-5 shrink-0"
-              :title="t('connection.copyTestResult')"
-              :aria-label="t('connection.copyTestResult')"
-              @click="copyTestResult"
-            >
-              <Copy class="h-3 w-3" />
-            </Button>
-          </template>
-        </div>
-        <Button variant="outline" class="shrink-0" :disabled="isTesting || isSaving" @click="testConnection">
+      <DialogFooter class="flex items-center gap-2">
+        <span v-if="testResult" :class="testResult.ok ? 'text-green-500' : 'text-red-500'" class="text-sm mr-auto">
+          {{ testResult.ok ? t('connection.testSuccess') : testResult.message }}
+        </span>
+        <Button variant="outline" :disabled="isTesting || isSaving" @click="testConnection">
           {{ isTesting ? t('connection.testing') : t('connection.test') }}
         </Button>
-        <Button class="shrink-0" @click="save" :disabled="isSaving || !form.name || (!form.host && !(mongoUseUrl && form.connection_string))">
+        <Button @click="save" :disabled="isSaving || !form.name || (!form.host && !(mongoUseUrl && form.connection_string))">
           {{ isSaving ? t('common.loading') : (editingId ? t('connection.save') : t('connection.saveAndConnect')) }}
         </Button>
       </DialogFooter>
-      </template>
     </DialogContent>
   </Dialog>
 </template>

@@ -157,7 +157,7 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_jso
 pub async fn connect(url: &str) -> Result<MySqlPool, String> {
     MySqlPoolOptions::new()
         .max_connections(5)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(300))
         .connect(url)
         .await
@@ -174,7 +174,7 @@ pub async fn connect_bare(url: &str) -> Result<MySqlPool, String> {
         .timezone(None);
     MySqlPoolOptions::new()
         .max_connections(5)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(300))
         .connect_with(options)
         .await

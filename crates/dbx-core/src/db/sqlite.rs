@@ -20,7 +20,7 @@ pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
 
     SqlitePoolOptions::new()
         .max_connections(5)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(300))
         .connect_with(options)
         .await

@@ -89,7 +89,7 @@ fn pg_value_to_json(row: &PgRow, idx: usize, type_name: &str) -> serde_json::Val
 pub async fn connect(url: &str) -> Result<PgPool, String> {
     PgPoolOptions::new()
         .max_connections(5)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(300))
         .connect(url)
         .await

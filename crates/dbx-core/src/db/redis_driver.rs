@@ -28,11 +28,11 @@ pub struct RedisValue {
 pub async fn connect(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = redis::Client::open(url).map_err(|e| format!("Redis connection failed: {e}"))?;
     let mut con = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(5),
         client.get_multiplexed_async_connection(),
     )
     .await
-    .map_err(|_| "Redis connection timed out (10s)".to_string())?
+    .map_err(|_| "Redis connection timed out (5s)".to_string())?
     .map_err(|e| format!("Redis connection failed: {e}"))?;
 
     redis::cmd("PING")

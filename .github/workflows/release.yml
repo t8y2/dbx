@@ -108,17 +108,215 @@ jobs:
           args: --target ${{ matrix.target }}
 
   publish:
-    needs: build
+    needs: [build, docker]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false
+        run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
 
+  packages:
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      APP_NAME: dbx
+      PRODUCT_NAME: DBX
+      REPO_OWNER: t8y2
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Tag '${TAG}' does not look like a semver version."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          ASSETS=(
+            "${PRODUCT_NAME}_${VERSION}_aarch64.dmg"
+            "${PRODUCT_NAME}_${VERSION}_x64.dmg"
+            "${PRODUCT_NAME}_${VERSION}_x64-setup.exe"
+          )
+
+          for ASSET in "${ASSETS[@]}"; do
+            echo "::group::Downloading ${ASSET}"
+            gh release download "${TAG}" \
+              --repo "${{ github.repository }}" \
+              --pattern "${ASSET}" \
+              --dir artifacts \
+              --clobber
+            echo "::endgroup::"
+          done
+
+          ls -lh artifacts/
+
+      - name: Compute SHA256 hashes
+        id: hashes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          compute_hash() {
+            local file="$1" name="$2"
+            if [[ ! -f "${file}" ]]; then
+              echo "::error::Missing artifact: ${file}"
+              exit 1
+            fi
+            local hash
+            hash=$(sha256sum "${file}" | cut -d ' ' -f 1)
+            echo "${name}=${hash}" >> "$GITHUB_OUTPUT"
+            echo "  ${name}: ${hash}"
+          }
+
+          echo "SHA256 hashes:"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64.dmg" "sha_dmg_x64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe"
+
+      - name: Publish Homebrew Cask
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA_ARM64="${{ steps.hashes.outputs.sha_dmg_arm64 }}"
+          SHA_X64="${{ steps.hashes.outputs.sha_dmg_x64 }}"
+
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/homebrew-tap.git" \
+            homebrew-tap
+          cd homebrew-tap
+          mkdir -p Casks
+
+          cat > Casks/dbx.rb <<'RUBY_EOF'
+          cask "dbx" do
+            version "__VERSION__"
+
+            on_arm do
+              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_aarch64.dmg",
+                  verified: "github.com/__OWNER__/__APP__/"
+              sha256 "__SHA_ARM64__"
+            end
+
+            on_intel do
+              url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_x64.dmg",
+                  verified: "github.com/__OWNER__/__APP__/"
+              sha256 "__SHA_X64__"
+            end
+
+            name "DBX"
+            desc "Open-source database management tool"
+            homepage "https://github.com/__OWNER__/__APP__"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
+            depends_on macos: ">= :big_sur"
+
+            app "DBX.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.dbx.app",
+              "~/Library/Caches/com.dbx.app",
+              "~/Library/Preferences/com.dbx.app.plist",
+              "~/Library/Logs/com.dbx.app",
+            ]
+          end
+          RUBY_EOF
+
+          sed -i 's/^          //' Casks/dbx.rb
+
+          sed -i "s/__VERSION__/${VERSION}/g" Casks/dbx.rb
+          sed -i "s/__OWNER__/${REPO_OWNER}/g" Casks/dbx.rb
+          sed -i "s/__APP__/${APP_NAME}/g" Casks/dbx.rb
+          sed -i "s/__PRODUCT__/${PRODUCT_NAME}/g" Casks/dbx.rb
+          sed -i "s/__SHA_ARM64__/${SHA_ARM64}/g" Casks/dbx.rb
+          sed -i "s/__SHA_X64__/${SHA_X64}/g" Casks/dbx.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/dbx.rb
+
+          if git diff --cached --quiet; then
+            echo "Homebrew Cask is already up to date."
+          else
+            git commit -m "dbx ${VERSION}"
+            git push
+            echo "::notice::Homebrew Cask updated to ${VERSION}"
+          fi
+
+      - name: Publish Scoop manifest
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA_EXE="${{ steps.hashes.outputs.sha_exe }}"
+
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/scoop-bucket.git" \
+            scoop-bucket
+          cd scoop-bucket
+
+          cat > dbx.json <<JSON_EOF
+          {
+              "version": "${VERSION}",
+              "description": "Open-source database management tool",
+              "homepage": "https://github.com/${REPO_OWNER}/${APP_NAME}",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/${PRODUCT_NAME}_${VERSION}_x64-setup.exe",
+                      "hash": "${SHA_EXE}"
+                  }
+              },
+              "innosetup": false,
+              "installer": {
+                  "args": ["/S", "/D=\$dir"]
+              },
+              "uninstaller": {
+                  "file": "uninstall.exe",
+                  "args": ["/S"]
+              },
+              "checkver": {
+                  "github": "https://github.com/${REPO_OWNER}/${APP_NAME}"
+              },
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/${PRODUCT_NAME}_\$version_x64-setup.exe"
+                      }
+                  }
+              }
+          }
+          JSON_EOF
+
+          sed -i 's/^          //' dbx.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dbx.json
+
+          if git diff --cached --quiet; then
+            echo "Scoop manifest is already up to date."
+          else
+            git commit -m "dbx ${VERSION}"
+            git push
+            echo "::notice::Scoop manifest updated to ${VERSION}"
+          fi
 
   docker:
-    needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

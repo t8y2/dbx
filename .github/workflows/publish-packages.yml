@@ -6,9 +6,6 @@ on:
       tag:
         description: 'Release tag (e.g. v0.3.10)'
         required: true
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
 
 permissions:
   contents: read
@@ -21,17 +18,12 @@ env:
 jobs:
   publish:
     name: Publish to Homebrew & Scoop
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Extract version from tag
         id: version
         run: |
-          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${{ github.event.workflow_run.head_branch }}"
-          fi
+          TAG="${{ github.event.inputs.tag }}"
           TAG="$(echo "${TAG}" | xargs)"
           VERSION="${TAG#v}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then

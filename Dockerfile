@@ -3,7 +3,8 @@ FROM node:20-slim AS frontend
 WORKDIR /app
 RUN npm i -g pnpm
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
 COPY src/ src/
 COPY index.html vite.config.ts tsconfig.json ./
 COPY tailwind.config.* postcss.config.* ./
@@ -21,11 +22,14 @@ RUN mkdir -p src-tauri/src && echo 'fn main() {}' > src-tauri/src/main.rs && ech
 COPY src-tauri/Cargo.toml src-tauri/
 COPY src-tauri/build.rs src-tauri/
 COPY src-tauri/tauri.conf.json src-tauri/
-RUN cargo build --release -p dbx-web
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release -p dbx-web && \
+    cp /app/target/release/dbx-web /usr/local/bin/dbx-web
 
 # Stage 3: Final image
 FROM debian:bookworm-slim
-COPY --from=backend /app/target/release/dbx-web /usr/local/bin/
+COPY --from=backend /usr/local/bin/dbx-web /usr/local/bin/
 COPY --from=frontend /app/dist /app/static
 ENV DBX_STATIC_DIR=/app/static
 ENV DBX_DATA_DIR=/app/data

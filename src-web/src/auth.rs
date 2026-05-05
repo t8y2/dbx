@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
@@ -52,6 +53,9 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
         password::verify_password(&body.password, password_hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !password_valid {
+    let parsed_hash = PasswordHash::new(password_hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if Argon2::default().verify_password(body.password.as_bytes(), &parsed_hash).is_err() {
         let mut rl = state.login_rate_limit.lock().await;
         rl.fail_count += 1;
         if rl.fail_count >= MAX_ATTEMPTS {

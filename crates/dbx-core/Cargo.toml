@@ -15,12 +15,12 @@ chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "mysql", "postgres", "sqlite", "json", "chrono", "uuid", "rust_decimal"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "mysql", "postgres", "sqlite", "json", "chrono", "uuid", "rust_decimal"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 duckdb = { version = "1.3.2", features = ["bundled"] }
-tiberius = { version = "0.12.3", features = ["tds73", "chrono", "rust_decimal"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures = "0.3"
 mongodb = "3.2.5"
 oracle-rs = "0.1"

@@ -1,3 +1,4 @@
 npx lint-staged
 cd src-tauri && cargo fmt && git add -u .
 cd "$(git rev-parse --show-toplevel)/crates/dbx-core" && cargo fmt --all && git add -u .
+cd "$(git rev-parse --show-toplevel)/src-web" && cargo fmt && git add -u .

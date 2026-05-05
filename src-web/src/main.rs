@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHasher};
 use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -47,6 +50,10 @@ async fn main() {
     // Password hash
     let password_hash =
         std::env::var("DBX_PASSWORD").ok().map(|pw| password::hash_password(&pw).expect("Failed to hash password"));
+    let password_hash = std::env::var("DBX_PASSWORD").ok().map(|pw| {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string()
+    });
 
     let web_state = Arc::new(WebState {
         app: app_state,

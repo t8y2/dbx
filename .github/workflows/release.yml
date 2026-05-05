@@ -49,13 +49,13 @@ jobs:
         id: deps-hash
         shell: bash
         run: |
-          hash=$(grep -v '^version = ' src-tauri/Cargo.lock | sha256sum | cut -d' ' -f1)
+          hash=$(grep -v '^version = ' Cargo.lock | sha256sum | cut -d' ' -f1)
           echo "hash=${hash:0:20}" >> "$GITHUB_OUTPUT"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: './ -> target'
           shared-key: release-${{ matrix.target }}-${{ steps.deps-hash.outputs.hash }}
           cache-on-failure: true
 

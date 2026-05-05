@@ -4,11 +4,13 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::ai::{AiChatMessage, AiConfig, AiConversation};
+use crate::encryption;
 use crate::history::HistoryEntry;
 use crate::models::connection::ConnectionConfig;
 
 pub struct Storage {
     db: SqlitePool,
+    encryption_key: Vec<u8>,
 }
 
 const SCHEMA_STATEMENTS: &[&str] = &[
@@ -66,8 +68,21 @@ impl Storage {
             sqlx::query(statement).execute(&pool).await.map_err(|e| e.to_string())?;
         }
 
-        Ok(Self { db: pool })
+        // Derive encryption key from database path
+        let encryption_key = derive_encryption_key(db_path)?;
+
+        Ok(Self { db: pool, encryption_key })
     }
+}
+
+/// Derives a consistent encryption key from the database path.
+fn derive_encryption_key(db_path: &Path) -> Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+
+    let path_str = db_path.to_string_lossy();
+    let mut hasher = Sha256::new();
+    hasher.update(path_str.as_bytes());
+    Ok(hasher.finalize().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -355,17 +370,28 @@ impl Storage {
                 .fetch_optional(&self.db)
                 .await
                 .map_err(|e| e.to_string())?;
-        Ok(row.map(|(s,)| s))
+        
+        match row {
+            Some((encrypted,)) => {
+                // Decrypt the secret
+                let decrypted = encryption::decrypt_secret(&encrypted, &self.encryption_key)?;
+                Ok(Some(decrypted))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String> {
+        // Encrypt the secret before storing
+        let encrypted = encryption::encrypt_secret(secret, &self.encryption_key)?;
+        
         sqlx::query(
             "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) \
              VALUES (?, ?, ?)",
         )
         .bind(connection_id)
         .bind(key)
-        .bind(secret)
+        .bind(&encrypted)
         .execute(&self.db)
         .await
         .map_err(|e| e.to_string())?;

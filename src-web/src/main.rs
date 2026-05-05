@@ -1,5 +1,6 @@
 mod auth;
 mod error;
+mod password;
 mod routes;
 mod sse;
 mod state;
@@ -13,7 +14,6 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
 use dbx_core::storage::Storage;
-use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -46,9 +46,7 @@ async fn main() {
 
     // Password hash
     let password_hash = std::env::var("DBX_PASSWORD").ok().map(|pw| {
-        let mut hasher = Sha256::new();
-        hasher.update(pw.as_bytes());
-        hex::encode(hasher.finalize())
+        password::hash_password(&pw).expect("Failed to hash password")
     });
 
     let web_state = Arc::new(WebState {

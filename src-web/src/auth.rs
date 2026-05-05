@@ -6,8 +6,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use crate::password;
 use crate::state::WebState;
 
 #[derive(Deserialize)]
@@ -47,11 +47,11 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
         }
     }
 
-    let mut hasher = Sha256::new();
-    hasher.update(body.password.as_bytes());
-    let hash = hex::encode(hasher.finalize());
+    // Verify password using Argon2
+    let password_valid = password::verify_password(&body.password, password_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if hash != *password_hash {
+    if !password_valid {
         let mut rl = state.login_rate_limit.lock().await;
         rl.fail_count += 1;
         if rl.fail_count >= MAX_ATTEMPTS {

@@ -21,12 +21,7 @@ use state::WebState;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dbx_web=info,tower_http=info".parse().unwrap()),
-        )
-        .init();
+    env_logger::init();
 
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -66,10 +61,6 @@ async fn main() {
         password_hash,
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit {
-            fail_count: 0,
-            locked_until: None,
-        }),
     });
 
     // CORS
@@ -155,13 +146,12 @@ async fn main() {
         .route("/update/check", get(routes::update::check_for_updates))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
-        .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 
-    // Build app
+    // Build app with auth middleware
     let mut app = Router::new()
         .nest("/api", api)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .layer(cors);
 
     // Static file serving
@@ -180,9 +170,9 @@ async fn main() {
         .unwrap_or(4224);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    tracing::info!("DBX Web server starting on http://{}", addr);
+    log::info!("DBX Web server starting on http://{}", addr);
     if std::env::var("DBX_PASSWORD").is_ok() {
-        tracing::info!("Password protection is enabled");
+        log::info!("Password protection is enabled");
     }
 
     let listener = tokio::net::TcpListener::bind(addr)

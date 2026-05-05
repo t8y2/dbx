@@ -21,6 +21,9 @@ pub struct AuthCheckResponse {
     pub required: bool,
 }
 
+const MAX_ATTEMPTS: u32 = 5;
+const LOCKOUT_SECS: u64 = 60;
+
 pub async fn login(
     State(state): State<Arc<WebState>>,
     Json(body): Json<LoginRequest>,
@@ -36,12 +39,39 @@ pub async fn login(
         }
     };
 
+    // Check rate limit
+    {
+        let rl = state.login_rate_limit.lock().await;
+        if let Some(locked_until) = rl.locked_until {
+            if locked_until > std::time::Instant::now() {
+                let remaining = (locked_until - std::time::Instant::now()).as_secs();
+                return Ok((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": format!("请 {remaining} 秒后再试")})),
+                ).into_response());
+            }
+        }
+    }
+
     let mut hasher = Sha256::new();
     hasher.update(body.password.as_bytes());
     let hash = hex::encode(hasher.finalize());
 
     if hash != *password_hash {
+        let mut rl = state.login_rate_limit.lock().await;
+        rl.fail_count += 1;
+        if rl.fail_count >= MAX_ATTEMPTS {
+            rl.locked_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(LOCKOUT_SECS));
+            rl.fail_count = 0;
+        }
         return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Success — reset rate limit
+    {
+        let mut rl = state.login_rate_limit.lock().await;
+        rl.fail_count = 0;
+        rl.locked_until = None;
     }
 
     let token = uuid::Uuid::new_v4().to_string();

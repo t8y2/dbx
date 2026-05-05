@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { DatabaseZap } from "lucide-vue-next";
+import { Lock, Loader2 } from "lucide-vue-next";
 
 const emit = defineEmits<{ authenticated: [] }>();
 
@@ -34,24 +34,38 @@ async function login() {
 </script>
 
 <template>
-  <div class="flex items-center justify-center h-screen bg-background">
-    <div class="w-80 space-y-6 text-center">
-      <div class="flex items-center justify-center gap-2 text-2xl font-bold">
-        <DatabaseZap class="w-8 h-8" />
-        <span>DBX</span>
+  <div class="flex items-center justify-center h-screen bg-gradient-to-br from-background via-background to-blue-950/20">
+    <div class="w-[360px] space-y-8">
+      <div class="flex flex-col items-center gap-4">
+        <img src="/logo.png" alt="DBX" class="w-20 h-20 rounded-2xl shadow-lg shadow-blue-500/20" />
+        <div class="text-center">
+          <h1 class="text-2xl font-bold tracking-tight">DBX</h1>
+          <p class="text-sm text-muted-foreground mt-1">数据库管理工具</p>
+        </div>
       </div>
-      <form class="space-y-4" @submit.prevent="login">
-        <Input
-          v-model="password"
-          type="password"
-          placeholder="请输入访问密码"
-          autofocus
-        />
-        <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
-        <Button type="submit" class="w-full" :disabled="loading || !password">
+
+      <form class="space-y-4" @submit.prevent="login" autocomplete="off">
+        <div class="relative">
+          <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            v-model="password"
+            type="password"
+            placeholder="请输入访问密码"
+            class="pl-10 h-11"
+            autocomplete="off"
+            autofocus
+          />
+        </div>
+        <p v-if="error" class="text-sm text-destructive text-center">{{ error }}</p>
+        <Button type="submit" class="w-full h-11 text-sm font-medium" :disabled="loading || !password">
+          <Loader2 v-if="loading" class="w-4 h-4 animate-spin mr-2" />
           {{ loading ? "登录中..." : "登录" }}
         </Button>
       </form>
+
+      <p class="text-center text-xs text-muted-foreground/50">
+        Powered by DBX
+      </p>
     </div>
   </div>
 </template>

@@ -45,9 +45,8 @@ async fn main() {
     };
 
     // Password hash
-    let password_hash = std::env::var("DBX_PASSWORD").ok().map(|pw| {
-        password::hash_password(&pw).expect("Failed to hash password")
-    });
+    let password_hash =
+        std::env::var("DBX_PASSWORD").ok().map(|pw| password::hash_password(&pw).expect("Failed to hash password"));
 
     let web_state = Arc::new(WebState {
         app: app_state,

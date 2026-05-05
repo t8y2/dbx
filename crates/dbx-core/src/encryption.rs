@@ -34,9 +34,8 @@ pub fn encrypt_secret(secret: &str, master_key: &[u8]) -> Result<String, String>
     let cipher = Aes256Gcm::new(&key);
 
     // Encrypt
-    let ciphertext = cipher
-        .encrypt(nonce, Payload::from(secret.as_bytes()))
-        .map_err(|e| format!("Encryption failed: {e}"))?;
+    let ciphertext =
+        cipher.encrypt(nonce, Payload::from(secret.as_bytes())).map_err(|e| format!("Encryption failed: {e}"))?;
 
     // Combine nonce + ciphertext and encode
     let mut encrypted = nonce_bytes.to_vec();
@@ -76,9 +75,7 @@ pub fn decrypt_secret(encrypted: &str, master_key: &[u8]) -> Result<String, Stri
     let cipher = Aes256Gcm::new(&key);
 
     // Decrypt
-    let plaintext = cipher
-        .decrypt(nonce, Payload::from(ciphertext))
-        .map_err(|e| format!("Decryption failed: {e}"))?;
+    let plaintext = cipher.decrypt(nonce, Payload::from(ciphertext)).map_err(|e| format!("Decryption failed: {e}"))?;
 
     String::from_utf8(plaintext).map_err(|e| format!("UTF-8 decode failed: {e}"))
 }

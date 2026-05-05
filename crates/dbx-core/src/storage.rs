@@ -370,7 +370,7 @@ impl Storage {
                 .fetch_optional(&self.db)
                 .await
                 .map_err(|e| e.to_string())?;
-        
+
         match row {
             Some((encrypted,)) => {
                 // Decrypt the secret
@@ -384,7 +384,7 @@ impl Storage {
     pub async fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String> {
         // Encrypt the secret before storing
         let encrypted = encryption::encrypt_secret(secret, &self.encryption_key)?;
-        
+
         sqlx::query(
             "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) \
              VALUES (?, ?, ?)",

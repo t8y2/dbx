@@ -48,8 +48,8 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     }
 
     // Verify password using Argon2
-    let password_valid = password::verify_password(&body.password, password_hash)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let password_valid =
+        password::verify_password(&body.password, password_hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !password_valid {
         let mut rl = state.login_rate_limit.lock().await;

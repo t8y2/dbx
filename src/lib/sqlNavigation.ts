@@ -2,8 +2,6 @@
  * Utilities for SQL identifier navigation (Ctrl/Cmd + click on table/column names).
  */
 
-import type { SqlCompletionColumn } from "@/lib/sqlCompletion";
-
 const SQL_KEYWORDS_SET = new Set([
   "select",
   "from",

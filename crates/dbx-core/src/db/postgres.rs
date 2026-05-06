@@ -198,7 +198,7 @@ pub async fn get_columns(pool: &PgPool, schema: &str, table: &str) -> Result<Vec
          FROM pg_attribute a \
          JOIN pg_type t ON t.oid = a.atttypid \
          LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
-         WHERE a.attrelid = ($1 || '.' || $2)::regclass \
+         WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
          AND a.attnum > 0 AND NOT a.attisdropped \
          ORDER BY a.attnum",
     )

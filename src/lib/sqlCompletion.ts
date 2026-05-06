@@ -192,86 +192,8 @@ export function buildSqlCompletionItemsFromContext(
 }
 
 /**
- * Extract the SQL statement that contains the cursor position.
- * Splits on semicolons but ignores those inside string literals.
- */
-function extractStatementAt(sql: string, cursor: number): string {
-  // Find the start of the statement containing cursor
-  let start = 0;
-  let inSingleQuote = false;
-  let inDoubleQuote = false;
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === "'" && !inDoubleQuote) inSingleQuote = !inSingleQuote;
-    else if (ch === '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
-    else if (ch === ";" && !inSingleQuote && !inDoubleQuote) {
-      if (i < cursor) {
-        start = i + 1;
-        while (start < sql.length && /\s/.test(sql[start])) start++;
-      }
-    }
-  }
-  // Find the end of the statement (next semicolon at or after cursor)
-  let end = sql.length;
-  inSingleQuote = false;
-  inDoubleQuote = false;
-  for (let i = start; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === "'" && !inDoubleQuote) inSingleQuote = !inSingleQuote;
-    else if (ch === '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
-    else if (ch === ";" && !inSingleQuote && !inDoubleQuote && i >= cursor) {
-      end = i;
-      break;
-    }
-  }
-  return sql.slice(start, end).trim();
-}
-
-export function getSqlCompletionContext(sql: string, cursor: number): SqlCompletionContext {
-  // Extract the full statement at cursor position (respects semicolons and string literals)
-  const fullStatement = extractStatementAt(sql, cursor);
-
-  // Simpler approach: just use sql.slice(0, cursor) but find start of current stmt
-  const stmtStart = extractStatementStart(sql, cursor);
-  const beforeCursor = sql.slice(stmtStart, cursor);
-
-  const dottedMatch = /([A-Za-z_][\w$]*)\.([A-Za-z_][\w$]*)?$/.exec(beforeCursor);
-  const plainMatch = /([A-Za-z_][\w$]*)$/.exec(beforeCursor);
-  const prefix = dottedMatch?.[2] ?? plainMatch?.[1] ?? "";
-  const qualifier = dottedMatch?.[1];
-  const bareStart = qualifier
-    ? beforeCursor.length - prefix.length
-    : beforeCursor.length - (plainMatch?.[1]?.length ?? 0);
-  const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
-  const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
-
-  const referencedTables = extractReferencedTables(fullStatement);
-
-  const afterTableTrigger =
-    TABLE_TRIGGER_KEYWORDS.has(lastWord) ||
-    (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) ||
-    isInTableListContext(beforeToken);
-
-  // Check if we're in a context where columns are expected (based on content before cursor)
-  const inColumnContext = isInColumnContext(beforeCursor.trimEnd());
-
-  return {
-    prefix,
-    qualifier,
-    // Suggest tables ONLY after FROM/JOIN/UPDATE/INTO/etc keywords
-    suggestTables: afterTableTrigger,
-    // Suggest columns when:
-    // 1. There's a table qualifier (table.column)
-    // 2. We're in a column context (WHERE, ON, etc.) AND there are referenced tables
-    suggestColumns: !!qualifier || (inColumnContext && referencedTables.length > 0),
-    // Always suggest keywords
-    suggestKeywords: true,
-    referencedTables,
-  };
-}
-
-/**
  * Find the start position of the SQL statement containing the cursor.
+ * Respects semicolons and string literals.
  */
 function extractStatementStart(sql: string, cursor: number): number {
   let start = 0;
@@ -292,19 +214,82 @@ function extractStatementStart(sql: string, cursor: number): number {
 }
 
 /**
- * Check if the context before the current token is a column-expected context.
- * beforeToken is everything before the current token being typed.
+ * Extract the full SQL statement that contains the cursor position.
+ * Respects semicolons and string literals.
  */
-function isInColumnContext(beforeToken: string): boolean {
-  if (!beforeToken) return false;
+function extractStatementAt(sql: string, cursor: number): string {
+  const start = extractStatementStart(sql, cursor);
+  let end = sql.length;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  for (let i = start; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" && !inDoubleQuote) inSingleQuote = !inSingleQuote;
+    else if (ch === '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
+    else if (ch === ";" && !inSingleQuote && !inDoubleQuote && i >= cursor) {
+      end = i;
+      break;
+    }
+  }
+  return sql.slice(start, end).trim();
+}
+
+export function getSqlCompletionContext(sql: string, cursor: number): SqlCompletionContext {
+  // Extract the full statement at cursor position for referenced tables
+  const fullStatement = extractStatementAt(sql, cursor);
+
+  // Content before cursor within the current statement
+  const stmtStart = extractStatementStart(sql, cursor);
+  const beforeCursor = sql.slice(stmtStart, cursor);
+
+  const dottedMatch = /([A-Za-z_][\w$]*)\.([A-Za-z_][\w$]*)?$/.exec(beforeCursor);
+  const plainMatch = /([A-Za-z_][\w$]*)$/.exec(beforeCursor);
+  const prefix = dottedMatch?.[2] ?? plainMatch?.[1] ?? "";
+  const qualifier = dottedMatch?.[1];
+  const bareStart = qualifier
+    ? beforeCursor.length - prefix.length
+    : beforeCursor.length - (plainMatch?.[1]?.length ?? 0);
+  const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
+  const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
+
+  const referencedTables = extractReferencedTables(fullStatement);
+
+  const afterTableTrigger =
+    TABLE_TRIGGER_KEYWORDS.has(lastWord) ||
+    (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) ||
+    isInTableListContext(beforeToken);
+
+  // Check if we're in a context where columns are expected
+  const inColumnContext = isInColumnContext(beforeCursor);
+
+  return {
+    prefix,
+    qualifier,
+    // Suggest tables ONLY after FROM/JOIN/UPDATE/INTO/etc keywords
+    suggestTables: afterTableTrigger,
+    // Suggest columns when:
+    // 1. There's a table qualifier (table.column)
+    // 2. We're in a column context (WHERE, ON, SELECT, etc.) AND there are referenced tables
+    suggestColumns: !!qualifier || (inColumnContext && referencedTables.length > 0),
+    // Always suggest keywords
+    suggestKeywords: true,
+    referencedTables,
+  };
+}
+
+/**
+ * Check if the content before cursor is in a column-expected context.
+ */
+function isInColumnContext(beforeCursor: string): boolean {
+  if (!beforeCursor) return false;
 
   // Strip string literals
-  const cleaned = beforeToken.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, "''");
+  const cleaned = beforeCursor.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, "''");
 
-  // Get all words
+  // Get all words/tokens
   const lastWords = cleaned.trimEnd().split(/\s+/);
-  // Check the last word AND the second-to-last word
-  // because `beforeToken` already excludes the prefix being typed
+
+  // Check the last 3 words for column-context keywords
   for (let i = lastWords.length - 1; i >= Math.max(0, lastWords.length - 3); i--) {
     const word = lastWords[i]?.toLowerCase().replace(/[^a-z0-9.]/g, "") ?? "";
     // Operators that indicate column context
@@ -505,11 +490,18 @@ function buildColumnItems(
         table.name === q ||
         table.name.toLowerCase() === qLower,
     );
-    const tableKeys = new Set(
-      relatedTables.map((table) => (table.schema ? `${table.schema}.${table.name}` : table.name)),
-    );
-    // Filter columns by key (schema.table) or by table name matching the qualifier
-    relevantCols = allColumns.filter((c) => tableKeys.has(c.key) || c.table.toLowerCase() === qLower);
+    // Build a set of actual table names to filter by
+    const tableNameSet = new Set(relatedTables.map((t) => t.name.toLowerCase()));
+    // Also build all possible key formats for columnsByTable matching
+    const tableKeys = new Set<string>();
+    for (const table of relatedTables) {
+      tableKeys.add(table.name);
+      if (table.schema) {
+        tableKeys.add(`${table.schema}.${table.name}`);
+      }
+    }
+    // Filter columns by matching the column's table name or the map key
+    relevantCols = allColumns.filter((c) => tableNameSet.has(c.table.toLowerCase()) || tableKeys.has(c.key));
   }
 
   // Deduplicate columns by name

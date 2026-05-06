@@ -43,6 +43,8 @@ let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 
 // Completion cache
 let cachedTables: Array<{ name: string; schema?: string; type?: "table" | "view" }> = [];
+// Persistent column cache keyed by "schema.table" or "table"
+const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
 
 function setFontSize(size: number) {
   const next = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, size));
@@ -112,29 +114,57 @@ async function formatCurrentSql() {
 async function provideSqlCompletions(currentState: import("@codemirror/state").EditorState, position: number) {
   if (!props.connectionId || !props.database) return null;
 
-  const completionContext = getSqlCompletionContext(currentState.doc.toString(), position);
+  const fullDoc = currentState.doc.toString();
+  const completionContext = getSqlCompletionContext(fullDoc, position);
   const tables = await connectionStore.listCompletionTables(props.connectionId, props.database);
-  const columnsByTable = new Map<string, SqlCompletionColumn[]>();
 
-  if (completionContext.suggestColumns) {
-    // Fetch columns for ALL tables — simplifies key matching and ensures columns are always available
-    await Promise.all(
-      tables.map(async (table) => {
-        const cacheKey = table.schema ? `${table.schema}.${table.name}` : table.name;
-        if (columnsByTable.has(cacheKey)) return;
-        try {
-          const columns = await connectionStore.listCompletionColumns(
-            props.connectionId!,
-            props.database!,
-            table.name,
-            table.schema,
-          );
-          columnsByTable.set(cacheKey, columns);
-        } catch {
-          // Skip tables that fail
-        }
-      }),
-    );
+  // Collect referenced tables — enrich with schema from cached tables list
+  let refs = completionContext.referencedTables.map((rt) => {
+    // If no schema, look it up in the cached tables
+    if (!rt.schema) {
+      const cached = tables.find((t) => t.name.toLowerCase() === rt.name.toLowerCase());
+      if (cached && cached.schema) {
+        return { ...rt, schema: cached.schema };
+      }
+    }
+    return rt;
+  });
+
+  // If no referenced tables but qualifier exists, infer table from tables list
+  if (refs.length === 0 && completionContext.qualifier) {
+    const q = completionContext.qualifier.toLowerCase();
+    const matched = tables.filter((t) => t.name.toLowerCase() === q || t.name.toLowerCase().endsWith("." + q));
+    refs = matched.map((t) => ({ name: t.name, schema: t.schema }));
+  }
+
+  await Promise.all(
+    refs.map(async (refTable) => {
+      const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
+      if (cachedColumnsByTable.has(cacheKey)) {
+        return;
+      }
+      try {
+        const columns = await connectionStore.listCompletionColumns(
+          props.connectionId!,
+          props.database!,
+          refTable.name,
+          refTable.schema,
+        );
+        cachedColumnsByTable.set(cacheKey, columns);
+      } catch (e) {
+        console.error(`[DBX] Failed to load columns for ${cacheKey}:`, e);
+      }
+    }),
+  );
+
+  // Build columnsByTable from persistent cache — only include columns for referenced tables
+  const columnsByTable = new Map<string, SqlCompletionColumn[]>();
+  for (const refTable of refs) {
+    const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
+    const cached = cachedColumnsByTable.get(cacheKey);
+    if (cached) {
+      columnsByTable.set(cacheKey, cached);
+    }
   }
 
   const items = buildSqlCompletionItemsFromContext(completionContext, {
@@ -163,6 +193,8 @@ async function refreshCompletionCache() {
   } catch {
     cachedTables = [];
   }
+  // Clear column cache when connection/database changes
+  cachedColumnsByTable.clear();
 }
 
 onMounted(async () => {
@@ -364,18 +396,23 @@ onMounted(async () => {
               const matchedCols: Array<{ name: string; table: string; schema?: string }> = [];
 
               for (const refTable of tablesToCheck) {
-                const cols = await connectionStore.listCompletionColumns(
-                  props.connectionId!,
-                  props.database!,
-                  refTable.name,
-                  refTable.schema,
-                );
-                console.log(
-                  "[DBX] columns for",
-                  refTable.name,
-                  ":",
-                  cols.map((c) => c.name),
-                );
+                const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
+
+                // Use persistent column cache; fetch only if missing
+                let cols = cachedColumnsByTable.get(cacheKey);
+                if (!cols) {
+                  try {
+                    cols = await connectionStore.listCompletionColumns(
+                      props.connectionId!,
+                      props.database!,
+                      refTable.name,
+                      refTable.schema,
+                    );
+                    cachedColumnsByTable.set(cacheKey, cols);
+                  } catch {
+                    continue;
+                  }
+                }
                 for (const col of cols) {
                   if (col.name.toLowerCase() === colLower) {
                     matchedCols.push({
@@ -387,31 +424,8 @@ onMounted(async () => {
                 }
               }
 
-              if (matchedCols.length === 0) {
-                // Fallback: scan all tables
-                for (const table of cachedTables) {
-                  const cols = await connectionStore.listCompletionColumns(
-                    props.connectionId!,
-                    props.database!,
-                    table.name,
-                    table.schema,
-                  );
-                  for (const col of cols) {
-                    if (col.name.toLowerCase() === colLower) {
-                      matchedCols.push({
-                        name: col.name,
-                        table: table.name,
-                        schema: col.schema || table.schema,
-                      });
-                    }
-                  }
-                }
-              }
-
               if (matchedCols.length > 0) {
                 emit("clickColumn", matchedCols);
-              } else {
-                // No columns found — silently ignore, don't show error panel
               }
             } catch (e) {
               console.error("[DBX] Ctrl+click error:", e);

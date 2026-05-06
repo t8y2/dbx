@@ -289,32 +289,22 @@ onMounted(async () => {
 
           const currentView = view.value;
           if (!currentView || !props.connectionId || !props.database) {
-            console.log("[DBX] Ctrl+click skipped: missing view/connectionId/database", {
-              hasView: !!currentView,
-              connectionId: props.connectionId,
-              database: props.database,
-            });
             return false;
           }
 
           // Use posAtCoords for accurate click position
           const coords = { x: event.clientX, y: event.clientY };
           const pos = currentView.posAtCoords(coords);
-          console.log("[DBX] Ctrl+click at coords", { coords, pos });
           if (pos == null) {
-            console.log("[DBX] posAtCoords returned null");
             return false;
           }
 
           const doc = currentView.state.doc.toString();
           const identifier = extractIdentifierAt(doc, pos);
-          console.log("[DBX] extracted identifier", { pos, identifier });
           if (!identifier) {
-            console.log("[DBX] no identifier at position");
             return false;
           }
           if (isSqlKeyword(identifier)) {
-            console.log("[DBX] identifier is SQL keyword, skipping:", identifier);
             return false;
           }
 
@@ -326,35 +316,24 @@ onMounted(async () => {
               if (cachedTables.length === 0) {
                 cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!);
               }
-              console.log("[DBX] cachedTables count:", cachedTables.length);
 
               // 1. Check if it's a table name
               const matchedTable = matchTable(identifier, cachedTables);
               if (matchedTable) {
-                console.log("[DBX] matched table:", matchedTable);
                 emit(
                   "clickTable",
                   matchedTable.schema ? `${matchedTable.schema}.${matchedTable.name}` : matchedTable.name,
                 );
                 return;
               }
-              console.log("[DBX] not a table name, checking columns...");
 
               // 2. Parse SQL at click position to get referenced tables
               const context = getSqlCompletionContext(doc, pos);
               let referencedTables = context.referencedTables;
-              console.log("[DBX] SQL parse result", {
-                referencedTables,
-                suggestTables: context.suggestTables,
-                suggestColumns: context.suggestColumns,
-                prefix: context.prefix,
-              });
-
               // Enrich referenced tables with schema from cachedTables
               referencedTables = referencedTables.map((rt) => {
                 const cached = cachedTables.find((ct) => ct.name.toLowerCase() === rt.name.toLowerCase());
                 if (cached && cached.schema && !rt.schema) {
-                  console.log("[DBX] enriched table schema:", rt.name, "->", cached.schema);
                   return { ...rt, schema: cached.schema };
                 }
                 return rt;
@@ -367,11 +346,8 @@ onMounted(async () => {
               const colLower = colName.toLowerCase();
 
               if (referencedTables.length === 0) {
-                console.log("[DBX] no referenced tables in SQL, skipping");
                 return;
               }
-              console.log("[DBX] enriched referencedTables:", referencedTables, "qualifier:", qualifier);
-
               // 3. Fetch columns — if qualifier, only check matching table; otherwise check all
               const tablesToCheck = qualifier
                 ? referencedTables.filter(
@@ -382,15 +358,12 @@ onMounted(async () => {
                 : referencedTables;
 
               if (tablesToCheck.length === 0 && qualifier) {
-                console.log("[DBX] qualifier", qualifier, "not found in referenced tables, skipping");
                 return;
               }
 
               const matchedCols: Array<{ name: string; table: string; schema?: string }> = [];
 
               for (const refTable of tablesToCheck) {
-                const querySchema = refTable.schema || props.database || "";
-                console.log("[DBX] querying columns for table:", refTable.name, "schema:", querySchema);
                 const cols = await connectionStore.listCompletionColumns(
                   props.connectionId!,
                   props.database!,
@@ -414,9 +387,7 @@ onMounted(async () => {
                 }
               }
 
-              console.log("[DBX] matched cols in referenced tables:", matchedCols.length);
               if (matchedCols.length === 0) {
-                console.log("[DBX] fallback: scanning all", cachedTables.length, "tables");
                 // Fallback: scan all tables
                 for (const table of cachedTables) {
                   const cols = await connectionStore.listCompletionColumns(
@@ -437,12 +408,10 @@ onMounted(async () => {
                 }
               }
 
-              console.log("[DBX] final matched cols:", matchedCols);
               if (matchedCols.length > 0) {
                 emit("clickColumn", matchedCols);
               } else {
                 // No columns found — silently ignore, don't show error panel
-                console.log("[DBX] column not found, ignoring");
               }
             } catch (e) {
               console.error("[DBX] Ctrl+click error:", e);

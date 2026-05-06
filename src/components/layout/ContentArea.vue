@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent } from "vue";
+import { computed, ref, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
 import { Loader2, Square, Bot, Table2, GitBranch, BarChart3 } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
@@ -9,6 +9,8 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import RedisKeyBrowser from "@/components/redis/RedisKeyBrowser.vue";
 import MongoDocBrowser from "@/components/mongo/MongoDocBrowser.vue";
+import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
+import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
@@ -41,10 +43,17 @@ const emit = defineEmits<{
   paginate: [offset: number, limit: number, whereInput?: string];
   sort: [column: string, direction: "asc" | "desc" | null, whereInput?: string];
   executeSql: [sql: string];
+  clickTable: [tableName: string];
 }>();
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+
+// Column info panel state
+const showColumnInfo = ref(false);
+const columnInfoColumns = ref<ColumnInfo[]>([]);
+const columnInfoLoading = ref(false);
+const columnInfoError = ref<string | undefined>(undefined);
 
 const activeSqlFormatDialect = computed<SqlFormatDialect>(() => {
   switch (props.activeConnection?.db_type) {
@@ -70,6 +79,84 @@ const hasNumericData = computed(() => {
   if (!r || r.rows.length === 0) return false;
   return r.columns.some((_, idx) => r.rows.some((row) => typeof row[idx] === "number"));
 });
+
+// Column info panel handlers
+async function onHandleClickColumn(
+  matchedCols: Array<{ name: string; table: string; schema?: string }>,
+  errorMsg?: string,
+) {
+  if (!props.activeTab.connectionId || !props.activeTab.database) return;
+
+  columnInfoLoading.value = true;
+  columnInfoError.value = undefined;
+
+  try {
+    // If there's an error from the editor, show it directly
+    if (errorMsg) {
+      columnInfoError.value = errorMsg;
+      columnInfoColumns.value = [];
+    } else if (matchedCols.length === 0) {
+      columnInfoColumns.value = [];
+      columnInfoError.value = undefined;
+    } else {
+      // Fetch full column details from API
+      const apiModule = await import("@/lib/api");
+      const results: ColumnInfo[] = [];
+
+      for (const matchedCol of matchedCols) {
+        const querySchema = matchedCol.schema || props.activeTab.database || "";
+        try {
+          const fullColumns = await apiModule.getColumns(
+            props.activeTab.connectionId,
+            props.activeTab.database,
+            querySchema,
+            matchedCol.table,
+          );
+          for (const col of fullColumns) {
+            if (col.name === matchedCol.name) {
+              results.push({
+                name: col.name,
+                table: matchedCol.table,
+                dataType: col.data_type,
+                isNullable: col.is_nullable,
+                columnDefault: col.column_default,
+                isPrimaryKey: col.is_primary_key,
+                comment: col.comment,
+                extra: col.extra,
+              });
+            }
+          }
+        } catch {
+          // Skip tables that fail
+        }
+      }
+
+      columnInfoColumns.value = results;
+    }
+  } catch (e: any) {
+    columnInfoError.value = e?.message || String(e);
+    columnInfoColumns.value = [];
+  } finally {
+    columnInfoLoading.value = false;
+    showColumnInfo.value = true;
+  }
+}
+
+function closeColumnInfo() {
+  showColumnInfo.value = false;
+  columnInfoColumns.value = [];
+  columnInfoError.value = undefined;
+}
+
+function onHandleClickTable(tableName: string) {
+  emit("clickTable", tableName);
+}
+
+function onHandleCloseColumnPanel() {
+  showColumnInfo.value = false;
+  columnInfoColumns.value = [];
+  columnInfoError.value = undefined;
+}
 </script>
 
 <template>
@@ -78,7 +165,7 @@ const hasNumericData = computed(() => {
     <template v-if="activeTab.mode === 'query'">
       <Splitpanes horizontal class="flex-1">
         <Pane :size="40" :min-size="15">
-          <div class="h-full flex flex-col">
+          <div class="h-full flex flex-col relative">
             <QueryEditor
               class="flex-1"
               :model-value="activeTab.sql"
@@ -92,6 +179,16 @@ const hasNumericData = computed(() => {
               @cursor-change="emit('editorCursorChange', $event)"
               @format-error="emit('formatError')"
               @execute="emit('execute')"
+              @click-table="onHandleClickTable"
+              @click-column="onHandleClickColumn"
+              @close-column-panel="onHandleCloseColumnPanel"
+            />
+            <ColumnInfoPanel
+              v-if="showColumnInfo"
+              :columns="columnInfoColumns"
+              :loading="columnInfoLoading"
+              :error="columnInfoError"
+              @close="closeColumnInfo"
             />
           </div>
         </Pane>

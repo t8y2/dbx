@@ -227,6 +227,27 @@ async function openConnectionQuery(connectionId: string) {
   }
 }
 
+async function onClickTable(tableName: string) {
+  const tab = activeTab.value;
+  if (!tab) return;
+  const connectionId = tab.connectionId;
+  const database = tab.database;
+
+  // Parse schema.table if needed
+  const [schema, rawTableName] = tableName.includes(".") ? tableName.split(".") : [database, tableName];
+
+  try {
+    await connectionStore.ensureConnected(connectionId);
+    const ddl = await api.getTableDdl(connectionId, database, schema || database, rawTableName);
+
+    // Create a new tab with the DDL
+    const tabId = queryStore.createTab(connectionId, database, `DDL - ${rawTableName}`);
+    queryStore.updateSql(tabId, ddl);
+  } catch (e: any) {
+    toast(`Failed to get table DDL: ${e?.message || String(e)}`, 5000);
+  }
+}
+
 async function changeActiveConnection(connectionId: string) {
   const tab = activeTab.value;
   if (!tab) return;
@@ -452,6 +473,7 @@ onUnmounted(() => {
                   @paginate="onPaginate"
                   @sort="onSort"
                   @execute-sql="onExecuteSql"
+                  @click-table="onClickTable"
                 />
               </div>
               <WelcomeScreen

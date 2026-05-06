@@ -7,7 +7,9 @@ import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { buildSqlCompletionItemsFromContext, getSqlCompletionContext } from "@/lib/sqlCompletion";
+import { extractIdentifierAt, isSqlKeyword, matchTable } from "@/lib/sqlNavigation";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
+import type { SqlCompletionColumn } from "@/lib/sqlCompletion";
 
 const props = defineProps<{
   modelValue: string;
@@ -24,6 +26,9 @@ const emit = defineEmits<{
   cursorChange: [pos: number];
   formatError: [message: string];
   execute: [sql: string];
+  clickTable: [tableName: string];
+  clickColumn: [columns: Array<{ name: string; table: string; schema?: string }>, error?: string | undefined];
+  closeColumnPanel: [];
 }>();
 
 const editorRef = ref<HTMLDivElement>();
@@ -35,6 +40,9 @@ const MAX_FONT_SIZE = 24;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
+
+// Completion cache
+let cachedTables: Array<{ name: string; schema?: string; type?: "table" | "view" }> = [];
 
 function setFontSize(size: number) {
   const next = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, size));
@@ -106,7 +114,7 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
 
   const completionContext = getSqlCompletionContext(currentState.doc.toString(), position);
   const tables = await connectionStore.listCompletionTables(props.connectionId, props.database);
-  const columnsByTable = new Map<string, Awaited<ReturnType<typeof connectionStore.listCompletionColumns>>>();
+  const columnsByTable = new Map<string, SqlCompletionColumn[]>();
 
   if (completionContext.suggestColumns) {
     const relatedTables = completionContext.qualifier
@@ -147,6 +155,15 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
     })),
     validFor: /^[\w$]*$/,
   };
+}
+
+async function refreshCompletionCache() {
+  if (!props.connectionId || !props.database) return;
+  try {
+    cachedTables = await connectionStore.listCompletionTables(props.connectionId, props.database);
+  } catch {
+    cachedTables = [];
+  }
 }
 
 onMounted(async () => {
@@ -260,11 +277,170 @@ onMounted(async () => {
           else if (event.deltaY > 0) zoomOut();
           return true;
         },
+        mousedown: (event: MouseEvent) => {
+          // Click without modifier -> close column panel
+          if (!event.metaKey && !event.ctrlKey) {
+            if (event.button === 0) {
+              emit("closeColumnPanel");
+            }
+            return false;
+          }
+          // Only handle Ctrl/Cmd + left click
+          if (event.button !== 0) return false;
+
+          const currentView = view.value;
+          if (!currentView || !props.connectionId || !props.database) {
+            console.log("[DBX] Ctrl+click skipped: missing view/connectionId/database", {
+              hasView: !!currentView,
+              connectionId: props.connectionId,
+              database: props.database,
+            });
+            return false;
+          }
+
+          // Use posAtCoords for accurate click position
+          const coords = { x: event.clientX, y: event.clientY };
+          const pos = currentView.posAtCoords(coords);
+          console.log("[DBX] Ctrl+click at coords", { coords, pos });
+          if (pos == null) {
+            console.log("[DBX] posAtCoords returned null");
+            return false;
+          }
+
+          const doc = currentView.state.doc.toString();
+          const identifier = extractIdentifierAt(doc, pos);
+          console.log("[DBX] extracted identifier", { pos, identifier });
+          if (!identifier) {
+            console.log("[DBX] no identifier at position");
+            return false;
+          }
+          if (isSqlKeyword(identifier)) {
+            console.log("[DBX] identifier is SQL keyword, skipping:", identifier);
+            return false;
+          }
+
+          // Prevent default, resolve async
+          event.preventDefault();
+          setTimeout(async () => {
+            try {
+              // Ensure table cache is populated
+              if (cachedTables.length === 0) {
+                cachedTables = await connectionStore.listCompletionTables(props.connectionId!, props.database!);
+              }
+              console.log("[DBX] cachedTables count:", cachedTables.length);
+
+              // 1. Check if it's a table name
+              const matchedTable = matchTable(identifier, cachedTables);
+              if (matchedTable) {
+                console.log("[DBX] matched table:", matchedTable);
+                emit(
+                  "clickTable",
+                  matchedTable.schema ? `${matchedTable.schema}.${matchedTable.name}` : matchedTable.name,
+                );
+                return;
+              }
+              console.log("[DBX] not a table name, checking columns...");
+
+              // 2. Parse SQL at click position to get referenced tables
+              const context = getSqlCompletionContext(doc, pos);
+              let referencedTables = context.referencedTables;
+              console.log("[DBX] SQL parse result", {
+                referencedTables,
+                suggestTables: context.suggestTables,
+                suggestColumns: context.suggestColumns,
+                prefix: context.prefix,
+              });
+
+              // Enrich referenced tables with schema from cachedTables
+              referencedTables = referencedTables.map((rt) => {
+                const cached = cachedTables.find((ct) => ct.name.toLowerCase() === rt.name.toLowerCase());
+                if (cached && cached.schema && !rt.schema) {
+                  console.log("[DBX] enriched table schema:", rt.name, "->", cached.schema);
+                  return { ...rt, schema: cached.schema };
+                }
+                return rt;
+              });
+
+              if (referencedTables.length === 0) {
+                console.log("[DBX] no referenced tables in SQL");
+                emit("clickColumn", [], `Could not determine which tables to query for column "${identifier}"`);
+                return;
+              }
+              console.log("[DBX] enriched referencedTables:", referencedTables);
+
+              // 3. Fetch columns from referenced tables to find matches
+              const lower = identifier.toLowerCase();
+              const matchedCols: Array<{ name: string; table: string; schema?: string }> = [];
+
+              for (const refTable of referencedTables) {
+                const querySchema = refTable.schema || props.database || "";
+                console.log("[DBX] querying columns for table:", refTable.name, "schema:", querySchema);
+                const cols = await connectionStore.listCompletionColumns(
+                  props.connectionId!,
+                  props.database!,
+                  refTable.name,
+                  refTable.schema,
+                );
+                console.log(
+                  "[DBX] columns for",
+                  refTable.name,
+                  ":",
+                  cols.map((c) => c.name),
+                );
+                for (const col of cols) {
+                  if (col.name.toLowerCase() === lower) {
+                    matchedCols.push({
+                      name: col.name,
+                      table: refTable.name,
+                      schema: col.schema || refTable.schema,
+                    });
+                  }
+                }
+              }
+
+              console.log("[DBX] matched cols in referenced tables:", matchedCols.length);
+              if (matchedCols.length === 0) {
+                console.log("[DBX] fallback: scanning all", cachedTables.length, "tables");
+                // Fallback: scan all tables
+                for (const table of cachedTables) {
+                  const cols = await connectionStore.listCompletionColumns(
+                    props.connectionId!,
+                    props.database!,
+                    table.name,
+                    table.schema,
+                  );
+                  for (const col of cols) {
+                    if (col.name.toLowerCase() === lower) {
+                      matchedCols.push({
+                        name: col.name,
+                        table: table.name,
+                        schema: col.schema || table.schema,
+                      });
+                    }
+                  }
+                }
+              }
+
+              console.log("[DBX] final matched cols:", matchedCols);
+              if (matchedCols.length > 0) {
+                emit("clickColumn", matchedCols);
+              } else {
+                emit("clickColumn", [], `Column "${identifier}" not found in any table`);
+              }
+            } catch (e) {
+              console.error("[DBX] Ctrl+click error:", e);
+            }
+          }, 0);
+          return true;
+        },
       }),
     ],
   });
 
   view.value = new EditorView({ state, parent: editorRef.value });
+
+  // Fetch completion data
+  refreshCompletionCache();
 });
 
 watch(
@@ -285,7 +461,21 @@ watch(
   },
 );
 
-// Reactively apply editor settings changes (theme, font family, font size)
+watch(
+  () => props.connectionId,
+  () => {
+    refreshCompletionCache();
+  },
+);
+
+watch(
+  () => props.database,
+  () => {
+    refreshCompletionCache();
+  },
+);
+
+// Reactively apply editor settings changes
 watch(
   () => settingsStore.editorSettings,
   async (ss) => {

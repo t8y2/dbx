@@ -208,6 +208,7 @@ export default {
     copySqlCondition: "复制 SQL 条件",
     transpose: "转置查看",
     rowsPerPageShort: " 行/页",
+    columnDetails: "列详情",
   },
   welcome: {
     title: "数据库工作台",

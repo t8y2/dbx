@@ -209,6 +209,7 @@ export default {
     copySqlCondition: "Copy SQL Condition",
     transpose: "Transpose Row",
     rowsPerPageShort: " rows",
+    columnDetails: "Column Details",
   },
   welcome: {
     title: "Database Workspace",

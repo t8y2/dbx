@@ -117,23 +117,22 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
   const columnsByTable = new Map<string, SqlCompletionColumn[]>();
 
   if (completionContext.suggestColumns) {
-    const relatedTables = completionContext.qualifier
-      ? completionContext.referencedTables.filter(
-          (table) => table.alias === completionContext.qualifier || table.name === completionContext.qualifier,
-        )
-      : completionContext.referencedTables;
-
+    // Fetch columns for ALL tables — simplifies key matching and ensures columns are always available
     await Promise.all(
-      relatedTables.map(async (table) => {
+      tables.map(async (table) => {
         const cacheKey = table.schema ? `${table.schema}.${table.name}` : table.name;
         if (columnsByTable.has(cacheKey)) return;
-        const columns = await connectionStore.listCompletionColumns(
-          props.connectionId!,
-          props.database!,
-          table.name,
-          table.schema,
-        );
-        columnsByTable.set(cacheKey, columns);
+        try {
+          const columns = await connectionStore.listCompletionColumns(
+            props.connectionId!,
+            props.database!,
+            table.name,
+            table.schema,
+          );
+          columnsByTable.set(cacheKey, columns);
+        } catch {
+          // Skip tables that fail
+        }
       }),
     );
   }
@@ -361,18 +360,35 @@ onMounted(async () => {
                 return rt;
               });
 
+              // Check if identifier has a qualifier (e.g., c.card_name)
+              const qualifierMatch = /^(.+)\.(.+)$/.exec(identifier);
+              const qualifier = qualifierMatch ? qualifierMatch[1] : null;
+              const colName = qualifierMatch ? qualifierMatch[2] : identifier;
+              const colLower = colName.toLowerCase();
+
               if (referencedTables.length === 0) {
-                console.log("[DBX] no referenced tables in SQL");
-                emit("clickColumn", [], `Could not determine which tables to query for column "${identifier}"`);
+                console.log("[DBX] no referenced tables in SQL, skipping");
                 return;
               }
-              console.log("[DBX] enriched referencedTables:", referencedTables);
+              console.log("[DBX] enriched referencedTables:", referencedTables, "qualifier:", qualifier);
 
-              // 3. Fetch columns from referenced tables to find matches
-              const lower = identifier.toLowerCase();
+              // 3. Fetch columns — if qualifier, only check matching table; otherwise check all
+              const tablesToCheck = qualifier
+                ? referencedTables.filter(
+                    (rt) =>
+                      rt.alias?.toLowerCase() === qualifier.toLowerCase() ||
+                      rt.name.toLowerCase() === qualifier.toLowerCase(),
+                  )
+                : referencedTables;
+
+              if (tablesToCheck.length === 0 && qualifier) {
+                console.log("[DBX] qualifier", qualifier, "not found in referenced tables, skipping");
+                return;
+              }
+
               const matchedCols: Array<{ name: string; table: string; schema?: string }> = [];
 
-              for (const refTable of referencedTables) {
+              for (const refTable of tablesToCheck) {
                 const querySchema = refTable.schema || props.database || "";
                 console.log("[DBX] querying columns for table:", refTable.name, "schema:", querySchema);
                 const cols = await connectionStore.listCompletionColumns(
@@ -388,7 +404,7 @@ onMounted(async () => {
                   cols.map((c) => c.name),
                 );
                 for (const col of cols) {
-                  if (col.name.toLowerCase() === lower) {
+                  if (col.name.toLowerCase() === colLower) {
                     matchedCols.push({
                       name: col.name,
                       table: refTable.name,
@@ -410,7 +426,7 @@ onMounted(async () => {
                     table.schema,
                   );
                   for (const col of cols) {
-                    if (col.name.toLowerCase() === lower) {
+                    if (col.name.toLowerCase() === colLower) {
                       matchedCols.push({
                         name: col.name,
                         table: table.name,
@@ -425,7 +441,8 @@ onMounted(async () => {
               if (matchedCols.length > 0) {
                 emit("clickColumn", matchedCols);
               } else {
-                emit("clickColumn", [], `Column "${identifier}" not found in any table`);
+                // No columns found — silently ignore, don't show error panel
+                console.log("[DBX] column not found, ignoring");
               }
             } catch (e) {
               console.error("[DBX] Ctrl+click error:", e);

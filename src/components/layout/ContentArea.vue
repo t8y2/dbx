@@ -87,55 +87,50 @@ async function onHandleClickColumn(
 ) {
   if (!props.activeTab.connectionId || !props.activeTab.database) return;
 
+  // If error or no columns, silently ignore — don't show the panel
+  if (errorMsg || matchedCols.length === 0) return;
+
   columnInfoLoading.value = true;
   columnInfoError.value = undefined;
 
   try {
-    // If there's an error from the editor, show it directly
-    if (errorMsg) {
-      columnInfoError.value = errorMsg;
-      columnInfoColumns.value = [];
-    } else if (matchedCols.length === 0) {
-      columnInfoColumns.value = [];
-      columnInfoError.value = undefined;
-    } else {
-      // Fetch full column details from API
-      const apiModule = await import("@/lib/api");
-      const results: ColumnInfo[] = [];
+    // Fetch full column details from API
+    const apiModule = await import("@/lib/api");
+    const results: ColumnInfo[] = [];
 
-      for (const matchedCol of matchedCols) {
-        const querySchema = matchedCol.schema || props.activeTab.database || "";
-        try {
-          const fullColumns = await apiModule.getColumns(
-            props.activeTab.connectionId,
-            props.activeTab.database,
-            querySchema,
-            matchedCol.table,
-          );
-          for (const col of fullColumns) {
-            if (col.name === matchedCol.name) {
-              results.push({
-                name: col.name,
-                table: matchedCol.table,
-                dataType: col.data_type,
-                isNullable: col.is_nullable,
-                columnDefault: col.column_default,
-                isPrimaryKey: col.is_primary_key,
-                comment: col.comment,
-                extra: col.extra,
-              });
-            }
+    for (const matchedCol of matchedCols) {
+      const querySchema = matchedCol.schema || props.activeTab.database || "";
+      try {
+        const fullColumns = await apiModule.getColumns(
+          props.activeTab.connectionId,
+          props.activeTab.database,
+          querySchema,
+          matchedCol.table,
+        );
+        for (const col of fullColumns) {
+          if (col.name === matchedCol.name) {
+            results.push({
+              name: col.name,
+              table: matchedCol.table,
+              dataType: col.data_type,
+              isNullable: col.is_nullable,
+              columnDefault: col.column_default,
+              isPrimaryKey: col.is_primary_key,
+              comment: col.comment,
+              extra: col.extra,
+            });
           }
-        } catch {
-          // Skip tables that fail
         }
+      } catch {
+        // Skip tables that fail
       }
-
-      columnInfoColumns.value = results;
     }
+
+    columnInfoColumns.value = results;
   } catch (e: any) {
-    columnInfoError.value = e?.message || String(e);
-    columnInfoColumns.value = [];
+    // Silently ignore errors
+    console.error("[DBX] Failed to fetch column info:", e);
+    return;
   } finally {
     columnInfoLoading.value = false;
     showColumnInfo.value = true;

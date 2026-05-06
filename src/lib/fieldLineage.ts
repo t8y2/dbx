@@ -200,7 +200,7 @@ function schemaMatches(left: string | undefined, right: string | undefined): boo
 }
 
 function normalizeIdentifier(value: string | undefined): string {
-  return (value ?? "").replace(/^[`"\[]|[`"\]]$/g, "").toLowerCase();
+  return (value ?? "").replace(/^[`"[]|[`"\]]$/g, "").toLowerCase();
 }
 
 function snippetAround(sql: string, needle: string): string {

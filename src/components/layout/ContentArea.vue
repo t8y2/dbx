@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { Loader2, Square, Bot, Table2, GitBranch, BarChart3, RefreshCcw, Save, RotateCcw } from "lucide-vue-next";
+import { Loader2, Square, Bot, Table2, GitBranch, BarChart3 } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -333,42 +333,6 @@ function onHandleCloseColumnPanel() {
           >
             {{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database) }}
             <template v-if="activeTab.tableMeta?.schema"> &middot; {{ activeTab.tableMeta.schema }}</template>
-          </span>
-          <span v-if="activeTab.tableMeta" class="ml-auto flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-5 text-xs px-1.5"
-              :disabled="dataGridRef?.isSaving"
-              @click="dataGridRef?.onToolbarRefresh()"
-            >
-              <Loader2 v-if="activeTab.isExecuting" class="w-3 h-3 mr-1 animate-spin" />
-              <RefreshCcw v-else class="w-3 h-3 mr-1" />
-              {{ t("grid.refresh") }}
-            </Button>
-            <template v-if="dataGridRef?.useTransaction">
-              <Button
-                :variant="dataGridRef?.transactionActive ? 'default' : 'secondary'"
-                size="sm"
-                class="h-5 text-xs px-1.5"
-                :disabled="!dataGridRef?.transactionActive || dataGridRef?.isSaving"
-                @click="dataGridRef?.onToolbarCommit()"
-              >
-                <Loader2 v-if="dataGridRef?.isSaving" class="w-3 h-3 mr-1 animate-spin" />
-                <Save v-else class="w-3 h-3 mr-1" />
-                {{ t("grid.commit") }}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                class="h-5 text-xs px-1.5"
-                :disabled="!dataGridRef?.transactionActive"
-                @click="dataGridRef?.onToolbarRollback()"
-              >
-                <RotateCcw class="w-3 h-3 mr-1" />
-                {{ t("grid.rollback") }}
-              </Button>
-            </template>
           </span>
         </div>
         <DataGrid

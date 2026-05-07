@@ -28,6 +28,8 @@ import {
   Info,
   Rows3,
   TriangleAlert,
+  RotateCcw,
+  RefreshCcw,
 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import {
@@ -1106,6 +1108,19 @@ defineExpose({ useTransaction, transactionActive, isSaving, onToolbarRefresh, on
               :placeholder="t('grid.search')"
               @keydown="onSearchKeydown"
             />
+            <span
+              v-if="useTransaction && transactionActive"
+              class="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1"
+            >
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              {{ t("grid.transactionActive") }}
+            </span>
+
+            <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5" :disabled="isSaving" @click="onToolbarRefresh">
+              <Loader2 v-if="loading" class="w-3 h-3 mr-1 animate-spin" />
+              <RefreshCcw v-else class="w-3 h-3 mr-1" />
+              {{ t("grid.refresh") }}
+            </Button>
             <Select
               v-if="editable && tableMeta"
               :model-value="rowStatusFilter"
@@ -1133,6 +1148,29 @@ defineExpose({ useTransaction, transactionActive, isSaving, onToolbarRefresh, on
               @click="addRow"
             >
               <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }}
+            </Button>
+            <Button
+              v-if="useTransaction"
+              :variant="transactionActive ? 'default' : 'secondary'"
+              size="sm"
+              class="h-5 text-xs px-1.5"
+              :disabled="!transactionActive || isSaving"
+              @click="onToolbarCommit"
+            >
+              <Loader2 v-if="isSaving" class="w-3 h-3 mr-1 animate-spin" />
+              <Save v-else class="w-3 h-3 mr-1" />
+              {{ t("grid.commit") }}
+            </Button>
+            <Button
+              v-if="useTransaction"
+              variant="outline"
+              size="sm"
+              class="h-5 text-xs px-1.5"
+              :disabled="!transactionActive"
+              @click="onToolbarRollback"
+            >
+              <RotateCcw class="w-3 h-3 mr-1" />
+              {{ t("grid.rollback") }}
             </Button>
             <Button
               v-if="tableMeta && connectionId"

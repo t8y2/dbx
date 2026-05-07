@@ -20,6 +20,21 @@ const queryStore = useQueryStore();
 const tabsContainerRef = ref<HTMLElement | null>(null);
 const { canScrollLeft, canScrollRight, updateScrollButtons, scrollTabs } = useTabScroll(tabsContainerRef);
 
+function hasTabsToLeft(tabId: string) {
+  return queryStore.tabs.findIndex((tab) => tab.id === tabId) > 0;
+}
+
+function hasTabsToRight(tabId: string) {
+  const index = queryStore.tabs.findIndex((tab) => tab.id === tabId);
+  return index >= 0 && index < queryStore.tabs.length - 1;
+}
+
+function tabTitle(tab: (typeof queryStore.tabs)[number]) {
+  return tabTooltipLines(tab)
+    .map((line) => `${line.label} ${line.value}`)
+    .join("\n");
+}
+
 watch(
   () => queryStore.tabs.length,
   () => {
@@ -61,63 +76,53 @@ watch(
     >
       <ContextMenu v-for="tab in queryStore.tabs" :key="tab.id">
         <ContextMenuTrigger as-child>
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <div
-                class="group flex min-w-38 items-center gap-1 px-2 h-full text-xs cursor-pointer transition-colors whitespace-nowrap border-r border-border/50"
-                :class="
-                  tab.id === queryStore.activeTabId
-                    ? 'bg-background text-foreground font-medium'
-                    : 'text-foreground/70 hover:text-foreground/90'
-                "
-                :style="
-                  tab.id === queryStore.activeTabId ? { boxShadow: '0 1px 0 0 var(--color-background)' } : undefined
-                "
-                :data-active-tab="tab.id === queryStore.activeTabId"
-                @click="queryStore.activeTabId = tab.id"
-              >
-                <span
-                  class="h-1.5 w-1.5 rounded-full shrink-0"
-                  :style="{ backgroundColor: connectionColor(tab.connectionId) || '#9ca3af' }"
-                />
-                <span class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab) }}</span>
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <button
-                      class="inline-flex rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
-                      :class="tab.pinned ? 'visible text-primary' : 'invisible group-hover:visible'"
-                      @click.stop="queryStore.togglePinnedTab(tab.id)"
-                    >
-                      <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>{{ tab.pinned ? t("contextMenu.unpin") : t("contextMenu.pin") }}</TooltipContent>
-                </Tooltip>
-                <span
-                  class="shrink-0 rounded border px-1 text-[10px] leading-4"
-                  :class="
-                    tab.mode === 'data'
-                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
-                      : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300'
-                  "
-                >
-                  {{ tabModeLabel(tab) }}
-                </span>
+          <div
+            class="group flex min-w-38 items-center gap-1 px-2 h-full text-xs cursor-pointer transition-colors whitespace-nowrap border-r border-border/50 select-none"
+            :class="
+              tab.id === queryStore.activeTabId
+                ? 'bg-background text-foreground font-medium'
+                : 'text-foreground/70 hover:text-foreground/90'
+            "
+            :style="tab.id === queryStore.activeTabId ? { boxShadow: '0 1px 0 0 var(--color-background)' } : undefined"
+            :data-active-tab="tab.id === queryStore.activeTabId"
+            :title="tabTitle(tab)"
+            @click="queryStore.activeTabId = tab.id"
+            @mousedown.right="queryStore.activeTabId = tab.id"
+          >
+            <span
+              class="h-1.5 w-1.5 rounded-full shrink-0"
+              :style="{ backgroundColor: connectionColor(tab.connectionId) || '#9ca3af' }"
+            />
+            <span class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab) }}</span>
+            <Tooltip>
+              <TooltipTrigger as-child>
                 <button
-                  class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0"
-                  @click.stop="queryStore.closeTab(tab.id)"
+                  class="inline-flex rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
+                  :class="tab.pinned ? 'visible text-primary' : 'invisible group-hover:visible'"
+                  @click.stop="queryStore.togglePinnedTab(tab.id)"
                 >
-                  <X class="h-3 w-3" />
+                  <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
                 </button>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
-              <template v-for="line in tabTooltipLines(tab)" :key="line.label">
-                <span class="text-muted-foreground">{{ line.label }}</span>
-                <span>{{ line.value }}</span>
-              </template>
-            </TooltipContent>
-          </Tooltip>
+              </TooltipTrigger>
+              <TooltipContent>{{ tab.pinned ? t("contextMenu.unpin") : t("contextMenu.pin") }}</TooltipContent>
+            </Tooltip>
+            <span
+              class="shrink-0 rounded border px-1 text-[10px] leading-4"
+              :class="
+                tab.mode === 'data'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300'
+                  : 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300'
+              "
+            >
+              {{ tabModeLabel(tab) }}
+            </span>
+            <button
+              class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0"
+              @click.stop="queryStore.closeTab(tab.id)"
+            >
+              <X class="h-3 w-3" />
+            </button>
+          </div>
         </ContextMenuTrigger>
 
         <ContextMenuContent class="w-44">
@@ -129,6 +134,14 @@ watch(
           <ContextMenuItem @click="queryStore.closeTab(tab.id)">
             <X class="w-3.5 h-3.5 mr-2" />
             {{ t("contextMenu.closeTab") }}
+          </ContextMenuItem>
+          <ContextMenuItem :disabled="!hasTabsToLeft(tab.id)" @click="queryStore.closeLeftTabs(tab.id)">
+            <X class="w-3.5 h-3.5 mr-2" />
+            {{ t("contextMenu.closeLeftTabs") }}
+          </ContextMenuItem>
+          <ContextMenuItem :disabled="!hasTabsToRight(tab.id)" @click="queryStore.closeRightTabs(tab.id)">
+            <X class="w-3.5 h-3.5 mr-2" />
+            {{ t("contextMenu.closeRightTabs") }}
           </ContextMenuItem>
           <ContextMenuItem :disabled="queryStore.tabs.length <= 1" @click="queryStore.closeOtherTabs(tab.id)">
             <X class="w-3.5 h-3.5 mr-2" />

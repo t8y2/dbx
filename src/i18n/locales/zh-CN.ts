@@ -410,6 +410,8 @@ export default {
     pin: "置顶",
     unpin: "取消置顶",
     closeTab: "关闭标签页",
+    closeLeftTabs: "关闭左侧标签页",
+    closeRightTabs: "关闭右侧标签页",
     closeOtherTabs: "关闭其他标签页",
     closeAllTabs: "关闭全部标签页",
     copyName: "复制名称",

@@ -4,7 +4,7 @@ import { ref, watch } from "vue";
 import type { DatabaseType, QueryTab } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/queryExecutionState";
-import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
+import { closeAllTabsState, closeLeftTabsState, closeOtherTabsState, closeRightTabsState } from "@/lib/tabCloseActions";
 import { buildExplainSql, parseExplainResult } from "@/lib/explainPlan";
 import { analyzeEditableQuery, allPrimaryKeysPresent } from "@/lib/sqlAnalysis";
 import * as api from "@/lib/api";
@@ -122,6 +122,38 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value.filter((tab) => tab.id !== id && tab.isExecuting).forEach((tab) => void cancelTabExecution(tab.id));
     tabs.value.filter((tab) => tab.id !== id && tab.isExplaining).forEach((tab) => void cancelTabExplain(tab.id));
     const next = closeOtherTabsState(tabs.value, activeTabId.value, id);
+    tabs.value = next.tabs;
+    activeTabId.value = next.activeTabId;
+  }
+
+  function closeLeftTabs(id: string) {
+    const targetIndex = tabs.value.findIndex((tab) => tab.id === id);
+    if (targetIndex < 0) return;
+    tabs.value
+      .slice(0, targetIndex)
+      .filter((tab) => tab.isExecuting)
+      .forEach((tab) => void cancelTabExecution(tab.id));
+    tabs.value
+      .slice(0, targetIndex)
+      .filter((tab) => tab.isExplaining)
+      .forEach((tab) => void cancelTabExplain(tab.id));
+    const next = closeLeftTabsState(tabs.value, activeTabId.value, id);
+    tabs.value = next.tabs;
+    activeTabId.value = next.activeTabId;
+  }
+
+  function closeRightTabs(id: string) {
+    const targetIndex = tabs.value.findIndex((tab) => tab.id === id);
+    if (targetIndex < 0) return;
+    tabs.value
+      .slice(targetIndex + 1)
+      .filter((tab) => tab.isExecuting)
+      .forEach((tab) => void cancelTabExecution(tab.id));
+    tabs.value
+      .slice(targetIndex + 1)
+      .filter((tab) => tab.isExplaining)
+      .forEach((tab) => void cancelTabExplain(tab.id));
+    const next = closeRightTabsState(tabs.value, activeTabId.value, id);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
   }
@@ -446,6 +478,8 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId,
     createTab,
     closeTab,
+    closeLeftTabs,
+    closeRightTabs,
     closeOtherTabs,
     closeAllTabs,
     updateSql,

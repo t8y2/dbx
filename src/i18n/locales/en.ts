@@ -418,6 +418,8 @@ export default {
     pin: "Pin",
     unpin: "Unpin",
     closeTab: "Close Tab",
+    closeLeftTabs: "Close Left Tabs",
+    closeRightTabs: "Close Right Tabs",
     closeOtherTabs: "Close Other Tabs",
     closeAllTabs: "Close All Tabs",
     copyName: "Copy Name",

@@ -31,7 +31,7 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "macOS": {
-      "frameworks": ["/opt/homebrew/lib/libodbc.2.dylib", "/opt/homebrew/lib/libltdl.7.dylib"]
+      "frameworks": ["libodbc.2.dylib", "libltdl.7.dylib"]
     },
     "icon": [
       "icons/32x32.png",

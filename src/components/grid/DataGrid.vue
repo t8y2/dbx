@@ -423,7 +423,7 @@ watch(() => props.result.columns.length, initColumnWidths);
 const pageSize = ref(100);
 const currentPage = ref(1);
 const isFullPage = computed(() => props.result.rows.length >= pageSize.value);
-const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql);
+const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && props.context !== "results");
 const isWhereSearch = computed(() => canUseWhereSearch.value && /^\s*where\b/i.test(searchText.value));
 const wherePredicate = computed(() => normalizeWhereInput(searchText.value));
 const activeWhereInput = computed(() => (isWhereSearch.value && wherePredicate.value ? searchText.value : undefined));
@@ -1282,14 +1282,8 @@ defineExpose({
       <ContextMenuTrigger as-child>
         <div v-if="hasData" class="flex-1 flex flex-col overflow-hidden">
           <!-- Search bar -->
-          <div
-            v-if="useTransaction || props.context === 'table-data'"
-            class="flex items-center gap-1 px-2 py-1 border-b shrink-0 bg-muted/20 relative"
-          >
-            <Search
-              class="w-3.5 h-3.5 text-muted-foreground shrink-0"
-              :style="props.context === 'table-data' ? '' : 'visibility: hidden'"
-            />
+          <div class="flex items-center gap-1 px-2 py-1 border-b shrink-0 bg-muted/20 relative">
+            <Search class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             <input
               ref="searchInputRef"
               v-model="searchText"
@@ -1300,7 +1294,6 @@ defineExpose({
               :placeholder="canUseWhereSearch ? t('grid.searchOrWhere') : t('grid.search')"
               @keydown="onSearchKeydown"
               @click="updateSuggestionPosition"
-              :style="props.context === 'table-data' ? '' : 'visibility: hidden'"
             />
             <span
               ref="measureRef"
@@ -1357,7 +1350,7 @@ defineExpose({
               {{ t("grid.refresh") }}
             </Button>
             <Select
-              v-if="editable && tableMeta"
+              v-if="useTransaction && editable && tableMeta"
               :model-value="rowStatusFilter"
               @update:model-value="(value: any) => setRowStatusFilter(String(value))"
             >
@@ -1373,7 +1366,7 @@ defineExpose({
               </SelectContent>
             </Select>
             <Button
-              v-if="editable && tableMeta"
+              v-if="useTransaction && editable && tableMeta"
               variant="ghost"
               size="sm"
               class="h-5 text-xs px-1.5 shrink-0"
@@ -1382,6 +1375,7 @@ defineExpose({
               <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }}
             </Button>
             <Button
+              v-if="useTransaction"
               :variant="transactionActive ? 'default' : 'secondary'"
               size="sm"
               class="h-5 text-xs px-1.5"
@@ -1393,6 +1387,7 @@ defineExpose({
               {{ t("grid.commit") }}
             </Button>
             <Button
+              v-if="useTransaction"
               variant="outline"
               size="sm"
               class="h-5 text-xs px-1.5"

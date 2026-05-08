@@ -222,6 +222,7 @@ export default {
     commit: "提交",
     rollback: "回滚",
     transactionActive: "编辑中",
+    sortUnsupported: "当前 SQL 不支持全量排序，请改为单条 SELECT 查询后再尝试。",
   },
   welcome: {
     title: "数据库工作台",

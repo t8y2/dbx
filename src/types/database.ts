@@ -152,6 +152,8 @@ export interface QueryTab {
   schema?: string;
   sql: string;
   lastExecutedSql?: string;
+  resultBaseSql?: string;
+  resultSortedSql?: string;
   pinned?: boolean;
   result?: QueryResult;
   results?: QueryResult[];

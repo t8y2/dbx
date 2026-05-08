@@ -1434,12 +1434,14 @@ defineExpose({
                       </div>
                     </TooltipTrigger>
                     <TooltipContent
-                      v-if="columnTypeMap.get(col)"
+                      v-if="columnTypeMap.get(col) || columnCommentMap.get(col)"
                       side="bottom"
                       class="text-xs grid grid-cols-[auto_1fr] gap-x-2"
                     >
-                      <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
-                      <span :class="typeColorClass(columnTypeMap.get(col)!)">{{ columnTypeMap.get(col) }}</span>
+                      <template v-if="columnTypeMap.get(col)">
+                        <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
+                        <span :class="typeColorClass(columnTypeMap.get(col)!)">{{ columnTypeMap.get(col) }}</span>
+                      </template>
                       <template v-if="columnCommentMap.get(col)">
                         <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
                         <span>{{ columnCommentMap.get(col) }}</span>

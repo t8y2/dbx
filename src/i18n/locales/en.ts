@@ -223,6 +223,7 @@ export default {
     commit: "Commit",
     rollback: "Rollback",
     transactionActive: "Editing",
+    sortUnsupported: "This SQL does not support full-result sorting. Try again with a single SELECT query.",
   },
   welcome: {
     title: "Database Workspace",

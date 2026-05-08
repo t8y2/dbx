@@ -1,5 +1,5 @@
 import type { DatabaseType } from "../types/database.ts";
-import { isSchemaAware, usesFetchFirst } from "@/lib/databaseCapabilities";
+import { isSchemaAware, usesFetchFirst } from "./databaseCapabilities.ts";
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;

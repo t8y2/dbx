@@ -297,7 +297,7 @@ pub async fn get_columns_core(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
     match pool {
-        PoolKind::Mysql(p, _) => db::mysql::get_columns(p, schema, table).await,
+        PoolKind::Mysql(p, _) => db::mysql::get_columns(p, database, table).await,
         PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await,
         PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await,
         _ => Ok(vec![]),

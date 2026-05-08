@@ -1,10 +1,15 @@
 import { type ComputedRef } from "vue";
+import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { buildSortedQuerySql } from "@/lib/queryResultSort";
 import type { QueryTab } from "@/types/database";
+import { useToast } from "@/composables/useToast";
 
 export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>) {
+  const { t } = useI18n();
+  const { toast } = useToast();
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
 
@@ -44,13 +49,24 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     if (!tab) return;
     if (tab.mode === "data" && tab.tableMeta) {
       queryStore.updateSql(tab.id, buildTableSql(tab, { whereInput }));
-      return queryStore.executeCurrentTab();
+      await queryStore.executeCurrentTab();
+      return;
     }
-    // Results mode: re-run only the SQL that produced the current result set
+    if (tab.resultSortedSql) {
+      await queryStore.executeTabSql(tab.id, tab.resultSortedSql, {
+        resultBaseSql: tab.resultBaseSql ?? tab.sql,
+        resultSortedSql: tab.resultSortedSql,
+      });
+      return;
+    }
     if (sql?.trim()) {
-      return queryStore.executeTabSql(tab.id, sql);
+      await queryStore.executeTabSql(tab.id, sql, {
+        resultBaseSql: sql,
+        resultSortedSql: undefined,
+      });
+      return;
     }
-    return queryStore.executeCurrentTab();
+    await queryStore.executeCurrentTab();
   }
 
   async function onPaginate(offset: number, limit: number, whereInput?: string, orderBy?: string) {
@@ -63,11 +79,39 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
   async function onSort(column: string, direction: "asc" | "desc" | null, whereInput?: string) {
     const tab = activeTab.value;
-    if (!tab?.tableMeta) return;
-    const orderBy = direction ? `${quoteIdent(tab, column)} ${direction.toUpperCase()}` : undefined;
-    const sql = buildTableSql(tab, { orderBy, whereInput });
-    queryStore.updateSql(tab.id, sql);
-    await queryStore.executeCurrentTab();
+    if (!tab) return;
+
+    if (tab.mode === "data") {
+      if (!tab.tableMeta) return;
+      const orderBy = direction ? `${quoteIdent(tab, column)} ${direction.toUpperCase()}` : undefined;
+      const sql = buildTableSql(tab, { orderBy, whereInput });
+      queryStore.updateSql(tab.id, sql);
+      await queryStore.executeCurrentTab();
+      return;
+    }
+
+    const baseSql = tab.resultBaseSql ?? tab.sql;
+    if (!baseSql.trim()) return;
+
+    if (!direction) {
+      await queryStore.executeTabSql(tab.id, baseSql, {
+        resultBaseSql: baseSql,
+        resultSortedSql: undefined,
+      });
+      return;
+    }
+
+    const config = connectionStore.getConfig(tab.connectionId);
+    const built = buildSortedQuerySql(baseSql, config?.db_type, column, direction);
+    if (!built.ok) {
+      toast(t("grid.sortUnsupported"), 5000);
+      return;
+    }
+
+    await queryStore.executeTabSql(tab.id, built.sql, {
+      resultBaseSql: baseSql,
+      resultSortedSql: built.sql,
+    });
   }
 
   return { onExecuteSql, onReloadData, onPaginate, onSort };

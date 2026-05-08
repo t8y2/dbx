@@ -136,7 +136,11 @@ export const useQueryStore = defineStore("query", () => {
 
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
-    if (tab) tab.sql = sql;
+    if (tab) {
+      tab.sql = sql;
+      tab.resultSortedSql = undefined;
+      tab.resultBaseSql = undefined;
+    }
   }
 
   function togglePinnedTab(id: string) {
@@ -153,6 +157,8 @@ export const useQueryStore = defineStore("query", () => {
     tab.schema = undefined;
     tab.result = undefined;
     tab.lastExecutedSql = undefined;
+    tab.resultBaseSql = undefined;
+    tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
   }
@@ -171,6 +177,8 @@ export const useQueryStore = defineStore("query", () => {
     tab.schema = undefined;
     tab.result = undefined;
     tab.lastExecutedSql = undefined;
+    tab.resultBaseSql = undefined;
+    tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
   }
@@ -226,14 +234,13 @@ export const useQueryStore = defineStore("query", () => {
 
   async function executeCurrentSql(sql: string) {
     if (!activeTabId.value) return;
-    await executeTabSql(activeTabId.value, sql);
+    await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined });
   }
 
   /**
-   * Analyze if the query result is editable (single-table SELECT with primary keys).
-   * If editable, fetches table metadata and sets queryAnalysis + tableMeta on the tab.
+   * Analyze query metadata for result tooltips and editability.
    */
-  async function analyzeQueryEditability(tab: QueryTab, sql: string) {
+  async function analyzeQueryMetadata(tab: QueryTab, sql: string) {
     if (tab.mode !== "query") return;
     if (!tab.result || !tab.result.columns.length) {
       tab.queryAnalysis = undefined;
@@ -268,33 +275,31 @@ export const useQueryStore = defineStore("query", () => {
       const columns = await api.getColumns(tab.connectionId, tab.database, schema, analysis.tableName);
       const primaryKeys = columns.filter((c) => c.is_primary_key).map((c) => c.name);
 
-      if (primaryKeys.length === 0) {
-        tab.queryAnalysis = undefined;
-        tab.tableMeta = undefined;
-        return;
-      }
-
-      if (!allPrimaryKeysPresent(primaryKeys, tab.result.columns)) {
-        tab.queryAnalysis = undefined;
-        tab.tableMeta = undefined;
-        return;
-      }
-
       tab.tableMeta = {
         schema: schema || undefined,
         tableName: analysis.tableName,
         columns,
         primaryKeys,
       };
+
+      if (primaryKeys.length === 0 || !allPrimaryKeysPresent(primaryKeys, tab.result.columns)) {
+        tab.queryAnalysis = undefined;
+        return;
+      }
+
       tab.queryAnalysis = analysis;
     } catch (err) {
-      console.error("[DBX] ERROR fetching columns for editable query:", err);
+      console.error("[DBX] ERROR fetching columns for query metadata:", err);
       tab.queryAnalysis = undefined;
       tab.tableMeta = undefined;
     }
   }
 
-  async function executeTabSql(id: string, sql: string) {
+  async function executeTabSql(
+    id: string,
+    sql: string,
+    options?: { resultBaseSql?: string; resultSortedSql?: string | undefined },
+  ) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || !sql.trim()) return;
 
@@ -316,8 +321,9 @@ export const useQueryStore = defineStore("query", () => {
           current.activeResultIndex = undefined;
           current.result = results[0];
         }
-        // Analyze editability after successful execution
-        await analyzeQueryEditability(current, sql);
+        current.resultBaseSql = options?.resultBaseSql ?? sql;
+        current.resultSortedSql = options?.resultSortedSql;
+        await analyzeQueryMetadata(current, current.resultBaseSql);
       }
     } catch (e: any) {
       const current = tabs.value.find((t) => t.id === id);
@@ -326,6 +332,9 @@ export const useQueryStore = defineStore("query", () => {
         current.results = undefined;
         current.activeResultIndex = undefined;
         current.queryAnalysis = undefined;
+        current.tableMeta = undefined;
+        current.resultBaseSql = options?.resultBaseSql ?? sql;
+        current.resultSortedSql = options?.resultSortedSql;
       }
     } finally {
       const current = tabs.value.find((t) => t.id === id);

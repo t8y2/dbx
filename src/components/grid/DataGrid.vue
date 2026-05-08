@@ -304,8 +304,8 @@ function onSearchKeydown(e: KeyboardEvent) {
       return;
     }
 
-    if (searchText.value[start] === close) {
-      // Cursor before closing char → skip over it
+    if (e.key === close && searchText.value[start] === close) {
+      // Cursor before matching close char → skip over it (only for quotes)
       e.preventDefault();
       input.setSelectionRange(start + 1, start + 1);
       return;
@@ -1273,18 +1273,22 @@ defineExpose({ useTransaction, transactionActive, isSaving, onToolbarRefresh, on
       <ContextMenuTrigger as-child>
         <div v-if="hasData" class="flex-1 flex flex-col overflow-hidden">
           <!-- Search bar -->
-          <div v-if="useTransaction" class="flex items-center gap-1 px-2 py-1 border-b shrink-0 bg-muted/20 relative">
+          <div
+            v-if="useTransaction || props.context === 'table-data'"
+            class="flex items-center gap-1 px-2 py-1 border-b shrink-0 bg-muted/20 relative"
+          >
             <Search
               class="w-3.5 h-3.5 text-muted-foreground shrink-0"
               :style="props.context === 'table-data' ? '' : 'visibility: hidden'"
             />
             <input
+              ref="searchInputRef"
               v-model="searchText"
               autocapitalize="off"
               autocorrect="off"
               spellcheck="false"
               class="flex-1 h-5 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
-              :placeholder="t('grid.search')"
+              :placeholder="canUseWhereSearch ? t('grid.searchOrWhere') : t('grid.search')"
               @keydown="onSearchKeydown"
               @click="updateSuggestionPosition"
               :style="props.context === 'table-data' ? '' : 'visibility: hidden'"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { Loader2, Square, Bot, Table2, GitBranch, BarChart3, RefreshCcw, Save, RotateCcw } from "lucide-vue-next";
+import { Loader2, Square, Bot, Table2, GitBranch, BarChart3 } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -277,9 +277,13 @@ function onHandleCloseColumnPanel() {
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 @reload="(sql?: string, whereInput?: string) => emit('reload', sql, whereInput)"
                 @paginate="
-                  (offset: number, limit: number, orderBy?: string) => emit('paginate', offset, limit, orderBy)
+                  (offset: number, limit: number, whereInput?: string, orderBy?: string) =>
+                    emit('paginate', offset, limit, whereInput, orderBy)
                 "
-                @sort="(column: string, direction: 'asc' | 'desc' | null) => emit('sort', column, direction)"
+                @sort="
+                  (column: string, direction: 'asc' | 'desc' | null, whereInput?: string) =>
+                    emit('sort', column, direction, whereInput)
+                "
               />
               <div
                 v-if="activeTab.result?.columns.includes('Error')"

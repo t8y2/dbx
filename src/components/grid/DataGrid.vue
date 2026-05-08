@@ -1264,7 +1264,16 @@ function escapeAndHighlightKeywords(s: string): string {
     .replace(SQL_KEYWORDS, '<span class="ddl-kw">$1</span>');
 }
 
-defineExpose({ useTransaction, transactionActive, isSaving, onToolbarRefresh, onToolbarCommit, onToolbarRollback });
+defineExpose({
+  useTransaction,
+  transactionActive,
+  isSaving,
+  onToolbarRefresh,
+  onToolbarCommit,
+  onToolbarRollback,
+  showDdl,
+  toggleDdl,
+});
 </script>
 
 <template>
@@ -1392,16 +1401,6 @@ defineExpose({ useTransaction, transactionActive, isSaving, onToolbarRefresh, on
             >
               <RotateCcw class="w-3 h-3 mr-1" />
               {{ t("grid.rollback") }}
-            </Button>
-            <Button
-              v-if="tableMeta && connectionId"
-              variant="ghost"
-              size="sm"
-              class="h-5 text-xs px-1.5 shrink-0"
-              :class="{ 'bg-accent': showDdl }"
-              @click="toggleDdl"
-            >
-              <Code2 class="w-3 h-3 mr-1" /> DDL
             </Button>
           </div>
           <!-- Content area: table + DDL drawer -->

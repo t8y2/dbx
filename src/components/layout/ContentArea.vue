@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { Loader2, Square, Bot, Table2, GitBranch, BarChart3 } from "lucide-vue-next";
+import { Loader2, Square, Bot, Table2, GitBranch, BarChart3, Code2 } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -339,6 +339,19 @@ function onHandleCloseColumnPanel() {
             {{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database) }}
             <template v-if="activeTab.tableMeta?.schema"> &middot; {{ activeTab.tableMeta.schema }}</template>
           </span>
+          <span v-if="activeTab.tableMeta" class="ml-auto text-muted-foreground">
+            {{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}
+          </span>
+          <Button
+            v-if="activeTab.tableMeta && activeTab.connectionId"
+            variant="ghost"
+            size="sm"
+            class="h-5 text-xs px-1.5 shrink-0"
+            :class="{ 'bg-accent': dataGridRef?.showDdl }"
+            @click="dataGridRef?.toggleDdl()"
+          >
+            <Code2 class="h-3.5 w-3.5" /> DDL
+          </Button>
         </div>
         <DataGrid
           v-if="activeTab.result"

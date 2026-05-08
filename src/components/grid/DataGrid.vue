@@ -423,9 +423,10 @@ watch(() => props.result.columns.length, initColumnWidths);
 const pageSize = ref(100);
 const currentPage = ref(1);
 const isFullPage = computed(() => props.result.rows.length >= pageSize.value);
-const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && props.context !== "results");
+const isResultsContext = computed(() => props.context === "results");
+const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
 const isWhereSearch = computed(() => canUseWhereSearch.value && /^\s*where\b/i.test(searchText.value));
-const wherePredicate = computed(() => normalizeWhereInput(searchText.value));
+const wherePredicate = computed(() => (canUseWhereSearch.value ? normalizeWhereInput(searchText.value) : undefined));
 const activeWhereInput = computed(() => (isWhereSearch.value && wherePredicate.value ? searchText.value : undefined));
 const clientSearchText = computed(() => (isWhereSearch.value ? "" : searchText.value));
 

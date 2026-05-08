@@ -475,6 +475,8 @@ function toggleSort(colName: string) {
 
 const CELL_DISPLAY_MAX_LENGTH = 256;
 
+const CELL_DISPLAY_MAX_LENGTH = 256;
+
 function formatCell(value: CellValue): string {
   if (value === null) return "NULL";
   if (typeof value === "boolean") return value ? "true" : "false";

@@ -181,9 +181,7 @@ export default {
     exportJson: "导出 JSON",
     exportMarkdown: "导出 Markdown",
     copied: "已复制!",
-    search: "搜索...",
-    searchOrWhere: "搜索，或输入 WHERE 条件...",
-    applyWhere: "应用 WHERE",
+    search: "数据过滤...",
     filterRows: "筛选行",
     filterAllRows: "全部行",
     filterChangedRows: "有变更内容",
@@ -525,6 +523,7 @@ export default {
     members: "{count} 个成员",
     entries: "{count} 条记录",
     noExpiry: "永不过期",
+    binaryStringReadonlyHint: "二进制字符串按转义文本只读展示；当前不支持直接编辑原始字节值。",
   },
   mongo: {
     documents: "{count} 个文档",

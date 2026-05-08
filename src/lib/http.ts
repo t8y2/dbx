@@ -450,40 +450,52 @@ export async function redisScanKeys(
   return post("/api/redis/scan-keys", { connectionId, db, cursor, pattern, count });
 }
 
-export async function redisGetValue(connectionId: string, key: string): Promise<RedisValue> {
-  return post("/api/redis/get-value", { connectionId, key });
+export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
+  return post("/api/redis/get-value", { connectionId, db, keyRaw });
 }
 
-export async function redisSetString(connectionId: string, key: string, value: string, ttl?: number): Promise<void> {
-  return post("/api/redis/set-string", { connectionId, key, value, ttl });
+export async function redisSetString(
+  connectionId: string,
+  db: number,
+  keyRaw: string,
+  value: string,
+  ttl?: number,
+): Promise<void> {
+  return post("/api/redis/set-string", { connectionId, db, keyRaw, value, ttl });
 }
 
-export async function redisDeleteKey(connectionId: string, key: string): Promise<void> {
-  return post("/api/redis/delete-key", { connectionId, key });
+export async function redisDeleteKey(connectionId: string, db: number, keyRaw: string): Promise<void> {
+  return post("/api/redis/delete-key", { connectionId, db, keyRaw });
 }
 
-export async function redisHashSet(connectionId: string, key: string, field: string, value: string): Promise<void> {
-  return post("/api/redis/hash-set", { connectionId, key, field, value });
+export async function redisHashSet(
+  connectionId: string,
+  db: number,
+  keyRaw: string,
+  field: string,
+  value: string,
+): Promise<void> {
+  return post("/api/redis/hash-set", { connectionId, db, keyRaw, field, value });
 }
 
-export async function redisHashDel(connectionId: string, key: string, field: string): Promise<void> {
-  return post("/api/redis/hash-del", { connectionId, key, field });
+export async function redisHashDel(connectionId: string, db: number, keyRaw: string, field: string): Promise<void> {
+  return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
 }
 
-export async function redisListPush(connectionId: string, key: string, value: string): Promise<void> {
-  return post("/api/redis/list-push", { connectionId, key, value });
+export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string): Promise<void> {
+  return post("/api/redis/list-push", { connectionId, db, keyRaw, value });
 }
 
-export async function redisListRemove(connectionId: string, key: string, index: number): Promise<void> {
-  return post("/api/redis/list-remove", { connectionId, key, index });
+export async function redisListRemove(connectionId: string, db: number, keyRaw: string, index: number): Promise<void> {
+  return post("/api/redis/list-remove", { connectionId, db, keyRaw, index });
 }
 
-export async function redisSetAdd(connectionId: string, key: string, member: string): Promise<void> {
-  return post("/api/redis/set-add", { connectionId, key, member });
+export async function redisSetAdd(connectionId: string, db: number, keyRaw: string, member: string): Promise<void> {
+  return post("/api/redis/set-add", { connectionId, db, keyRaw, member });
 }
 
-export async function redisSetRemove(connectionId: string, key: string, member: string): Promise<void> {
-  return post("/api/redis/set-remove", { connectionId, key, member });
+export async function redisSetRemove(connectionId: string, db: number, keyRaw: string, member: string): Promise<void> {
+  return post("/api/redis/set-remove", { connectionId, db, keyRaw, member });
 }
 
 // ---------------------------------------------------------------------------

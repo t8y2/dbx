@@ -122,10 +122,21 @@ impl ConnectionConfig {
                 format!("server=tcp:{host},{port};database={}", self.database.as_deref().unwrap_or("master"))
             }
             DatabaseType::MongoDb => {
+                let is_tunneled = host != self.host.as_str() || port != self.port;
                 if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
+                    if is_tunneled {
+                        return rewrite_mongo_uri_host(cs, &host, port);
+                    }
                     return cs.to_string();
                 }
-                let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
+                let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
+                if is_tunneled && !suffix.contains("directConnection=") {
+                    if suffix.is_empty() {
+                        suffix = "?directConnection=true".to_string();
+                    } else {
+                        suffix.push_str("&directConnection=true");
+                    }
+                }
                 format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
@@ -176,10 +187,21 @@ impl ConnectionConfig {
                 self.database.as_deref().unwrap_or("master")
             ),
             DatabaseType::MongoDb => {
+                let is_tunneled = host != self.host.as_str() || port != self.port;
                 if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
+                    if is_tunneled {
+                        return rewrite_mongo_uri_host(cs, &host, port);
+                    }
                     return cs.to_string();
                 }
-                let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
+                let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
+                if is_tunneled && !suffix.contains("directConnection=") {
+                    if suffix.is_empty() {
+                        suffix = "?directConnection=true".to_string();
+                    } else {
+                        suffix.push_str("&directConnection=true");
+                    }
+                }
                 if self.username.is_empty() {
                     format!("mongodb://{host}:{port}{db_part}{suffix}")
                 } else {
@@ -252,6 +274,52 @@ impl ConnectionConfig {
             _ => value.trim_start_matches('?').to_string(),
         }
     }
+}
+
+pub fn parse_mongo_first_host(uri: &str) -> Option<(String, u16)> {
+    let rest = uri.strip_prefix("mongodb://").or_else(|| uri.strip_prefix("mongodb+srv://"))?;
+    let authority = rest.split('/').next()?;
+    let host_section = match authority.rfind('@') {
+        Some(idx) => &authority[idx + 1..],
+        None => authority,
+    };
+    let first = host_section.split(',').next()?;
+    match first.rsplit_once(':') {
+        Some((h, p)) => Some((h.to_string(), p.parse().unwrap_or(27017))),
+        None => Some((first.to_string(), 27017)),
+    }
+}
+
+fn rewrite_mongo_uri_host(uri: &str, new_host: &str, new_port: u16) -> String {
+    let (_scheme, rest) = if let Some(r) = uri.strip_prefix("mongodb+srv://") {
+        ("mongodb://", r)
+    } else if let Some(r) = uri.strip_prefix("mongodb://") {
+        ("mongodb://", r)
+    } else {
+        return uri.to_string();
+    };
+
+    let (creds_prefix, after_creds) = match rest.find('@') {
+        Some(idx) => (&rest[..=idx], &rest[idx + 1..]),
+        None => ("", rest),
+    };
+
+    let after_hosts = match after_creds.find('/') {
+        Some(idx) => &after_creds[idx..],
+        None => "",
+    };
+
+    let mut result = format!("mongodb://{creds_prefix}{new_host}:{new_port}{after_hosts}");
+
+    if !result.contains("directConnection=") {
+        if result.contains('?') {
+            result.push_str("&directConnection=true");
+        } else {
+            result.push_str("?directConnection=true");
+        }
+    }
+
+    result
 }
 
 fn encode_url_part(value: &str) -> String {
@@ -410,5 +478,84 @@ mod tests {
         assert_eq!(url, "mongodb://10.1.2.3:17000/admin?authSource=admin&authMechanism=SCRAM-SHA-1");
         assert!(!url.contains("root"));
         assert!(!url.contains("secret"));
+    }
+
+    #[test]
+    fn parse_mongo_first_host_replica_set() {
+        let uri = "mongodb://user:pass@host1:27017,host2:27017,host3:27017/admin?replicaSet=rs0";
+        let (host, port) = super::parse_mongo_first_host(uri).unwrap();
+        assert_eq!(host, "host1");
+        assert_eq!(port, 27017);
+    }
+
+    #[test]
+    fn parse_mongo_first_host_single() {
+        let uri = "mongodb://user:pass@myhost:30000/db";
+        let (host, port) = super::parse_mongo_first_host(uri).unwrap();
+        assert_eq!(host, "myhost");
+        assert_eq!(port, 30000);
+    }
+
+    #[test]
+    fn parse_mongo_first_host_no_creds() {
+        let uri = "mongodb://host1:27017,host2:27017/admin";
+        let (host, port) = super::parse_mongo_first_host(uri).unwrap();
+        assert_eq!(host, "host1");
+        assert_eq!(port, 27017);
+    }
+
+    #[test]
+    fn parse_mongo_first_host_srv() {
+        let uri = "mongodb+srv://user:pass@cluster0.example.net/db";
+        let (host, port) = super::parse_mongo_first_host(uri).unwrap();
+        assert_eq!(host, "cluster0.example.net");
+        assert_eq!(port, 27017);
+    }
+
+    #[test]
+    fn mongodb_connection_string_rewritten_when_tunneled() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string =
+            Some("mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0&authSource=admin".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(
+            url,
+            "mongodb://read:pass@127.0.0.1:54321/admin?replicaSet=rs0&authSource=admin&directConnection=true"
+        );
+    }
+
+    #[test]
+    fn mongodb_connection_string_unchanged_when_not_tunneled() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string = Some("mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0".to_string());
+
+        let url = config.connection_url();
+
+        assert_eq!(url, "mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0");
+    }
+
+    #[test]
+    fn mongodb_form_url_adds_direct_connection_when_tunneled() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.url_params = Some("replicaSet=rs0&authSource=admin".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(
+            url,
+            "mongodb://root:secret@127.0.0.1:54321/admin?replicaSet=rs0&authSource=admin&directConnection=true"
+        );
+    }
+
+    #[test]
+    fn mongodb_form_url_no_duplicate_direct_connection() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.url_params = Some("directConnection=true&authSource=admin".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert!(url.matches("directConnection").count() == 1);
     }
 }

@@ -60,6 +60,11 @@ RUN case "$TARGETARCH" in \
 COPY crates/ crates/
 COPY src-web/ src-web/
 
+# Docker COPY preserves original file timestamps, which may be older than the
+# dummy-source binary compiled above. Touch all .rs files so cargo detects the
+# source change and recompiles instead of reusing the dummy binary.
+RUN find crates/ src-web/ -name '*.rs' -exec touch {} +
+
 RUN case "$TARGETARCH" in \
       amd64) rust_target=x86_64-unknown-linux-gnu; lib_arch=x86_64-linux-gnu ;; \
       arm64) rust_target=aarch64-unknown-linux-gnu; lib_arch=aarch64-linux-gnu ;; \

@@ -13,7 +13,9 @@ const { t } = useI18n();
 
 const props = defineProps<{
   connectionId: string;
-  keyName: string;
+  db: number;
+  keyDisplay: string;
+  keyRaw: string;
 }>();
 
 const emit = defineEmits<{ deleted: [] }>();
@@ -37,18 +39,20 @@ const pendingDelete = ref<PendingDelete | null>(null);
 const deleteDetails = computed(() => {
   const pending = pendingDelete.value;
   if (!pending) return "";
-  if (pending.kind === "key") return t("dangerDialog.redisKeyDetails", { key: props.keyName });
+  if (pending.kind === "key") return t("dangerDialog.redisKeyDetails", { key: props.keyDisplay });
   if (pending.kind === "hash")
-    return t("dangerDialog.redisHashFieldDetails", { key: props.keyName, field: pending.field });
+    return t("dangerDialog.redisHashFieldDetails", { key: props.keyDisplay, field: pending.field });
   if (pending.kind === "list")
-    return t("dangerDialog.redisListItemDetails", { key: props.keyName, index: pending.index });
-  return t("dangerDialog.redisSetMemberDetails", { key: props.keyName, member: pending.member });
+    return t("dangerDialog.redisListItemDetails", { key: props.keyDisplay, index: pending.index });
+  return t("dangerDialog.redisSetMemberDetails", { key: props.keyDisplay, member: pending.member });
 });
+
+const isBinaryStringValue = computed(() => data.value?.key_type === "string" && data.value?.value_is_binary);
 
 async function load() {
   loading.value = true;
   try {
-    data.value = await api.redisGetValue(props.connectionId, props.keyName);
+    data.value = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
     if (data.value.key_type === "string") {
       editValue.value = String(data.value.value);
     }
@@ -58,13 +62,20 @@ async function load() {
 }
 
 async function saveString() {
-  await api.redisSetString(props.connectionId, props.keyName, editValue.value);
+  if (isBinaryStringValue.value) return;
+  await api.redisSetString(props.connectionId, props.db, props.keyRaw, editValue.value);
   isEditing.value = false;
   await load();
 }
 
+function handleStringInput() {
+  if (!isBinaryStringValue.value) {
+    isEditing.value = true;
+  }
+}
+
 async function applyDeleteKey() {
-  await api.redisDeleteKey(props.connectionId, props.keyName);
+  await api.redisDeleteKey(props.connectionId, props.db, props.keyRaw);
   emit("deleted");
 }
 
@@ -82,13 +93,13 @@ function copyValue() {
 // Hash
 async function hashSet() {
   if (!newField.value) return;
-  await api.redisHashSet(props.connectionId, props.keyName, newField.value, newValue.value);
+  await api.redisHashSet(props.connectionId, props.db, props.keyRaw, newField.value, newValue.value);
   newField.value = "";
   newValue.value = "";
   await load();
 }
 async function applyHashDel(field: string) {
-  await api.redisHashDel(props.connectionId, props.keyName, field);
+  await api.redisHashDel(props.connectionId, props.db, props.keyRaw, field);
   await load();
 }
 function requestHashDel(field: string) {
@@ -99,12 +110,12 @@ function requestHashDel(field: string) {
 // List
 async function listPush() {
   if (!newValue.value) return;
-  await api.redisListPush(props.connectionId, props.keyName, newValue.value);
+  await api.redisListPush(props.connectionId, props.db, props.keyRaw, newValue.value);
   newValue.value = "";
   await load();
 }
 async function applyListRemove(index: number) {
-  await api.redisListRemove(props.connectionId, props.keyName, index);
+  await api.redisListRemove(props.connectionId, props.db, props.keyRaw, index);
   await load();
 }
 function requestListRemove(index: number) {
@@ -115,12 +126,12 @@ function requestListRemove(index: number) {
 // Set
 async function setAdd() {
   if (!newValue.value) return;
-  await api.redisSetAdd(props.connectionId, props.keyName, newValue.value);
+  await api.redisSetAdd(props.connectionId, props.db, props.keyRaw, newValue.value);
   newValue.value = "";
   await load();
 }
 async function applySetRemove(member: string) {
-  await api.redisSetRemove(props.connectionId, props.keyName, member);
+  await api.redisSetRemove(props.connectionId, props.db, props.keyRaw, member);
   await load();
 }
 function requestSetRemove(member: string) {
@@ -154,8 +165,8 @@ onMounted(load);
 
     <template v-else-if="data">
       <!-- Header -->
-      <div class="flex items-center gap-2 px-4 py-2 border-b bg-muted/30 shrink-0">
-        <span class="font-mono text-sm font-medium truncate">{{ data.key }}</span>
+      <div class="h-9 flex items-center gap-2 px-4 border-b bg-muted/30 shrink-0">
+        <span class="font-mono text-sm font-medium truncate">{{ data.key_display }}</span>
         <Badge variant="secondary" class="text-xs">{{ data.key_type }}</Badge>
         <Badge v-if="data.ttl > 0" variant="outline" class="text-xs">TTL: {{ data.ttl }}s</Badge>
         <Badge v-else-if="data.ttl === -1" variant="outline" class="text-xs opacity-50">{{
@@ -174,8 +185,12 @@ onMounted(load);
         <textarea
           v-model="editValue"
           class="flex-1 p-4 font-mono text-sm bg-background resize-none outline-none"
-          @input="isEditing = true"
+          :readonly="isBinaryStringValue"
+          @input="handleStringInput"
         />
+        <div v-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
+          {{ t("redis.binaryStringReadonlyHint") }}
+        </div>
         <div v-if="isEditing" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
           <Button
             variant="ghost"

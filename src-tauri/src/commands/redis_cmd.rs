@@ -25,88 +25,97 @@ pub async fn redis_scan_keys(
 pub async fn redis_get_value(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
 ) -> Result<RedisValue, String> {
-    dbx_core::redis_ops::redis_get_value_core(&state, &connection_id, &key).await
+    dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
 }
 
 #[tauri::command]
 pub async fn redis_set_string(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     value: String,
     ttl: Option<i64>,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_set_string_core(&state, &connection_id, &key, &value, ttl).await
+    dbx_core::redis_ops::redis_set_string_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
 }
 
 #[tauri::command]
 pub async fn redis_delete_key(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_delete_key_core(&state, &connection_id, &key).await
+    dbx_core::redis_ops::redis_delete_key_in_db_core(&state, &connection_id, db, &key_raw).await
 }
 
 #[tauri::command]
 pub async fn redis_hash_set(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     field: String,
     value: String,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_hash_set_core(&state, &connection_id, &key, &field, &value).await
+    dbx_core::redis_ops::redis_hash_set_in_db_core(&state, &connection_id, db, &key_raw, &field, &value).await
 }
 
 #[tauri::command]
 pub async fn redis_hash_del(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     field: String,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_hash_del_core(&state, &connection_id, &key, &field).await
+    dbx_core::redis_ops::redis_hash_del_in_db_core(&state, &connection_id, db, &key_raw, &field).await
 }
 
 #[tauri::command]
 pub async fn redis_list_push(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     value: String,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_list_push_core(&state, &connection_id, &key, &value).await
+    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value).await
 }
 
 #[tauri::command]
 pub async fn redis_list_remove(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     index: i64,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_list_remove_core(&state, &connection_id, &key, index).await
+    dbx_core::redis_ops::redis_list_remove_in_db_core(&state, &connection_id, db, &key_raw, index).await
 }
 
 #[tauri::command]
 pub async fn redis_set_add(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     member: String,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_set_add_core(&state, &connection_id, &key, &member).await
+    dbx_core::redis_ops::redis_set_add_in_db_core(&state, &connection_id, db, &key_raw, &member).await
 }
 
 #[tauri::command]
 pub async fn redis_set_remove(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
-    key: String,
+    db: u32,
+    key_raw: String,
     member: String,
 ) -> Result<(), String> {
-    dbx_core::redis_ops::redis_set_remove_core(&state, &connection_id, &key, &member).await
+    dbx_core::redis_ops::redis_set_remove_in_db_core(&state, &connection_id, db, &key_raw, &member).await
 }

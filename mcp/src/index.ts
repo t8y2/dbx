@@ -5,7 +5,12 @@ import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
-import { loadConnections as desktopLoadConnections, findConnection as desktopFindConnection } from "./connections.js";
+import {
+  loadConnections as desktopLoadConnections,
+  findConnection as desktopFindConnection,
+  addConnection as desktopAddConnection,
+  removeConnection as desktopRemoveConnection,
+} from "./connections.js";
 import {
   listTables as desktopListTables,
   describeTable as desktopDescribeTable,
@@ -19,6 +24,8 @@ const isWebMode = !!process.env.DBX_WEB_URL;
 interface Backend {
   loadConnections(): Promise<ConnectionConfig[]>;
   findConnection(name: string): Promise<ConnectionConfig | undefined>;
+  addConnection(config: Omit<ConnectionConfig, "id">): Promise<ConnectionConfig>;
+  removeConnection(name: string): Promise<boolean>;
   listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]>;
   describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]>;
   executeQuery(config: ConnectionConfig, sql: string): Promise<QueryResult>;
@@ -32,6 +39,8 @@ if (isWebMode) {
   backend = {
     loadConnections: desktopLoadConnections,
     findConnection: desktopFindConnection,
+    addConnection: desktopAddConnection,
+    removeConnection: desktopRemoveConnection,
     listTables: desktopListTables,
     describeTable: desktopDescribeTable,
     executeQuery: desktopExecuteQuery,
@@ -52,7 +61,7 @@ function mdTable(headers: string[], rows: string[][]): string {
 
 const server = new McpServer({
   name: "dbx",
-  version: "0.1.1",
+  version: "0.2.1",
 });
 
 server.tool(
@@ -130,6 +139,45 @@ server.tool(
   },
 );
 
+server.tool(
+  "dbx_add_connection",
+  "Add a new database connection to DBX",
+  {
+    name: z.string().describe("Connection name"),
+    db_type: z.string().describe("Database type: postgres, mysql, sqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch"),
+    host: z.string().describe("Database host"),
+    port: z.number().describe("Database port"),
+    username: z.string().default("").describe("Username"),
+    password: z.string().default("").describe("Password"),
+    database: z.string().optional().describe("Default database name"),
+    ssl: z.boolean().default(false).describe("Enable SSL"),
+  },
+  async ({ name, db_type, host, port, username, password, database, ssl }) => {
+    const existing = await backend.findConnection(name);
+    if (existing) return text(`Connection "${name}" already exists.`);
+    const config = await backend.addConnection({
+      name, db_type, host, port, username, password,
+      database, ssl, ssh_enabled: false,
+    } as Omit<ConnectionConfig, "id">);
+    await notifyReload();
+    return text(`Connection "${config.name}" added (id: ${config.id}).`);
+  },
+);
+
+server.tool(
+  "dbx_remove_connection",
+  "Remove a database connection from DBX",
+  {
+    connection_name: z.string().describe("Name of the connection to remove"),
+  },
+  async ({ connection_name }) => {
+    const removed = await backend.removeConnection(connection_name);
+    if (!removed) return text(`Connection "${connection_name}" not found.`);
+    await notifyReload();
+    return text(`Connection "${connection_name}" removed.`);
+  },
+);
+
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "object") return JSON.stringify(value);
@@ -152,6 +200,13 @@ async function getBridgeUrl(): Promise<string> {
   const portFile = join(appDataDir(), "mcp-bridge-port");
   const port = (await readFile(portFile, "utf-8")).trim();
   return `http://127.0.0.1:${port}`;
+}
+
+async function notifyReload(): Promise<void> {
+  try {
+    const bridgeUrl = await getBridgeUrl();
+    await fetch(`${bridgeUrl}/reload-connections`, { method: "POST" });
+  } catch {}
 }
 
 // Desktop-only tools: open table and execute-and-show require the Tauri bridge

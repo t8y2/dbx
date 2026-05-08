@@ -1,4 +1,5 @@
-use redis::{AsyncCommands, FromRedisValue, Value as RedisRawValue};
+use base64::Engine;
+use redis::{FromRedisValue, Value as RedisRawValue};
 use serde::{Deserialize, Serialize};
 
 const STREAM_ENTRY_LIMIT: usize = 100;
@@ -6,7 +7,8 @@ const DEFAULT_REDIS_DATABASES: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisKeyInfo {
-    pub key: String,
+    pub key_display: String,
+    pub key_raw: String,
     pub key_type: String,
     pub ttl: i64,
 }
@@ -19,9 +21,11 @@ pub struct RedisScanResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisValue {
-    pub key: String,
+    pub key_display: String,
+    pub key_raw: String,
     pub key_type: String,
     pub ttl: i64,
+    pub value_is_binary: bool,
     pub value: serde_json::Value,
 }
 
@@ -94,7 +98,7 @@ pub async fn scan_keys_page(
     pattern: &str,
     count: usize,
 ) -> Result<RedisScanResult, String> {
-    let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+    let raw: RedisRawValue = redis::cmd("SCAN")
         .arg(cursor)
         .arg("MATCH")
         .arg(pattern)
@@ -104,56 +108,77 @@ pub async fn scan_keys_page(
         .await
         .map_err(|e| e.to_string())?;
 
+    let (next_cursor, keys) = parse_scan_keys(raw)?;
+
     let mut result = Vec::new();
     for key in &keys {
         let key_type: String =
-            redis::cmd("TYPE").arg(key.as_str()).query_async(con).await.unwrap_or_else(|_| "unknown".to_string());
+            redis::cmd("TYPE").arg(key).query_async(con).await.unwrap_or_else(|_| "unknown".to_string());
 
-        let ttl: i64 = con.ttl(key.as_str()).await.unwrap_or(-1);
+        let ttl: i64 = redis::cmd("TTL").arg(key).query_async(con).await.unwrap_or(-1);
 
-        result.push(RedisKeyInfo { key: key.clone(), key_type, ttl });
+        result.push(RedisKeyInfo {
+            key_display: redis_key_bytes_to_display(key),
+            key_raw: redis_key_bytes_to_raw(key),
+            key_type,
+            ttl,
+        });
     }
     Ok(RedisScanResult { cursor: next_cursor, keys: result })
 }
 
-pub async fn get_value(con: &mut redis::aio::MultiplexedConnection, key: &str) -> Result<RedisValue, String> {
+pub async fn get_value(con: &mut redis::aio::MultiplexedConnection, key: &[u8]) -> Result<RedisValue, String> {
     let key_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
 
-    let ttl: i64 = con.ttl(key).await.unwrap_or(-1);
+    let ttl: i64 = redis::cmd("TTL").arg(key).query_async(con).await.unwrap_or(-1);
 
-    let value = match key_type.as_str() {
+    let (value, value_is_binary) = match key_type.as_str() {
         "string" => {
-            let v: String = con.get(key).await.map_err(|e| e.to_string())?;
-            serde_json::Value::String(v)
+            let v: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+            let value_is_binary = redis_value_contains_binary(&v);
+            (redis_raw_to_json(v), value_is_binary)
         }
         "list" => {
-            let v: Vec<String> = con.lrange(key, 0, -1).await.map_err(|e| e.to_string())?;
-            serde_json::json!(v)
+            let v: RedisRawValue =
+                redis::cmd("LRANGE").arg(key).arg(0).arg(-1).query_async(con).await.map_err(|e| e.to_string())?;
+            (redis_array_to_json(v), false)
         }
         "set" => {
-            let v: Vec<String> = con.smembers(key).await.map_err(|e| e.to_string())?;
-            serde_json::json!(v)
+            let v: RedisRawValue = redis::cmd("SMEMBERS").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+            (redis_array_to_json(v), false)
         }
         "zset" => {
-            let v: Vec<(String, f64)> = con.zrange_withscores(key, 0, -1).await.map_err(|e| e.to_string())?;
-            serde_json::json!(v.iter().map(|(m, s)| serde_json::json!({"member": m, "score": s})).collect::<Vec<_>>())
+            let v: RedisRawValue = redis::cmd("ZRANGE")
+                .arg(key)
+                .arg(0)
+                .arg(-1)
+                .arg("WITHSCORES")
+                .query_async(con)
+                .await
+                .map_err(|e| e.to_string())?;
+            (parse_zset_entries(v), false)
         }
         "hash" => {
-            let v: Vec<(String, String)> = con.hgetall(key).await.map_err(|e| e.to_string())?;
-            let map: serde_json::Map<String, serde_json::Value> =
-                v.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
-            serde_json::Value::Object(map)
+            let v: RedisRawValue = redis::cmd("HGETALL").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+            (parse_hash_entries(v), false)
         }
-        "stream" => get_stream_entries(con, key).await?,
-        _ => serde_json::Value::Null,
+        "stream" => (get_stream_entries(con, key).await?, false),
+        _ => (serde_json::Value::Null, false),
     };
 
-    Ok(RedisValue { key: key.to_string(), key_type, ttl, value })
+    Ok(RedisValue {
+        key_display: redis_key_bytes_to_display(key),
+        key_raw: redis_key_bytes_to_raw(key),
+        key_type,
+        ttl,
+        value_is_binary,
+        value,
+    })
 }
 
 async fn get_stream_entries(
     con: &mut redis::aio::MultiplexedConnection,
-    key: &str,
+    key: &[u8],
 ) -> Result<serde_json::Value, String> {
     let raw: RedisRawValue = redis::cmd("XRANGE")
         .arg(key)
@@ -166,6 +191,69 @@ async fn get_stream_entries(
         .map_err(|e| e.to_string())?;
 
     Ok(parse_stream_entries(raw))
+}
+
+fn parse_scan_keys(raw: RedisRawValue) -> Result<(u64, Vec<Vec<u8>>), String> {
+    let RedisRawValue::Array(parts) = raw else {
+        return Err("Invalid Redis SCAN response".to_string());
+    };
+    if parts.len() != 2 {
+        return Err("Invalid Redis SCAN response".to_string());
+    }
+
+    let cursor = redis_value_to_string(parts[0].clone())
+        .ok_or_else(|| "Invalid Redis SCAN cursor".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "Invalid Redis SCAN cursor".to_string())?;
+
+    let RedisRawValue::Array(keys) = &parts[1] else {
+        return Err("Invalid Redis SCAN keys payload".to_string());
+    };
+
+    let mut parsed = Vec::with_capacity(keys.len());
+    for key in keys {
+        parsed.push(redis_value_to_bytes(key.clone()).ok_or_else(|| "Invalid Redis key payload".to_string())?);
+    }
+
+    Ok((cursor, parsed))
+}
+
+fn parse_hash_entries(raw: RedisRawValue) -> serde_json::Value {
+    let RedisRawValue::Array(entries) = raw else {
+        return serde_json::Value::Null;
+    };
+
+    let mut map = serde_json::Map::new();
+    let mut iter = entries.into_iter();
+    while let Some(field) = iter.next() {
+        let Some(value) = iter.next() else {
+            break;
+        };
+        let field = redis_value_to_string(field).unwrap_or_default();
+        map.insert(field, redis_raw_to_json(value));
+    }
+
+    serde_json::Value::Object(map)
+}
+
+fn parse_zset_entries(raw: RedisRawValue) -> serde_json::Value {
+    let RedisRawValue::Array(entries) = raw else {
+        return serde_json::Value::Null;
+    };
+
+    let mut rows = Vec::new();
+    let mut iter = entries.into_iter();
+    while let Some(member) = iter.next() {
+        let Some(score) = iter.next() else {
+            break;
+        };
+        rows.push(serde_json::json!({
+            "member": redis_value_to_string(member).unwrap_or_default(),
+            "score": redis_value_to_string(score).unwrap_or_default(),
+        }));
+    }
+
+    serde_json::Value::Array(rows)
 }
 
 fn parse_stream_entries(raw: RedisRawValue) -> serde_json::Value {
@@ -209,70 +297,137 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
 
 fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
     match value {
-        RedisRawValue::BulkString(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+        RedisRawValue::BulkString(bytes) => Some(redis_bytes_to_display(&bytes)),
         RedisRawValue::SimpleString(value) => Some(value),
         RedisRawValue::Int(value) => Some(value.to_string()),
         RedisRawValue::Double(value) => Some(value.to_string()),
         RedisRawValue::Boolean(value) => Some(value.to_string()),
-        RedisRawValue::VerbatimString { text, .. } => Some(text),
+        RedisRawValue::VerbatimString { text, .. } => Some(redis_bytes_to_display(text.as_bytes())),
         RedisRawValue::Okay => Some("OK".to_string()),
         _ => None,
     }
 }
 
+fn redis_value_contains_binary(value: &RedisRawValue) -> bool {
+    match value {
+        RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).is_err(),
+        RedisRawValue::VerbatimString { text, .. } => std::str::from_utf8(text.as_bytes()).is_err(),
+        _ => false,
+    }
+}
+
+fn redis_value_to_bytes(value: RedisRawValue) -> Option<Vec<u8>> {
+    match value {
+        RedisRawValue::BulkString(bytes) => Some(bytes),
+        RedisRawValue::SimpleString(value) => Some(value.into_bytes()),
+        RedisRawValue::Int(value) => Some(value.to_string().into_bytes()),
+        RedisRawValue::Double(value) => Some(value.to_string().into_bytes()),
+        RedisRawValue::Boolean(value) => Some(value.to_string().into_bytes()),
+        RedisRawValue::VerbatimString { text, .. } => Some(text.into_bytes()),
+        RedisRawValue::Okay => Some(b"OK".to_vec()),
+        _ => None,
+    }
+}
+
+fn redis_array_to_json(value: RedisRawValue) -> serde_json::Value {
+    match value {
+        RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
+        other => redis_raw_to_json(other),
+    }
+}
+
+fn redis_raw_to_json(value: RedisRawValue) -> serde_json::Value {
+    match value {
+        RedisRawValue::Nil => serde_json::Value::Null,
+        RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
+        other => serde_json::Value::String(redis_value_to_string(other).unwrap_or_default()),
+    }
+}
+
+fn redis_bytes_to_display(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.replace('\\', "\\\\");
+    }
+
+    let mut output = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\\' => output.push_str("\\\\"),
+            0x20..=0x7e => output.push(byte as char),
+            _ => output.push_str(&format!("\\x{:02x}", byte)),
+        }
+    }
+    output
+}
+
+pub fn redis_key_bytes_to_display(bytes: &[u8]) -> String {
+    redis_bytes_to_display(bytes)
+}
+
+pub fn redis_key_bytes_to_raw(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+pub fn redis_key_raw_to_bytes(value: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD.decode(value).map_err(|e| format!("Invalid Redis key encoding: {e}"))
+}
+
 pub async fn set_string(
     con: &mut redis::aio::MultiplexedConnection,
-    key: &str,
+    key: &[u8],
     value: &str,
     ttl: Option<i64>,
 ) -> Result<(), String> {
-    con.set::<_, _, ()>(key, value).await.map_err(|e| e.to_string())?;
+    redis::cmd("SET").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
     if let Some(t) = ttl {
         if t > 0 {
-            con.expire::<_, ()>(key, t).await.map_err(|e| e.to_string())?;
+            redis::cmd("EXPIRE").arg(key).arg(t).query_async::<()>(con).await.map_err(|e| e.to_string())?;
         }
     }
     Ok(())
 }
 
-pub async fn delete_key(con: &mut redis::aio::MultiplexedConnection, key: &str) -> Result<(), String> {
-    con.del::<_, ()>(key).await.map_err(|e| e.to_string())
+pub async fn delete_key(con: &mut redis::aio::MultiplexedConnection, key: &[u8]) -> Result<(), String> {
+    redis::cmd("DEL").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
 pub async fn hash_set(
     con: &mut redis::aio::MultiplexedConnection,
-    key: &str,
+    key: &[u8],
     field: &str,
     value: &str,
 ) -> Result<(), String> {
-    con.hset::<_, _, _, ()>(key, field, value).await.map_err(|e| e.to_string())
+    redis::cmd("HSET").arg(key).arg(field).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn hash_del(con: &mut redis::aio::MultiplexedConnection, key: &str, field: &str) -> Result<(), String> {
-    con.hdel::<_, _, ()>(key, field).await.map_err(|e| e.to_string())
+pub async fn hash_del(con: &mut redis::aio::MultiplexedConnection, key: &[u8], field: &str) -> Result<(), String> {
+    redis::cmd("HDEL").arg(key).arg(field).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn list_push(con: &mut redis::aio::MultiplexedConnection, key: &str, value: &str) -> Result<(), String> {
-    con.rpush::<_, _, ()>(key, value).await.map_err(|e| e.to_string())
+pub async fn list_push(con: &mut redis::aio::MultiplexedConnection, key: &[u8], value: &str) -> Result<(), String> {
+    redis::cmd("RPUSH").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn list_remove(con: &mut redis::aio::MultiplexedConnection, key: &str, index: i64) -> Result<(), String> {
+pub async fn list_remove(con: &mut redis::aio::MultiplexedConnection, key: &[u8], index: i64) -> Result<(), String> {
     let placeholder = "__DELETED_PLACEHOLDER__";
     redis::cmd("LSET").arg(key).arg(index).arg(placeholder).query_async::<()>(con).await.map_err(|e| e.to_string())?;
-    con.lrem::<_, _, ()>(key, 1, placeholder).await.map_err(|e| e.to_string())
+    redis::cmd("LREM").arg(key).arg(1).arg(placeholder).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn set_add(con: &mut redis::aio::MultiplexedConnection, key: &str, member: &str) -> Result<(), String> {
-    con.sadd::<_, _, ()>(key, member).await.map_err(|e| e.to_string())
+pub async fn set_add(con: &mut redis::aio::MultiplexedConnection, key: &[u8], member: &str) -> Result<(), String> {
+    redis::cmd("SADD").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn set_remove(con: &mut redis::aio::MultiplexedConnection, key: &str, member: &str) -> Result<(), String> {
-    con.srem::<_, _, ()>(key, member).await.map_err(|e| e.to_string())
+pub async fn set_remove(con: &mut redis::aio::MultiplexedConnection, key: &[u8], member: &str) -> Result<(), String> {
+    redis::cmd("SREM").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_database_count, parse_stream_entries, RedisRawValue};
+    use super::{
+        parse_database_count, parse_scan_keys, parse_stream_entries, redis_key_bytes_to_display,
+        redis_key_bytes_to_raw, redis_key_raw_to_bytes, redis_raw_to_json, redis_value_contains_binary, RedisRawValue,
+    };
 
     fn bulk(value: &str) -> RedisRawValue {
         RedisRawValue::BulkString(value.as_bytes().to_vec())
@@ -334,5 +489,59 @@ mod tests {
         ]);
 
         assert_eq!(parse_database_count(value), Some(32));
+    }
+
+    #[test]
+    fn formats_binary_keys_like_rdm() {
+        let bytes = [0xAC, 0xED, 0x00, 0x05, b't', 0x00, b'A', b'\\'];
+
+        assert_eq!(redis_key_bytes_to_display(&bytes), "\\xac\\xed\\x00\\x05t\\x00A\\\\");
+    }
+
+    #[test]
+    fn preserves_utf8_keys_as_readable_text() {
+        let bytes = "用户:配置".as_bytes();
+
+        assert_eq!(redis_key_bytes_to_display(bytes), "用户:配置");
+    }
+
+    #[test]
+    fn round_trips_raw_key_transport() {
+        let bytes = b"\xAC\xED\x00\x05t\x00token";
+        let encoded = redis_key_bytes_to_raw(bytes);
+
+        assert_eq!(redis_key_raw_to_bytes(&encoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn parses_scan_response_with_binary_keys() {
+        let raw = RedisRawValue::Array(vec![
+            RedisRawValue::BulkString(b"17".to_vec()),
+            RedisRawValue::Array(vec![
+                RedisRawValue::BulkString(vec![0xAC, 0xED, 0x00, 0x05, b't']),
+                RedisRawValue::BulkString(b"plain:key".to_vec()),
+            ]),
+        ]);
+
+        let (cursor, keys) = parse_scan_keys(raw).unwrap();
+
+        assert_eq!(cursor, 17);
+        assert_eq!(keys, vec![vec![0xAC, 0xED, 0x00, 0x05, b't'], b"plain:key".to_vec()]);
+    }
+
+    #[test]
+    fn formats_binary_string_values_like_rdm() {
+        let raw = RedisRawValue::BulkString(vec![0xAC, 0xED, 0x00, 0x05, b's', b'r']);
+
+        let value = redis_raw_to_json(raw);
+
+        assert_eq!(value, serde_json::Value::String("\\xac\\xed\\x00\\x05sr".to_string()));
+    }
+
+    #[test]
+    fn does_not_treat_utf8_with_backslashes_as_binary() {
+        let raw = RedisRawValue::BulkString(br#"C:\Users\path"#.to_vec());
+
+        assert!(!redis_value_contains_binary(&raw));
     }
 }

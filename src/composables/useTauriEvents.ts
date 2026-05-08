@@ -37,6 +37,9 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
             );
           },
         );
+        listen("mcp-reload-connections", async () => {
+          await connectionStore.initFromDisk();
+        });
         listen<{ connection_id: string; database: string; sql: string }>("mcp-execute-query", async (event) => {
           const { connection_id, database, sql } = event.payload;
           if (!connectionStore.connections.length) await connectionStore.initFromDisk();

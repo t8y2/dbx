@@ -1,8 +1,8 @@
 {
   "name": "@dbx-app/mcp-server",
-  "version": "0.1.3",
+  "version": "0.2.1",
   "mcpName": "io.github.t8y2/dbx",
-  "description": "MCP server for DBX — query databases from Claude Code, Cursor, and other AI agents",
+  "description": "MCP server for DBX \u2014 query databases from Claude Code, Cursor, and other AI agents",
   "type": "module",
   "bin": {
     "dbx-mcp-server": "dist/index.js"
@@ -33,15 +33,23 @@
   "homepage": "https://github.com/t8y2/dbx/tree/main/mcp",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^12.9.0",
     "keytar": "^7.9.0",
     "mysql2": "^3.14.1",
     "pg": "^8.16.0",
     "zod": "^3.25.20"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.21",
     "@types/pg": "^8.15.4",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
   }
 }

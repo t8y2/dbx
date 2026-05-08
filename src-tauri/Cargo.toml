@@ -32,6 +32,7 @@ tauri-plugin-fs = "2.5.0"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-window-state = "2"
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 portpicker = "0.1.1"

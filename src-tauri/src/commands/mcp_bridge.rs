@@ -74,6 +74,9 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
                     handle_open_table(&app, &st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /execute-query") {
                     handle_execute_query(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /reload-connections") {
+                    let _ = app.emit("mcp-reload-connections", ());
+                    respond(&mut stream, "200 OK", "ok").await;
                 } else {
                     let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
                 }

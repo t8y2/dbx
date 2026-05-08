@@ -62,7 +62,7 @@ import {
   type CellPosition,
   type CellSelectionRange,
 } from "@/lib/gridSelection";
-import { buildTableSelectSql, normalizeWhereInput, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { buildDataGridSaveStatements, formatGridSqlLiteral } from "@/lib/dataGridSql";
 import { formatMarkdownTable } from "@/lib/markdownTable";
 import {
@@ -205,154 +205,14 @@ const showTranspose = ref(false);
 const sortCol = ref<string | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
-const searchSuggestions = ref<string[]>([]);
-const suggestionIndex = ref(-1);
-const searchInputRef = ref<HTMLInputElement>();
-const measureRef = ref<HTMLSpanElement>();
-const suggestionLeft = ref(0);
-
-function updateSuggestionPosition() {
-  nextTick(() => {
-    const input = searchInputRef.value;
-    const measure = measureRef.value;
-    if (!input || !measure) return;
-    const cursorPos = input.selectionStart ?? 0;
-    measure.textContent = searchText.value.slice(0, cursorPos);
-    suggestionLeft.value = measure.getBoundingClientRect().width;
-  });
-}
-
-watch(searchText, (val) => {
-  searchSuggestions.value = [];
-  if (!canUseWhereSearch.value || !props.tableMeta?.columns?.length) return;
-
-  const trimmed = val.trimStart();
-  const lower = trimmed.toLowerCase();
-
-  if (trimmed.length > 0 && lower !== "where" && "where".startsWith(lower)) {
-    searchSuggestions.value = ["WHERE "];
-    suggestionIndex.value = 0;
-    updateSuggestionPosition();
-    return;
-  }
-
-  const m = val.match(/^\s*where\s+(.+)$/i);
-  if (m) {
-    const lastToken = m[1].split(/[\s,()><=!]+/).pop() || "";
-    if (lastToken.length > 0) {
-      const tl = lastToken.toLowerCase();
-      searchSuggestions.value = props.tableMeta.columns
-        .map((c) => c.name)
-        .filter((n) => n.toLowerCase().startsWith(tl) && n.toLowerCase() !== tl)
-        .slice(0, 8);
-      suggestionIndex.value = 0;
-      updateSuggestionPosition();
-    }
-  }
-});
-
-function acceptSuggestion() {
-  const idx = suggestionIndex.value;
-  if (idx < 0 || idx >= searchSuggestions.value.length) return;
-  const sug = searchSuggestions.value[idx];
-
-  if (sug === "WHERE ") {
-    const trimmed = searchText.value.trimStart();
-    const leading = searchText.value.slice(0, searchText.value.length - trimmed.length);
-    searchText.value = leading + "WHERE ";
-  } else {
-    const lastWordMatch = searchText.value.match(/([^\s,()><=!]+)$/);
-    if (lastWordMatch) {
-      const lastWord = lastWordMatch[1];
-      const prefix = searchText.value.slice(0, -lastWord.length);
-      searchText.value = prefix + sug;
-    }
-  }
-  searchSuggestions.value = [];
-  suggestionIndex.value = -1;
-  searchInputRef.value?.focus();
-}
-
-function dismissSuggestions() {
-  searchSuggestions.value = [];
-  suggestionIndex.value = -1;
-}
-
-function navigateSuggestion(delta: number) {
-  if (searchSuggestions.value.length === 0) return;
-  suggestionIndex.value = Math.min(Math.max(suggestionIndex.value + delta, 0), searchSuggestions.value.length - 1);
-}
-
-const PAIRS: Record<string, string> = { "'": "'", '"': '"', "(": ")" };
 
 function onSearchKeydown(e: KeyboardEvent) {
-  if (e.key in PAIRS && !e.ctrlKey && !e.metaKey) {
-    const input = e.target as HTMLInputElement;
-    const start = input.selectionStart ?? 0;
-    const end = input.selectionEnd ?? 0;
-    const close = PAIRS[e.key];
-
-    if (start !== end) {
-      // Wrap selection: 'text' → 'text'
-      e.preventDefault();
-      const selected = searchText.value.slice(start, end);
-      searchText.value = searchText.value.slice(0, start) + e.key + selected + close + searchText.value.slice(end);
-      nextTick(() => {
-        input.setSelectionRange(start + 1 + selected.length, start + 1 + selected.length);
-      });
-      suggestionIndex.value = -1;
-      return;
-    }
-
-    if (searchText.value[start] === close) {
-      // Cursor before closing char → skip over it
-      e.preventDefault();
-      input.setSelectionRange(start + 1, start + 1);
-      return;
-    }
-
-    e.preventDefault();
-    searchText.value = searchText.value.slice(0, start) + e.key + close + searchText.value.slice(end);
-    nextTick(() => {
-      input.setSelectionRange(start + 1, start + 1);
-    });
-    suggestionIndex.value = -1;
-    return;
-  }
-
-  if (searchSuggestions.value.length > 0) {
-    if (e.key === "Tab") {
-      e.preventDefault();
-      acceptSuggestion();
-      return;
-    }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      dismissSuggestions();
-      return;
-    }
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      navigateSuggestion(1);
-      return;
-    }
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      navigateSuggestion(-1);
-      return;
-    }
-  }
-  if (e.key === "Enter") {
-    onSearchEnter(e);
-    return;
-  }
   if (e.key === "Escape") {
     searchText.value = "";
   }
 }
 
 const saveError = ref("");
-const isApplyingWhere = ref(false);
 const rowStatusFilter = ref<RowStatusFilter>("all");
 const columnWidths = ref<number[]>([]);
 const gridRef = ref<HTMLDivElement>();
@@ -423,11 +283,7 @@ watch(() => props.result.columns.length, initColumnWidths);
 const pageSize = ref(100);
 const currentPage = ref(1);
 const isFullPage = computed(() => props.result.rows.length >= pageSize.value);
-const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql);
-const isWhereSearch = computed(() => canUseWhereSearch.value && /^\s*where\b/i.test(searchText.value));
-const wherePredicate = computed(() => normalizeWhereInput(searchText.value));
-const activeWhereInput = computed(() => (isWhereSearch.value && wherePredicate.value ? searchText.value : undefined));
-const clientSearchText = computed(() => (isWhereSearch.value ? "" : searchText.value));
+const clientSearchText = computed(() => searchText.value);
 
 function currentOrderBy(): string | undefined {
   return sortCol.value ? `${quoteIdent(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
@@ -436,17 +292,17 @@ function currentOrderBy(): string | undefined {
 function prevPage() {
   if (currentPage.value <= 1) return;
   currentPage.value--;
-  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, activeWhereInput.value, currentOrderBy());
+  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, currentOrderBy());
 }
 function nextPage() {
   if (!isFullPage.value) return;
   currentPage.value++;
-  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, activeWhereInput.value, currentOrderBy());
+  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, currentOrderBy());
 }
 function changePageSize(size: number) {
   pageSize.value = size;
   currentPage.value = 1;
-  emit("paginate", 0, size, activeWhereInput.value, currentOrderBy());
+  emit("paginate", 0, size, currentOrderBy());
 }
 
 // --- Editing ---
@@ -575,7 +431,7 @@ const activeCellDetail = computed(() => {
   if (!item || !column) return null;
   const value = item.data[cell.col] ?? null;
   const rawValue = formatCell(value);
-  const valueText = value === null ? "" : String(value);
+  const valueText = value === null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
   const trimmed = valueText.trim();
   const maybeJson = typeof value === "string" && (trimmed.startsWith("{") || trimmed.startsWith("["));
   let formattedJson = "";
@@ -604,53 +460,26 @@ function toggleSort(colName: string) {
   if (sortCol.value === colName) {
     if (sortDir.value === "asc") {
       sortDir.value = "desc";
-      emit("sort", colName, "desc", activeWhereInput.value);
+      emit("sort", colName, "desc");
     } else {
       sortCol.value = null;
       sortDir.value = "asc";
-      emit("sort", colName, null, activeWhereInput.value);
+      emit("sort", colName, null);
     }
   } else {
     sortCol.value = colName;
     sortDir.value = "asc";
-    emit("sort", colName, "asc", activeWhereInput.value);
+    emit("sort", colName, "asc");
   }
 }
 
-function onSearchEnter(event: KeyboardEvent) {
-  if (!isWhereSearch.value) return;
-  event.preventDefault();
-  void applyWhereSearch();
-}
-
-async function applyWhereSearch() {
-  if (!props.tableMeta || !props.onExecuteSql || !wherePredicate.value) return;
-  isApplyingWhere.value = true;
-  saveError.value = "";
-  currentPage.value = 1;
-  try {
-    const sql = buildTableSelectSql({
-      databaseType: props.databaseType,
-      schema: props.tableMeta.schema,
-      tableName: props.tableMeta.tableName,
-      primaryKeys: props.tableMeta.primaryKeys,
-      orderBy: sortCol.value ? `${quoteIdent(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined,
-      limit: pageSize.value,
-      whereInput: searchText.value,
-    });
-    await props.onExecuteSql(sql);
-  } catch (e: any) {
-    saveError.value = String(e?.message || e);
-  } finally {
-    isApplyingWhere.value = false;
-  }
-}
+const CELL_DISPLAY_MAX_LENGTH = 256;
 
 function formatCell(value: CellValue): string {
   if (value === null) return "NULL";
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
+  const s = typeof value === "object" ? JSON.stringify(value) : String(value);
+  return s.length > CELL_DISPLAY_MAX_LENGTH ? s.slice(0, CELL_DISPLAY_MAX_LENGTH) : s;
 }
 
 function quoteIdent(name: string): string {
@@ -754,7 +583,7 @@ function startEdit(rowId: number, colIdx: number) {
   isCancelling = false;
   editingCell.value = { rowId, col: colIdx };
   const val = item?.data[colIdx] ?? null;
-  editValue.value = val === null ? "" : String(val);
+  editValue.value = val === null ? "" : typeof val === "object" ? JSON.stringify(val) : String(val);
   nextTick(() => {
     const input = document.querySelector(".cell-edit-input") as HTMLInputElement;
     input?.focus();
@@ -1261,6 +1090,8 @@ function escapeAndHighlightKeywords(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(SQL_KEYWORDS, '<span class="ddl-kw">$1</span>');
 }
+
+defineExpose({ useTransaction, transactionActive, isSaving, onToolbarRefresh, onToolbarCommit, onToolbarRollback });
 </script>
 
 <template>
@@ -1275,13 +1106,12 @@ function escapeAndHighlightKeywords(s: string): string {
               :style="props.context === 'table-data' ? '' : 'visibility: hidden'"
             />
             <input
-              ref="searchInputRef"
               v-model="searchText"
               autocapitalize="off"
               autocorrect="off"
               spellcheck="false"
               class="flex-1 h-5 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
-              :placeholder="canUseWhereSearch ? t('grid.searchOrWhere') : t('grid.search')"
+              :placeholder="t('grid.search')"
               @keydown="onSearchKeydown"
               @click="updateSuggestionPosition"
               :style="props.context === 'table-data' ? '' : 'visibility: hidden'"
@@ -1577,7 +1407,7 @@ function escapeAndHighlightKeywords(s: string): string {
               </div>
               <pre
                 v-else
-                class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5"
+                class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text"
                 :class="ddlWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
                 v-html="highlightSql(ddlContent)"
               ></pre>

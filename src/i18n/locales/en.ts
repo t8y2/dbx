@@ -182,9 +182,7 @@ export default {
     exportJson: "Export JSON",
     exportMarkdown: "Export Markdown",
     copied: "Copied!",
-    search: "Search...",
-    searchOrWhere: "Search, or enter a WHERE clause...",
-    applyWhere: "Apply WHERE",
+    search: "Data Filter...",
     filterRows: "Filter rows",
     filterAllRows: "All rows",
     filterChangedRows: "Changed",
@@ -534,6 +532,8 @@ export default {
     members: "{count} members",
     entries: "{count} entries",
     noExpiry: "no expiry",
+    binaryStringReadonlyHint:
+      "Binary string values are shown as escaped text in read-only mode; editing raw bytes is not supported.",
   },
   mongo: {
     documents: "{count} documents",

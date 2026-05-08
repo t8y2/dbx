@@ -61,6 +61,22 @@ export async function findConnection(name: string): Promise<ConnectionConfig | u
   return connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
 }
 
+export async function addConnection(config: Omit<ConnectionConfig, "id">): Promise<ConnectionConfig> {
+  const res = await apiFetch("/api/connection/save", {
+    method: "POST",
+    body: JSON.stringify({ configs: [config] }),
+  });
+  const saved = (await res.json()) as ConnectionConfig;
+  return saved;
+}
+
+export async function removeConnection(name: string): Promise<boolean> {
+  const connection = await findConnection(name);
+  if (!connection) return false;
+  await apiFetch(`/api/connection/delete?id=${encodeURIComponent(connection.id)}`, { method: "DELETE" });
+  return true;
+}
+
 async function ensureConnected(config: ConnectionConfig): Promise<void> {
   await apiFetch("/api/connection/connect", {
     method: "POST",

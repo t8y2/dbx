@@ -7,7 +7,7 @@ MCP server for [DBX](https://github.com/t8y2/dbx) — lets AI agents (Claude Cod
 ## Features
 
 - **Zero config** — Automatically reads your DBX connections (including passwords from system keyring)
-- **5 tools** — List connections, list tables, describe table, execute SQL, open table in DBX UI
+- **7 tools** — List/add/remove connections, list tables, describe table, execute SQL, open table in DBX UI
 - **Connection pooling** — Reuses database connections across queries
 - **PostgreSQL & MySQL** — Supports PostgreSQL, MySQL, and compatible databases (Doris, StarRocks, etc.)
 - **DBX UI integration** — Open tables directly in the DBX desktop app from your AI agent
@@ -69,6 +69,8 @@ In Claude Code, just ask:
 | Tool | Description |
 |---|---|
 | `dbx_list_connections` | List all database connections configured in DBX |
+| `dbx_add_connection` | Add a new database connection |
+| `dbx_remove_connection` | Remove a database connection |
 | `dbx_list_tables` | List tables and views for a connection |
 | `dbx_describe_table` | Get column definitions for a table |
 | `dbx_execute_query` | Execute a SQL query (max 100 rows) |
@@ -79,17 +81,14 @@ In Claude Code, just ask:
 ```
 AI Agent → MCP Server → Database
                 ↓
-         DBX connections.json
-         + system keyring (passwords)
+         DBX SQLite database (dbx.db)
 ```
 
-The MCP server reads your database connections from DBX's config directory:
+The MCP server reads your database connections from DBX's SQLite database:
 
-- **macOS**: `~/Library/Application Support/com.dbx.app/connections.json`
-- **Linux**: `~/.config/com.dbx.app/connections.json`
-- **Windows**: `%APPDATA%\com.dbx.app\connections.json`
-
-Passwords are retrieved from the system keyring (macOS Keychain / Linux Secret Service / Windows Credential Manager).
+- **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
+- **Linux**: `~/.config/com.dbx.app/dbx.db`
+- **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
 
 ## DBX UI Integration
 
@@ -112,8 +111,8 @@ MIT
 
 ### 特性
 
-- **零配置** — 自动读取 DBX 的连接配置（包括系统钥匙串中的密码）
-- **5 个工具** — 列出连接、列出表、查看表结构、执行 SQL、在 DBX 中打开表
+- **零配置** — 自动读取 DBX 的连接配置
+- **7 个工具** — 列出/添加/删除连接、列出表、查看表结构、执行 SQL、在 DBX 中打开表
 - **连接池** — 跨查询复用数据库连接
 - **PostgreSQL 和 MySQL** — 支持 PostgreSQL、MySQL 及兼容数据库（Doris、StarRocks 等）
 - **DBX UI 联动** — 从 AI 助手直接在 DBX 桌面端打开表
@@ -161,6 +160,8 @@ npx @dbx-app/mcp-server
 | 工具 | 说明 |
 |---|---|
 | `dbx_list_connections` | 列出 DBX 中所有已配置的数据库连接 |
+| `dbx_add_connection` | 添加新的数据库连接 |
+| `dbx_remove_connection` | 删除数据库连接 |
 | `dbx_list_tables` | 列出指定连接的表和视图 |
 | `dbx_describe_table` | 获取表的列定义 |
 | `dbx_execute_query` | 执行 SQL 查询（最多返回 100 行） |
@@ -168,13 +169,11 @@ npx @dbx-app/mcp-server
 
 ### 工作原理
 
-MCP Server 从 DBX 的配置目录读取连接信息：
+MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
 
-- **macOS**: `~/Library/Application Support/com.dbx.app/connections.json`
-- **Linux**: `~/.config/com.dbx.app/connections.json`
-- **Windows**: `%APPDATA%\com.dbx.app\connections.json`
-
-密码从系统钥匙串中获取（macOS Keychain / Linux Secret Service / Windows 凭据管理器）。
+- **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
+- **Linux**: `~/.config/com.dbx.app/dbx.db`
+- **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
 
 ### DBX UI 联动
 

@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-const LATEST_JSON_URL: &str = "https://github.com/t8y2/dbx/releases/latest/download/latest.json";
+const LATEST_JSON_URLS: &[&str] = &[
+    "https://update.hwdns.net/https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+    "https://gh-proxy.org/https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+    "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+];
 const RELEASE_URL_PREFIX: &str = "https://github.com/t8y2/dbx/releases/tag/v";
 
 #[derive(Debug, Deserialize)]
@@ -21,18 +25,28 @@ pub struct UpdateInfo {
 }
 
 pub async fn fetch_latest_release() -> Result<TauriRelease, String> {
-    let client = reqwest::Client::new();
-    client
-        .get(LATEST_JSON_URL)
-        .header(reqwest::header::USER_AGENT, "dbx-update-checker")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to check updates: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Failed to check updates: {e}"))?
-        .json::<TauriRelease>()
-        .await
-        .map_err(|e| format!("Failed to parse update response: {e}"))
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+    let mut last_err = String::new();
+    for url in LATEST_JSON_URLS {
+        match client
+            .get(*url)
+            .header(reqwest::header::USER_AGENT, "dbx-update-checker")
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(resp) => {
+                return resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"));
+            }
+            Err(e) => {
+                last_err = format!("{e}");
+            }
+        }
+    }
+    Err(format!("Failed to check updates: {last_err}"))
 }
 
 pub fn build_update_info(release: TauriRelease, current_version: &str) -> UpdateInfo {

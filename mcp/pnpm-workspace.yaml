@@ -1,0 +1,4 @@
+ignoredBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+  - keytar

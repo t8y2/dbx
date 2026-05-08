@@ -18,7 +18,8 @@
         "minWidth": 900,
         "minHeight": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": false
       }
     ],
     "security": {
@@ -29,6 +30,9 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "macOS": {
+      "frameworks": ["libodbc.2.dylib", "libltdl.7.dylib"]
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,6 +45,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkxNEYyMzE3QkJCNkM3REYKUldUZng3YTdGeU5Qa1NnTUZCRVhJVkxsOWZKQWFPVCtacUgySlNlcjRDU2RmZElCQnphd25pYUMK",
       "endpoints": [
+        "https://update.hwdns.net/https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+        "https://gh-proxy.org/https://github.com/t8y2/dbx/releases/latest/download/latest.json",
         "https://github.com/t8y2/dbx/releases/latest/download/latest.json"
       ]
     }

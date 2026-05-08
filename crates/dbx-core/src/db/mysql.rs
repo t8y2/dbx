@@ -85,10 +85,10 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_jso
 
     if upper_type == "JSON" {
         if let Ok(v) = row.try_get::<serde_json::Value, _>(idx) {
-            return v;
+            return serde_json::Value::String(v.to_string());
         }
         if let Ok(v) = row.try_get::<String, _>(idx) {
-            return serde_json::from_str::<serde_json::Value>(&v).unwrap_or(serde_json::Value::String(v));
+            return serde_json::Value::String(v);
         }
         return serde_json::Value::Null;
     }

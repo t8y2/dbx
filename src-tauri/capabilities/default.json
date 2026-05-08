@@ -17,6 +17,7 @@
     "fs:allow-write-text-file",
     "fs:allow-read-text-file",
     "shell:allow-open",
-    "updater:default"
+    "updater:default",
+    "window-state:default"
   ]
 }

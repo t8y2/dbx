@@ -124,6 +124,35 @@ Execute a SQL query and return results (max 100 rows).
 | `connection_name` | Yes | DBX connection name |
 | `sql` | Yes | SQL query |
 
+### `dbx_add_connection`
+
+Add a new database connection to DBX.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `name` | Yes | Connection name |
+| `db_type` | Yes | Database type (postgres, mysql, sqlite, redis, etc.) |
+| `host` | Yes | Database host |
+| `port` | Yes | Database port |
+| `username` | No | Username |
+| `password` | No | Password |
+| `database` | No | Default database name |
+| `ssl` | No | Enable SSL (default: false) |
+
+**Example:**
+> "Add a PostgreSQL connection named prod-db on db.example.com:5432"
+
+### `dbx_remove_connection`
+
+Remove a database connection from DBX.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `connection_name` | Yes | Name of the connection to remove |
+
+**Example:**
+> "Remove the test-db connection"
+
 ### `dbx_open_table`
 
 Open a table in DBX desktop app UI. **Requires DBX to be running.**
@@ -151,15 +180,13 @@ Execute a SQL query in DBX desktop app UI. **Requires DBX to be running.**
 
 ### Connection Configs
 
-The MCP Server reads DBX's connection config files:
+The MCP Server reads DBX's SQLite database:
 
 | Platform | Path |
 |---|---|
-| macOS | `~/Library/Application Support/com.dbx.app/connections.json` |
-| Linux | `~/.config/com.dbx.app/connections.json` |
-| Windows | `%APPDATA%\com.dbx.app\connections.json` |
-
-Passwords are retrieved from the system keyring (macOS Keychain / Linux Secret Service / Windows Credential Manager).
+| macOS | `~/Library/Application Support/com.dbx.app/dbx.db` |
+| Linux | `~/.config/com.dbx.app/dbx.db` |
+| Windows | `%APPDATA%\com.dbx.app\dbx.db` |
 
 ### UI Integration
 

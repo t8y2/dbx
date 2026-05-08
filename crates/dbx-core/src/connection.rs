@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 
 use crate::db;
 use crate::db::ssh_tunnel::TunnelManager;
-use crate::models::connection::{ConnectionConfig, DatabaseType};
+use crate::models::connection::{parse_mongo_first_host, ConnectionConfig, DatabaseType};
 use crate::query_cancel::RunningQueries;
 use crate::storage::Storage;
 
@@ -209,6 +209,17 @@ impl AppState {
             return Ok(("127.0.0.1".to_string(), local_port));
         }
 
+        let (remote_host, remote_port) = if config.db_type == DatabaseType::MongoDb {
+            config
+                .connection_string
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .and_then(parse_mongo_first_host)
+                .unwrap_or_else(|| (config.host.clone(), config.port))
+        } else {
+            (config.host.clone(), config.port)
+        };
+
         let local_port = self
             .tunnels
             .start_tunnel(
@@ -219,8 +230,8 @@ impl AppState {
                 &config.ssh_password,
                 &config.ssh_key_path,
                 &config.ssh_key_passphrase,
-                &config.host,
-                config.port,
+                &remote_host,
+                remote_port,
                 config.ssh_expose_lan,
             )
             .await?;

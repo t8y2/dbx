@@ -587,7 +587,7 @@ onUnmounted(() => {
         <Transition name="toast">
           <div
             v-if="toastVisible"
-            class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg"
+            class="fixed bottom-6 left-1/2 -translate-x-1/2 z-100 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg"
           >
             {{ toastMessage }}
           </div>

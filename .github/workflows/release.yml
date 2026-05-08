@@ -113,7 +113,6 @@ jobs:
           APPLE_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_TEAM_ID || '' }}
-          TAURI_CONFIG: ${{ startsWith(matrix.platform, 'macos') && '{"bundle":{"macOS":{"frameworks":["libodbc.2.dylib","libltdl.7.dylib"]}}}' || '{}' }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'DBX ${{ github.ref_name }}'

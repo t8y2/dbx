@@ -29,3 +29,4 @@ csv = "1"
 calamine = "0.30.1"
 odbc-api = "25"
 rust-gaussdb = { git = "https://github.com/t8y2/rust-gaussdb", branch = "main" }
+base64 = "0.22"

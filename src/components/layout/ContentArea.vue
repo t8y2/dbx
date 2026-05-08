@@ -40,8 +40,8 @@ const emit = defineEmits<{
   editorCursorChange: [pos: number];
   formatError: [];
   reload: [];
-  paginate: [offset: number, limit: number, orderBy?: string];
-  sort: [column: string, direction: "asc" | "desc" | null];
+  paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
+  sort: [column: string, direction: "asc" | "desc" | null, whereInput?: string];
   executeSql: [sql: string];
   clickTable: [tableName: string];
 }>();
@@ -275,9 +275,13 @@ function onHandleCloseColumnPanel() {
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 @reload="emit('reload')"
                 @paginate="
-                  (offset: number, limit: number, orderBy?: string) => emit('paginate', offset, limit, orderBy)
+                  (offset: number, limit: number, whereInput?: string, orderBy?: string) =>
+                    emit('paginate', offset, limit, whereInput, orderBy)
                 "
-                @sort="(column: string, direction: 'asc' | 'desc' | null) => emit('sort', column, direction)"
+                @sort="
+                  (column: string, direction: 'asc' | 'desc' | null, whereInput?: string) =>
+                    emit('sort', column, direction, whereInput)
+                "
               />
               <div
                 v-if="activeTab.result?.columns.includes('Error')"
@@ -351,8 +355,14 @@ function onHandleCloseColumnPanel() {
           :table-meta="activeTab.tableMeta"
           :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
           @reload="emit('reload')"
-          @paginate="(offset: number, limit: number, orderBy?: string) => emit('paginate', offset, limit, orderBy)"
-          @sort="(column: string, direction: 'asc' | 'desc' | null) => emit('sort', column, direction)"
+          @paginate="
+            (offset: number, limit: number, whereInput?: string, orderBy?: string) =>
+              emit('paginate', offset, limit, whereInput, orderBy)
+          "
+          @sort="
+            (column: string, direction: 'asc' | 'desc' | null, whereInput?: string) =>
+              emit('sort', column, direction, whereInput)
+          "
         />
         <div
           v-else-if="activeTab.isExecuting"

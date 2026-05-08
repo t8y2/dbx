@@ -13,7 +13,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return quoteTableIdentifier(config?.db_type, name);
   }
 
-  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number } = {}): string {
+  function buildTableSql(
+    tab: QueryTab,
+    options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {},
+  ): string {
     const config = connectionStore.getConfig(tab.connectionId);
     const fallbackOrderColumns =
       config?.db_type === "sqlserver" && !tab.tableMeta?.primaryKeys?.length
@@ -45,19 +48,19 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     queryStore.executeCurrentTab();
   }
 
-  async function onPaginate(offset: number, limit: number, orderBy?: string) {
+  async function onPaginate(offset: number, limit: number, whereInput?: string, orderBy?: string) {
     const tab = activeTab.value;
     if (!tab?.tableMeta) return;
-    const sql = buildTableSql(tab, { limit, offset, orderBy });
+    const sql = buildTableSql(tab, { limit, offset, whereInput, orderBy });
     queryStore.updateSql(tab.id, sql);
     await queryStore.executeCurrentTab();
   }
 
-  async function onSort(column: string, direction: "asc" | "desc" | null) {
+  async function onSort(column: string, direction: "asc" | "desc" | null, whereInput?: string) {
     const tab = activeTab.value;
     if (!tab?.tableMeta) return;
     const orderBy = direction ? `${quoteIdent(tab, column)} ${direction.toUpperCase()}` : undefined;
-    const sql = buildTableSql(tab, { orderBy });
+    const sql = buildTableSql(tab, { orderBy, whereInput });
     queryStore.updateSql(tab.id, sql);
     await queryStore.executeCurrentTab();
   }

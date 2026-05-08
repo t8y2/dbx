@@ -17,6 +17,8 @@ export interface SortedQuerySqlError {
 export function buildSortedQuerySql(
   originalSql: string,
   databaseType: DatabaseType | undefined,
+  resultColumns: string[],
+  columnIndex: number,
   column: string,
   direction: QuerySortDirection,
 ): SortedQuerySqlResult | SortedQuerySqlError {
@@ -38,9 +40,32 @@ export function buildSortedQuerySql(
     return { ok: false, reason: "not_select" };
   }
 
-  const quotedColumn = quoteTableIdentifier(databaseType, column);
+  const aliases = buildDerivedColumnAliases(resultColumns);
+  const sortAlias = aliases[columnIndex] ?? aliases[resultColumns.indexOf(column)] ?? fallbackAlias(columnIndex);
+  const quotedColumn = quoteTableIdentifier(databaseType, sortAlias);
+  const aliasList = aliases.map((alias) => quoteTableIdentifier(databaseType, alias)).join(", ");
   return {
     ok: true,
-    sql: `SELECT * FROM (${statement}) t ORDER BY ${quotedColumn} ${direction.toUpperCase()};`,
+    sql: `SELECT * FROM (${statement}) t(${aliasList}) ORDER BY ${quotedColumn} ${direction.toUpperCase()};`,
   };
+}
+
+function buildDerivedColumnAliases(resultColumns: string[]): string[] {
+  const seen = new Map<string, number>();
+  return resultColumns.map((column, index) => {
+    const base = normalizeAliasBase(column, index);
+    const count = (seen.get(base) ?? 0) + 1;
+    seen.set(base, count);
+    return count === 1 ? base : `${base}_${count}`;
+  });
+}
+
+function normalizeAliasBase(column: string, index: number): string {
+  const compact = column.trim().replace(/\s+/g, "_");
+  const safe = compact.replace(/[^\p{L}\p{N}_$]/gu, "_").replace(/^_+|_+$/g, "");
+  return safe || fallbackAlias(index);
+}
+
+function fallbackAlias(index: number): string {
+  return `column_${index + 1}`;
 }

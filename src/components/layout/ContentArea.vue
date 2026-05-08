@@ -41,7 +41,7 @@ const emit = defineEmits<{
   formatError: [];
   reload: [sql?: string, whereInput?: string];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
-  sort: [column: string, direction: "asc" | "desc" | null, whereInput?: string];
+  sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string];
   executeSql: [sql: string];
   clickTable: [tableName: string];
 }>();
@@ -281,8 +281,8 @@ function onHandleCloseColumnPanel() {
                     emit('paginate', offset, limit, whereInput, orderBy)
                 "
                 @sort="
-                  (column: string, direction: 'asc' | 'desc' | null, whereInput?: string) =>
-                    emit('sort', column, direction, whereInput)
+                  (column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string) =>
+                    emit('sort', column, columnIndex, direction, whereInput)
                 "
               />
               <div
@@ -374,8 +374,8 @@ function onHandleCloseColumnPanel() {
               emit('paginate', offset, limit, whereInput, orderBy)
           "
           @sort="
-            (column: string, direction: 'asc' | 'desc' | null, whereInput?: string) =>
-              emit('sort', column, direction, whereInput)
+            (column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string) =>
+              emit('sort', column, columnIndex, direction, whereInput)
           "
         />
         <div

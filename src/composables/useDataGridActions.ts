@@ -77,7 +77,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeCurrentTab();
   }
 
-  async function onSort(column: string, direction: "asc" | "desc" | null, whereInput?: string) {
+  async function onSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string) {
     const tab = activeTab.value;
     if (!tab) return;
 
@@ -102,7 +102,14 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     }
 
     const config = connectionStore.getConfig(tab.connectionId);
-    const built = buildSortedQuerySql(baseSql, config?.db_type, column, direction);
+    const built = buildSortedQuerySql(
+      baseSql,
+      config?.db_type,
+      tab.result?.columns ?? [],
+      columnIndex,
+      column,
+      direction,
+    );
     if (!built.ok) {
       toast(t("grid.sortUnsupported"), 5000);
       return;

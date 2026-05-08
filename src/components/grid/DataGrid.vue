@@ -98,7 +98,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   reload: [sql?: string, whereInput?: string];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
-  sort: [column: string, direction: "asc" | "desc" | null, whereInput?: string];
+  sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string];
 }>();
 
 const hasData = computed(() => props.result.columns.length > 0);
@@ -203,6 +203,7 @@ const showCellDetail = ref(false);
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
 const sortCol = ref<string | null>(null);
+const sortColIndex = ref<number | null>(null);
 const sortDir = ref<"asc" | "desc">("asc");
 const searchText = ref("");
 const searchSuggestions = ref<string[]>([]);
@@ -599,21 +600,23 @@ const activeCellDetail = computed(() => {
   };
 });
 
-function toggleSort(colName: string) {
+function toggleSort(colName: string, colIdx: number) {
   if (isResizing) return;
-  if (sortCol.value === colName) {
+  if (sortCol.value === colName && sortColIndex.value === colIdx) {
     if (sortDir.value === "asc") {
       sortDir.value = "desc";
-      emit("sort", colName, "desc", activeWhereInput.value);
+      emit("sort", colName, colIdx, "desc", activeWhereInput.value);
     } else {
       sortCol.value = null;
+      sortColIndex.value = null;
       sortDir.value = "asc";
-      emit("sort", colName, null, activeWhereInput.value);
+      emit("sort", colName, colIdx, null, activeWhereInput.value);
     }
   } else {
     sortCol.value = colName;
+    sortColIndex.value = colIdx;
     sortDir.value = "asc";
-    emit("sort", colName, "asc", activeWhereInput.value);
+    emit("sort", colName, colIdx, "asc", activeWhereInput.value);
   }
 }
 
@@ -1415,17 +1418,23 @@ defineExpose({
                   >
                     #
                   </div>
-                  <Tooltip v-for="(col, colIdx) in result.columns" :key="col">
+                  <Tooltip v-for="(col, colIdx) in result.columns" :key="`${col}-${colIdx}`">
                     <TooltipTrigger as-child>
                       <div
                         class="shrink-0 px-3 py-1.5 border-r border-border whitespace-nowrap cursor-pointer hover:bg-accent/50 select-none relative overflow-hidden"
                         :style="{ width: `var(--col-w-${colIdx})` }"
-                        @click="toggleSort(col)"
+                        @click="toggleSort(col, colIdx)"
                       >
                         <span class="flex min-w-0 items-center gap-1 overflow-hidden">
                           <span class="min-w-0 truncate">{{ col }}</span>
-                          <ArrowUp v-if="sortCol === col && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
-                          <ArrowDown v-else-if="sortCol === col && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
+                          <ArrowUp
+                            v-if="sortCol === col && sortColIndex === colIdx && sortDir === 'asc'"
+                            class="h-3 w-3 shrink-0"
+                          />
+                          <ArrowDown
+                            v-else-if="sortCol === col && sortColIndex === colIdx && sortDir === 'desc'"
+                            class="h-3 w-3 shrink-0"
+                          />
                         </span>
                         <div
                           class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"

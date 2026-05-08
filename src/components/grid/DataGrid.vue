@@ -96,7 +96,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  reload: [];
+  reload: [sql?: string, whereInput?: string];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
   sort: [column: string, direction: "asc" | "desc" | null, whereInput?: string];
 }>();
@@ -482,7 +482,7 @@ async function onToolbarRefresh() {
   if (transactionActive.value) {
     discardChanges();
   }
-  emit("reload");
+  emit("reload", props.sql, searchText.value);
 }
 
 async function onToolbarCommit() {
@@ -934,7 +934,7 @@ async function saveChanges() {
   deletedRows.value.clear();
   exitTransaction();
   isSaving.value = false;
-  emit("reload");
+  emit("reload", props.sql, searchText.value);
 }
 
 function discardChanges() {

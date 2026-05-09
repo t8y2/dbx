@@ -47,6 +47,27 @@ pub struct AppState {
     pub storage: Storage,
 }
 
+pub fn metadata_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
+    let mut db_config = config.clone();
+    if matches!(db_config.db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+        db_config.database = None;
+    }
+    db_config
+}
+
+pub fn database_connection_config(config: &ConnectionConfig, database: Option<&str>) -> ConnectionConfig {
+    let mut db_config = if database.is_some() { config.clone() } else { metadata_connection_config(config) };
+    if let Some(db) = database {
+        if db_config.db_type != DatabaseType::Oracle
+            && db_config.db_type != DatabaseType::Dameng
+            && db_config.db_type != DatabaseType::Gaussdb
+        {
+            db_config.database = Some(db.to_string());
+        }
+    }
+    db_config
+}
+
 impl AppState {
     pub fn new(storage: Storage) -> Self {
         Self {
@@ -103,15 +124,7 @@ impl AppState {
         let config = configs.get(connection_id).ok_or("Connection config not found")?.clone();
         drop(configs);
 
-        let mut db_config = config.clone();
-        if let Some(db) = database {
-            if db_config.db_type != DatabaseType::Oracle
-                && db_config.db_type != DatabaseType::Dameng
-                && db_config.db_type != DatabaseType::Gaussdb
-            {
-                db_config.database = Some(db.to_string());
-            }
-        }
+        let db_config = database_connection_config(&config, database);
 
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
         probe_connection_endpoint(&db_config, &host, port).await?;
@@ -311,5 +324,58 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &sqlx::mysql::My
     {
         Ok(Some((_, val))) if val.to_lowercase() == "oracle" => MysqlMode::OceanBaseOracle,
         _ => MysqlMode::Normal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{database_connection_config, metadata_connection_config};
+    use crate::models::connection::{ConnectionConfig, DatabaseType};
+
+    fn mysql_config(database: Option<&str>) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "conn".to_string(),
+            name: "MySQL".to_string(),
+            db_type: DatabaseType::Mysql,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            host: "127.0.0.1".to_string(),
+            port: 3306,
+            username: "root".to_string(),
+            password: "secret".to_string(),
+            database: database.map(str::to_string),
+            color: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+            ssh_key_passphrase: String::new(),
+            ssh_expose_lan: false,
+            ssl: false,
+            sysdba: false,
+            connection_string: None,
+        }
+    }
+
+    #[test]
+    fn mysql_metadata_connection_ignores_saved_default_database() {
+        let config = mysql_config(Some("app"));
+
+        let metadata = metadata_connection_config(&config);
+
+        assert_eq!(metadata.database, None);
+        assert_eq!(metadata.db_type, DatabaseType::Mysql);
+    }
+
+    #[test]
+    fn mysql_database_connection_keeps_requested_database() {
+        let config = mysql_config(Some("app"));
+
+        let scoped = database_connection_config(&config, Some("analytics"));
+
+        assert_eq!(scoped.database.as_deref(), Some("analytics"));
     }
 }

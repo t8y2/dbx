@@ -2,8 +2,8 @@ use std::sync::Arc;
 use tauri::State;
 
 pub use dbx_core::connection::{
-    connection_url_for_endpoint, expand_tilde, probe_connection_endpoint, redacted_connection_url_for_endpoint,
-    AppState, MysqlMode, PoolKind,
+    connection_url_for_endpoint, expand_tilde, metadata_connection_config, probe_connection_endpoint,
+    redacted_connection_url_for_endpoint, AppState, MysqlMode, PoolKind,
 };
 use dbx_core::db;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
@@ -143,13 +143,14 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
 #[tauri::command]
 pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
     let id = config.id.clone();
+    let db_config = metadata_connection_config(&config);
 
-    let (host, port) = state.connection_host_port(&id, &config).await?;
-    probe_connection_endpoint(&config, &host, port).await?;
-    let url = connection_url_for_endpoint(&config, &host, port);
+    let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    probe_connection_endpoint(&db_config, &host, port).await?;
+    let url = connection_url_for_endpoint(&db_config, &host, port);
 
-    let pool = match config.db_type {
-        DatabaseType::Mysql if config.needs_bare_mysql() => {
+    let pool = match db_config.db_type {
+        DatabaseType::Mysql if db_config.needs_bare_mysql() => {
             PoolKind::Mysql(db::mysql::connect_bare(&url).await?, MysqlMode::Bare)
         }
         DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?, MysqlMode::Normal),
@@ -157,13 +158,13 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             PoolKind::Mysql(db::mysql::connect_bare(&url).await?, MysqlMode::Bare)
         }
         DatabaseType::Postgres | DatabaseType::Redshift => PoolKind::Postgres(db::postgres::connect(&url).await?),
-        DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&expand_tilde(&config.host)).await?),
+        DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&expand_tilde(&db_config.host)).await?),
         DatabaseType::Redis => {
             let con = db::redis_driver::connect(&url).await?;
             PoolKind::Redis(tokio::sync::Mutex::new(con))
         }
         DatabaseType::DuckDb => {
-            let con = duckdb::Connection::open(&expand_tilde(&config.host)).map_err(|e| e.to_string())?;
+            let con = duckdb::Connection::open(&expand_tilde(&db_config.host)).map_err(|e| e.to_string())?;
             PoolKind::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(con)))
         }
         DatabaseType::MongoDb => {
@@ -172,32 +173,38 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             PoolKind::MongoDb(client)
         }
         DatabaseType::ClickHouse => {
-            let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
-            let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
+            let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
+            let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
             let client = db::clickhouse_driver::ChClient::new(&url, username, password);
             db::clickhouse_driver::test_connection(&client).await?;
             PoolKind::ClickHouse(client)
         }
         DatabaseType::SqlServer => {
-            let client =
-                db::sqlserver::connect(&host, port, &config.username, &config.password, config.database.as_deref())
-                    .await?;
+            let client = db::sqlserver::connect(
+                &host,
+                port,
+                &db_config.username,
+                &db_config.password,
+                db_config.database.as_deref(),
+            )
+            .await?;
             PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
         }
         DatabaseType::Oracle => {
             let client = db::oracle_driver::connect(
                 &host,
                 port,
-                config.database.as_deref().unwrap_or("ORCL"),
-                &config.username,
-                &config.password,
-                config.sysdba,
+                db_config.database.as_deref().unwrap_or("ORCL"),
+                &db_config.username,
+                &db_config.password,
+                db_config.sysdba,
             )
             .await?;
             PoolKind::Oracle(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
         }
         DatabaseType::Elasticsearch => {
-            let client = db::elasticsearch_driver::EsClient::new(&url, Some(&config.username), Some(&config.password));
+            let client =
+                db::elasticsearch_driver::EsClient::new(&url, Some(&db_config.username), Some(&db_config.password));
             db::elasticsearch_driver::test_connection(&client).await?;
             PoolKind::Elasticsearch(client)
         }
@@ -205,9 +212,9 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             let client = db::dm_driver::connect(
                 &host,
                 port,
-                config.database.as_deref().unwrap_or(""),
-                &config.username,
-                &config.password,
+                db_config.database.as_deref().unwrap_or(""),
+                &db_config.username,
+                &db_config.password,
             )
             .await?;
             PoolKind::Dameng(std::sync::Arc::new(std::sync::Mutex::new(client)))
@@ -216,9 +223,9 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             let client = db::gaussdb_driver::connect(
                 &host,
                 port,
-                config.database.as_deref().unwrap_or(""),
-                &config.username,
-                &config.password,
+                db_config.database.as_deref().unwrap_or(""),
+                &db_config.username,
+                &db_config.password,
             )
             .await?;
             PoolKind::Gaussdb(std::sync::Arc::new(tokio::sync::Mutex::new(client)))

@@ -21,6 +21,7 @@ import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletio
 import * as api from "@/lib/api";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { buildDatabaseTreeNodes } from "@/lib/databaseTree";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 
@@ -361,23 +362,8 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       await ensureConnected(connectionId);
-      let databases = await api.listDatabases(connectionId);
-      const config = getConfig(connectionId);
-      if (config?.database) {
-        databases = databases.filter((db) => db.name === config.database);
-      }
-      setChildren(
-        node,
-        databases.map((db) => ({
-          id: `${connectionId}:${db.name}`,
-          label: db.name,
-          type: "database" as const,
-          connectionId,
-          database: db.name,
-          isExpanded: false,
-          children: [],
-        })),
-      );
+      const databases = await api.listDatabases(connectionId);
+      setChildren(node, buildDatabaseTreeNodes(connectionId, databases));
       node.isExpanded = true;
     } finally {
       node.isLoading = false;

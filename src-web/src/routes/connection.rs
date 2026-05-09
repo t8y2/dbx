@@ -66,9 +66,9 @@ pub async fn connect_db(
 
     app.configs.lock().await.insert(connection_id.clone(), config.clone());
 
-    let pool_key = app.get_or_create_pool(&connection_id, config.database.as_deref()).await.map_err(AppError)?;
+    app.get_or_create_pool(&connection_id, None).await.map_err(AppError)?;
 
-    Ok(Json(pool_key))
+    Ok(Json(connection_id))
 }
 
 pub async fn disconnect_db(

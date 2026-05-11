@@ -566,6 +566,7 @@ export default {
     function: "Function",
     name: "Name",
     type: "Type",
+    source: "Source",
     schemaColumn: "Schema",
     comment: "Comment",
     loadingSchemas: "Loading schemas...",

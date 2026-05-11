@@ -83,6 +83,18 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("timed out")
         || lower.contains("closed")
         || lower.contains("eof")
+        || lower.contains("i/o error")
+        || is_os_connection_error(&lower)
+}
+
+fn is_os_connection_error(lower: &str) -> bool {
+    let os_error_codes = ["10053", "10054", "10057", "10058", "10060", "10061"];
+    if let Some(pos) = lower.find("os error ") {
+        let after = &lower[pos + 9..];
+        let code: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        return os_error_codes.contains(&code.as_str());
+    }
+    false
 }
 
 pub fn timeout_error() -> String {
@@ -686,5 +698,38 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err(), timeout_error());
+    }
+
+    #[test]
+    fn is_connection_error_detects_english_messages() {
+        assert!(is_connection_error("connection reset"));
+        assert!(is_connection_error("broken pipe"));
+        assert!(is_connection_error("reset by peer"));
+        assert!(is_connection_error("Connection timed out"));
+        assert!(is_connection_error("socket closed"));
+        assert!(is_connection_error("unexpected eof"));
+    }
+
+    #[test]
+    fn is_connection_error_detects_localized_io_errors() {
+        assert!(is_connection_error("I/O error: 远程主机强迫关闭了一个现有的连接。 (os error 10054)"));
+        assert!(is_connection_error(
+            "I/O error: 由于连接方在一段时间后没有正确答复或连接的主机没有反应，连接尝试失败。 (os error 10060)"
+        ));
+    }
+
+    #[test]
+    fn is_connection_error_detects_os_error_codes() {
+        assert!(is_connection_error("os error 10053"));
+        assert!(is_connection_error("os error 10054"));
+        assert!(is_connection_error("os error 10060"));
+        assert!(is_connection_error("os error 10061"));
+    }
+
+    #[test]
+    fn is_connection_error_rejects_non_connection_errors() {
+        assert!(!is_connection_error("ORA-00942: table or view does not exist"));
+        assert!(!is_connection_error("syntax error at position 5"));
+        assert!(!is_connection_error("os error 13"));
     }
 }

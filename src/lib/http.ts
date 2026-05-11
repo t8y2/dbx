@@ -3,6 +3,8 @@ import type {
   DatabaseInfo,
   TableInfo,
   ObjectInfo,
+  ObjectSource,
+  ObjectSourceKind,
   ColumnInfo,
   IndexInfo,
   ForeignKeyInfo,
@@ -173,6 +175,18 @@ export async function listTables(connectionId: string, database: string, schema:
 
 export async function listObjects(connectionId: string, database: string, schema: string): Promise<ObjectInfo[]> {
   return get(`/api/schema/objects?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function getObjectSource(
+  connectionId: string,
+  database: string,
+  schema: string,
+  name: string,
+  objectType: ObjectSourceKind,
+): Promise<ObjectSource> {
+  return get(
+    `/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType })}`,
+  );
 }
 
 export async function getColumns(

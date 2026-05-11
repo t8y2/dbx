@@ -5,6 +5,8 @@ import type {
   DatabaseInfo,
   TableInfo,
   ObjectInfo,
+  ObjectSource,
+  ObjectSourceKind,
   ColumnInfo,
   IndexInfo,
   ForeignKeyInfo,
@@ -142,6 +144,16 @@ export async function listTables(connectionId: string, database: string, schema:
 
 export async function listObjects(connectionId: string, database: string, schema: string): Promise<ObjectInfo[]> {
   return invoke("list_objects", { connectionId, database, schema });
+}
+
+export async function getObjectSource(
+  connectionId: string,
+  database: string,
+  schema: string,
+  name: string,
+  objectType: ObjectSourceKind,
+): Promise<ObjectSource> {
+  return invoke("get_object_source", { connectionId, database, schema, name, objectType });
 }
 
 export async function listSchemas(connectionId: string, database: string): Promise<string[]> {

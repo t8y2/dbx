@@ -553,6 +553,7 @@ export default {
     function: "函数",
     name: "名称",
     type: "类型",
+    source: "源代码",
     schemaColumn: "Schema",
     comment: "注释",
     loadingSchemas: "加载 Schema...",

@@ -46,6 +46,7 @@ const emit = defineEmits<{
   executeSql: [sql: string];
   clickTable: [tableName: string];
   openObjectTable: [target: { tableName: string; schema?: string }];
+  editObjectSource: [target: { title: string; sql: string; schema?: string }];
   objectSchemaChange: [schema: string | undefined];
 }>();
 
@@ -442,6 +443,7 @@ function onHandleCloseColumnPanel() {
         :database="activeTab.database"
         :schema="activeTab.objectBrowser?.schema"
         @open-table="emit('openObjectTable', $event)"
+        @edit-source="emit('editObjectSource', $event)"
         @schema-change="emit('objectSchemaChange', $event)"
       />
     </template>

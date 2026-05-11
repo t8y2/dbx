@@ -319,6 +319,25 @@ async function onClickTable(tableName: string) {
   }
 }
 
+function openObjectSourceEditor(target: { title: string; sql: string; schema?: string }) {
+  const tab = activeTab.value;
+  if (!tab) return;
+  const existing = queryStore.tabs.find(
+    (item) =>
+      item.mode === "query" &&
+      item.connectionId === tab.connectionId &&
+      item.database === tab.database &&
+      item.title === target.title,
+  );
+  if (existing) {
+    queryStore.activeTabId = existing.id;
+    return;
+  }
+  const tabId = queryStore.createTab(tab.connectionId, tab.database, target.title);
+  if (target.schema) queryStore.updateSchema(tabId, target.schema);
+  queryStore.updateSql(tabId, target.sql);
+}
+
 async function changeActiveConnection(connectionId: string) {
   const tab = activeTab.value;
   if (!tab) return;
@@ -640,6 +659,7 @@ onUnmounted(() => {
                         tableName: target.tableName,
                       })
                   "
+                  @edit-object-source="openObjectSourceEditor"
                   @object-schema-change="(schema) => activeTab && queryStore.updateSchema(activeTab.id, schema)"
                 />
               </div>

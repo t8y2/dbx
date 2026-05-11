@@ -1,14 +1,29 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
-import { Braces, Eye, Loader2, RefreshCw, Search, ScrollText, Table2 } from "lucide-vue-next";
+import {
+  Braces,
+  Code2,
+  Copy,
+  Eye,
+  Loader2,
+  PencilLine,
+  RefreshCw,
+  Search,
+  ScrollText,
+  Table2,
+  WrapText,
+  X,
+} from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/api";
-import type { ConnectionConfig, ObjectInfo } from "@/types/database";
+import type { ConnectionConfig, ObjectInfo, ObjectSourceKind } from "@/types/database";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { useToast } from "@/composables/useToast";
+import { buildEditableObjectSourceSql, objectSourceEditTabTitle } from "@/lib/objectSourceEditor";
 
 type ObjectRow = {
   id: string;
@@ -29,9 +44,11 @@ const props = defineProps<{
 const emit = defineEmits<{
   openTable: [target: { tableName: string; schema?: string }];
   schemaChange: [schema: string | undefined];
+  editSource: [target: { title: string; sql: string; schema?: string }];
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 
 const schemas = ref<string[]>([]);
 const selectedSchema = ref<string | undefined>(props.schema);
@@ -40,6 +57,11 @@ const search = ref("");
 const objectFilter = ref<ObjectFilter>("all");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
+const sourceLoading = ref(false);
+const sourceContent = ref("");
+const sourceError = ref("");
+const sourceRow = ref<ObjectRow | null>(null);
+const sourceWrap = ref(false);
 const error = ref("");
 let loadId = 0;
 
@@ -112,13 +134,73 @@ function iconClass(type: ObjectRow["type"]) {
   return "text-green-500";
 }
 
-function canOpen(row: ObjectRow) {
-  return row.type === "TABLE" || row.type === "VIEW";
+function canOpenSource(row: ObjectRow) {
+  return row.type === "VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION";
+}
+
+function sourceTitle(row: ObjectRow | null) {
+  if (!row) return t("objects.source");
+  return `${row.name} ${t("objects.source")}`;
 }
 
 function openRow(row: ObjectRow) {
-  if (!canOpen(row)) return;
-  emit("openTable", { tableName: row.name, schema: row.schema });
+  if (row.type === "TABLE") {
+    emit("openTable", { tableName: row.name, schema: row.schema });
+    return;
+  }
+  if (canOpenSource(row)) {
+    void openSource(row);
+  }
+}
+
+async function openSource(row: ObjectRow) {
+  sourceRow.value = row;
+  sourceContent.value = "";
+  sourceError.value = "";
+  sourceLoading.value = true;
+  try {
+    const result = await api.getObjectSource(
+      props.connection.id,
+      props.database,
+      row.schema || selectedSchema.value || props.database,
+      row.name,
+      row.type as ObjectSourceKind,
+    );
+    sourceContent.value = result.source;
+  } catch (e: any) {
+    sourceError.value = e?.message || String(e);
+  } finally {
+    sourceLoading.value = false;
+  }
+}
+
+function closeSource() {
+  sourceRow.value = null;
+  sourceContent.value = "";
+  sourceError.value = "";
+}
+
+function copySource() {
+  if (!sourceContent.value) return;
+  navigator.clipboard.writeText(sourceContent.value);
+  toast(t("grid.copied"));
+}
+
+function editSource() {
+  if (!sourceRow.value || !sourceContent.value) return;
+  const row = sourceRow.value;
+  const schema = row.schema || selectedSchema.value;
+  emit("editSource", {
+    title: objectSourceEditTabTitle(schema, row.name),
+    schema,
+    sql: buildEditableObjectSourceSql({
+      databaseType: props.connection.db_type,
+      objectType: row.type as ObjectSourceKind,
+      schema,
+      name: row.name,
+      source: sourceContent.value,
+    }),
+  });
 }
 
 async function loadSchemas() {
@@ -275,11 +357,11 @@ watch(
         <div class="truncate">{{ t("objects.schemaColumn") }}</div>
         <div v-if="hasComments" class="truncate">{{ t("objects.comment") }}</div>
       </div>
-      <RecycleScroller class="flex-1 min-h-0" :items="filteredRows" :item-size="38" key-field="id">
+      <RecycleScroller class="min-h-0 flex-1" :items="filteredRows" :item-size="38" key-field="id">
         <template #default="{ item }">
           <div
             class="grid h-[38px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
-            :class="{ 'cursor-default hover:bg-transparent': !canOpen(item) }"
+            :class="{ 'bg-accent/40': sourceRow?.id === item.id }"
             :style="{ gridTemplateColumns }"
             @click="openRow(item)"
           >
@@ -295,6 +377,42 @@ watch(
           </div>
         </template>
       </RecycleScroller>
+      <div v-if="sourceRow" class="flex h-[42%] min-h-44 shrink-0 flex-col border-t bg-background">
+        <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
+          <Code2 class="h-3.5 w-3.5 text-muted-foreground" />
+          <span class="min-w-0 flex-1 truncate text-xs font-medium">{{ sourceTitle(sourceRow) }}</span>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="copySource">
+            <Copy class="h-3 w-3" />
+          </Button>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
+            <PencilLine class="h-3 w-3" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-5 w-5"
+            :class="{ 'bg-accent': sourceWrap }"
+            @click="sourceWrap = !sourceWrap"
+          >
+            <WrapText class="h-3 w-3" />
+          </Button>
+          <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
+            <X class="h-3 w-3" />
+          </Button>
+        </div>
+        <div v-if="sourceLoading" class="flex flex-1 items-center justify-center">
+          <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
+        </div>
+        <div v-else-if="sourceError" class="flex flex-1 items-center justify-center px-4 text-sm text-destructive">
+          {{ sourceError }}
+        </div>
+        <pre
+          v-else
+          class="min-w-0 flex-1 overflow-auto p-3 font-mono text-xs leading-5"
+          :class="sourceWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
+          >{{ sourceContent }}</pre
+        >
+      </div>
     </div>
   </div>
 </template>

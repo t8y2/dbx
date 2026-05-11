@@ -100,6 +100,15 @@ export interface ObjectInfo {
   comment?: string | null;
 }
 
+export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION";
+
+export interface ObjectSource {
+  name: string;
+  object_type: ObjectSourceKind;
+  schema?: string | null;
+  source: string;
+}
+
 export interface ColumnInfo {
   name: string;
   data_type: string;

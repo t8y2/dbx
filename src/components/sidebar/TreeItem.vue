@@ -66,7 +66,12 @@ import {
   buildExportPageSql,
   type ExportedTableSql,
 } from "@/lib/databaseExport";
-import { qualifiedTableName as buildQualifiedTableName, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import {
+  buildTableSelectSql,
+  qualifiedTableName as buildQualifiedTableName,
+  quoteTableIdentifier,
+} from "@/lib/tableSelectSql";
+import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import {
   SQL_FILE_UNSUPPORTED_TYPES,
   DIAGRAM_SUPPORTED_TYPES,
@@ -346,30 +351,58 @@ async function openData() {
   const node = props.node;
   if (!(node.type === "table" || node.type === "view") || !node.connectionId || !node.database) return;
   const config = connectionStore.getConfig(node.connectionId);
+  const traceId = uuid().slice(0, 8);
+  const startedAt = performance.now();
+  const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
+  console.info("[DBX][openData:start]", {
+    traceId,
+    type: node.type,
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    table: node.label,
+    dbType: config?.db_type,
+  });
   const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "data");
+  console.info("[DBX][openData:tab-created]", { traceId, tabId, elapsed: elapsed() });
   queryStore.setExecuting(tabId, true);
 
   try {
+    console.info("[DBX][openData:ensure-connected:start]", { traceId, elapsed: elapsed() });
     await connectionStore.ensureConnected(node.connectionId);
+    console.info("[DBX][openData:ensure-connected:done]", { traceId, elapsed: elapsed() });
     if (!config) throw new Error("Connection config not found");
 
-    const qualifiedName =
-      isSchemaAware(config.db_type) && node.schema
-        ? `${quoteIdent(node.schema)}.${quoteIdent(node.label)}`
-        : quoteIdent(node.label);
-
     const querySchema = node.schema || node.database;
+    console.info("[DBX][openData:get-columns:start]", {
+      traceId,
+      database: node.database,
+      schema: querySchema,
+      table: node.label,
+      elapsed: elapsed(),
+    });
     const columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
-    const pks = columns.filter((c) => c.is_primary_key).map((c) => c.name);
-    const order = pks.length ? ` ORDER BY ${pks.map((pk) => `${quoteIdent(pk)} ASC`).join(", ")}` : "";
-    let sql: string;
-    if (usesFetchFirst(config.db_type)) {
-      sql = `SELECT * FROM ${qualifiedName}${order} FETCH FIRST 100 ROWS ONLY`;
-    } else if (config.db_type === "sqlserver") {
-      sql = `SELECT TOP 100 * FROM ${qualifiedName}${order}`;
-    } else {
-      sql = `SELECT * FROM ${qualifiedName}${order} LIMIT 100;`;
-    }
+    console.info("[DBX][openData:get-columns:done]", {
+      traceId,
+      columnCount: columns.length,
+      primaryKeys: columns.filter((column) => column.is_primary_key).map((column) => column.name),
+      elapsed: elapsed(),
+    });
+    const pks = editablePrimaryKeys(config.db_type, columns);
+    const sql = buildTableSelectSql({
+      databaseType: config.db_type,
+      schema: node.schema,
+      tableName: node.label,
+      primaryKeys: pks,
+      includeRowId: usesSyntheticRowIdKey(config.db_type, pks),
+    });
+    console.info("[DBX][openData:sql-built]", {
+      traceId,
+      primaryKeys: pks,
+      includeRowId: usesSyntheticRowIdKey(config.db_type, pks),
+      sql,
+      elapsed: elapsed(),
+    });
     queryStore.updateSql(tabId, sql);
     queryStore.setTableMeta(tabId, {
       schema: node.schema,
@@ -378,8 +411,11 @@ async function openData() {
       primaryKeys: pks,
     });
 
+    console.info("[DBX][openData:execute:start]", { traceId, tabId, elapsed: elapsed() });
     await queryStore.executeTabSql(tabId, sql);
+    console.info("[DBX][openData:execute:done]", { traceId, tabId, elapsed: elapsed() });
   } catch (e: any) {
+    console.error("[DBX][openData:error]", { traceId, elapsed: elapsed(), error: e });
     queryStore.setErrorResult(tabId, e);
   }
 }

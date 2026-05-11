@@ -1,6 +1,11 @@
 import { ref, computed, nextTick, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/api";
-import { buildDataGridRollbackStatements, buildDataGridSaveStatements } from "@/lib/dataGridSql";
+import {
+  buildDataGridRollbackStatements,
+  buildDataGridSaveStatements,
+  dataGridSaveExecutionSchema,
+  validateDataGridSave,
+} from "@/lib/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/gridRowStatus";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
@@ -59,6 +64,7 @@ export interface UseDataGridEditorOptions {
   whereFilterInput: Ref<string>;
   orderByInput: Ref<string>;
   rowStatusFilter: Ref<RowStatusFilter>;
+  initialEditColumn?: ComputedRef<number>;
   getRowItem: (rowId: number) => RowItem | undefined;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string): void;
@@ -83,6 +89,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     whereFilterInput,
     orderByInput,
     rowStatusFilter,
+    initialEditColumn,
     getRowItem,
     emit,
   } = options;
@@ -342,7 +349,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     nextTick(() => {
       const el = getScrollerElement();
       if (el) el.scrollTop = el.scrollHeight;
-      startEdit(rowId, 0);
+      startEdit(rowId, initialEditColumn?.value ?? 0);
     });
   }
 
@@ -484,6 +491,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
 
     const stmtOptions = saveStatementOptions();
+    const validationError = stmtOptions
+      ? validateDataGridSave({
+          databaseType: databaseType.value,
+          columns: stmtOptions.columns,
+          columnInfo: tableMeta.value?.columns,
+          dirtyRows: stmtOptions.dirtyRows,
+          newRows: stmtOptions.newRows,
+        })
+      : undefined;
+    if (validationError) {
+      saveError.value = validationError;
+      isSaving.value = false;
+      return;
+    }
+
     const stmts = stmtOptions ? buildDataGridSaveStatements(stmtOptions) : [];
     if (stmts.length === 0) {
       isSaving.value = false;
@@ -492,10 +514,23 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const rollbackStmts = stmtOptions ? buildDataGridRollbackStatements(stmtOptions) : [];
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
+    console.info("[DBX][dataGrid:save-statements]", {
+      databaseType: databaseType.value,
+      table: tableMeta.value
+        ? [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".")
+        : undefined,
+      statements: stmts,
+      rollbackStatements: rollbackStmts,
+    });
 
     if (useTransaction.value && connectionId.value && database.value) {
       try {
-        apiResult = await api.executeInTransaction(connectionId.value, database.value, stmts, tableMeta.value?.schema);
+        apiResult = await api.executeInTransaction(
+          connectionId.value,
+          database.value,
+          stmts,
+          dataGridSaveExecutionSchema(databaseType.value, tableMeta.value),
+        );
       } catch (e: any) {
         saveError.value = String(e.message || e);
         isSaving.value = false;

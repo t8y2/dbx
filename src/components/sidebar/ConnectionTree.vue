@@ -5,7 +5,14 @@ import { Search, X, ListFilter, Check, FolderPlus } from "lucide-vue-next";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { TreeNode } from "@/types/database";
 import { matchSidebarLabel } from "@/lib/sidebarSearch";
-import { flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
+import {
+  SIDEBAR_TREE_ROW_HEIGHT,
+  SIDEBAR_TREE_PRERENDER_COUNT,
+  SIDEBAR_TREE_SCROLL_BUFFER,
+  flattenTree,
+  shouldVirtualizeFlatTree,
+  type FlatTreeNode,
+} from "@/composables/useFlatTree";
 import TreeItem from "./TreeItem.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -242,7 +249,9 @@ function onSearchToggle(node: TreeNode) {
       v-if="flatNodes.length > 0 && useVirtualTree"
       class="min-h-0 flex-1 overflow-y-auto"
       :items="flatNodes"
-      :item-size="28"
+      :item-size="SIDEBAR_TREE_ROW_HEIGHT"
+      :buffer="SIDEBAR_TREE_SCROLL_BUFFER"
+      :prerender="SIDEBAR_TREE_PRERENDER_COUNT"
       key-field="id"
       type-field="type"
       flow-mode

@@ -37,8 +37,29 @@ pub async fn execute_multi(
     let registered_query =
         execution_id.as_ref().filter(|id| !id.trim().is_empty()).map(|id| state.running_queries.register(id.clone()));
     let cancel_token = registered_query.as_ref().map(|query| query.token());
+    let trace_id = execution_id.as_deref().unwrap_or("no-execution-id");
+    log::info!(
+        "[query][execute_multi:start] trace_id={} connection_id={} database={} schema={:?} sql={}",
+        trace_id,
+        connection_id,
+        database,
+        schema,
+        sql
+    );
 
-    dbx_core::query::execute_multi_core(&state, &connection_id, &database, &sql, schema.as_deref(), cancel_token).await
+    let result =
+        dbx_core::query::execute_multi_core(&state, &connection_id, &database, &sql, schema.as_deref(), cancel_token)
+            .await;
+    match &result {
+        Ok(results) => log::info!(
+            "[query][execute_multi:done] trace_id={} result_count={} row_counts={:?}",
+            trace_id,
+            results.len(),
+            results.iter().map(|result| result.rows.len()).collect::<Vec<_>>()
+        ),
+        Err(error) => log::error!("[query][execute_multi:error] trace_id={} error={}", trace_id, error),
+    }
+    result
 }
 
 #[tauri::command]

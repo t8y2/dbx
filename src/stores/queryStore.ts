@@ -368,12 +368,32 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || !sql.trim()) return;
 
     const executionId = uuid();
+    const traceId = executionId.slice(0, 8);
+    const startedAt = performance.now();
+    const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     tab.isExecuting = true;
     tab.isCancelling = false;
     tab.executionId = executionId;
     tab.lastExecutedSql = sql;
+    console.info("[DBX][executeTabSql:start]", {
+      traceId,
+      tabId: id,
+      mode: tab.mode,
+      connectionId: tab.connectionId,
+      database: tab.database,
+      schema: tab.schema,
+      sql,
+    });
     try {
+      console.info("[DBX][executeTabSql:execute-multi:start]", { traceId, elapsed: elapsed() });
       const results = await api.executeMulti(tab.connectionId, tab.database, sql, tab.schema, executionId);
+      console.info("[DBX][executeTabSql:execute-multi:done]", {
+        traceId,
+        resultCount: results.length,
+        rowCounts: results.map((result) => result.rows.length),
+        columnCounts: results.map((result) => result.columns.length),
+        elapsed: elapsed(),
+      });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
         if (results.length > 1) {
@@ -387,9 +407,18 @@ export const useQueryStore = defineStore("query", () => {
         }
         current.resultBaseSql = options?.resultBaseSql ?? sql;
         current.resultSortedSql = options?.resultSortedSql;
+        console.info("[DBX][executeTabSql:metadata:start]", { traceId, elapsed: elapsed() });
         await analyzeQueryMetadata(current, current.resultBaseSql);
+        console.info("[DBX][executeTabSql:metadata:done]", { traceId, elapsed: elapsed() });
+      } else {
+        console.warn("[DBX][executeTabSql:stale-result]", {
+          traceId,
+          currentExecutionId: current?.executionId,
+          elapsed: elapsed(),
+        });
       }
     } catch (e: any) {
+      console.error("[DBX][executeTabSql:error]", { traceId, elapsed: elapsed(), error: e });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
         current.result = toErrorResult(e);
@@ -406,6 +435,13 @@ export const useQueryStore = defineStore("query", () => {
         current.isExecuting = false;
         current.isCancelling = false;
         current.executionId = undefined;
+        console.info("[DBX][executeTabSql:finish]", { traceId, elapsed: elapsed() });
+      } else {
+        console.warn("[DBX][executeTabSql:finish-stale]", {
+          traceId,
+          currentExecutionId: current?.executionId,
+          elapsed: elapsed(),
+        });
       }
     }
     trimResultCache();

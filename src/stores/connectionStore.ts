@@ -23,10 +23,10 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { isSchemaAware, TREE_SCHEMA_TYPES } from "@/lib/databaseCapabilities";
 import { buildDatabaseTreeNodes } from "@/lib/databaseTree";
 import { buildSqlServerDatabaseTreeNodes, SQLSERVER_DEFAULT_SCHEMA } from "@/lib/sqlServerTree";
+import { buildTableTreeNodes, expandCachedObjectBrowserNodes } from "@/lib/tableTree";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
-const SIDEBAR_TABLE_NODE_LIMIT = 15;
 type ImportSource = "dbx" | "navicat" | "dbeaver";
 
 interface LoadTreeOptions {
@@ -280,9 +280,12 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string): Promise<boolean> {
     const children = await api.loadSchemaCache<TreeNode[]>(cacheKey).catch(() => null);
     if (!children) return false;
+    const normalizedChildren = expandCachedObjectBrowserNodes(children);
     setChildren(
       node,
-      node.type === "connection" && node.connectionId ? withSavedSqlRoot(node.connectionId, children, node) : children,
+      node.type === "connection" && node.connectionId
+        ? withSavedSqlRoot(node.connectionId, normalizedChildren, node)
+        : normalizedChildren,
     );
     node.isExpanded = true;
     return true;
@@ -290,24 +293,6 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
     await api.saveSchemaCache(cacheKey, children).catch(() => undefined);
-  }
-
-  function buildObjectBrowserNode(
-    nodeId: string,
-    connectionId: string,
-    database: string,
-    schema: string | undefined,
-    objectCount: number,
-  ): TreeNode {
-    return {
-      id: `${nodeId}:__object_browser`,
-      label: "tree.objectBrowser",
-      type: "object-browser",
-      connectionId,
-      database,
-      schema,
-      objectCount,
-    };
   }
 
   function useCachedChildren(node: TreeNode, options?: LoadTreeOptions): boolean {
@@ -683,34 +668,7 @@ export const useConnectionStore = defineStore("connection", () => {
         api.listSchemas(connectionId, database),
         api.listTables(connectionId, database, SQLSERVER_DEFAULT_SCHEMA),
       ]);
-      let children = buildSqlServerDatabaseTreeNodes(connectionId, database, schemas, defaultSchemaTables);
-      if (defaultSchemaTables.length > SIDEBAR_TABLE_NODE_LIMIT) {
-        const previewTables = buildSqlServerDatabaseTreeNodes(
-          connectionId,
-          database,
-          [],
-          defaultSchemaTables.slice(0, SIDEBAR_TABLE_NODE_LIMIT),
-        );
-        const browserNode = buildObjectBrowserNode(
-          `${nodeId}:${SQLSERVER_DEFAULT_SCHEMA}`,
-          connectionId,
-          database,
-          SQLSERVER_DEFAULT_SCHEMA,
-          defaultSchemaTables.length,
-        );
-        const hiddenTables = defaultSchemaTables.slice(SIDEBAR_TABLE_NODE_LIMIT);
-        browserNode.hiddenChildren = hiddenTables.map((t) => ({
-          id: `${nodeId}:${SQLSERVER_DEFAULT_SCHEMA}:${t.name}`,
-          label: t.name,
-          type: (t.table_type === "VIEW" ? "view" : "table") as "view" | "table",
-          connectionId,
-          database,
-          schema: SQLSERVER_DEFAULT_SCHEMA,
-          isExpanded: false,
-          children: [],
-        }));
-        children = [...previewTables, browserNode, ...children.filter((child) => child.type === "schema")];
-      }
+      const children = buildSqlServerDatabaseTreeNodes(connectionId, database, schemas, defaultSchemaTables);
       setChildren(node, children);
       await savePersistedTreeChildren(cacheKey, children);
       node.isExpanded = true;
@@ -734,32 +692,13 @@ export const useConnectionStore = defineStore("connection", () => {
       const tables = await api.listTables(connectionId, database, querySchema);
       const config = getConfig(connectionId);
       const effectiveSchema = schema || (config?.db_type && isSchemaAware(config.db_type) ? database : undefined);
-      const visibleTables = tables.slice(0, SIDEBAR_TABLE_NODE_LIMIT);
-      const children: TreeNode[] = visibleTables.map((t) => ({
-        id: `${nodeId}:${t.name}`,
-        label: t.name,
-        type: (t.table_type === "VIEW" ? "view" : "table") as "view" | "table",
+      const children = buildTableTreeNodes({
+        nodeId,
         connectionId,
         database,
         schema: effectiveSchema,
-        isExpanded: false,
-        children: [],
-      }));
-      if (tables.length > SIDEBAR_TABLE_NODE_LIMIT) {
-        const hiddenTables = tables.slice(SIDEBAR_TABLE_NODE_LIMIT);
-        const browserNode = buildObjectBrowserNode(nodeId, connectionId, database, effectiveSchema, tables.length);
-        browserNode.hiddenChildren = hiddenTables.map((t) => ({
-          id: `${nodeId}:${t.name}`,
-          label: t.name,
-          type: (t.table_type === "VIEW" ? "view" : "table") as "view" | "table",
-          connectionId,
-          database,
-          schema: effectiveSchema,
-          isExpanded: false,
-          children: [],
-        }));
-        children.push(browserNode);
-      }
+        tables,
+      });
       setChildren(node, children);
       await savePersistedTreeChildren(cacheKey, children);
       node.isExpanded = true;

@@ -332,10 +332,12 @@ pub async fn list_triggers(conn: &OracleClient, schema: &str, table: &str) -> Re
 
 pub async fn execute_query_with_schema(conn: &OracleClient, schema: &str, sql: &str) -> Result<QueryResult, String> {
     let set_schema = format!("ALTER SESSION SET CURRENT_SCHEMA = \"{}\"", schema);
+    log::info!("[oracle][set-schema:start] schema={schema}");
     conn.execute(&set_schema, &[]).await.map_err(|e| {
         log::error!("[oracle] set current_schema failed: {e}");
         e.to_string()
     })?;
+    log::info!("[oracle][set-schema:done] schema={schema}");
     execute_query(conn, sql).await
 }
 
@@ -343,17 +345,31 @@ pub async fn execute_query(conn: &OracleClient, sql: &str) -> Result<QueryResult
     let start = Instant::now();
     let sql = sql.trim().trim_end_matches(';');
     let explicit_limit = explicit_select_row_limit(sql);
+    log::info!("[oracle][execute:start] explicit_limit={:?} sql={}", explicit_limit, sql);
 
     // Rewrite FETCH FIRST N ROWS ONLY → ROWNUM for Oracle 11g compatibility.
     let sql = rewrite_fetch_first(sql);
+    log::info!("[oracle][execute:rewritten] sql={}", sql.as_ref());
 
     if starts_with_executable_sql_keyword(sql.as_ref(), &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"]) {
         let capped_sql = cap_select_rows(sql.as_ref());
         let query_limit = explicit_limit.unwrap_or(ORACLE_QUERY_LIMIT).min(ORACLE_QUERY_LIMIT);
+        log::info!(
+            "[oracle][query_with_limit:start] query_limit={} fetch_size=500 sql={}",
+            query_limit,
+            capped_sql.as_ref()
+        );
         let result = conn.query_with_limit(capped_sql.as_ref(), &[], query_limit, 500).await.map_err(|e| {
             log::error!("[oracle] execute_query SELECT failed: {e}");
             e.to_string()
         })?;
+        log::info!(
+            "[oracle][query_with_limit:done] column_count={} row_count={} has_more_rows={} elapsed_ms={}",
+            result.columns.len(),
+            result.rows.len(),
+            result.has_more_rows,
+            start.elapsed().as_millis()
+        );
         let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
         let mut rows: Vec<Vec<serde_json::Value>> = result
             .rows
@@ -369,11 +385,24 @@ pub async fn execute_query(conn: &OracleClient, sql: &str) -> Result<QueryResult
             rows.truncate(crate::query::MAX_ROWS);
         }
 
+        log::info!(
+            "[oracle][execute:done] column_count={} row_count={} truncated={} elapsed_ms={}",
+            columns.len(),
+            rows.len(),
+            truncated,
+            start.elapsed().as_millis()
+        );
         Ok(QueryResult { columns, rows, affected_rows: 0, execution_time_ms: start.elapsed().as_millis(), truncated })
     } else {
+        log::info!("[oracle][execute-non-select:start] sql={}", sql.as_ref());
         match conn.execute(sql.as_ref(), &[]).await {
             Ok(result) => {
                 let _ = conn.commit().await;
+                log::info!(
+                    "[oracle][execute-non-select:done] affected_rows={} elapsed_ms={}",
+                    result.rows_affected,
+                    start.elapsed().as_millis()
+                );
                 Ok(QueryResult {
                     columns: vec![],
                     rows: vec![],
@@ -384,8 +413,9 @@ pub async fn execute_query(conn: &OracleClient, sql: &str) -> Result<QueryResult
             }
             Err(e) => {
                 let msg = e.to_string();
+                log::error!("[oracle][execute-non-select:error] {msg}");
                 if msg.contains("Server rejected") || msg.contains("closed the connection") {
-                    Err("Operation failed (connection closed) — possibly a constraint violation (foreign key, unique, or check constraint).".to_string())
+                    Err(format!("Operation failed (connection closed). Original driver error: {msg}"))
                 } else {
                     Err(msg)
                 }

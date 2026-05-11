@@ -3,6 +3,7 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { buildSortedQuerySql } from "@/lib/queryResultSort";
 import type { QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
@@ -23,16 +24,22 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {},
   ): string {
     const config = connectionStore.getConfig(tab.connectionId);
+    const primaryKeys = tab.tableMeta ? editablePrimaryKeys(config?.db_type, tab.tableMeta.columns) : [];
+    if (tab.tableMeta && primaryKeys.join("\0") !== tab.tableMeta.primaryKeys.join("\0")) {
+      tab.tableMeta.primaryKeys = primaryKeys;
+    }
     const fallbackOrderColumns =
-      config?.db_type === "sqlserver" && !tab.tableMeta?.primaryKeys?.length
+      config?.db_type === "sqlserver" && !primaryKeys.length
         ? tab.tableMeta?.columns.slice(0, 1).map((column) => column.name)
         : undefined;
+    const useRowId = usesSyntheticRowIdKey(config?.db_type, primaryKeys);
     return buildTableSelectSql({
       databaseType: config?.db_type,
       schema: tab.tableMeta?.schema,
       tableName: tab.tableMeta?.tableName ?? "",
-      primaryKeys: tab.tableMeta?.primaryKeys,
+      primaryKeys,
       fallbackOrderColumns,
+      includeRowId: useRowId,
       ...options,
     });
   }

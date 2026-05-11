@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
+import { DBX_ROWID_COLUMN } from "../src/lib/tableEditing.ts";
 import { buildTableSelectSql } from "../src/lib/tableSelectSql.ts";
 
 test("builds a MySQL table WHERE query from search input", () => {
@@ -37,7 +38,10 @@ test("builds SQL Server first page query with schema-aware brackets", () => {
     primaryKeys: ["id"],
   });
 
-  assert.equal(sql, "SELECT * FROM [dbo].[accounts] WHERE (id = 1) ORDER BY [id] ASC OFFSET 0 ROWS FETCH NEXT 25 ROWS ONLY");
+  assert.equal(
+    sql,
+    "SELECT * FROM [dbo].[accounts] WHERE (id = 1) ORDER BY [id] ASC OFFSET 0 ROWS FETCH NEXT 25 ROWS ONLY",
+  );
 });
 
 test("builds SQL Server later pages with OFFSET and FETCH", () => {
@@ -64,4 +68,20 @@ test("builds SQL Server pages with fallback order columns when there is no prima
   });
 
   assert.equal(sql, "SELECT * FROM [dbo].[logs] ORDER BY [created_at] ASC OFFSET 50 ROWS FETCH NEXT 50 ROWS ONLY");
+});
+
+test("builds Oracle table data queries with ROWID for keyless editing", () => {
+  const sql = buildTableSelectSql({
+    databaseType: "oracle",
+    schema: "DBXTEST",
+    tableName: "DBX_LOAD_TABLE_006",
+    primaryKeys: [DBX_ROWID_COLUMN],
+    includeRowId: true,
+    limit: 100,
+  });
+
+  assert.equal(
+    sql,
+    `SELECT ROWIDTOCHAR(t.ROWID) AS "__DBX_ROWID", t.* FROM "DBXTEST"."DBX_LOAD_TABLE_006" t ORDER BY t.ROWID ASC FETCH FIRST 100 ROWS ONLY`,
+  );
 });

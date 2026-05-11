@@ -31,7 +31,9 @@ export interface UseDataGridExportOptions {
   databaseType: ComputedRef<string | undefined>;
   hasCellSelection: ComputedRef<boolean>;
   selectedCells: ComputedRef<SelectionData>;
-  contextCell: Ref<{ rowId: number; rowIndex: number; col: number } | null>;
+  contextCell:
+    | Ref<{ rowId: number; rowIndex: number; col: number } | null>
+    | ComputedRef<{ rowId: number; rowIndex: number; col: number } | null>;
   getRowItem: (rowId: number) => RowItem | undefined;
   quoteIdent: (name: string) => string;
   escapeVal: (value: CellValue) => string;

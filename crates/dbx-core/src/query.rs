@@ -205,6 +205,7 @@ pub async fn do_execute(
             let client = pool.client();
             let schema = schema.map(|s| s.to_string());
             drop(connections);
+            log::info!("[query][oracle:lock:start] schema={:?} sql={}", schema, sql);
             let client = match cancel_token.as_ref() {
                 Some(token) => tokio::select! {
                     biased;
@@ -213,6 +214,7 @@ pub async fn do_execute(
                 },
                 None => client.lock().await,
             };
+            log::info!("[query][oracle:lock:done] schema={:?}", schema);
             if let Some(schema) = schema {
                 wait_for_query(cancel_token, db::oracle_driver::execute_query_with_schema(&*client, &schema, sql))
                     .await
@@ -635,9 +637,11 @@ async fn exec_tx_none_inner(
 ) -> Result<db::QueryResult, String> {
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
+        log::info!("[query][tx-none:statement:start] index={} sql={}", i + 1, sql);
         match do_execute(state, pool_key, sql, schema, None).await {
             Ok(result) => {
                 total_affected += result.affected_rows;
+                log::info!("[query][tx-none:statement:done] index={} affected_rows={}", i + 1, result.affected_rows);
             }
             Err(e) => {
                 log::warn!("Statement {} failed (no transaction support): {}", i + 1, e);

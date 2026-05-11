@@ -1,5 +1,9 @@
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
+export const SIDEBAR_TREE_ROW_HEIGHT = 28;
+export const SIDEBAR_TREE_SCROLL_BUFFER = SIDEBAR_TREE_ROW_HEIGHT * 48;
+export const SIDEBAR_TREE_PRERENDER_COUNT = 48;
+
 export interface FlatTreeNode {
   node: TreeNode;
   depth: number;

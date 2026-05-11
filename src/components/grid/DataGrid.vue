@@ -60,6 +60,7 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { QueryResult, ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/api";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { isHiddenGridColumn, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { formatGridSqlLiteral } from "@/lib/dataGridSql";
 import { matchesRowStatusFilter, type RowStatus, type RowStatusFilter } from "@/lib/gridRowStatus";
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
@@ -727,11 +728,25 @@ const isApplyingWhere = ref(false);
 const rowStatusFilter = ref<RowStatusFilter>("all");
 const gridRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
+const visibleColumnIndexes = computed(() =>
+  props.result.columns
+    .map((column, index) => ({ column, index }))
+    .filter(({ column }) => !isHiddenGridColumn(props.databaseType, column, props.tableMeta?.primaryKeys ?? []))
+    .map(({ index }) => index),
+);
+const visibleColumns = computed(() => visibleColumnIndexes.value.map((index) => props.result.columns[index]));
+const visibleRows = computed(() =>
+  props.result.rows.map((row) => visibleColumnIndexes.value.map((index) => row[index])),
+);
+const firstVisibleColumnIndex = computed(() => visibleColumnIndexes.value[0] ?? 0);
+function actualColumnIndex(visibleColumnIndex: number): number {
+  return visibleColumnIndexes.value[visibleColumnIndex] ?? visibleColumnIndex;
+}
 
 // --- Column resize composable ---
 const { initColumnWidths, onResizeStart, autoFitColumn, columnVars, getIsResizing } = useDataGridColumnResize({
-  columns: computed(() => props.result.columns),
-  rows: computed(() => props.result.rows),
+  columns: visibleColumns,
+  rows: visibleRows,
   gridRef,
 });
 function syncHeaderScroll(e: Event) {
@@ -741,7 +756,7 @@ function syncHeaderScroll(e: Event) {
 }
 
 initColumnWidths();
-watch(() => props.result.columns.length, initColumnWidths);
+watch(() => visibleColumns.value.length, initColumnWidths);
 watch(
   () => props.result,
   () => {
@@ -756,6 +771,9 @@ const currentPage = ref(1);
 const isFullPage = computed(() => props.result.rows.length >= pageSize.value);
 const isResultsContext = computed(() => props.context === "results");
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
+const tableUsesSyntheticRowId = computed(() =>
+  usesSyntheticRowIdKey(props.databaseType, props.tableMeta?.primaryKeys ?? []),
+);
 const clientSearchText = computed(() => (searchText.value.trim() ? searchText.value : ""));
 watch(clientSearchText, (value) => {
   clearTimeout(_searchTimer);
@@ -826,6 +844,7 @@ const editor = useDataGridEditor({
   whereFilterInput,
   orderByInput,
   rowStatusFilter,
+  initialEditColumn: firstVisibleColumnIndex,
   getRowItem,
   emit,
 });
@@ -936,6 +955,27 @@ function getRowItem(rowId: number): RowItem | undefined {
   return displayItems.value.find((item) => item.id === rowId);
 }
 
+function visibleRowData(row: CellValue[]): CellValue[] {
+  return visibleColumnIndexes.value.map((index) => row[index]);
+}
+
+function visibleDirtyColumns(row: boolean[]): boolean[] {
+  return visibleColumnIndexes.value.map((index) => row[index] ?? false);
+}
+
+const visibleDisplayItems = computed<RowItem[]>(() =>
+  displayItems.value.map((item) => ({
+    ...item,
+    data: visibleRowData(item.data),
+    isDirtyCol: visibleDirtyColumns(item.isDirtyCol),
+  })),
+);
+const exportContextCell = computed(() => {
+  if (!contextCell.value) return null;
+  const visibleCol = visibleColumnIndexes.value.indexOf(contextCell.value.col);
+  return { ...contextCell.value, col: visibleCol };
+});
+
 const deleteRowDetails = computed(() =>
   props.tableMeta?.tableName
     ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName })
@@ -961,8 +1001,8 @@ const isErrorResult = computed(
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // --- Selection composable ---
 const selection = useDataGridSelection({
-  columns: computed(() => props.result.columns),
-  displayItems,
+  columns: visibleColumns,
+  displayItems: visibleDisplayItems,
   editingCell,
   showTranspose,
   transposeRowIndex,
@@ -1197,6 +1237,7 @@ async function applyOrderBySearch() {
       orderBy: orderByClause,
       limit: pageSize.value,
       whereInput: whereFilterInput.value.trim() || undefined,
+      includeRowId: tableUsesSyntheticRowId.value,
     });
     await props.onExecuteSql(sql);
   } catch (e: any) {
@@ -1222,6 +1263,7 @@ async function applyWhereFilter() {
         (sortCol.value ? `${quoteIdent(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
       whereInput: whereFilterInput.value.trim() || undefined,
+      includeRowId: tableUsesSyntheticRowId.value,
     });
     await props.onExecuteSql(sql);
   } catch (e: any) {
@@ -1286,8 +1328,8 @@ const {
   exportXlsx,
   copySql,
 } = useDataGridExport({
-  columns: computed(() => props.result.columns),
-  displayItems,
+  columns: visibleColumns,
+  displayItems: visibleDisplayItems,
   sql: computed(() => props.sql),
   tableMeta: computed(() =>
     props.tableMeta ? { schema: props.tableMeta.schema, tableName: props.tableMeta.tableName } : undefined,
@@ -1333,9 +1375,9 @@ async function pasteClipboardIntoSelection() {
     const item = displayItems.value[start.rowIndex + rowOffset];
     if (!item) return;
     row.forEach((value, colOffset) => {
-      const col = start.colIndex + colOffset;
-      if (col >= props.result.columns.length) return;
-      applyCellValue(item.id, col, value);
+      const visibleCol = start.colIndex + colOffset;
+      if (visibleCol >= visibleColumns.value.length) return;
+      applyCellValue(item.id, actualColumnIndex(visibleCol), value);
     });
   });
   toast(t("grid.pasted"));
@@ -1348,8 +1390,8 @@ function cutSelection() {
   for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
     const item = displayItems.value[rowIndex];
     if (!item) continue;
-    for (let col = range.startCol; col <= range.endCol; col++) {
-      applyCellValue(item.id, col, null);
+    for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+      applyCellValue(item.id, actualColumnIndex(visibleCol), null);
     }
   }
 }
@@ -1399,13 +1441,16 @@ const transposeData = computed(() => {
   if (transposeRowIndex.value === null) return null;
   const item = displayItems.value[transposeRowIndex.value];
   if (!item) return null;
-  return props.result.columns.map((col, i) => ({
-    column: col,
-    type: columnTypeMap.value.get(col) || "",
-    value: item.data[i],
-    display: formatCell(item.data[i]),
-    isNull: item.data[i] === null,
-  }));
+  return visibleColumnIndexes.value.map((columnIndex) => {
+    const col = props.result.columns[columnIndex];
+    return {
+      column: col,
+      type: columnTypeMap.value.get(col) || "",
+      value: item.data[columnIndex],
+      display: formatCell(item.data[columnIndex]),
+      isNull: item.data[columnIndex] === null,
+    };
+  });
 });
 
 function openTranspose(rowIndex: number) {
@@ -1439,10 +1484,10 @@ watch(
 );
 
 // --- Context menu handlers ---
-function onCellContext(rowId: number, rowIndex: number, colIdx: number) {
+function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleColIdx: number) {
   contextCell.value = { rowId, rowIndex, col: colIdx };
-  if (!cellIsSelected(rowIndex, colIdx)) {
-    selectSingleCell(rowIndex, colIdx);
+  if (!cellIsSelected(rowIndex, visibleColIdx)) {
+    selectSingleCell(rowIndex, visibleColIdx);
   }
 }
 
@@ -1856,44 +1901,58 @@ defineExpose({
                   >
                     #
                   </div>
-                  <Tooltip v-for="(col, colIdx) in result.columns" :key="`${col}-${colIdx}`">
+                  <Tooltip v-for="(col, colIdx) in visibleColumns" :key="`${col}-${actualColumnIndex(colIdx)}`">
                     <TooltipTrigger as-child>
                       <div
                         class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-accent/60 select-none relative overflow-hidden"
                         :style="{ width: `var(--col-w-${colIdx})` }"
                       >
                         <span class="flex min-w-0 items-center gap-1 overflow-hidden">
-                          <span class="min-w-0 flex-1 truncate cursor-pointer" @click="toggleSort(col, colIdx)">{{
-                            col
-                          }}</span>
+                          <span
+                            class="min-w-0 flex-1 truncate cursor-pointer"
+                            @click="toggleSort(col, actualColumnIndex(colIdx))"
+                          >
+                            {{ col }}
+                          </span>
                           <button
                             type="button"
                             class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
                             :class="
-                              sortCol === col && sortColIndex === colIdx ? 'text-primary opacity-100' : 'opacity-80'
+                              sortCol === col && sortColIndex === actualColumnIndex(colIdx)
+                                ? 'text-primary opacity-100'
+                                : 'opacity-80'
                             "
                             :title="t('grid.sort')"
-                            @click.stop="toggleSort(col, colIdx)"
+                            @click.stop="toggleSort(col, actualColumnIndex(colIdx))"
                           >
                             <ArrowUp
-                              v-if="sortCol === col && sortColIndex === colIdx && sortDir === 'asc'"
+                              v-if="sortCol === col && sortColIndex === actualColumnIndex(colIdx) && sortDir === 'asc'"
                               class="h-3 w-3 shrink-0"
                             />
                             <ArrowDown
-                              v-else-if="sortCol === col && sortColIndex === colIdx && sortDir === 'desc'"
+                              v-else-if="
+                                sortCol === col && sortColIndex === actualColumnIndex(colIdx) && sortDir === 'desc'
+                              "
                               class="h-3 w-3 shrink-0"
                             />
                             <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
                           </button>
                           <Popover
-                            :open="localFilterOpenColumn === colIdx"
-                            @update:open="(value: boolean) => (value ? openLocalFilter(colIdx) : closeLocalFilter())"
+                            :open="localFilterOpenColumn === actualColumnIndex(colIdx)"
+                            @update:open="
+                              (value: boolean) =>
+                                value ? openLocalFilter(actualColumnIndex(colIdx)) : closeLocalFilter()
+                            "
                           >
                             <PopoverTrigger as-child>
                               <button
                                 type="button"
                                 class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                                :class="localFilterActive(colIdx) ? 'text-primary opacity-100' : 'opacity-80'"
+                                :class="
+                                  localFilterActive(actualColumnIndex(colIdx))
+                                    ? 'text-primary opacity-100'
+                                    : 'opacity-80'
+                                "
                                 :title="t('grid.localFilter')"
                                 @click.stop
                               >
@@ -1994,7 +2053,7 @@ defineExpose({
                                   variant="ghost"
                                   size="sm"
                                   class="h-7 px-2 text-xs text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-700 dark:hover:bg-slate-100 dark:hover:text-slate-900"
-                                  @click="clearLocalFilter(colIdx)"
+                                  @click="clearLocalFilter(actualColumnIndex(colIdx))"
                                 >
                                   {{ t("grid.clearFilter") }}
                                 </Button>
@@ -2100,24 +2159,24 @@ defineExpose({
                       {{ index + 1 }}
                     </div>
                     <div
-                      v-for="(cell, colIdx) in item.data"
-                      :key="colIdx"
+                      v-for="(actualColIdx, visibleColIdx) in visibleColumnIndexes"
+                      :key="actualColIdx"
                       class="group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none"
-                      :style="{ width: `var(--col-w-${colIdx})` }"
+                      :style="{ width: `var(--col-w-${visibleColIdx})` }"
                       :class="{
-                        'text-muted-foreground italic': isNull(cell),
-                        'bg-yellow-500/10': item.isDirtyCol[colIdx],
-                        'cell-selected': cellIsSelected(index, colIdx),
-                        'tabular-nums': typeof cell === 'number',
+                        'text-muted-foreground italic': isNull(item.data[actualColIdx]),
+                        'bg-yellow-500/10': item.isDirtyCol[actualColIdx],
+                        'cell-selected': cellIsSelected(index, visibleColIdx),
+                        'tabular-nums': typeof item.data[actualColIdx] === 'number',
                         'cursor-text hover:bg-accent/50': editable && !item.isDeleted,
                         'line-through': item.isDeleted,
                       }"
-                      @mousedown="beginCellSelection(index, colIdx, $event)"
-                      @mouseenter="extendCellSelection(index, colIdx)"
-                      @dblclick="editable && !item.isDeleted && startEdit(item.id, colIdx)"
-                      @contextmenu="onCellContext(item.id, index, colIdx)"
+                      @mousedown="beginCellSelection(index, visibleColIdx, $event)"
+                      @mouseenter="extendCellSelection(index, visibleColIdx)"
+                      @dblclick="editable && !item.isDeleted && startEdit(item.id, actualColIdx)"
+                      @contextmenu="onCellContext(item.id, index, actualColIdx, visibleColIdx)"
                     >
-                      <template v-if="editingCell?.rowId === item.id && editingCell?.col === colIdx">
+                      <template v-if="editingCell?.rowId === item.id && editingCell?.col === actualColIdx">
                         <input
                           v-model="editValue"
                           autocapitalize="off"
@@ -2130,12 +2189,12 @@ defineExpose({
                         />
                       </template>
                       <template v-else>
-                        {{ formatCell(cell) }}
+                        {{ formatCell(item.data[actualColIdx]) }}
                         <button
                           class="absolute right-0.5 top-0.5 hidden h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground group-hover/cell:flex"
                           :title="t('grid.cellDetails')"
                           @mousedown.stop
-                          @click.stop="showCellDetails(index, colIdx)"
+                          @click.stop="showCellDetails(index, actualColIdx)"
                         >
                           <Info class="h-3 w-3" />
                         </button>

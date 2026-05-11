@@ -1,5 +1,6 @@
 import type { DatabaseType } from "../types/database.ts";
 import { isSchemaAware, usesFetchFirst } from "./databaseCapabilities.ts";
+import { DBX_ROWID_COLUMN } from "./tableEditing.ts";
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
@@ -11,12 +12,22 @@ export interface BuildTableSelectSqlOptions {
   limit?: number;
   offset?: number;
   whereInput?: string;
+  includeRowId?: boolean;
 }
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
   if (databaseType === "mysql") return `\`${name.replace(/`/g, "``")}\``;
   if (databaseType === "sqlserver") return `[${name.replace(/\]/g, "]]")}]`;
   return `"${name.replace(/"/g, '""')}"`;
+}
+
+function isOracleRowId(databaseType: DatabaseType | undefined, name: string): boolean {
+  return databaseType === "oracle" && name.toUpperCase() === DBX_ROWID_COLUMN;
+}
+
+function quoteOrderIdentifier(databaseType: DatabaseType | undefined, name: string, tableAlias?: string): string {
+  if (isOracleRowId(databaseType, name)) return tableAlias ? `${tableAlias}.ROWID` : "ROWID";
+  return quoteTableIdentifier(databaseType, name);
 }
 
 export function qualifiedTableName(
@@ -40,17 +51,22 @@ export function buildTableSelectSql(options: BuildTableSelectSqlOptions): string
   const table = qualifiedTableName(options);
   const predicate = normalizeWhereInput(options.whereInput);
   const where = predicate ? ` WHERE (${predicate})` : "";
+  const rowIdAlias = options.includeRowId && databaseType === "oracle" ? "t" : undefined;
   const defaultOrderBy = options.primaryKeys?.length
-    ? options.primaryKeys.map((pk) => `${quoteTableIdentifier(databaseType, pk)} ASC`).join(", ")
+    ? options.primaryKeys.map((pk) => `${quoteOrderIdentifier(databaseType, pk, rowIdAlias)} ASC`).join(", ")
     : options.fallbackOrderColumns?.length
       ? options.fallbackOrderColumns.map((column) => `${quoteTableIdentifier(databaseType, column)} ASC`).join(", ")
       : undefined;
   const orderBy = options.orderBy ?? defaultOrderBy;
   const order = orderBy ? ` ORDER BY ${orderBy}` : "";
 
+  const selectColumns =
+    options.includeRowId && databaseType === "oracle" ? `ROWIDTOCHAR(t.ROWID) AS "${DBX_ROWID_COLUMN}", t.*` : "*";
+  const tableAlias = options.includeRowId && usesFetchFirst(databaseType) ? `${table} t` : table;
+
   if (usesFetchFirst(databaseType)) {
     const offset = options.offset ? ` OFFSET ${options.offset} ROWS` : "";
-    return `SELECT * FROM ${table}${where}${order}${offset} FETCH FIRST ${limit} ROWS ONLY`;
+    return `SELECT ${selectColumns} FROM ${tableAlias}${where}${order}${offset} FETCH FIRST ${limit} ROWS ONLY`;
   }
 
   if (databaseType === "sqlserver") {

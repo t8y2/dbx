@@ -1,5 +1,6 @@
 import * as api from "@/lib/api";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
+import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 
@@ -44,12 +45,26 @@ async function openTableTarget(target: NavigationTarget) {
     const [columnsResult, dataResult] = await Promise.allSettled([columnsPromise, dataPromise]);
     if (columnsResult.status === "fulfilled") {
       const columns = columnsResult.value;
+      const primaryKeys = editablePrimaryKeys(config.db_type, columns);
+      const useRowId = usesSyntheticRowIdKey(config.db_type, primaryKeys);
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
         tableName: target.tableName,
         columns,
-        primaryKeys: columns.filter((c) => c.is_primary_key).map((c) => c.name),
+        primaryKeys,
       });
+      if (useRowId) {
+        const newSql = buildTableSelectSql({
+          databaseType: config.db_type,
+          schema: target.schema,
+          tableName: target.tableName,
+          whereInput: target.whereInput,
+          primaryKeys,
+          includeRowId: true,
+        });
+        queryStore.updateSql(tabId, newSql);
+        await queryStore.executeTabSql(tabId, newSql);
+      }
     }
     if (dataResult.status === "rejected") throw dataResult.reason;
     if (columnsResult.status === "rejected")
@@ -107,7 +122,7 @@ export function useNavigationTargets(dialogs: {
         queryStore.setTableMeta(activeTab.id, {
           ...activeTab.tableMeta,
           columns,
-          primaryKeys: columns.filter((c) => c.is_primary_key).map((c) => c.name),
+          primaryKeys: editablePrimaryKeys(connectionStore.getConfig(activeTab.connectionId)?.db_type, columns),
         });
         await reloadData();
       } catch (e: any) {

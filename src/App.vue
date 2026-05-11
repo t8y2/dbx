@@ -28,7 +28,7 @@ import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { useTauriEvents } from "@/composables/useTauriEvents";
-import { setLocale, currentLocale } from "@/i18n";
+import { setLocale, currentLocale, nextLocale } from "@/i18n";
 import * as api from "@/lib/api";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
@@ -358,7 +358,7 @@ function changeActiveSchema(schema: string | undefined) {
 }
 
 function toggleLocale() {
-  setLocale(currentLocale() === "zh-CN" ? "en" : "zh-CN");
+  setLocale(nextLocale(currentLocale()));
 }
 function openGitHub() {
   openUrl("https://github.com/t8y2/dbx");

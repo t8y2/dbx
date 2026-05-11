@@ -191,6 +191,7 @@ pub async fn do_execute(
         }
         PoolKind::Oracle(pool) => {
             let client = pool.client();
+            let schema = schema.map(|s| s.to_string());
             drop(connections);
             let client = match cancel_token.as_ref() {
                 Some(token) => tokio::select! {
@@ -200,7 +201,13 @@ pub async fn do_execute(
                 },
                 None => client.lock().await,
             };
-            wait_for_query(cancel_token, db::oracle_driver::execute_query(&*client, sql)).await.map(truncate_result)
+            if let Some(schema) = schema {
+                wait_for_query(cancel_token, db::oracle_driver::execute_query_with_schema(&*client, &schema, sql))
+                    .await
+                    .map(truncate_result)
+            } else {
+                wait_for_query(cancel_token, db::oracle_driver::execute_query(&*client, sql)).await.map(truncate_result)
+            }
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
@@ -215,11 +222,16 @@ pub async fn do_execute(
         PoolKind::Dameng(client) => {
             let client = client.clone();
             let sql = sql.to_string();
+            let schema = schema.map(|s| s.to_string());
             drop(connections);
             wait_for_query(cancel_token, async move {
                 let task = tokio::task::spawn_blocking(move || {
                     let client = client.lock().map_err(|e| e.to_string())?;
-                    db::dm_driver::execute_query_sync(&client, &sql)
+                    if let Some(schema) = schema {
+                        db::dm_driver::execute_query_with_schema_sync(&client, &schema, &sql)
+                    } else {
+                        db::dm_driver::execute_query_sync(&client, &sql)
+                    }
                 });
                 task.await.map_err(|e| e.to_string())?
             })

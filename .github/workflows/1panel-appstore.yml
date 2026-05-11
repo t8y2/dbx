@@ -58,7 +58,7 @@ jobs:
               --repo "1Panel-dev/appstore" \
               --head "${REPO_OWNER}:${BRANCH}" \
               --title "feat(dbx): release ${VERSION}" \
-              --body "Automated release of DBX v${VERSION}" \
-              --base master
+              --body "$(printf 'Automated release of DBX v%s\n\n```release-note\nfeat(dbx): release %s\n```' "${VERSION}" "${VERSION}")" \
+              --base dev
             echo "::notice::1Panel App Store PR created for ${VERSION}"
           fi

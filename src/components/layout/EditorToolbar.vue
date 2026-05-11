@@ -24,6 +24,7 @@ import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connectionPresentation";
 import { isDefaultDatabase } from "@/lib/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabPresentation";
+import { isSingleDatabase } from "@/lib/databaseCapabilities";
 import { hexToRgba } from "@/lib/color";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
@@ -60,16 +61,18 @@ const activeDatabaseOptions = computed(() => {
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
+const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
+const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 
 const showSchemaSelector = computed(() => {
   const connection = props.activeConnection;
-  return connection && isSchemaAware(connection.id) && props.activeTab.database;
+  return connection && isSchemaAware(connection.id) && (props.activeTab.database || isSingleDb.value);
 });
 
 const activeSchemaOptions = computed(() => {
   const connection = props.activeConnection;
   if (!connection) return [];
-  return getSchemaOptionsForDb(connection.id, props.activeTab.database);
+  return getSchemaOptionsForDb(connection.id, schemaDatabaseKey.value);
 });
 
 const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeConnection, activeDatabaseValue.value));
@@ -212,7 +215,7 @@ function databaseDisplayName(database: string): string {
           </SelectContent>
         </Select>
       </div>
-      <div v-if="activeConnection?.db_type !== 'elasticsearch'" class="flex items-center gap-1">
+      <div v-if="activeConnection?.db_type !== 'elasticsearch' && !isSingleDb" class="flex items-center gap-1">
         <Database class="h-3.5 w-3.5 shrink-0" />
         <Select
           :model-value="activeDatabaseValue"
@@ -259,14 +262,14 @@ function databaseDisplayName(database: string): string {
           @update:model-value="(v: any) => emit('changeSchema', v || undefined)"
           @update:open="
             (open: boolean) => {
-              if (open && activeConnection) loadSchemaOptions(activeConnection.id, activeTab.database).catch(() => {});
+              if (open && activeConnection) loadSchemaOptions(activeConnection.id, schemaDatabaseKey).catch(() => {});
             }
           "
         >
           <SelectTrigger class="h-6 w-auto max-w-56 border-0 bg-transparent px-1 text-xs shadow-none focus:ring-0">
             <SelectValue
               :placeholder="
-                activeConnection && isLoadingSchemas(activeConnection.id, activeTab.database)
+                activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)
                   ? t('common.loading')
                   : t('editor.selectSchema')
               "

@@ -80,7 +80,7 @@ import {
   isSchemaAware,
   usesFetchFirst,
 } from "@/lib/databaseCapabilities";
-import { treeNodeRowAction } from "@/lib/treeNodeClick";
+import { treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatCsv, formatJson, formatSqlInsert } from "@/lib/exportFormats";
 import { hexToRgba } from "@/lib/color";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -279,14 +279,8 @@ async function toggle() {
   }
 }
 
-function onClick() {
+function runRowClickAction() {
   const node = props.node;
-  if (canOpenObjectBrowser.value) {
-    const shouldOpenObjectBrowser = !canExpand.value || !node.isExpanded;
-    if (canExpand.value) void toggle();
-    if (shouldOpenObjectBrowser) void openObjectBrowser();
-    return;
-  }
   if (node.type === "object-browser") {
     void openObjectBrowser();
     return;
@@ -298,6 +292,18 @@ function onClick() {
     openSavedSqlFile();
   } else if (action === "toggle") {
     toggle();
+  }
+}
+
+function onClick(event: MouseEvent) {
+  if (event.detail > 1) return;
+  runRowClickAction();
+}
+
+function onDoubleClick() {
+  const action = treeNodeRowDoubleClickAction(props.node.type, canOpenObjectBrowser.value);
+  if (action === "open-object-browser") {
+    void openObjectBrowser();
   }
 }
 
@@ -1380,6 +1386,7 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
           }"
           :style="rowStyle"
           @click="onClick"
+          @dblclick="onDoubleClick"
           @mousedown="isDraggable ? startDrag($event, node.id, node.type) : undefined"
           @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
           @mouseleave="clearTarget(node.id)"

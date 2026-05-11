@@ -330,6 +330,15 @@ pub async fn list_triggers(conn: &OracleClient, schema: &str, table: &str) -> Re
         .collect())
 }
 
+pub async fn execute_query_with_schema(conn: &OracleClient, schema: &str, sql: &str) -> Result<QueryResult, String> {
+    let set_schema = format!("ALTER SESSION SET CURRENT_SCHEMA = \"{}\"", schema);
+    conn.execute(&set_schema, &[]).await.map_err(|e| {
+        log::error!("[oracle] set current_schema failed: {e}");
+        e.to_string()
+    })?;
+    execute_query(conn, sql).await
+}
+
 pub async fn execute_query(conn: &OracleClient, sql: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
     let sql = sql.trim().trim_end_matches(';');

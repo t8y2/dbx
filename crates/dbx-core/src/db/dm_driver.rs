@@ -258,6 +258,15 @@ pub fn list_triggers(client: &DmClient, schema: &str, table: &str) -> Result<Vec
         .collect())
 }
 
+pub fn execute_query_with_schema_sync(client: &DmClient, schema: &str, sql: &str) -> Result<QueryResult, String> {
+    let set_schema = format!("SET SCHEMA \"{}\"", schema);
+    client.conn.execute(&set_schema, (), None).map_err(|e| {
+        log::error!("[dameng] set schema failed: {e}");
+        e.to_string()
+    })?;
+    execute_query_sync(client, sql)
+}
+
 pub fn execute_query_sync(client: &DmClient, sql: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
     let sql = sql.trim().trim_end_matches(';');

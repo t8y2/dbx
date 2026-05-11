@@ -623,6 +623,10 @@ function onWhereFilterKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Enter") {
     e.preventDefault();
+    if (whereSuggestions.value.length > 0) {
+      acceptWhereSuggestion();
+      return;
+    }
     applyWhereFilter();
   }
 }
@@ -709,6 +713,10 @@ function onOrderByKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Enter") {
     e.preventDefault();
+    if (orderBySuggestions.value.length > 0) {
+      acceptOrderBySuggestion();
+      return;
+    }
     applyOrderBySearch();
   }
 }

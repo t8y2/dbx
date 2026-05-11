@@ -10,8 +10,7 @@ import {
   type SelectionData,
 } from "@/lib/gridSelection";
 import { useToast } from "@/composables/useToast";
-
-type CellValue = string | number | boolean | null;
+import { displayCellValue, type CellValue } from "@/lib/cellValue";
 
 interface RowItem {
   id: number;
@@ -34,7 +33,6 @@ export interface UseDataGridExportOptions {
   selectedCells: ComputedRef<SelectionData>;
   contextCell: Ref<{ rowId: number; rowIndex: number; col: number } | null>;
   getRowItem: (rowId: number) => RowItem | undefined;
-  formatCell: (value: CellValue) => string;
   quoteIdent: (name: string) => string;
   escapeVal: (value: CellValue) => string;
 }
@@ -52,7 +50,6 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     selectedCells,
     contextCell,
     getRowItem,
-    formatCell,
     quoteIdent,
     escapeVal,
   } = options;
@@ -88,7 +85,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (!contextCell.value || contextCell.value.col < 0) return;
     const item = getRowItem(contextCell.value.rowId);
     const val = item?.data[contextCell.value.col] ?? null;
-    copyText(formatCell(val));
+    copyText(displayCellValue(val));
   }
 
   function copyRow() {
@@ -116,7 +113,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   function copyAll() {
     const header = columns.value.join("\t");
-    const body = displayItems.value.map((item) => item.data.map((c) => formatCell(c)).join("\t")).join("\n");
+    const body = displayItems.value.map((item) => item.data.map((c) => displayCellValue(c)).join("\t")).join("\n");
     copyText(`${header}\n${body}`);
   }
 
@@ -182,7 +179,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   // --- Export functions ---
   async function exportCsv() {
     try {
-      const rows = displayItems.value.map((item) => item.data.map((c) => formatCell(c)));
+      const rows = displayItems.value.map((item) => item.data.map((c) => displayCellValue(c)));
       if (await saveFileContent(formatCsv(columns.value, rows), "export.csv", "CSV", "csv")) {
         toast(t("grid.exported"));
       }

@@ -62,6 +62,7 @@ import * as api from "@/lib/api";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { formatGridSqlLiteral } from "@/lib/dataGridSql";
 import { matchesRowStatusFilter, type RowStatus, type RowStatusFilter } from "@/lib/gridRowStatus";
+import { displayCellValue, type CellValue } from "@/lib/cellValue";
 
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
@@ -799,7 +800,6 @@ function changePageSize(size: number) {
 }
 
 // --- Editing (composable) ---
-type CellValue = string | number | boolean | null;
 
 interface RowItem {
   id: number;
@@ -1001,7 +1001,7 @@ const activeCellDetail = computed(() => {
   const column = props.result.columns[cell.col];
   if (!item || !column) return null;
   const value = item.data[cell.col] ?? null;
-  const rawValue = formatCell(value);
+  const rawValue = displayCellValue(value);
   const valueText = value === null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
   const trimmed = valueText.trim();
   const maybeJson = typeof value === "string" && (trimmed.startsWith("{") || trimmed.startsWith("["));
@@ -1297,7 +1297,6 @@ const {
   selectedCells,
   contextCell,
   getRowItem,
-  formatCell,
   quoteIdent,
   escapeVal,
 });
@@ -1377,8 +1376,10 @@ async function onGridKeydown(event: KeyboardEvent) {
 }
 
 function copyDetailValue() {
-  if (!activeCellDetail.value) return;
-  copyText(activeCellDetail.value.rawValue);
+  const detail = activeCellDetail.value;
+  if (!detail) return;
+  const text = detail.value === null ? "" : displayCellValue(detail.value);
+  copyText(text);
 }
 
 function copyDetailColumnName() {

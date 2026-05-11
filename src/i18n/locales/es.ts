@@ -80,7 +80,7 @@ export default {
     newFolderDefault: "Nueva carpeta",
     renameFolder: "Renombrar carpeta",
     deleteFolder: "Eliminar carpeta",
-    deleteFolderConfirm: "Eliminar “{name}” y los archivos SQL que contiene?",
+    deleteFolderConfirm: "¿Eliminar “{name}” y los archivos SQL que contiene?",
     open: "Abrir SQL",
     renameFile: "Renombrar SQL",
     deleteFile: "Eliminar SQL",

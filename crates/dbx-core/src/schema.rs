@@ -677,6 +677,217 @@ pub async fn get_table_ddl_core(
     }
 }
 
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn pg_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn mysql_ident(value: &str) -> String {
+    format!("`{}`", value.replace('`', "``"))
+}
+
+fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
+    match kind {
+        db::ObjectSourceKind::View => "view",
+        db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function => "routine",
+    }
+}
+
+fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
+    match kind {
+        db::ObjectSourceKind::View => "'V'",
+        db::ObjectSourceKind::Procedure => "'P'",
+        db::ObjectSourceKind::Function => "'FN','IF','TF','FS','FT'",
+    }
+}
+
+pub fn sqlserver_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
+    format!(
+        "SELECT m.definition FROM sys.sql_modules m \
+         JOIN sys.objects o ON o.object_id = m.object_id \
+         JOIN sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE s.name = {} AND o.name = {} AND o.type IN ({})",
+        sql_string(schema),
+        sql_string(name),
+        sqlserver_object_type_filter(kind)
+    )
+}
+
+pub fn postgres_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
+    match kind {
+        db::ObjectSourceKind::View => {
+            format!("SELECT pg_get_viewdef('{}.{}'::regclass, true)", pg_ident(schema), pg_ident(name))
+        }
+        db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function => {
+            let prokind = if matches!(kind, db::ObjectSourceKind::Procedure) { "p" } else { "f" };
+            format!(
+                "SELECT pg_get_functiondef(p.oid) \
+                 FROM pg_proc p \
+                 JOIN pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}' \
+                 ORDER BY p.oid LIMIT 1",
+                sql_string(schema),
+                sql_string(name),
+                prokind
+            )
+        }
+    }
+}
+
+pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
+    let object_type = match kind {
+        db::ObjectSourceKind::View => "VIEW",
+        db::ObjectSourceKind::Procedure => "PROCEDURE",
+        db::ObjectSourceKind::Function => "FUNCTION",
+    };
+    format!(
+        "SELECT DBMS_METADATA.GET_DDL({}, {}, {}) FROM DUAL",
+        sql_string(object_type),
+        sql_string(name),
+        sql_string(schema)
+    )
+}
+
+pub fn sqlite_object_source_sql(name: &str, kind: &db::ObjectSourceKind) -> String {
+    format!(
+        "SELECT sql FROM sqlite_master WHERE type = {} AND name = {}",
+        sql_string(sqlite_object_type(kind)),
+        sql_string(name)
+    )
+}
+
+pub fn mysql_object_source_sql(name: &str, kind: &db::ObjectSourceKind) -> String {
+    match kind {
+        db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {}", mysql_ident(name)),
+        db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {}", mysql_ident(name)),
+        db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {}", mysql_ident(name)),
+    }
+}
+
+fn first_string_cell(result: db::QueryResult) -> Result<String, String> {
+    result
+        .rows
+        .first()
+        .and_then(|row| row.iter().find_map(|value| value.as_str().map(str::to_string)))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Object source not found".to_string())
+}
+
+async fn mysql_object_source(
+    pool: &sqlx::mysql::MySqlPool,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+) -> Result<String, String> {
+    use sqlx::Row;
+    let sql = mysql_object_source_sql(name, kind);
+    let row: sqlx::mysql::MySqlRow = sqlx::raw_sql(&sql).fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let index = if matches!(kind, db::ObjectSourceKind::View) { 1 } else { 2 };
+    row.try_get::<String, _>(index)
+        .or_else(|_| row.try_get::<Vec<u8>, _>(index).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .map_err(|e| e.to_string())
+}
+
+pub async fn get_object_source_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    name: &str,
+    object_type: db::ObjectSourceKind,
+) -> Result<db::ObjectSource, String> {
+    let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let source = {
+        let connections = state.connections.read().await;
+        if let Some(client) = extract_sqlserver(&connections, &pool_key) {
+            drop(connections);
+            let mut client = client.lock().await;
+            first_string_cell(
+                db::sqlserver::execute_query(&mut client, &sqlserver_object_source_sql(schema, name, &object_type))
+                    .await?,
+            )?
+        } else if let Some(pool) = extract_oracle(&connections, &pool_key) {
+            drop(connections);
+            let client = pool.client();
+            let client = client.lock().await;
+            first_string_cell(
+                db::oracle_driver::execute_query(&*client, &oracle_object_source_sql(schema, name, &object_type))
+                    .await?,
+            )?
+        } else if let Some(client) = extract_gaussdb(&connections, &pool_key) {
+            drop(connections);
+            let mut client = client.lock().await;
+            first_string_cell(
+                db::gaussdb_driver::execute_query(&mut client, &postgres_object_source_sql(schema, name, &object_type))
+                    .await?,
+            )?
+        } else {
+            match connections.get(&pool_key).ok_or("Pool not found")? {
+                PoolKind::Mysql(pool, _) => mysql_object_source(pool, name, &object_type).await?,
+                PoolKind::Postgres(pool) => first_string_cell(
+                    db::postgres::execute_query(pool, &postgres_object_source_sql(schema, name, &object_type)).await?,
+                )?,
+                PoolKind::Sqlite(pool) => first_string_cell(
+                    db::sqlite::execute_query(pool, &sqlite_object_source_sql(name, &object_type)).await?,
+                )?,
+                PoolKind::ClickHouse(client) if matches!(object_type, db::ObjectSourceKind::View) => {
+                    let result = db::clickhouse_driver::execute_query(
+                        client,
+                        database,
+                        &format!("SHOW CREATE TABLE {}", mysql_ident(name)),
+                    )
+                    .await?;
+                    first_string_cell(result)?
+                }
+                _ => return Err("Object source is not supported for this database type".to_string()),
+            }
+        }
+    };
+
+    Ok(db::ObjectSource {
+        name: name.to_string(),
+        object_type,
+        schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+        source,
+    })
+}
+
+#[cfg(test)]
+mod object_source_tests {
+    use super::*;
+    use crate::types::ObjectSourceKind;
+
+    #[test]
+    fn builds_sqlserver_object_source_sql_for_schema_scoped_routines() {
+        assert_eq!(
+            sqlserver_object_source_sql("dbo", "refresh_cache", &ObjectSourceKind::Procedure),
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = 'dbo' AND o.name = 'refresh_cache' AND o.type IN ('P')"
+        );
+    }
+
+    #[test]
+    fn builds_postgres_object_source_sql_for_views_and_functions() {
+        assert_eq!(
+            postgres_object_source_sql("public", "active_users", &ObjectSourceKind::View),
+            "SELECT pg_get_viewdef('\"public\".\"active_users\"'::regclass, true)"
+        );
+        assert_eq!(
+            postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function),
+            "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' ORDER BY p.oid LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn builds_oracle_object_source_sql_using_metadata_api() {
+        assert_eq!(
+            oracle_object_source_sql("HR", "ACTIVE_USERS", &ObjectSourceKind::View),
+            "SELECT DBMS_METADATA.GET_DDL('VIEW', 'ACTIVE_USERS', 'HR') FROM DUAL"
+        );
+    }
+}
+
 pub async fn mysql_ddl(pool: &sqlx::mysql::MySqlPool, table: &str) -> Result<String, String> {
     use sqlx::Row;
     let sql = format!("SHOW CREATE TABLE `{}`", table.replace('`', "``"));

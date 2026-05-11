@@ -1,46 +1,41 @@
 name: 1Panel App Store
 
 on:
-  release:
-    types: [published, released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to submit (e.g. 0.5.3)"
+        required: true
 
 jobs:
   submit:
     runs-on: ubuntu-latest
-    if: ${{ !github.event.release.draft && !github.event.release.prerelease }}
     env:
       REPO_OWNER: t8y2
     steps:
       - uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Submit to 1Panel App Store
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ github.event.inputs.version }}"
 
-          git clone --depth 1 \
-            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/appstore.git" \
+          git clone --depth 1 -b localApps \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/appstore-1panel.git" \
             appstore
           cd appstore
 
           APP_DIR="apps/dbx"
-          mkdir -p "${APP_DIR}/${VERSION}"
+          mkdir -p "${APP_DIR}/latest"
 
           cp "${{ github.workspace }}/1panel/data.yml" "${APP_DIR}/data.yml"
           cp "${{ github.workspace }}/1panel/README.md" "${APP_DIR}/README.md"
           if [ -f "${{ github.workspace }}/1panel/logo.png" ]; then
             cp "${{ github.workspace }}/1panel/logo.png" "${APP_DIR}/logo.png"
           fi
-          cp -r "${{ github.workspace }}/1panel/latest/." "${APP_DIR}/${VERSION}/"
+          cp -r "${{ github.workspace }}/1panel/latest/." "${APP_DIR}/latest/"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -55,10 +50,10 @@ jobs:
             git commit -m "feat(dbx): release ${VERSION}"
             git push origin "${BRANCH}"
             gh pr create \
-              --repo "1Panel-dev/appstore" \
+              --repo "okxlin/appstore" \
               --head "${REPO_OWNER}:${BRANCH}" \
               --title "feat(dbx): release ${VERSION}" \
-              --body "$(printf 'Automated release of DBX v%s\n\n```release-note\nfeat(dbx): release %s\n```' "${VERSION}" "${VERSION}")" \
-              --base dev
+              --body "Automated release of DBX v${VERSION}" \
+              --base localApps
             echo "::notice::1Panel App Store PR created for ${VERSION}"
           fi

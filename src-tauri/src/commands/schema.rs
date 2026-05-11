@@ -42,6 +42,18 @@ pub async fn list_objects(
 }
 
 #[tauri::command]
+pub async fn get_object_source(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    name: String,
+    object_type: db::ObjectSourceKind,
+) -> Result<db::ObjectSource, String> {
+    dbx_core::schema::get_object_source_core(&state, &connection_id, &database, &schema, &name, object_type).await
+}
+
+#[tauri::command]
 pub async fn get_columns(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

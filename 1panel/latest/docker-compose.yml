@@ -1,11 +1,9 @@
-version: "3"
-
 services:
-  ${CONTAINER_NAME}:
-    image: t8y2/dbx:${PANEL_APP_VERSION_TAG}
+  dbx:
+    image: t8y2/dbx:latest
     container_name: ${CONTAINER_NAME}
     ports:
-      - ${PANEL_APP_PORT_HTTP}:4224
+      - "${PANEL_APP_PORT_HTTP}:4224"
     environment:
       - DBX_PASSWORD=${PANEL_DB_PASSWORD}
     volumes:
@@ -13,6 +11,8 @@ services:
     restart: unless-stopped
     networks:
       - 1panel-network
+    labels:
+      createdBy: "Apps"
 
 networks:
   1panel-network:

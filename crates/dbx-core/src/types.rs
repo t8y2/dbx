@@ -20,6 +20,22 @@ pub struct ObjectInfo {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ObjectSourceKind {
+    View,
+    Procedure,
+    Function,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectSource {
+    pub name: String,
+    pub object_type: ObjectSourceKind,
+    pub schema: Option<String>,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,

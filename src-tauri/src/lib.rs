@@ -83,6 +83,7 @@ pub fn run() {
             commands::schema::list_databases,
             commands::schema::list_tables,
             commands::schema::list_objects,
+            commands::schema::get_object_source,
             commands::schema::list_schemas,
             commands::schema::get_columns,
             commands::schema::list_indexes,

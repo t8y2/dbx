@@ -304,12 +304,18 @@ function typeColor(type: string): string {
   }
 }
 
-function formatSize(size: number, type: string): string {
+function formatSize(size: number, type: string, valuePreview: string): string {
+  if (!valuePreview) return "";
   if (type === "string") {
     if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
     return `${size} B`;
   }
   return String(size);
+}
+
+function formatTtl(ttl: number): string {
+  if (ttl === -2) return "";
+  return ttl === -1 ? "∞" : `${ttl}s`;
 }
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -519,14 +525,14 @@ defineExpose({ focusSearch });
 
               <!-- Size column -->
               <div class="px-2 flex items-center justify-end border-r text-muted-foreground">
-                <template v-if="row.node.kind === 'leaf'">{{ formatSize(row.node.size, row.node.keyType) }}</template>
+                <template v-if="row.node.kind === 'leaf'">
+                  {{ formatSize(row.node.size, row.node.keyType, row.node.valuePreview) }}
+                </template>
               </div>
 
               <!-- TTL column -->
               <div class="px-2 flex items-center justify-end text-muted-foreground">
-                <template v-if="row.node.kind === 'leaf'">{{
-                  row.node.ttl === -1 ? "∞" : `${row.node.ttl}s`
-                }}</template>
+                <template v-if="row.node.kind === 'leaf'">{{ formatTtl(row.node.ttl) }}</template>
               </div>
             </div>
           </template>

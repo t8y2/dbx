@@ -276,23 +276,25 @@ pub async fn scan_keys_page(
         .map_err(|e| e.to_string())?;
 
     let (next_cursor, keys) = parse_scan_keys(raw)?;
+    if keys.is_empty() {
+        return Ok(RedisScanResult { cursor: next_cursor, keys: Vec::new() });
+    }
 
-    let mut result = Vec::new();
+    let mut pipe = redis::pipe();
     for key in &keys {
-        let key_type: String =
-            redis::cmd("TYPE").arg(key).query_async(con).await.unwrap_or_else(|_| "unknown".to_string());
+        pipe.cmd("TYPE").arg(key);
+    }
+    let key_types: Vec<String> = pipe.query_async(con).await.unwrap_or_default();
 
-        let ttl: i64 = redis::cmd("TTL").arg(key).query_async(con).await.unwrap_or(-1);
-
-        let (size, value_preview) = fetch_key_preview(con, key, &key_type).await;
-
+    let mut result = Vec::with_capacity(keys.len());
+    for (index, key) in keys.iter().enumerate() {
         result.push(RedisKeyInfo {
             key_display: redis_key_bytes_to_display(key),
             key_raw: redis_key_bytes_to_raw(key),
-            key_type,
-            ttl,
-            size,
-            value_preview,
+            key_type: key_types.get(index).cloned().unwrap_or_else(|| "unknown".to_string()),
+            ttl: -2,
+            size: 0,
+            value_preview: String::new(),
         });
     }
     Ok(RedisScanResult { cursor: next_cursor, keys: result })
@@ -349,89 +351,6 @@ pub async fn get_value(con: &mut redis::aio::MultiplexedConnection, key: &[u8]) 
         total,
         scan_cursor,
     })
-}
-
-async fn fetch_key_preview(con: &mut redis::aio::MultiplexedConnection, key: &[u8], key_type: &str) -> (u64, String) {
-    match key_type {
-        "string" => {
-            let len: u64 = redis::cmd("STRLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let v: Option<String> = redis::cmd("GETRANGE").arg(key).arg(0).arg(199).query_async(con).await.ok();
-            (len, v.unwrap_or_default())
-        }
-        "list" => {
-            let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let items: Vec<String> =
-                redis::cmd("LRANGE").arg(key).arg(0).arg(2).query_async(con).await.unwrap_or_default();
-            let preview = format!("[{}]", items.join(", "));
-            (len, preview)
-        }
-        "set" => {
-            let len: u64 = redis::cmd("SCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let raw: RedisRawValue = redis::cmd("SSCAN")
-                .arg(key)
-                .arg(0)
-                .arg("COUNT")
-                .arg(3)
-                .query_async(con)
-                .await
-                .unwrap_or(RedisRawValue::Nil);
-            let members = parse_scan_members(raw).map(|(_, items)| items).unwrap_or_default();
-            let parts: Vec<String> = members.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).take(3).collect();
-            let preview = format!("{{{}}}", parts.join(", "));
-            (len, preview)
-        }
-        "hash" => {
-            let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let raw: RedisRawValue = redis::cmd("HSCAN")
-                .arg(key)
-                .arg(0)
-                .arg("COUNT")
-                .arg(3)
-                .query_async(con)
-                .await
-                .unwrap_or(RedisRawValue::Nil);
-            let pairs = parse_scan_pairs(raw, "hash").map(|(_, items)| items).unwrap_or_default();
-            let parts: Vec<String> = pairs
-                .iter()
-                .take(3)
-                .filter_map(|v| {
-                    let f = v.get("field")?.as_str()?;
-                    let val = v.get("value")?.as_str()?;
-                    Some(format!("{f}:{val}"))
-                })
-                .collect();
-            let preview = format!("[{}]", parts.join(", "));
-            (len, preview)
-        }
-        "zset" => {
-            let len: u64 = redis::cmd("ZCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let raw: RedisRawValue = redis::cmd("ZSCAN")
-                .arg(key)
-                .arg(0)
-                .arg("COUNT")
-                .arg(3)
-                .query_async(con)
-                .await
-                .unwrap_or(RedisRawValue::Nil);
-            let pairs = parse_scan_pairs(raw, "zset").map(|(_, items)| items).unwrap_or_default();
-            let parts: Vec<String> = pairs
-                .iter()
-                .take(3)
-                .filter_map(|v| {
-                    let m = v.get("member")?.as_str()?;
-                    let s = v.get("score")?.as_str()?;
-                    Some(format!("{m}:{s}"))
-                })
-                .collect();
-            let preview = format!("{{{}}}", parts.join(", "));
-            (len, preview)
-        }
-        "stream" => {
-            let len: u64 = redis::cmd("XLEN").arg(key).query_async(con).await.unwrap_or(0);
-            (len, format!("{len} entries"))
-        }
-        _ => (0, String::new()),
-    }
 }
 
 async fn get_stream_entries(

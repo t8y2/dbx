@@ -506,11 +506,20 @@ export default {
     reasoningProcess: "Thinking process",
     stopGenerating: "Stop generating",
     tableMentionEmpty: "No matching tables",
+    tableMentionPlaceholderHint: "Type @ to mention tables for context",
     tableMentionTypes: {
       table: "Table",
       view: "View",
       systemTable: "System table",
       temporaryTable: "Temporary table",
+    },
+    modes: {
+      ask: "Ask",
+      agent: "Agent",
+    },
+    modeHints: {
+      ask: "Generate SQL and explanations without auto-running them",
+      agent: "Auto-run safe queries when possible",
     },
     fixWithAi: "Fix with AI",
     truncated: "Context truncated",

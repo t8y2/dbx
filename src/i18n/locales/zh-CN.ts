@@ -495,11 +495,20 @@ export default {
     reasoningProcess: "思考过程",
     stopGenerating: "停止生成",
     tableMentionEmpty: "没有匹配的表",
+    tableMentionPlaceholderHint: "输入 @ 可选择表并带入上下文",
     tableMentionTypes: {
       table: "表",
       view: "视图",
       systemTable: "系统表",
       temporaryTable: "临时表",
+    },
+    modes: {
+      ask: "Ask",
+      agent: "Agent",
+    },
+    modeHints: {
+      ask: "只生成 SQL 和说明，不自动执行",
+      agent: "可自动执行安全查询",
     },
     fixWithAi: "用 AI 修复",
     truncated: "上下文已截断",

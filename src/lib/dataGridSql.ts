@@ -29,13 +29,18 @@ export interface DataGridSaveStatementOptions {
 
 export interface DataGridSaveValidationOptions {
   databaseType?: DatabaseType;
+  tableMeta?: DataGridTableMeta;
   columns: string[];
+  rows?: GridCellValue[][];
   columnInfo?: DataGridColumnInfo[];
   dirtyRows: Array<[number, Array<[number, GridCellValue]>]>;
   newRows: GridCellValue[][];
 }
 
 export function validateDataGridSave(options: DataGridSaveValidationOptions): string | undefined {
+  const duplicateKeyError = validateInsertedPrimaryKeys(options);
+  if (duplicateKeyError) return duplicateKeyError;
+
   const notNullColumns = new Set(
     (options.columnInfo ?? [])
       .filter(
@@ -64,6 +69,32 @@ export function validateDataGridSave(options: DataGridSaveValidationOptions): st
         return nullWriteError(column);
       }
     }
+  }
+
+  return undefined;
+}
+
+function validateInsertedPrimaryKeys(options: DataGridSaveValidationOptions): string | undefined {
+  const primaryKeys = options.tableMeta?.primaryKeys ?? [];
+  if (primaryKeys.length === 0 || options.newRows.length === 0) return undefined;
+
+  const primaryKeyIndexes = primaryKeys.map((primaryKey) => findColumnIndex(options.columns, primaryKey));
+  if (primaryKeyIndexes.some((index) => index === -1)) return undefined;
+
+  const existingKeys = new Set<string>();
+  for (const row of options.rows ?? []) {
+    const key = primaryKeyValueKey(primaryKeyIndexes, row);
+    if (key) existingKeys.add(key);
+  }
+
+  const newKeys = new Set<string>();
+  for (const row of options.newRows) {
+    const key = primaryKeyValueKey(primaryKeyIndexes, row);
+    if (!key) continue;
+    if (existingKeys.has(key) || newKeys.has(key)) {
+      return duplicatePrimaryKeyError(primaryKeys, primaryKeyIndexes, row, existingKeys.has(key));
+    }
+    newKeys.add(key);
   }
 
   return undefined;
@@ -250,6 +281,36 @@ function isNullWriteToNotNullColumn(
   if (!column || isOracleRowId(databaseType, column)) return false;
   if (isNeo4jElementId(databaseType, column)) return false;
   return value === null && notNullColumns.has(normalizeColumnName(column));
+}
+
+function findColumnIndex(columns: string[], target: string): number {
+  const normalizedTarget = normalizeColumnName(target);
+  return columns.findIndex((column) => normalizeColumnName(column) === normalizedTarget);
+}
+
+function primaryKeyValueKey(primaryKeyIndexes: number[], row: GridCellValue[]): string | undefined {
+  const values = primaryKeyIndexes.map((index) => row[index]);
+  if (values.some((value) => value === null || value === undefined)) return undefined;
+  return JSON.stringify(values);
+}
+
+function duplicatePrimaryKeyError(
+  primaryKeys: string[],
+  primaryKeyIndexes: number[],
+  row: GridCellValue[],
+  matchesExistingRow: boolean,
+): string {
+  const keySummary = primaryKeys
+    .map((primaryKey, index) => `${primaryKey} = ${formatKeyValueForMessage(row[primaryKeyIndexes[index]])}`)
+    .join(", ");
+  const source = matchesExistingRow ? "the existing primary key" : "another new row's primary key";
+  return `New row duplicates ${source} (${keySummary}). Change the key before saving.`;
+}
+
+function formatKeyValueForMessage(value: GridCellValue): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "string") return `"${value.replace(/"/g, '\\"')}"`;
+  return String(value);
 }
 
 function normalizeColumnName(name: string): string {

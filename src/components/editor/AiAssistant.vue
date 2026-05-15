@@ -92,6 +92,7 @@ const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 const activeAction = ref<AiAction>("generate");
+const assistantMode = ref<"ask" | "agent">("ask");
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
@@ -147,7 +148,9 @@ const isWaitingForFirstDelta = computed(() => {
   return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
 });
 
-const activePlaceholder = computed(() => t(`ai.placeholders.${activeAction.value}`));
+const activePlaceholder = computed(
+  () => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`,
+);
 
 const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
 
@@ -444,7 +447,7 @@ async function send() {
   scrollToBottom();
 
   const requestedAction = activeAction.value;
-  const shouldAutoExecute = shouldAttemptAiAutoExecute(displayText, requestedAction);
+  const shouldAutoExecute = assistantMode.value === "agent" && shouldAttemptAiAutoExecute(displayText, requestedAction);
   isGenerating.value = true;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
@@ -900,6 +903,26 @@ function formatInlineText(text: string): string {
           @keydown="onPromptKeydown"
         />
         <div class="flex items-center gap-1.5">
+          <div class="inline-flex rounded-md border bg-muted/30 p-0.5 text-[11px]">
+            <button
+              type="button"
+              class="rounded px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
+              :class="{ 'bg-background text-foreground shadow-sm': assistantMode === 'ask' }"
+              :title="t('ai.modeHints.ask')"
+              @click="assistantMode = 'ask'"
+            >
+              {{ t("ai.modes.ask") }}
+            </button>
+            <button
+              type="button"
+              class="rounded px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
+              :class="{ 'bg-background text-foreground shadow-sm': assistantMode === 'agent' }"
+              :title="t('ai.modeHints.agent')"
+              @click="assistantMode = 'agent'"
+            >
+              {{ t("ai.modes.agent") }}
+            </button>
+          </div>
           <DropdownMenu>
             <DropdownMenuTrigger as-child>
               <button

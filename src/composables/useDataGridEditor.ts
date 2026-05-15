@@ -12,6 +12,7 @@ import { supportsDataGridTransaction } from "@/lib/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
+import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/tableEditing";
 
 type CellValue = string | number | boolean | null;
 
@@ -371,12 +372,31 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     });
   }
 
+  function clonedRowData(item: RowItem): CellValue[] {
+    const columnInfoByName = new Map(
+      (tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]),
+    );
+    return item.data.map((val, i) => {
+      const columnName = result.value.columns[i];
+      const columnInfo = columnInfoByName.get(columnName.toLowerCase());
+      return shouldClearClonedColumn(columnName, columnInfo) ? null : val;
+    });
+  }
+
+  function shouldClearClonedColumn(columnName: string, columnInfo: ColumnInfo | undefined): boolean {
+    if (databaseType.value === "oracle" && columnName.toUpperCase() === DBX_ROWID_COLUMN) return true;
+    if (databaseType.value === "neo4j" && columnName === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
+    const extra = columnInfo?.extra ?? "";
+    const columnDefault = columnInfo?.column_default ?? "";
+    return (
+      /\b(auto_increment|autoincrement|identity|generated)\b/i.test(extra) || /\bnextval\s*\(/i.test(columnDefault)
+    );
+  }
+
   function cloneRow(rowId: number) {
     const item = getRowItem(rowId);
     if (!item) return;
-    const primaryKeys = tableMeta.value?.primaryKeys ?? [];
-    const columns = result.value.columns;
-    const clonedData = item.data.map((val, i) => (primaryKeys.includes(columns[i]) ? null : val));
+    const clonedData = clonedRowData(item);
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
     if (useTransaction.value && !transactionActive.value) {
@@ -391,13 +411,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function cloneRows(rowIds: number[]) {
-    const primaryKeys = tableMeta.value?.primaryKeys ?? [];
-    const columns = result.value.columns;
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     for (const rowId of rowIds) {
       const item = getRowItem(rowId);
       if (!item) continue;
-      const clonedData = item.data.map((val, i) => (primaryKeys.includes(columns[i]) ? null : val));
+      const clonedData = clonedRowData(item);
       newRows.value.push(clonedData);
     }
     if (useTransaction.value && !transactionActive.value) {
@@ -559,7 +577,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const validationError = stmtOptions
       ? validateDataGridSave({
           databaseType: databaseType.value,
+          tableMeta: tableMeta.value,
           columns: stmtOptions.columns,
+          rows: stmtOptions.rows,
           columnInfo: tableMeta.value?.columns,
           dirtyRows: stmtOptions.dirtyRows,
           newRows: stmtOptions.newRows,

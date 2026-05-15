@@ -232,7 +232,12 @@ test("rejects NULL writes to non-null table columns", () => {
 test("allows NULL for MySQL auto increment columns when inserting rows", () => {
   const error = validateDataGridSave({
     databaseType: "mysql",
+    tableMeta: {
+      tableName: "people",
+      primaryKeys: ["id"],
+    },
     columns: ["id", "name"],
+    rows: [],
     columnInfo: [
       { name: "id", is_nullable: false, column_default: null, is_primary_key: true, extra: "auto_increment" },
       { name: "name", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
@@ -242,4 +247,55 @@ test("allows NULL for MySQL auto increment columns when inserting rows", () => {
   });
 
   assert.equal(error, undefined);
+});
+
+test("rejects inserted rows that duplicate existing primary key values", () => {
+  const error = validateDataGridSave({
+    databaseType: "postgres",
+    tableMeta: {
+      tableName: "education_data",
+      primaryKeys: ["country_code", "year"],
+    },
+    columns: ["country_code", "year", "value"],
+    rows: [["ALB", 2021, 0.812]],
+    columnInfo: [
+      { name: "country_code", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "year", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "value", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ],
+    dirtyRows: [],
+    newRows: [["ALB", 2021, 0.812]],
+  });
+
+  assert.equal(
+    error,
+    'New row duplicates the existing primary key (country_code = "ALB", year = 2021). Change the key before saving.',
+  );
+});
+
+test("rejects inserted rows that duplicate another new row primary key", () => {
+  const error = validateDataGridSave({
+    databaseType: "postgres",
+    tableMeta: {
+      tableName: "education_data",
+      primaryKeys: ["country_code", "year"],
+    },
+    columns: ["country_code", "year", "value"],
+    rows: [],
+    columnInfo: [
+      { name: "country_code", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "year", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "value", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ],
+    dirtyRows: [],
+    newRows: [
+      ["ALB", 2021, 0.812],
+      ["ALB", 2021, 0.913],
+    ],
+  });
+
+  assert.equal(
+    error,
+    'New row duplicates another new row\'s primary key (country_code = "ALB", year = 2021). Change the key before saving.',
+  );
 });

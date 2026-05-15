@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
-import { Loader2, Square, Bot, Table2, GitBranch, BarChart3, Code2 } from "lucide-vue-next";
+import { Loader2, Square, Bot, Table2, GitBranch, BarChart3, TableProperties } from "lucide-vue-next";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -382,7 +382,7 @@ defineExpose({ focusSearch });
             :class="{ 'bg-accent': dataGridRef?.showDdl }"
             @click="dataGridRef?.toggleDdl()"
           >
-            <Code2 class="h-3.5 w-3.5" /> DDL
+            <TableProperties class="h-3.5 w-3.5" /> {{ t("grid.tableInfo") }}
           </Button>
         </div>
         <DataGrid

@@ -506,7 +506,7 @@ export default {
     reasoningProcess: "Thinking process",
     stopGenerating: "Stop generating",
     tableMentionEmpty: "No matching tables",
-    tableMentionPlaceholderHint: "Type @ to mention tables for context",
+    tableMentionPlaceholderHint: "Type {'@'} to mention tables for context",
     tableMentionTypes: {
       table: "Table",
       view: "View",

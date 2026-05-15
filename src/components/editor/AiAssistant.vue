@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -17,6 +17,7 @@ import {
   MessageSquarePlus,
   Replace,
   Server,
+  Table2,
   Play,
   Square,
   Trash2,
@@ -50,12 +51,16 @@ import {
   saveAiConversation,
   loadAiConversations,
   deleteAiConversation,
+  listSchemas,
+  listTables,
   type AiConversation,
 } from "@/lib/api";
 import type { AiMessage } from "@/lib/api";
-import type { ConnectionConfig, QueryTab } from "@/types/database";
+import type { ConnectionConfig, QueryTab, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
+import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -91,6 +96,24 @@ const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
 const showConversationList = ref(false);
+const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
+
+interface AiMentionCandidate {
+  schema?: string;
+  name: string;
+  tableType: string;
+}
+
+const mentionOpen = ref(false);
+const mentionLoading = ref(false);
+const mentionError = ref("");
+const mentionStart = ref(0);
+const mentionSelectedIndex = ref(0);
+const mentionCandidates = ref<AiMentionCandidate[]>([]);
+const mentionCache = ref<Record<string, AiMentionCandidate[]>>({});
+const selectedMentions = ref<AiTableMention[]>([]);
+let mentionTimer: ReturnType<typeof setTimeout> | undefined;
+let mentionRequestId = 0;
 
 const actionButtons: { action: AiAction; icon: any; key: string }[] = [
   { action: "generate", icon: Wand2, key: "ai.actions.generate" },
@@ -116,6 +139,8 @@ const chatTitle = computed(() => {
   const first = messages.value.find((m) => m.role === "user");
   return first ? first.content.slice(0, 30) : t("ai.newChat");
 });
+
+const promptMentionChips = computed(() => selectedMentions.value);
 
 const isWaitingForFirstDelta = computed(() => {
   const last = messages.value[messages.value.length - 1];
@@ -201,9 +226,208 @@ function scrollToBottom() {
   });
 }
 
+function mentionCacheKey(connectionId: string, database: string, query: string) {
+  return `${connectionId}:${database}:${query.toLowerCase()}`;
+}
+
+function mentionSchemaOrder(schemas: string[]): string[] {
+  const currentSchema = props.tab?.tableMeta?.schema;
+  const preferred = [currentSchema, "public", "dbo", "main"].filter((value): value is string => !!value);
+  return [...schemas].sort((a, b) => {
+    const ai = preferred.indexOf(a);
+    const bi = preferred.indexOf(b);
+    if (ai >= 0 || bi >= 0) return (ai >= 0 ? ai : 99) - (bi >= 0 ? bi : 99);
+    return a.localeCompare(b);
+  });
+}
+
+function activeMentionAtCursor(): { start: number; query: string } | null {
+  const textarea = promptTextareaRef.value;
+  const cursor = textarea?.selectionStart ?? prompt.value.length;
+  const beforeCursor = prompt.value.slice(0, cursor);
+  const match = /(^|[\s([{,;:])@([^\s]*)$/.exec(beforeCursor);
+  if (!match) return null;
+  return { start: beforeCursor.length - match[2].length - 1, query: match[2] };
+}
+
+function normalizeMentionQuery(query: string): { schemaPrefix: string; tableFilter: string } {
+  const clean = query.replace(/^["`]+|["`]+$/g, "");
+  const dot = clean.lastIndexOf(".");
+  if (dot < 0) return { schemaPrefix: "", tableFilter: clean };
+  return {
+    schemaPrefix: clean.slice(0, dot).replace(/^["`]+|["`]+$/g, ""),
+    tableFilter: clean.slice(dot + 1).replace(/^["`]+|["`]+$/g, ""),
+  };
+}
+
+async function loadMentionCandidates(query: string) {
+  if (!props.connection || !props.tab?.connectionId || !props.tab.database) return;
+
+  const key = mentionCacheKey(props.tab.connectionId, props.tab.database, query);
+  if (mentionCache.value[key]) {
+    mentionCandidates.value = mentionCache.value[key];
+    return;
+  }
+
+  const requestId = ++mentionRequestId;
+  mentionLoading.value = true;
+  mentionError.value = "";
+  const { schemaPrefix, tableFilter } = normalizeMentionQuery(query);
+
+  try {
+    await connectionStore.ensureConnected(props.tab.connectionId);
+    let candidates: AiMentionCandidate[] = [];
+    if (isSchemaAware(props.connection.db_type)) {
+      const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, props.tab.database));
+      const filteredSchemas = schemaPrefix
+        ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase()))
+        : schemas;
+      const results = await Promise.all(
+        filteredSchemas.slice(0, 8).map(async (schema) => {
+          const tables = await listTables(
+            props.tab!.connectionId,
+            props.tab!.database,
+            schema,
+            tableFilter || undefined,
+            20,
+          );
+          return filterMentionCandidates(
+            tables.map((table) => mentionCandidateFromTable(table, schema)),
+            tableFilter,
+            20,
+          );
+        }),
+      );
+      candidates = results.flat();
+    } else {
+      const schema = props.tab.database || props.connection.database || "main";
+      const tables = await listTables(props.tab.connectionId, props.tab.database, schema, tableFilter || undefined, 40);
+      candidates = filterMentionCandidates(
+        tables.map((table) => mentionCandidateFromTable(table)),
+        tableFilter,
+        40,
+      );
+    }
+
+    if (requestId !== mentionRequestId) return;
+    mentionCache.value[key] = candidates.slice(0, 40);
+    mentionCandidates.value = mentionCache.value[key];
+    mentionSelectedIndex.value = 0;
+  } catch (e: any) {
+    if (requestId !== mentionRequestId) return;
+    mentionError.value = translateBackendError(t, e?.message || String(e));
+    mentionCandidates.value = [];
+  } finally {
+    if (requestId === mentionRequestId) mentionLoading.value = false;
+  }
+}
+
+function mentionCandidateFromTable(table: TableInfo, schema?: string): AiMentionCandidate {
+  return { schema, name: table.name, tableType: table.table_type };
+}
+
+function mentionDisplayName(mention: AiTableMention) {
+  return [mention.schema, mention.table].filter(Boolean).join(".");
+}
+
+function removeMentionChip(mention: AiTableMention) {
+  selectedMentions.value = selectedMentions.value.filter((item) => item.raw !== mention.raw);
+  nextTick(() => promptTextareaRef.value?.focus());
+}
+
+function addSelectedMention(candidate: AiMentionCandidate) {
+  const raw = formatAiTableMention(candidate.schema, candidate.name);
+  const key = `${candidate.schema || ""}.${candidate.name}`.toLowerCase();
+  if (selectedMentions.value.some((mention) => `${mention.schema || ""}.${mention.table}`.toLowerCase() === key))
+    return;
+  selectedMentions.value.push({ raw, schema: candidate.schema, table: candidate.name });
+}
+
+function formatMentionTableType(tableType: string) {
+  const normalized = tableType.toUpperCase().replace(/\s+/g, "_");
+  if (normalized.includes("VIEW")) return t("ai.tableMentionTypes.view");
+  if (normalized.includes("SYSTEM")) return t("ai.tableMentionTypes.systemTable");
+  if (normalized.includes("TEMP")) return t("ai.tableMentionTypes.temporaryTable");
+  return t("ai.tableMentionTypes.table");
+}
+
+function filterMentionCandidates(
+  candidates: AiMentionCandidate[],
+  tableFilter: string,
+  limit: number,
+): AiMentionCandidate[] {
+  const normalizedFilter = tableFilter.toLowerCase();
+  return candidates
+    .filter((candidate) => !normalizedFilter || candidate.name.toLowerCase().includes(normalizedFilter))
+    .slice(0, limit);
+}
+
+function refreshMentionState() {
+  clearTimeout(mentionTimer);
+  const mention = activeMentionAtCursor();
+  if (!mention || !props.connection || !props.tab?.database || isGenerating.value) {
+    mentionOpen.value = false;
+    return;
+  }
+
+  mentionOpen.value = true;
+  mentionStart.value = mention.start;
+  mentionTimer = setTimeout(() => {
+    loadMentionCandidates(mention.query).catch(() => {});
+  }, 120);
+}
+
+function insertMention(candidate: AiMentionCandidate) {
+  const textarea = promptTextareaRef.value;
+  const cursor = textarea?.selectionStart ?? prompt.value.length;
+  const before = prompt.value.slice(0, mentionStart.value);
+  const after = prompt.value.slice(cursor);
+  addSelectedMention(candidate);
+  prompt.value = `${before}${after}`.replace(/\s{2,}/g, " ");
+  mentionOpen.value = false;
+  nextTick(() => {
+    const nextCursor = before.length;
+    promptTextareaRef.value?.focus();
+    promptTextareaRef.value?.setSelectionRange(nextCursor, nextCursor);
+  });
+}
+
+function onPromptKeydown(event: KeyboardEvent) {
+  if (mentionOpen.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      mentionSelectedIndex.value = Math.min(
+        mentionSelectedIndex.value + 1,
+        Math.max(mentionCandidates.value.length - 1, 0),
+      );
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      mentionSelectedIndex.value = Math.max(mentionSelectedIndex.value - 1, 0);
+      return;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && mentionCandidates.value[mentionSelectedIndex.value]) {
+      event.preventDefault();
+      insertMention(mentionCandidates.value[mentionSelectedIndex.value]);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      mentionOpen.value = false;
+      return;
+    }
+  }
+
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    send();
+  }
+}
+
 async function send() {
   const text = prompt.value.trim();
-  if (!text || isGenerating.value) return;
+  if ((!text && !selectedMentions.value.length) || isGenerating.value) return;
 
   if (!props.connection || !props.tab) return;
   if (!settings.isConfigured()) {
@@ -211,19 +435,25 @@ async function send() {
     return;
   }
 
-  messages.value.push({ role: "user", content: text });
+  const mentionedTables = [...selectedMentions.value, ...parseAiTableMentions(text)];
+  const displayText = [selectedMentions.value.map((mention) => mention.raw).join(" "), text].filter(Boolean).join(" ");
+
+  messages.value.push({ role: "user", content: displayText });
   prompt.value = "";
+  selectedMentions.value = [];
   scrollToBottom();
 
   const requestedAction = activeAction.value;
-  const shouldAutoExecute = shouldAttemptAiAutoExecute(text, requestedAction);
+  const shouldAutoExecute = shouldAttemptAiAutoExecute(displayText, requestedAction);
   isGenerating.value = true;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
   currentSessionId.value = sessionId;
   try {
-    const context = await buildAiContext(props.tab, props.connection);
+    const context = await buildAiContext(props.tab, props.connection, {
+      mentionedTables,
+    });
     const history: AiMessage[] = messages.value.slice(0, -2).map((m) => ({
       role: m.role,
       content: m.content,
@@ -232,7 +462,7 @@ async function send() {
       {
         config: settings.aiConfig,
         action: activeAction.value,
-        instruction: text,
+        instruction: displayText,
         context,
       },
       history,
@@ -338,6 +568,10 @@ function startNewChat() {
 
 onMounted(async () => {
   conversations.value = await loadAiConversations().catch(() => []);
+});
+
+onUnmounted(() => {
+  clearTimeout(mentionTimer);
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
@@ -557,7 +791,7 @@ function formatInlineText(text: string): string {
     </ScrollArea>
 
     <div class="p-2">
-      <div class="rounded-lg border bg-background px-2 pb-2 pt-1">
+      <div class="relative rounded-lg border bg-background px-2 pb-2 pt-1">
         <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
           <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
           <Server v-else class="h-3 w-3 shrink-0" />
@@ -605,13 +839,65 @@ function formatInlineText(text: string): string {
             </Select>
           </template>
         </div>
+        <div
+          v-if="mentionOpen"
+          class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md"
+        >
+          <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+            <span>{{ t("common.loading") }}</span>
+          </div>
+          <div v-else-if="mentionError" class="px-2 py-2 text-xs text-destructive">
+            {{ mentionError }}
+          </div>
+          <div v-else-if="!mentionCandidates.length" class="px-2 py-2 text-xs text-muted-foreground">
+            {{ t("ai.tableMentionEmpty") }}
+          </div>
+          <div v-else class="max-h-56 overflow-auto p-1">
+            <button
+              v-for="(candidate, index) in mentionCandidates"
+              :key="`${candidate.schema || ''}.${candidate.name}`"
+              type="button"
+              class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+              :class="{ 'bg-muted': index === mentionSelectedIndex }"
+              @mousedown.prevent="insertMention(candidate)"
+              @mouseenter="mentionSelectedIndex = index"
+            >
+              <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1 truncate">
+                <template v-if="candidate.schema">{{ candidate.schema }}.</template>{{ candidate.name }}
+              </span>
+              <span class="shrink-0 text-[10px] text-muted-foreground">{{
+                formatMentionTableType(candidate.tableType)
+              }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="promptMentionChips.length" class="mb-1.5 flex flex-wrap gap-1">
+          <button
+            v-for="mention in promptMentionChips"
+            :key="mention.raw"
+            type="button"
+            class="group inline-flex max-w-full items-center gap-1 rounded border border-border/80 bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
+            :title="mentionDisplayName(mention)"
+            @click="removeMentionChip(mention)"
+          >
+            <Table2 class="h-3 w-3 shrink-0 text-primary" />
+            <span class="truncate">{{ mentionDisplayName(mention) }}</span>
+            <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+          </button>
+        </div>
         <textarea
+          ref="promptTextareaRef"
           v-model="prompt"
           rows="3"
           class="w-full resize-none bg-transparent text-xs outline-none placeholder:text-muted-foreground mb-1"
           :placeholder="activePlaceholder"
           :disabled="isGenerating"
-          @keydown.enter.exact="send"
+          @input="refreshMentionState"
+          @click="refreshMentionState"
+          @keyup="refreshMentionState"
+          @keydown="onPromptKeydown"
         />
         <div class="flex items-center gap-1.5">
           <DropdownMenu>

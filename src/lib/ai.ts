@@ -11,6 +11,8 @@ import type {
 } from "@/types/database";
 import * as api from "@/lib/api";
 import { currentLocale } from "@/i18n";
+import { aiTableMentionKey, type AiTableMention } from "@/lib/aiTableMentions";
+import { isSchemaAware } from "@/lib/databaseCapabilities";
 
 export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData";
 
@@ -170,6 +172,9 @@ export function buildSystemPrompt(action: AiAction, context: AiContext): string 
       : "When the user asks to 'analyze' or 'look at' a table, generate a SELECT query to retrieve data, not a metadata query.",
     isZh ? "不要编造 Schema 中不存在的表或列。" : "Never invent tables or columns that are not in the schema context.",
     isZh
+      ? "用户输入中的 @schema.table 或 @table 表示用户明确提到的表；这些表已优先放入 Schema 上下文。"
+      : "User input may contain @schema.table or @table mentions. Treat them as explicit table references; mentioned tables are prioritized in the schema context.",
+    isZh
       ? "对于 DROP、DELETE、TRUNCATE、ALTER 或没有 WHERE 的 UPDATE，简要警告并优先提供安全的 SELECT 预览。"
       : "For destructive statements (DROP, DELETE, TRUNCATE, ALTER, UPDATE without WHERE), warn briefly and prefer a safer SELECT preview.",
   ];
@@ -255,11 +260,12 @@ function formatSchema(context: AiContext): string {
 export async function buildAiContext(
   tab: QueryTab,
   connection: ConnectionConfig,
-  options: { maxTables?: number; maxColumnsPerTable?: number } = {},
+  options: { maxTables?: number; maxColumnsPerTable?: number; mentionedTables?: AiTableMention[] } = {},
 ): Promise<AiContext> {
   const maxTables = options.maxTables ?? 50;
   const maxColumnsPerTable = options.maxColumnsPerTable ?? 40;
   const tables: AiSchemaTable[] = [];
+  const tableKeys = new Set<string>();
   let truncated = false;
 
   if (tab.tableMeta) {
@@ -277,8 +283,20 @@ export async function buildAiContext(
       indexes,
       foreignKeys,
     });
+    tableKeys.add(aiTableMentionKey(tab.tableMeta.schema, tName));
     truncated = tab.tableMeta.columns.length > maxColumnsPerTable;
-  } else if (!["redis", "mongodb"].includes(connection.db_type)) {
+  }
+
+  for (const mention of options.mentionedTables ?? []) {
+    const key = aiTableMentionKey(mention.schema, mention.table);
+    if (tableKeys.has(key)) continue;
+    const entry = await loadMentionedTableContext(tab, connection, mention, maxColumnsPerTable).catch(() => undefined);
+    if (!entry) continue;
+    tableKeys.add(aiTableMentionKey(entry.schema, entry.name));
+    tables.push(entry);
+  }
+
+  if (!tab.tableMeta && !["redis", "mongodb"].includes(connection.db_type)) {
     try {
       const schemas = await loadCandidateSchemas(tab, connection);
       for (const schema of schemas) {
@@ -295,7 +313,7 @@ export async function buildAiContext(
                 .listForeignKeys(tab.connectionId, tab.database, schema, table.name)
                 .catch(() => [] as ForeignKeyInfo[]),
             ]).then(([columns, indexes, foreignKeys]) => ({
-              schema: schema === tab.database && connection.db_type !== "postgres" ? undefined : schema,
+              schema: schema === tab.database && !isSchemaAware(connection.db_type) ? undefined : schema,
               name: table.name,
               tableType: table.table_type,
               columns: columns.slice(0, maxColumnsPerTable),
@@ -309,6 +327,9 @@ export async function buildAiContext(
         for (const meta of metaResults) {
           if (meta._truncatedCols) truncated = true;
           const { _truncatedCols, ...entry } = meta;
+          const key = aiTableMentionKey(entry.schema, entry.name);
+          if (tableKeys.has(key)) continue;
+          tableKeys.add(key);
           tables.push(entry);
         }
         if (tables.length >= maxTables) break;
@@ -330,8 +351,49 @@ export async function buildAiContext(
   };
 }
 
+async function loadMentionedTableContext(
+  tab: QueryTab,
+  connection: ConnectionConfig,
+  mention: AiTableMention,
+  maxColumnsPerTable: number,
+): Promise<AiSchemaTable | undefined> {
+  const schema = await resolveMentionedTableSchema(tab, connection, mention);
+  const [columns, indexes, foreignKeys] = await Promise.all([
+    api.getColumns(tab.connectionId, tab.database, schema, mention.table),
+    api.listIndexes(tab.connectionId, tab.database, schema, mention.table).catch(() => [] as IndexInfo[]),
+    api.listForeignKeys(tab.connectionId, tab.database, schema, mention.table).catch(() => [] as ForeignKeyInfo[]),
+  ]);
+  return {
+    schema: schema === tab.database && !isSchemaAware(connection.db_type) ? undefined : schema,
+    name: mention.table,
+    tableType: "TABLE",
+    columns: columns.slice(0, maxColumnsPerTable),
+    indexes,
+    foreignKeys,
+  };
+}
+
+async function resolveMentionedTableSchema(
+  tab: QueryTab,
+  connection: ConnectionConfig,
+  mention: AiTableMention,
+): Promise<string> {
+  if (mention.schema) return mention.schema;
+  if (tab.tableMeta?.tableName.toLowerCase() === mention.table.toLowerCase() && tab.tableMeta.schema) {
+    return tab.tableMeta.schema;
+  }
+  if (isSchemaAware(connection.db_type)) {
+    const schemas = await loadCandidateSchemas(tab, connection);
+    for (const schema of schemas) {
+      const tables = await api.listTables(tab.connectionId, tab.database, schema, mention.table, 10).catch(() => []);
+      if (tables.some((table) => table.name.toLowerCase() === mention.table.toLowerCase())) return schema;
+    }
+  }
+  return tab.database || connection.database || "main";
+}
+
 async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig): Promise<string[]> {
-  if (connection.db_type === "postgres" || connection.db_type === "sqlserver") {
+  if (isSchemaAware(connection.db_type)) {
     const schemas = await api.listSchemas(tab.connectionId, tab.database);
     return prioritizeSchemas(schemas);
   }

@@ -151,6 +151,7 @@ const isWaitingForFirstDelta = computed(() => {
 const activePlaceholder = computed(
   () => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`,
 );
+const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
 
 const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
 
@@ -903,26 +904,43 @@ function formatInlineText(text: string): string {
           @keydown="onPromptKeydown"
         />
         <div class="flex items-center gap-1.5">
-          <div class="inline-flex rounded-md border bg-muted/30 p-0.5 text-[11px]">
-            <button
-              type="button"
-              class="rounded px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
-              :class="{ 'bg-background text-foreground shadow-sm': assistantMode === 'ask' }"
-              :title="t('ai.modeHints.ask')"
-              @click="assistantMode = 'ask'"
-            >
-              {{ t("ai.modes.ask") }}
-            </button>
-            <button
-              type="button"
-              class="rounded px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
-              :class="{ 'bg-background text-foreground shadow-sm': assistantMode === 'agent' }"
-              :title="t('ai.modeHints.agent')"
-              @click="assistantMode = 'agent'"
-            >
-              {{ t("ai.modes.agent") }}
-            </button>
-          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger as-child>
+              <button
+                class="flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="activeModeHint"
+              >
+                <Bot class="h-3 w-3" />
+                <span>{{ t(`ai.modes.${assistantMode}`) }}</span>
+                <svg
+                  class="h-3 w-3 opacity-50"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" class="w-40">
+              <DropdownMenuItem class="text-xs gap-1.5" :title="t('ai.modeHints.ask')" @click="assistantMode = 'ask'">
+                <Check class="h-3 w-3" :class="{ 'opacity-0': assistantMode !== 'ask' }" />
+                <span>{{ t("ai.modes.ask") }}</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="text-xs gap-1.5"
+                :title="t('ai.modeHints.agent')"
+                @click="assistantMode = 'agent'"
+              >
+                <Check class="h-3 w-3" :class="{ 'opacity-0': assistantMode !== 'agent' }" />
+                <span>{{ t("ai.modes.agent") }}</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <DropdownMenu>
             <DropdownMenuTrigger as-child>
               <button

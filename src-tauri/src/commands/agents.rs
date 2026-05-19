@@ -7,7 +7,7 @@ use dbx_core::agent_manager::{
 };
 use dbx_core::agent_service::{
     build_agent_list, download_temp_path, fetch_registry, find_local_agent_jar, github_url_to_r2_path,
-    install_local_agent, invalidate_registry_cache, verify_and_replace_download,
+    install_local_agent, invalidate_registry_cache, replace_download,
 };
 use dbx_core::connection::AppState;
 
@@ -73,7 +73,6 @@ pub async fn install_agent(
             &platform_jre.url,
             &github_url_to_r2_path(&platform_jre.url, "jre"),
             &jre_archive,
-            &platform_jre.sha256,
             platform_jre.size,
         )
         .await?;
@@ -100,7 +99,6 @@ pub async fn install_agent(
         &driver.jar.url,
         &github_url_to_r2_path(&driver.jar.url, "driver"),
         &jar_path,
-        &driver.jar.sha256,
         driver.jar.size,
     )
     .await?;
@@ -162,7 +160,6 @@ pub async fn upgrade_all_agents(app: tauri::AppHandle, state: State<'_, Arc<AppS
                 &platform_jre.url,
                 &github_url_to_r2_path(&platform_jre.url, "jre"),
                 &jre_archive,
-                &platform_jre.sha256,
                 platform_jre.size,
             )
             .await?;
@@ -191,7 +188,6 @@ pub async fn upgrade_all_agents(app: tauri::AppHandle, state: State<'_, Arc<AppS
             &driver.jar.url,
             &github_url_to_r2_path(&driver.jar.url, "driver"),
             &jar_path,
-            &driver.jar.sha256,
             driver.jar.size,
         )
         .await?;
@@ -312,7 +308,6 @@ pub async fn reinstall_jre(
         &platform_jre.url,
         &github_url_to_r2_path(&platform_jre.url, "jre"),
         &jre_archive,
-        &platform_jre.sha256,
         platform_jre.size,
     )
     .await?;
@@ -335,7 +330,6 @@ async fn download_with_progress(
     url: &str,
     r2_path: &str,
     dest: &std::path::Path,
-    expected_sha256: &str,
     total_size: u64,
 ) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
@@ -365,7 +359,7 @@ async fn download_with_progress(
     }
     std::io::Write::flush(&mut file).map_err(|e| format!("Failed to flush temp file: {e}"))?;
     drop(file);
-    verify_and_replace_download(&tmp, dest, expected_sha256)
+    replace_download(&tmp, dest)
 }
 
 fn extract_archive(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {

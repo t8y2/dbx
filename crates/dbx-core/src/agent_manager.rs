@@ -142,7 +142,6 @@ pub struct DriverInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactInfo {
     pub url: String,
-    pub sha256: String,
     pub size: u64,
 }
 

@@ -159,16 +159,7 @@ pub fn download_temp_path(dest: &std::path::Path) -> std::path::PathBuf {
     dest.with_file_name(format!("{file_name}.download"))
 }
 
-pub fn verify_and_replace_download(
-    tmp: &std::path::Path,
-    dest: &std::path::Path,
-    expected_sha256: &str,
-) -> Result<(), String> {
-    if let Err(err) = verify_file_sha256(tmp, expected_sha256) {
-        std::fs::remove_file(tmp).ok();
-        return Err(err);
-    }
-
+pub fn replace_download(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -193,27 +184,4 @@ pub fn verify_and_replace_download(
 fn backup_path(dest: &std::path::Path) -> std::path::PathBuf {
     let file_name = dest.file_name().and_then(|name| name.to_str()).unwrap_or("download");
     dest.with_file_name(format!("{file_name}.backup-{}", uuid::Uuid::new_v4()))
-}
-
-pub fn verify_file_sha256(path: &std::path::Path, expected_sha256: &str) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    let expected = expected_sha256.trim().to_ascii_lowercase();
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("Failed to open file for SHA-256 verification: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let n = std::io::Read::read(&mut file, &mut buffer)
-            .map_err(|e| format!("Failed to read file for SHA-256 verification: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    let actual = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!("SHA-256 mismatch for {}: expected {expected}, got {actual}", path.display()))
-    }
 }

@@ -3485,16 +3485,27 @@ defineExpose({
                         </div>
                       </TooltipTrigger>
                       <TooltipContent
-                        v-if="columnTypeMap.get(col) || columnCommentMap.get(col)"
                         side="bottom"
-                        class="text-xs grid grid-cols-[auto_1fr] gap-x-2"
+                        class="grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs"
                       >
+                        <span class="text-background/70">{{ t("grid.columnName") }}</span>
+                        <span class="flex min-w-0 items-center gap-2">
+                          <span class="min-w-0 flex-1 truncate font-mono">{{ col }}</span>
+                          <button
+                            type="button"
+                            class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10"
+                            :title="t('grid.copyColumnName')"
+                            @click.stop="copyText(col)"
+                          >
+                            <Copy class="h-3 w-3" />
+                          </button>
+                        </span>
                         <template v-if="columnTypeMap.get(col)">
-                          <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
+                          <span class="text-background/70">{{ t("grid.columnType") }}</span>
                           <span :class="typeColorClass(columnTypeMap.get(col)!)">{{ columnTypeMap.get(col) }}</span>
                         </template>
                         <template v-if="columnCommentMap.get(col)">
-                          <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
+                          <span class="text-background/70">{{ t("grid.columnComment") }}</span>
                           <span>{{ columnCommentMap.get(col) }}</span>
                         </template>
                       </TooltipContent>

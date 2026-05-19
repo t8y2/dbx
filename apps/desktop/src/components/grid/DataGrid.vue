@@ -2079,6 +2079,48 @@ function cutSelection() {
   }
 }
 
+function currentSelectedCellPosition() {
+  const range = selectedRange.value;
+  if (!range) return null;
+  return { rowIndex: range.startRow, colIndex: range.startCol };
+}
+
+function scrollCellIntoView(rowIndex: number, colIndex: number) {
+  nextTick(() => {
+    const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"]`);
+    const cellEl = rowEl?.querySelector<HTMLElement>(`[data-visible-col-index="${colIndex}"]`);
+    (cellEl ?? rowEl)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function moveSelectedCell(rowDelta: number, colDelta: number): boolean {
+  const position = currentSelectedCellPosition();
+  if (!position || editingCell.value || displayItems.value.length === 0 || visibleColumnIndexes.value.length === 0)
+    return false;
+  const rowIndex = Math.max(0, Math.min(displayItems.value.length - 1, position.rowIndex + rowDelta));
+  const colIndex = Math.max(0, Math.min(visibleColumnIndexes.value.length - 1, position.colIndex + colDelta));
+  selectSingleCell(rowIndex, colIndex);
+  clearRowSelection();
+  if (showTranspose.value) transposeRowIndex.value = rowIndex;
+  scrollCellIntoView(rowIndex, colIndex);
+  return true;
+}
+
+function editSelectedCell(): boolean {
+  const position = currentSelectedCellPosition();
+  if (!position || editingCell.value) return false;
+  const item = displayItems.value[position.rowIndex];
+  const actualColIndex = actualColumnIndex(position.colIndex);
+  if (!item || !canEditCellItem(item, actualColIndex)) return false;
+  startEdit(item.id, actualColIndex);
+  return true;
+}
+
+function commitGridEdit() {
+  commitEdit();
+  nextTick(() => gridRef.value?.focus({ preventScroll: true }));
+}
+
 async function onGridKeydown(event: KeyboardEvent) {
   if (isFocusSearchShortcut(event)) {
     event.preventDefault();
@@ -2086,6 +2128,26 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (eventTargetAllowsNativeClipboard(event)) return;
+  if (event.key === "ArrowUp" && moveSelectedCell(-1, 0)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowDown" && moveSelectedCell(1, 0)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowLeft" && moveSelectedCell(0, -1)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowRight" && moveSelectedCell(0, 1)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Enter" && editSelectedCell()) {
+    event.preventDefault();
+    return;
+  }
   if (clipboardShortcut(event, "c")) {
     if (!hasCellSelection.value) return;
     event.preventDefault();
@@ -3535,6 +3597,7 @@ defineExpose({
                         @mousedown="handleDataCellMousedown(index, visibleColIdx, item.id, $event)"
                         @mouseenter="extendCellSelection(index, visibleColIdx)"
                         @dblclick="canEditCellItem(item, actualColIdx) && startEdit(item.id, actualColIdx)"
+                        :data-visible-col-index="visibleColIdx"
                         @contextmenu="onCellContext(item.id, index, actualColIdx, visibleColIdx)"
                       >
                         <template v-if="editingCell?.rowId === item.id && editingCell?.col === actualColIdx">
@@ -3543,7 +3606,7 @@ defineExpose({
                             v-model="editValue"
                             :kind="temporalEditorKindForColumn(actualColIdx)!"
                             @cancel="cancelEdit"
-                            @commit="commitEdit"
+                            @commit="commitGridEdit"
                           />
                           <input
                             v-else

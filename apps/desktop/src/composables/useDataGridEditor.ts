@@ -366,6 +366,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (e.key === "Enter") {
       e.preventDefault();
       commitEdit();
+      nextTick(focusScrollerWithoutScrolling);
     } else if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();

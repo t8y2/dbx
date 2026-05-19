@@ -9,7 +9,7 @@ use dbx_core::agent_manager::{
 };
 use dbx_core::agent_service::{
     build_agent_list, download_temp_path, fetch_registry, find_local_agent_jar, github_url_to_r2_path,
-    install_local_agent, invalidate_registry_cache, verify_and_replace_download,
+    install_local_agent, invalidate_registry_cache, replace_download,
 };
 use futures::Stream;
 use serde::Deserialize;
@@ -233,7 +233,6 @@ async fn install_agent_from_registry(
             &platform_jre.url,
             &github_url_to_r2_path(&platform_jre.url, "jre"),
             &jre_archive,
-            &platform_jre.sha256,
             platform_jre.size,
             Some(db_type),
             current,
@@ -253,7 +252,6 @@ async fn install_agent_from_registry(
         &driver.jar.url,
         &github_url_to_r2_path(&driver.jar.url, "driver"),
         &jar_path,
-        &driver.jar.sha256,
         driver.jar.size,
         Some(db_type),
         current,
@@ -293,7 +291,6 @@ async fn reinstall_jre_core(am: &AgentManager, jre_key: &str, tx: &broadcast::Se
         &platform_jre.url,
         &github_url_to_r2_path(&platform_jre.url, "jre"),
         &jre_archive,
-        &platform_jre.sha256,
         platform_jre.size,
         None,
         None,
@@ -319,7 +316,6 @@ async fn download_with_progress(
     url: &str,
     r2_path: &str,
     dest: &std::path::Path,
-    expected_sha256: &str,
     total_size: u64,
     db_type: Option<&str>,
     current: Option<u32>,
@@ -346,7 +342,7 @@ async fn download_with_progress(
     }
     std::io::Write::flush(&mut file).map_err(|err| format!("Failed to flush temp file: {err}"))?;
     drop(file);
-    verify_and_replace_download(&tmp, dest, expected_sha256)
+    replace_download(&tmp, dest)
 }
 
 fn send_install_progress(

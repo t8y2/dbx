@@ -2,7 +2,7 @@ use dbx_core::agent_manager::{
     AgentManager, AgentRegistry, ArtifactInfo, DriverInfo, InstalledDriver, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{build_agent_list, github_url_to_r2_path, local_agent_jar_candidates};
-use dbx_core::agent_service::{is_app_version_compatible, verify_and_replace_download, verify_file_sha256};
+use dbx_core::agent_service::{is_app_version_compatible, replace_download};
 
 fn test_manager(name: &str) -> AgentManager {
     let dir = std::env::temp_dir().join(format!("dbx-agent-service-{name}-{}", uuid::Uuid::new_v4()));
@@ -18,11 +18,7 @@ fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistr
             label: db_type.to_string(),
             min_app_version: "0.1.0".to_string(),
             jre: jre.to_string(),
-            jar: ArtifactInfo {
-                url: format!("https://example.com/dbx-agent-{db_type}.jar"),
-                sha256: "sha".to_string(),
-                size: 42,
-            },
+            jar: ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}.jar"), size: 42 },
         },
     );
     AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
@@ -104,20 +100,7 @@ fn accepts_current_app_when_min_version_is_not_newer() {
 }
 
 #[test]
-fn verifies_file_sha256() {
-    let path = test_path("sha256");
-    std::fs::write(&path, b"dbx").unwrap();
-
-    verify_file_sha256(&path, "e4a49ac91ae97a25f60bbe2fa6e25809af94df975aa42d3db29edc17e44e6989").unwrap();
-    let err =
-        verify_file_sha256(&path, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").unwrap_err();
-
-    assert!(err.contains("SHA-256 mismatch"));
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn atomic_replace_keeps_existing_destination_when_hash_fails() {
+fn atomic_replace_moves_download_into_place() {
     let dir = test_path("atomic");
     std::fs::create_dir_all(&dir).unwrap();
     let dest = dir.join("agent.jar");
@@ -125,12 +108,9 @@ fn atomic_replace_keeps_existing_destination_when_hash_fails() {
     std::fs::write(&dest, b"old").unwrap();
     std::fs::write(&tmp, b"new").unwrap();
 
-    let err =
-        verify_and_replace_download(&tmp, &dest, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-            .unwrap_err();
+    replace_download(&tmp, &dest).unwrap();
 
-    assert!(err.contains("SHA-256 mismatch"));
-    assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"new");
     assert!(!tmp.exists());
     std::fs::remove_dir_all(dir).ok();
 }

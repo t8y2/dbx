@@ -3,6 +3,7 @@ use futures::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::sql::starts_with_executable_sql_keyword;
@@ -279,37 +280,53 @@ pub async fn list_objects(pool: &MySqlPool, database: &str) -> Result<Vec<Object
         .collect())
 }
 
-pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let sql = format!(
+fn columns_sql(database: &str, table: &str) -> String {
+    format!(
         "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
-         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
          c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH \
          FROM information_schema.COLUMNS c \
-         LEFT JOIN information_schema.KEY_COLUMN_USAGE kcu \
-           ON c.TABLE_SCHEMA COLLATE utf8mb4_general_ci = kcu.TABLE_SCHEMA COLLATE utf8mb4_general_ci \
-           AND c.TABLE_NAME COLLATE utf8mb4_general_ci = kcu.TABLE_NAME COLLATE utf8mb4_general_ci \
-           AND c.COLUMN_NAME COLLATE utf8mb4_general_ci = kcu.COLUMN_NAME COLLATE utf8mb4_general_ci \
-           AND kcu.CONSTRAINT_NAME = 'PRIMARY' \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
-    );
+    )
+}
+
+fn primary_key_columns_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} AND CONSTRAINT_NAME = 'PRIMARY' \
+         ORDER BY ORDINAL_POSITION",
+        quote_value(database),
+        quote_value(table),
+    )
+}
+
+pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let pk_sql = primary_key_columns_sql(database, table);
+    let pk_rows: Vec<MySqlRow> = sqlx::raw_sql(&pk_sql).fetch_all(pool).await.map_err(|e| e.to_string())?;
+    let primary_key_columns: HashSet<String> = pk_rows.iter().map(|row| get_str_by_name(row, "COLUMN_NAME")).collect();
+
+    let sql = columns_sql(database, table);
     let rows: Vec<MySqlRow> = sqlx::raw_sql(&sql).fetch_all(pool).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
-        .map(|row| ColumnInfo {
-            name: get_str_by_name(row, "COLUMN_NAME"),
-            data_type: get_str_by_name(row, "COLUMN_TYPE"),
-            is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
-            column_default: get_opt_str(row, "COLUMN_DEFAULT"),
-            is_primary_key: row.get::<i32, _>("IS_PK") == 1,
-            extra: get_opt_str(row, "EXTRA"),
-            comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
-            numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
-            numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
-            character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
+        .map(|row| {
+            let name = get_str_by_name(row, "COLUMN_NAME");
+            ColumnInfo {
+                is_primary_key: primary_key_columns.contains(&name),
+                name,
+                data_type: get_str_by_name(row, "COLUMN_TYPE"),
+                is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
+                column_default: get_opt_str(row, "COLUMN_DEFAULT"),
+                extra: get_opt_str(row, "EXTRA"),
+                comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
+                numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
+                numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
+                character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
+            }
         })
         .collect())
 }
@@ -546,6 +563,24 @@ mod tests {
         assert!(sql.contains("information_schema.ROUTINES"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+    }
+
+    #[test]
+    fn mysql_columns_sql_avoids_information_schema_join_collation() {
+        let sql = columns_sql("app", "users");
+
+        assert!(!sql.contains("COLLATE"));
+        assert!(!sql.contains("KEY_COLUMN_USAGE"));
+        assert!(sql.contains("information_schema.COLUMNS"));
+    }
+
+    #[test]
+    fn mysql_primary_key_columns_sql_reads_key_column_usage_separately() {
+        let sql = primary_key_columns_sql("app", "users");
+
+        assert!(!sql.contains("COLLATE"));
+        assert!(sql.contains("information_schema.KEY_COLUMN_USAGE"));
+        assert!(sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
     }
 
     #[test]

@@ -303,6 +303,7 @@ export default {
     columnVisibility: "字段筛选",
     columnVisibilityHint: "至少保留一列可见。",
     searchColumns: "搜索字段...",
+    invertColumnVisibility: "反选",
     showAllColumns: "显示全部",
     moreValues: "还有 {count} 个值，输入关键词继续缩小范围",
     filterByValue: "筛选此值",

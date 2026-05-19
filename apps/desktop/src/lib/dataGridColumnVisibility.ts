@@ -33,3 +33,14 @@ export function nextHiddenColumnIndexes(options: {
   next.add(options.columnIndex);
   return next;
 }
+
+export function invertedHiddenColumnIndexes(
+  availableIndexes: number[],
+  hiddenIndexes: ReadonlySet<number>,
+): Set<number> {
+  const next = new Set(availableIndexes.filter((index) => !hiddenIndexes.has(index)));
+  if (next.size === availableIndexes.length && availableIndexes.length > 0) {
+    next.delete(availableIndexes[0]);
+  }
+  return next;
+}

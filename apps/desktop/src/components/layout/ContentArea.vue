@@ -43,6 +43,7 @@ type DataGridHandle = {
   isColumnVisible: (columnIndex: number) => boolean;
   toggleColumnVisibility: (columnIndex: number) => void;
   showAllColumns: () => void;
+  invertColumnVisibility: () => void;
   showDdl: boolean;
   toggleDdl: () => void;
 };
@@ -496,15 +497,26 @@ defineExpose({ focusSearch, refreshData });
               </div>
               <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-3 py-2">
                 <span class="text-[11px] text-muted-foreground">{{ t("grid.columnVisibilityHint") }}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="h-7 px-2 text-xs"
-                  :disabled="(dataGridRef?.hiddenColumnCount ?? 0) === 0"
-                  @click="dataGridRef?.showAllColumns()"
-                >
-                  {{ t("grid.showAllColumns") }}
-                </Button>
+                <div class="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-7 px-2 text-xs"
+                    :disabled="(dataGridRef?.displayableColumnCount ?? 0) <= 1"
+                    @click="dataGridRef?.invertColumnVisibility()"
+                  >
+                    {{ t("grid.invertColumnVisibility") }}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-7 px-2 text-xs"
+                    :disabled="(dataGridRef?.hiddenColumnCount ?? 0) === 0"
+                    @click="dataGridRef?.showAllColumns()"
+                  >
+                    {{ t("grid.showAllColumns") }}
+                  </Button>
+                </div>
               </div>
             </PopoverContent>
           </Popover>

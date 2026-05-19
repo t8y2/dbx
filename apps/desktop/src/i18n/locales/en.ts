@@ -306,6 +306,7 @@ export default {
     columnVisibility: "Columns",
     columnVisibilityHint: "At least one column stays visible.",
     searchColumns: "Search columns...",
+    invertColumnVisibility: "Invert",
     showAllColumns: "Show all",
     moreValues: "{count} more values, keep typing to narrow results",
     filterByValue: "Filter by This Value",

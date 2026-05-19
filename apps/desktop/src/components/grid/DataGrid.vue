@@ -119,6 +119,7 @@ import {
 } from "@/lib/paginationPageSize";
 import {
   filterColumnVisibilityOptions,
+  invertedHiddenColumnIndexes,
   nextHiddenColumnIndexes,
   visibleColumnIndexesForFilter,
 } from "@/lib/dataGridColumnVisibility";
@@ -1075,6 +1076,9 @@ function toggleColumnVisibility(columnIndex: number) {
 }
 function showAllColumns() {
   hiddenColumnIndexes.value = new Set();
+}
+function invertColumnVisibility() {
+  hiddenColumnIndexes.value = invertedHiddenColumnIndexes(displayableColumnIndexes.value, hiddenColumnIndexes.value);
 }
 const firstVisibleColumnIndex = computed(() => visibleColumnIndexes.value[0] ?? 0);
 function actualColumnIndex(visibleColumnIndex: number): number {
@@ -2546,6 +2550,7 @@ defineExpose({
   isColumnVisible,
   toggleColumnVisibility,
   showAllColumns,
+  invertColumnVisibility,
 });
 </script>
 

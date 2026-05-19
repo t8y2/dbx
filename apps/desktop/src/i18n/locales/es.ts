@@ -276,6 +276,7 @@ export default {
     columnVisibility: "Columnas",
     columnVisibilityHint: "Al menos una columna permanece visible.",
     searchColumns: "Buscar columnas...",
+    invertColumnVisibility: "Invertir",
     showAllColumns: "Mostrar todo",
     moreValues: "{count} valores más, sigue escribiendo para acotar los resultados",
     filterByValue: "Filtrar por este valor",

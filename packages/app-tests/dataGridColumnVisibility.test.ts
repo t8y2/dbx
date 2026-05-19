@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   filterColumnVisibilityOptions,
+  invertedHiddenColumnIndexes,
   nextHiddenColumnIndexes,
   visibleColumnIndexesForFilter,
 } from "../../apps/desktop/src/lib/dataGridColumnVisibility.ts";
@@ -36,4 +37,16 @@ test("shows a hidden column again when toggled", () => {
   });
 
   assert.deepEqual([...hidden].sort(), [2]);
+});
+
+test("inverts hidden column indexes", () => {
+  const hidden = invertedHiddenColumnIndexes([0, 1, 2, 3], new Set([1, 3]));
+
+  assert.deepEqual([...hidden].sort(), [0, 2]);
+});
+
+test("keeps one column visible when inverting all visible columns", () => {
+  const hidden = invertedHiddenColumnIndexes([0, 1, 2], new Set());
+
+  assert.deepEqual([...hidden].sort(), [1, 2]);
 });

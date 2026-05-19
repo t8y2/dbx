@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from "vue";
-import { useI18n } from "vue-i18n";
 import type { FocusOutsideEvent, PointerDownOutsideEvent } from "reka-ui";
 import { CalendarClock, ChevronDown, ChevronUp, CircleSlash } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatTemporalInputValue, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
 
-const props = defineProps<{
-  kind: TemporalCellEditorKind;
-  modelValue: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    kind: TemporalCellEditorKind;
+    modelValue: string;
+    variant?: "cell" | "inline";
+    commitOnClose?: boolean;
+  }>(),
+  {
+    variant: "cell",
+    commitOnClose: true,
+  },
+);
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
@@ -19,7 +25,6 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const { locale } = useI18n();
 const open = ref(true);
 const triggerRef = ref<HTMLButtonElement | null>(null);
 let closeHandled = false;
@@ -27,14 +32,11 @@ let closeHandled = false;
 const hasDate = computed(() => props.kind !== "time");
 const hasTime = computed(() => props.kind !== "date");
 const displayValue = computed(() => props.modelValue || "NULL");
-const monthOptions = computed(() => {
-  const formatter = new Intl.DateTimeFormat(locale.value, { month: "short" });
-  return Array.from({ length: 12 }, (_, index) => ({
-    value: index + 1,
-    label: formatter.format(new Date(2026, index, 1)),
-  }));
-});
-
+const triggerClass = computed(() =>
+  props.variant === "inline"
+    ? "cell-edit-input flex h-9 w-full items-center gap-2 rounded border bg-background px-2 text-left text-xs outline-none hover:border-primary/60 focus:border-primary"
+    : "cell-edit-input absolute inset-0 z-10 flex items-center gap-1 border-2 border-primary bg-background px-2 py-0.5 text-left text-xs outline-none",
+);
 const dateParts = computed(() => {
   const text = formatTemporalInputValue(props.modelValue, "date");
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
@@ -61,7 +63,7 @@ onMounted(() => {
 
 function setOpen(value: boolean) {
   open.value = value;
-  if (!value && !closeHandled) finishCommit();
+  if (!value && props.commitOnClose && !closeHandled) finishCommit();
 }
 
 function setModelValue(value: string) {
@@ -69,18 +71,22 @@ function setModelValue(value: string) {
 }
 
 function updateDate(part: "day" | "month" | "year", rawValue: string | number) {
-  const next = { ...dateParts.value, [part]: Number(rawValue) || dateParts.value[part] };
+  const numberValue = Number(rawValue);
+  const next = { ...dateParts.value };
+  if (Number.isNaN(numberValue)) return;
+  if (part === "year") next.year = Math.max(1, Math.min(9999, numberValue));
+  else if (part === "month") next.month = Math.max(1, Math.min(12, numberValue));
+  else next.day = Math.max(1, Math.min(31, numberValue));
   const maxDay = daysInMonth(next.year, next.month);
   next.day = Math.max(1, Math.min(maxDay, next.day));
   setDateTimeValue(next.year, next.month, next.day, timeValue.value);
 }
 
-function updateDateFromSelect(part: "day" | "month", rawValue: unknown) {
-  if (rawValue === null || rawValue === undefined) return;
-  updateDate(part, String(rawValue));
+function updateDateFromInput(part: "day" | "month" | "year", event: Event) {
+  updateDate(part, (event.target as HTMLInputElement).value);
 }
 
-function stepDate(part: "year", delta: number) {
+function stepDate(part: "day" | "month" | "year", delta: number) {
   updateDate(part, dateParts.value[part] + delta);
 }
 
@@ -92,6 +98,10 @@ function updateTime(part: "hour" | "minute" | "second", rawValue: string | numbe
     return;
   }
   setDateTimeValue(dateParts.value.year, dateParts.value.month, dateParts.value.day, nextTime);
+}
+
+function updateTimeFromInput(part: "hour" | "minute" | "second", event: Event) {
+  updateTime(part, (event.target as HTMLInputElement).value);
 }
 
 function stepTime(part: "hour" | "minute" | "second", delta: number) {
@@ -154,7 +164,8 @@ function isSelectInteractionTarget(target: EventTarget | null): boolean {
 }
 
 function normalizeTimePart(value: string | number, max: number): string {
-  const numberValue = Math.max(0, Math.min(max, Number(value) || 0));
+  const parsed = Number(value);
+  const numberValue = Math.max(0, Math.min(max, Number.isNaN(parsed) ? 0 : parsed));
   return String(numberValue).padStart(2, "0");
 }
 
@@ -178,13 +189,7 @@ function twoDigit(value: string | number): string {
 <template>
   <Popover :open="open" @update:open="setOpen">
     <PopoverTrigger as-child>
-      <button
-        ref="triggerRef"
-        type="button"
-        class="cell-edit-input absolute inset-0 z-10 flex items-center gap-1 border-2 border-primary bg-background px-2 py-0.5 text-left text-xs outline-none"
-        @keydown.stop="onKeydown"
-        @click.stop
-      >
+      <button ref="triggerRef" type="button" :class="triggerClass" @keydown.stop="onKeydown" @click.stop>
         <CalendarClock class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span class="min-w-0 flex-1 truncate">{{ displayValue }}</span>
       </button>
@@ -197,47 +202,16 @@ function twoDigit(value: string | number): string {
       @keydown.stop="onKeydown"
       @interact-outside="onPopoverInteractOutside"
     >
-      <div v-if="hasDate" class="grid grid-cols-[3.5rem_4.75rem_5rem] gap-1.5">
-        <Select
-          :model-value="String(dateParts.day)"
-          @update:model-value="(value) => updateDateFromSelect('day', value)"
+      <div v-if="hasDate" class="grid grid-cols-[4.5rem_4.5rem_4.5rem] gap-1.5">
+        <div
+          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
         >
-          <SelectTrigger class="h-7 w-full rounded-md px-2 text-[13px] tabular-nums">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent class="min-w-16">
-            <SelectItem
-              v-for="day in daysInMonth(dateParts.year, dateParts.month)"
-              :key="day"
-              :value="String(day)"
-              class="py-0.5 text-xs"
-            >
-              {{ day }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-
-        <Select
-          :model-value="String(dateParts.month)"
-          @update:model-value="(value) => updateDateFromSelect('month', value)"
-        >
-          <SelectTrigger class="h-7 w-full rounded-md px-2 text-[13px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent class="min-w-20">
-            <SelectItem
-              v-for="month in monthOptions"
-              :key="month.value"
-              :value="String(month.value)"
-              class="py-0.5 text-xs"
-            >
-              {{ month.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-
-        <div class="grid h-7 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <div class="flex items-center justify-center px-1 text-[13px] tabular-nums">{{ dateParts.year }}</div>
+          <input
+            :value="dateParts.year"
+            inputmode="numeric"
+            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
+            @change="updateDateFromInput('year', $event)"
+          />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('year', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -251,13 +225,64 @@ function twoDigit(value: string | number): string {
             </button>
           </div>
         </div>
+
+        <div
+          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
+        >
+          <input
+            :value="twoDigit(dateParts.month)"
+            inputmode="numeric"
+            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
+            @change="updateDateFromInput('month', $event)"
+          />
+          <div class="grid border-l">
+            <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('month', 1)">
+              <ChevronUp class="h-3 w-3" />
+            </button>
+            <button
+              type="button"
+              class="flex items-center justify-center border-t hover:bg-muted"
+              @click="stepDate('month', -1)"
+            >
+              <ChevronDown class="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
+        >
+          <input
+            :value="twoDigit(dateParts.day)"
+            inputmode="numeric"
+            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
+            @change="updateDateFromInput('day', $event)"
+          />
+          <div class="grid border-l">
+            <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('day', 1)">
+              <ChevronUp class="h-3 w-3" />
+            </button>
+            <button
+              type="button"
+              class="flex items-center justify-center border-t hover:bg-muted"
+              @click="stepDate('day', -1)"
+            >
+              <ChevronDown class="h-3 w-3" />
+            </button>
+          </div>
+        </div>
       </div>
 
       <div v-if="hasTime" class="grid grid-cols-[3.5rem_0.5rem_3.5rem_0.5rem_3.5rem] items-center gap-1.5">
-        <div class="grid h-7 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <div class="flex items-center justify-center px-1 text-[13px] tabular-nums">
-            {{ twoDigit(timeParts.hour) }}
-          </div>
+        <div
+          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
+        >
+          <input
+            :value="twoDigit(timeParts.hour)"
+            inputmode="numeric"
+            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
+            @change="updateTimeFromInput('hour', $event)"
+          />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('hour', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -272,10 +297,15 @@ function twoDigit(value: string | number): string {
           </div>
         </div>
         <span class="text-center text-xs text-muted-foreground">:</span>
-        <div class="grid h-7 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <div class="flex items-center justify-center px-1 text-[13px] tabular-nums">
-            {{ twoDigit(timeParts.minute) }}
-          </div>
+        <div
+          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
+        >
+          <input
+            :value="twoDigit(timeParts.minute)"
+            inputmode="numeric"
+            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
+            @change="updateTimeFromInput('minute', $event)"
+          />
           <div class="grid border-l">
             <button
               type="button"
@@ -294,10 +324,15 @@ function twoDigit(value: string | number): string {
           </div>
         </div>
         <span class="text-center text-xs text-muted-foreground">:</span>
-        <div class="grid h-7 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <div class="flex items-center justify-center px-1 text-[13px] tabular-nums">
-            {{ twoDigit(timeParts.second) }}
-          </div>
+        <div
+          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
+        >
+          <input
+            :value="twoDigit(timeParts.second)"
+            inputmode="numeric"
+            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
+            @change="updateTimeFromInput('second', $event)"
+          />
           <div class="grid border-l">
             <button
               type="button"

@@ -1720,6 +1720,21 @@ const activeCellDetail = computed(() => {
 
 const detailEditValue = ref("");
 const isEditingDetail = ref(false);
+const detailTemporalEditorKind = computed(() => {
+  const detail = activeCellDetail.value;
+  return detail ? temporalEditorKindForColumn(detail.colIndex) : undefined;
+});
+
+function resetDetailEdit() {
+  isEditingDetail.value = false;
+  detailEditValue.value = "";
+}
+
+function closeCellDetails() {
+  resetDetailEdit();
+  showCellDetail.value = false;
+  detailCell.value = null;
+}
 
 function startDetailEdit() {
   const detail = activeCellDetail.value;
@@ -1763,7 +1778,7 @@ function commitDetailEdit() {
 }
 
 function cancelDetailEdit() {
-  isEditingDetail.value = false;
+  resetDetailEdit();
 }
 
 function setDetailNull() {
@@ -1776,7 +1791,7 @@ function setDetailNull() {
   if (item.isNew && item.newIndex !== undefined) {
     newRows.value[item.newIndex][detail.colIndex] = null;
     newRows.value = [...newRows.value];
-    isEditingDetail.value = false;
+    resetDetailEdit();
     detailCell.value = { ...detailCell.value! };
     return;
   }
@@ -1789,7 +1804,7 @@ function setDetailNull() {
   if (useTransaction.value && !transactionActive.value) {
     enterTransaction();
   }
-  isEditingDetail.value = false;
+  resetDetailEdit();
   detailCell.value = { ...detailCell.value! };
 }
 
@@ -2006,6 +2021,7 @@ const {
 
 // --- Cell selection and detail ---
 function showCellDetails(rowIndex: number, colIndex: number) {
+  resetDetailEdit();
   detailCell.value = { rowIndex, col: colIndex };
   showCellDetail.value = true;
 }
@@ -2096,6 +2112,12 @@ function copyDetailValue() {
   copyText(text);
 }
 
+function copyDetailFormattedJson() {
+  const detail = activeCellDetail.value;
+  if (!detail?.formattedJson) return;
+  copyText(detail.formattedJson);
+}
+
 function copyDetailColumnName() {
   if (!activeCellDetail.value) return;
   copyText(activeCellDetail.value.column);
@@ -2184,7 +2206,7 @@ function openContextTranspose() {
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
   if (next.showTranspose) {
-    showCellDetail.value = false;
+    closeCellDetails();
     nextTick(updateTransposeViewport);
     if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
   }
@@ -2195,7 +2217,7 @@ function toggleTranspose(rowIndex: number) {
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
   if (next.showTranspose) {
-    showCellDetail.value = false;
+    closeCellDetails();
     nextTick(updateTransposeViewport);
     if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
   }
@@ -2223,8 +2245,7 @@ watch(
     }
     clearCellSelection();
     clearRowSelection();
-    showCellDetail.value = false;
-    detailCell.value = null;
+    closeCellDetails();
     showTranspose.value = false;
     transposeRowIndex.value = null;
     exitTransaction();
@@ -3726,7 +3747,7 @@ defineExpose({
               <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
                 <Info class="w-3.5 h-3.5 text-muted-foreground" />
                 <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t("grid.cellDetails") }}</span>
-                <Button variant="ghost" size="icon" class="h-5 w-5" @click="showCellDetail = false">
+                <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeCellDetails">
                   <X class="w-3 h-3" />
                 </Button>
               </div>
@@ -3785,9 +3806,20 @@ defineExpose({
                     </a>
                   </div>
                   <template v-if="isEditingDetail">
-                    <textarea
+                    <TemporalCellEditor
+                      v-if="detailTemporalEditorKind"
                       v-model="detailEditValue"
-                      class="w-full h-40 rounded border bg-background p-2 font-mono text-xs outline-none resize-y focus:border-primary"
+                      :kind="detailTemporalEditorKind"
+                      variant="inline"
+                      :commit-on-close="false"
+                      @cancel="cancelDetailEdit"
+                      @commit="commitDetailEdit"
+                    />
+                    <textarea
+                      v-else
+                      v-model="detailEditValue"
+                      wrap="off"
+                      class="w-full h-40 overflow-auto rounded border bg-background p-2 font-mono text-xs outline-none resize-y focus:border-primary"
                       @keydown.escape.stop="cancelDetailEdit"
                     />
                     <div class="flex gap-1 mt-1">
@@ -3801,7 +3833,7 @@ defineExpose({
                   </template>
                   <pre
                     v-else
-                    class="max-h-56 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
+                    class="max-h-56 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre cursor-pointer hover:border-primary/50"
                     :class="{ 'cursor-text': activeCellDetail.isEditable }"
                     @dblclick="startDetailEdit"
                     >{{ activeCellDetail.displayValue }}</pre
@@ -3814,12 +3846,22 @@ defineExpose({
                     >{{ activeCellDetail.rawValue }}</pre
                   >
                 </div>
-                <div v-if="activeCellDetail.formattedJson" class="space-y-1">
-                  <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
+                <div v-if="activeCellDetail.formattedJson" class="mt-2 space-y-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-6 px-2 text-xs"
+                      :title="t('grid.copyValue')"
+                      @click="copyDetailFormattedJson"
+                    >
+                      <Copy class="h-3 w-3" />
+                    </Button>
+                  </div>
                   <pre
                     class="max-h-72 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                  >
-        {{ activeCellDetail.formattedJson }}</pre
+                    >{{ activeCellDetail.formattedJson }}</pre
                   >
                 </div>
               </div>

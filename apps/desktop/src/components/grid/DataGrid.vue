@@ -2128,6 +2128,14 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (eventTargetAllowsNativeClipboard(event)) return;
+  if (event.key === "ArrowLeft" && moveTransposeRecordSelection(-1)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowRight" && moveTransposeRecordSelection(1)) {
+    event.preventDefault();
+    return;
+  }
   if (event.key === "ArrowUp" && moveSelectedCell(-1, 0)) {
     event.preventDefault();
     return;
@@ -2193,8 +2201,14 @@ function copyDetailSqlCondition() {
   copyText(condition);
 }
 
-const TRANSPOSE_RECORD_WIDTH = 168;
-const transposePinnedWidth = computed(() => transposeFieldWidth(visibleColumns.value));
+const TRANSPOSE_RECORD_DEFAULT_WIDTH = 168;
+const TRANSPOSE_RECORD_MIN_WIDTH = 96;
+const TRANSPOSE_PINNED_MIN_WIDTH = 104;
+const transposeRecordWidth = ref(TRANSPOSE_RECORD_DEFAULT_WIDTH);
+const transposePinnedWidthOverride = ref<number | null>(null);
+const transposePinnedWidth = computed(
+  () => transposePinnedWidthOverride.value ?? transposeFieldWidth(visibleColumns.value),
+);
 
 const transposeRows = computed(() => {
   return buildTransposeRows({
@@ -2211,7 +2225,7 @@ const transposeRecordWindow = computed(() =>
     scrollLeft: transposeScrollLeft.value,
     viewportWidth: transposeViewportWidth.value,
     pinnedWidth: transposePinnedWidth.value,
-    recordWidth: TRANSPOSE_RECORD_WIDTH,
+    recordWidth: transposeRecordWidth.value,
     overscan: 2,
   }),
 );
@@ -2220,7 +2234,7 @@ const visibleTransposeRecordIndexes = computed(() => {
   return Array.from({ length: window.end - window.start }, (_, offset) => window.start + offset);
 });
 const transposeTotalWidth = computed(
-  () => transposePinnedWidth.value + displayItems.value.length * TRANSPOSE_RECORD_WIDTH,
+  () => transposePinnedWidth.value + displayItems.value.length * transposeRecordWidth.value,
 );
 
 function transposeScrollElement(): HTMLElement | undefined {
@@ -2249,13 +2263,54 @@ function scrollTransposeRecordIntoView(rowIndex: number) {
       totalRecords: displayItems.value.length,
       viewportWidth: el.clientWidth,
       pinnedWidth: transposePinnedWidth.value,
-      recordWidth: TRANSPOSE_RECORD_WIDTH,
+      recordWidth: transposeRecordWidth.value,
     });
     updateTransposeViewport();
   });
 }
 
+function onTransposePinnedResizeStart(event: MouseEvent) {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = transposePinnedWidth.value;
+  const onMove = (e: MouseEvent) => {
+    transposePinnedWidthOverride.value = Math.max(TRANSPOSE_PINNED_MIN_WIDTH, startWidth + e.clientX - startX);
+    updateTransposeViewport();
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function onTransposeRecordResizeStart(event: MouseEvent) {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = transposeRecordWidth.value;
+  const onMove = (e: MouseEvent) => {
+    transposeRecordWidth.value = Math.max(TRANSPOSE_RECORD_MIN_WIDTH, startWidth + e.clientX - startX);
+    updateTransposeViewport();
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function closeTranspose() {
+  showTranspose.value = false;
+  transposeRowIndex.value = null;
+}
+
 function openContextTranspose() {
+  if (showTranspose.value) {
+    closeTranspose();
+    return;
+  }
   if (!contextCell.value) return;
   const next = nextContextTransposeState({
     showTranspose: showTranspose.value,
@@ -2285,13 +2340,23 @@ function toggleTranspose(rowIndex: number) {
   }
 }
 
+function selectTransposeRecord(rowIndex: number) {
+  if (rowIndex < 0 || rowIndex >= displayItems.value.length) return;
+  transposeRowIndex.value = rowIndex;
+  gridRef.value?.focus({ preventScroll: true });
+}
+
+function moveTransposeRecordSelection(delta: number): boolean {
+  if (!isTransposeMode.value || displayItems.value.length === 0) return false;
+  const current = transposeRowIndex.value ?? 0;
+  const next = Math.max(0, Math.min(displayItems.value.length - 1, current + delta));
+  transposeRowIndex.value = next;
+  scrollTransposeRecordIntoView(next);
+  return true;
+}
+
 function transposeNav(delta: number) {
-  if (transposeRowIndex.value === null) return;
-  const next = transposeRowIndex.value + delta;
-  if (next >= 0 && next < displayItems.value.length) {
-    transposeRowIndex.value = next;
-    scrollTransposeRecordIntoView(next);
-  }
+  moveTransposeRecordSelection(delta);
 }
 
 watch(isTransposeMode, (active) => {
@@ -2308,8 +2373,7 @@ watch(
     clearCellSelection();
     clearRowSelection();
     closeCellDetails();
-    showTranspose.value = false;
-    transposeRowIndex.value = null;
+    closeTranspose();
     exitTransaction();
   },
 );
@@ -2973,7 +3037,7 @@ defineExpose({
                   >
                     <ChevronRight class="w-3 h-3" />
                   </Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTranspose = false">
+                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeTranspose">
                     <X class="w-3 h-3" />
                   </Button>
                 </div>
@@ -2983,7 +3047,7 @@ defineExpose({
                   :style="{
                     '--transpose-total-w': `${transposeTotalWidth}px`,
                     '--transpose-field-w': `${transposePinnedWidth}px`,
-                    '--transpose-record-w': `${TRANSPOSE_RECORD_WIDTH}px`,
+                    '--transpose-record-w': `${transposeRecordWidth}px`,
                   }"
                   :items="transposeRows"
                   :item-size="30"
@@ -2997,24 +3061,33 @@ defineExpose({
                       :style="{ width: `${transposeTotalWidth}px` }"
                     >
                       <div
-                        class="sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 bg-[rgb(239_239_239)] truncate dark:bg-muted"
+                        class="sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 bg-[rgb(239_239_239)] truncate dark:bg-muted relative"
                         :style="{ width: `${transposePinnedWidth}px` }"
                       >
                         {{ t("grid.columnName") }}
+                        <div
+                          class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"
+                          @mousedown.stop="onTransposePinnedResizeStart"
+                        />
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeRecordWindow.beforeWidth}px` }" />
                       <div
                         v-for="recordIndex in visibleTransposeRecordIndexes"
                         :key="`transpose-head-${recordIndex}`"
-                        class="shrink-0 border-r border-border px-2 py-1.5 text-center tabular-nums"
+                        class="shrink-0 border-r border-border px-2 py-1.5 text-center tabular-nums relative"
                         :class="
                           recordIndex === transposeRowIndex
                             ? 'bg-primary/15 text-primary font-semibold'
                             : 'bg-[rgb(239_239_239)] dark:bg-muted'
                         "
-                        :style="{ width: `${TRANSPOSE_RECORD_WIDTH}px` }"
+                        :style="{ width: `${transposeRecordWidth}px` }"
+                        @click="selectTransposeRecord(recordIndex)"
                       >
                         {{ recordIndex + 1 }}
+                        <div
+                          class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"
+                          @mousedown.stop="onTransposeRecordResizeStart"
+                        />
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeRecordWindow.afterWidth}px` }" />
                     </div>
@@ -3040,8 +3113,9 @@ defineExpose({
                           'text-muted-foreground italic': item.values[recordIndex]?.isNull,
                           'bg-primary/10': recordIndex === transposeRowIndex,
                         }"
-                        :style="{ width: `${TRANSPOSE_RECORD_WIDTH}px` }"
+                        :style="{ width: `${transposeRecordWidth}px` }"
                         :title="item.values[recordIndex]?.display"
+                        @click="selectTransposeRecord(recordIndex)"
                       >
                         {{ item.values[recordIndex]?.display }}
                       </div>

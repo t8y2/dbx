@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.14"
+version = "0.5.15"
 dependencies = [
  "anyhow",
  "calamine",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.14"
+version = "0.5.15"
 dependencies = [
  "argon2",
  "async-stream",

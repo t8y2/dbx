@@ -1,6 +1,6 @@
 [package]
 name = "dbx-web"
-version = "0.5.14"
+version = "0.5.15"
 edition = "2021"
 
 [[bin]]

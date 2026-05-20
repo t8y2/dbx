@@ -27,6 +27,10 @@ function mdTable(headers: string[], rows: string[][]): string {
   return `${header}\n${sep}\n${body}`;
 }
 
+function withDatabase(config: ConnectionConfig, database?: string): ConnectionConfig {
+  return database === undefined ? config : { ...config, database };
+}
+
 export const DBX_CONNECTION_TYPE_DESCRIPTION =
   "Database type: postgres, mysql, sqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, doris, starrocks, redshift, dameng, kingbase, highgo, vastbase, goldendb, gaussdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, gbase, h2, snowflake, trino, hive, db2, informix, neo4j, cassandra, bigquery, kylin, sundb, tdengine, jdbc, access";
 
@@ -49,12 +53,13 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
   "List tables and views for a database connection",
   {
     connection_name: z.string().describe("Name of the DBX connection"),
+    database: z.string().optional().describe("Database name"),
     schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
   },
-  async ({ connection_name, schema }) => {
+  async ({ connection_name, database, schema }) => {
     const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
-    const tables = await backend.listTables(config, schema);
+    const tables = await backend.listTables(withDatabase(config, database), schema);
     if (tables.length === 0) return text("No tables found.");
     const rows = tables.map((t) => [t.name, t.type]);
     return text(mdTable(["Table", "Type"], rows));
@@ -67,12 +72,13 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
   {
     connection_name: z.string().describe("Name of the DBX connection"),
     table: z.string().describe("Table name"),
+    database: z.string().optional().describe("Database name"),
     schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
   },
-  async ({ connection_name, table, schema }) => {
+  async ({ connection_name, table, database, schema }) => {
     const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
-    const columns = await backend.describeTable(config, table, schema);
+    const columns = await backend.describeTable(withDatabase(config, database), table, schema);
     if (columns.length === 0) return text("No columns found.");
     const rows = columns.map((c) => [
       c.is_primary_key ? `${c.name} (PK)` : c.name,
@@ -90,15 +96,16 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
   "Execute a SQL query on a database connection (max 100 rows returned)",
   {
     connection_name: z.string().describe("Name of the DBX connection"),
+    database: z.string().optional().describe("Database name"),
     sql: z.string().describe("SQL query to execute"),
   },
-  async ({ connection_name, sql }) => {
+  async ({ connection_name, database, sql }) => {
     const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
     const safety = evaluateSqlSafety(sql, sqlSafetyFromEnv());
     if (!safety.allowed) return text(`Query blocked: ${safety.reason}`);
     try {
-      const result = await backend.executeQuery(config, sql);
+      const result = await backend.executeQuery(withDatabase(config, database), sql);
       if (result.columns.length === 0) return text(`Query executed. ${result.row_count} row(s) affected.`);
       const rows = result.rows.map((r) => result.columns.map((c) => formatCell(r[c])));
       return text(`${mdTable(result.columns, rows)}\n\n${result.row_count} row(s)`);
@@ -114,14 +121,15 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
   "Get compact table and column context for writing SQL",
   {
     connection_name: z.string().describe("Name of the DBX connection"),
+    database: z.string().optional().describe("Database name"),
     schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
     tables: z.array(z.string()).optional().describe("Specific table names to include"),
     max_tables: z.number().int().min(1).max(20).default(8).describe("Maximum number of tables to include"),
   },
-  async ({ connection_name, schema, tables, max_tables }) => {
+  async ({ connection_name, database, schema, tables, max_tables }) => {
     const config = await backend.findConnection(connection_name);
     if (!config) return text(`Connection "${connection_name}" not found`);
-    const context = await buildSchemaContext(backend, config, { schema, tables, maxTables: max_tables });
+    const context = await buildSchemaContext(backend, withDatabase(config, database), { schema, tables, maxTables: max_tables });
     if (context.tables.length === 0) return text("No matching tables found.");
     return text(formatSchemaContext(context));
   },

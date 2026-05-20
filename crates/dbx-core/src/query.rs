@@ -1016,7 +1016,7 @@ async fn exec_tx_explicit_inner(
     }
     drop(conns);
 
-    do_execute(state, pool_key, None, "BEGIN", schema, None, QueryExecutionOptions::default())
+    do_execute(state, pool_key, None, "BEGIN TRANSACTION", schema, None, QueryExecutionOptions::default())
         .await
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
 

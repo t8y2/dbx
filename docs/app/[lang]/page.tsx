@@ -54,13 +54,13 @@ function metrics(starLabel: string) {
   return {
     en: [
     { value: '~15 MB', label: 'desktop installer' },
-    { value: '25+', label: 'database engines' },
+    { value: '40+', label: 'database engines' },
     { value: '2 modes', label: 'desktop and Docker' },
       { value: starLabel, label: 'GitHub stars, fully open-source' },
     ],
     cn: [
     { value: '~15 MB', label: '桌面安装包' },
-    { value: '25+', label: '数据库引擎' },
+    { value: '40+', label: '数据库引擎' },
     { value: '2 种模式', label: '桌面与 Docker' },
       { value: starLabel, label: 'GitHub Star，完全开源' },
     ],

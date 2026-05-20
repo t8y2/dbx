@@ -1,5 +1,5 @@
 <div align="center">
-  <h2>15 MB 驾驭 30+ 种数据库。桌面端 & Docker 自托管，内置 AI 助手。</h2>
+  <h2>15 MB 驾驭 40+ 种数据库。桌面端 & Docker 自托管，内置 AI 助手。</h2>
 
   <p>
     <img src="https://dl.dbxio.com/assets/readme-hero-20260517.png" alt="DBX 截图" width="820" />
@@ -55,7 +55,7 @@
 
 ## 功能特性
 
-### 30+ 种数据库，一个工具搞定
+### 40+ 种数据库，一个工具搞定
 
 MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、CockroachDB、Access、HighGo 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 和自定义 JDBC。全部装进约 15 MB 的应用里，不内嵌 Chromium。
 

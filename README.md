@@ -1,5 +1,5 @@
 <div align="center">
-  <h2>30+ databases in 15 MB. Desktop & Docker self-hosting, with built-in AI assistant.</h2>
+  <h2>40+ databases in 15 MB. Desktop & Docker self-hosting, with built-in AI assistant.</h2>
 
   <p>
     <img src="https://dl.dbxio.com/assets/readme-hero-20260517.png" alt="DBX screenshot" width="820" />
@@ -55,7 +55,7 @@
 
 ## Features
 
-### 30+ Databases, One Tool
+### 40+ Databases, One Tool
 
 MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Redshift, DM, TDengine, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend DBX to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, and custom JDBC connections. All in a single ~15 MB app. No bundled Chromium.
 

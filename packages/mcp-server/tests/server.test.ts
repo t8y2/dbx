@@ -33,3 +33,23 @@ test("creates an MCP server without starting stdio transport", () => {
 
   assert.equal(typeof server.connect, "function");
 });
+
+test("execute query scopes the connection to the requested database", async () => {
+  let usedDatabase = "";
+  const scopedBackend: Backend = {
+    ...backend,
+    executeQuery: async (config) => {
+      usedDatabase = config.database || "";
+      return { columns: ["total"], rows: [{ total: 1 }], row_count: 1 };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "local",
+    database: "stores_demo",
+    sql: "SELECT FIRST 1 tabname FROM systables",
+  });
+
+  assert.equal(usedDatabase, "stores_demo");
+});

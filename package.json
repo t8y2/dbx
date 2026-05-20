@@ -1,7 +1,7 @@
 {
   "name": "dbx",
   "private": true,
-  "version": "0.5.14",
+  "version": "0.5.15",
   "type": "module",
   "packageManager": "pnpm@10.27.0",
   "engines": {

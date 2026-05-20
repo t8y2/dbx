@@ -187,11 +187,15 @@ impl ConnectionConfig {
                 _ => Some("postgres"),
             },
             DatabaseType::Redshift => Some("dev"),
+            DatabaseType::ClickHouse => Some("default"),
             DatabaseType::Gaussdb | DatabaseType::OpenGauss => Some("postgres"),
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Firebird => Some("employee"),
+            DatabaseType::H2 => Some("test"),
+            DatabaseType::Informix => Some("sysmaster"),
+            DatabaseType::Neo4j => Some("neo4j"),
             _ => None,
         }
     }
@@ -801,6 +805,45 @@ mod tests {
         assert_eq!(canonical.driver_profile.as_deref(), Some("tdengine"));
         assert_eq!(canonical.driver_label.as_deref(), Some("TDengine"));
         assert!(!canonical.needs_bare_mysql());
+    }
+
+    #[test]
+    fn informix_empty_database_uses_sysmaster_for_connection() {
+        let mut config = mysql_config("informix", "in4mix", None);
+        config.db_type = DatabaseType::Informix;
+        config.port = 9088;
+
+        assert_eq!(config.effective_database(), Some("sysmaster"));
+        assert_eq!(config.connection_url(), "informix://informix:in4mix@10.1.2.3:9088/sysmaster");
+    }
+
+    #[test]
+    fn h2_empty_database_uses_test_for_connection() {
+        let mut config = mysql_config("sa", "", None);
+        config.db_type = DatabaseType::H2;
+        config.port = 9092;
+
+        assert_eq!(config.effective_database(), Some("test"));
+        assert_eq!(config.connection_url(), "h2://sa:@10.1.2.3:9092/test");
+    }
+
+    #[test]
+    fn neo4j_empty_database_uses_neo4j_for_connection() {
+        let mut config = mysql_config("neo4j", "secret", None);
+        config.db_type = DatabaseType::Neo4j;
+        config.port = 7687;
+
+        assert_eq!(config.effective_database(), Some("neo4j"));
+        assert_eq!(config.connection_url(), "neo4j://neo4j:secret@10.1.2.3:7687/neo4j");
+    }
+
+    #[test]
+    fn clickhouse_empty_database_uses_default() {
+        let mut config = mysql_config("default", "", None);
+        config.db_type = DatabaseType::ClickHouse;
+        config.port = 8123;
+
+        assert_eq!(config.effective_database(), Some("default"));
     }
 
     #[test]

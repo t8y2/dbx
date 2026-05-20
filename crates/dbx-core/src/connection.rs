@@ -1,3 +1,4 @@
+use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -499,6 +500,11 @@ pub fn redacted_connection_url_for_endpoint(config: &ConnectionConfig, host: &st
 }
 
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
+    let agent_database = if config.db_type == DatabaseType::MongoDb {
+        mongo_agent_database(config, database)
+    } else {
+        database.to_string()
+    };
     let connection_string = if config.db_type == DatabaseType::MongoDb {
         config.connection_url_with_host(host, port)
     } else if config.db_type == DatabaseType::Oracle {
@@ -510,12 +516,40 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
     serde_json::json!({
         "host": host,
         "port": port,
-        "database": database,
+        "database": agent_database,
         "username": config.username,
         "password": config.password,
         "url_params": config.url_params.as_deref().unwrap_or(""),
         "connection_string": connection_string,
     })
+}
+
+fn mongo_agent_database(config: &ConnectionConfig, database: &str) -> String {
+    if let Some(database) = non_empty_database(database) {
+        return database.to_string();
+    }
+    if let Some(database) = config.database.as_deref().and_then(non_empty_database) {
+        return database.to_string();
+    }
+    if let Some(database) = config.connection_string.as_deref().and_then(mongo_uri_database) {
+        return database;
+    }
+    "admin".to_string()
+}
+
+fn non_empty_database(database: &str) -> Option<&str> {
+    let database = database.trim();
+    (!database.is_empty()).then_some(database)
+}
+
+fn mongo_uri_database(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("mongodb://").or_else(|| uri.strip_prefix("mongodb+srv://"))?;
+    let (_, after_hosts) = rest.split_once('/')?;
+    let database = after_hosts.split(['?', '#']).next()?.trim();
+    if database.is_empty() {
+        return None;
+    }
+    Some(percent_decode_str(database).decode_utf8_lossy().into_owned())
 }
 
 pub fn mongo_legacy_error_with_auth_hint(err: &str) -> String {
@@ -688,6 +722,18 @@ mod tests {
         let params = agent_connect_params(&config, "172.22.4.42", 27017, "RestCloud_V45PUB_Gateway");
 
         assert_eq!(params["connection_string"], "mongodb://mongouser:secret@172.22.4.42:27017/RestCloud%5FV45PUB%5FGateway?authSource=admin&authMechanism=SCRAM-SHA-1");
+    }
+
+    #[test]
+    fn agent_connect_params_mongodb_uses_connection_string_database_when_database_is_empty() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::MongoDb;
+        config.connection_string =
+            Some("mongodb://mongouser:secret@172.22.4.42:27017/RestCloud_V45PUB_Gateway?authSource=admin".to_string());
+
+        let params = agent_connect_params(&config, "172.22.4.42", 27017, "");
+
+        assert_eq!(params["database"], "RestCloud_V45PUB_Gateway");
     }
 
     #[test]

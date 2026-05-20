@@ -103,7 +103,7 @@ export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft 
     password: optionalParam(params, "password") ?? draft.password,
     database: optionalParam(params, "database") ?? draft.database,
     urlParams: optionalParam(params, "url_params") ?? draft.urlParams,
-    ssl: optionalParam(params, "ssl") === "true" ? true : draft.ssl,
+    ssl: optionalBooleanParam(params, "ssl") ? true : draft.ssl,
     ...(oneTime ? { oneTime: true } : {}),
   };
 }

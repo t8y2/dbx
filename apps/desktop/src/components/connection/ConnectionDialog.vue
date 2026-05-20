@@ -681,11 +681,32 @@ function resetForm() {
   resetTestState();
 }
 
-const autoSubmittedPrefill = ref<ConnectionDeepLinkDraft | null>(null);
+const submittedOneTimePrefillKey = ref<string | null>(null);
+
+function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
+  return JSON.stringify([
+    draft.name,
+    draft.dbType,
+    draft.driverProfile,
+    draft.driverLabel,
+    draft.host,
+    draft.port,
+    draft.username,
+    draft.password,
+    draft.database,
+    draft.urlParams,
+    draft.ssl,
+    draft.connectionString,
+    draft.oracleConnectionType,
+    draft.useMongoUrl,
+  ]);
+}
 
 function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
-  if (!draft.oneTime || autoSubmittedPrefill.value === draft) return;
-  autoSubmittedPrefill.value = draft;
+  if (!draft.oneTime) return;
+  const key = oneTimePrefillKey(draft);
+  if (submittedOneTimePrefillKey.value === key) return;
+  submittedOneTimePrefillKey.value = key;
   void nextTick(() => save());
 }
 
@@ -726,6 +747,7 @@ watch(
   open,
   (value) => {
     if (!value) {
+      submittedOneTimePrefillKey.value = null;
       resetForm();
       return;
     }

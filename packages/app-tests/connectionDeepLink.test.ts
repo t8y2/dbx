@@ -45,9 +45,10 @@ test("allows password query field to override database URL password", () => {
   assert.equal(draft?.password, "override");
 });
 
-test("parses one-time connection control parameter", () => {
-  const draft = parseConnectionDeepLink("dbx://connection/new?type=mysql&one_time=true");
+test("parses boolean control parameters consistently", () => {
+  const draft = parseConnectionDeepLink("dbx://connection/new?type=mysql&ssl=1&one_time=yes");
 
+  assert.equal(draft?.ssl, true);
   assert.equal(draft?.oneTime, true);
 });
 

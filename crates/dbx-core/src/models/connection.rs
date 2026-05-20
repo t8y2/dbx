@@ -68,6 +68,8 @@ pub struct ConnectionConfig {
     pub jdbc_driver_class: Option<String>,
     #[serde(default)]
     pub jdbc_driver_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub one_time: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,6 +88,10 @@ pub fn default_ssh_connect_timeout_secs() -> u64 {
 
 fn default_proxy_port() -> u16 {
     1080
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -671,6 +677,7 @@ mod tests {
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
+            one_time: false,
         }
     }
 

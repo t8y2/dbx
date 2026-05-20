@@ -112,6 +112,10 @@ export async function pendingOpenSqlFiles(): Promise<string[]> {
   return invoke("pending_open_sql_files");
 }
 
+export async function pendingOpenConnectionLinks(): Promise<string[]> {
+  return invoke("pending_open_connection_links");
+}
+
 export async function readExternalSqlFile(path: string): Promise<string> {
   return invoke("read_external_sql_file", { path });
 }

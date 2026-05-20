@@ -21,9 +21,11 @@ const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/sea
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDialogSources } from "@/composables/useDialogSources";
+import type { ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 
 const props = defineProps<{
   showConnectionDialog: boolean;
+  connectionPrefill?: ConnectionDeepLinkDraft | null;
   showSettingsDialog: boolean;
   settingsInitialTab?: string;
   appVersion?: string;
@@ -99,6 +101,7 @@ watch(
     v-if="shouldShowConnectionDialog"
     :open="shouldShowConnectionDialog"
     :edit-config="editConfig"
+    :prefill-config="connectionPrefill"
     @update:open="emit('update:showConnectionDialog', $event)"
     @connect-started="emit('connectStarted', $event)"
     @connect-succeeded="emit('connectSucceeded', $event)"

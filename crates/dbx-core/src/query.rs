@@ -1276,6 +1276,7 @@ mod tests {
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
+            one_time: false,
         };
 
         let params = external_driver_query_params(&config, "SELECT * FROM events", "analytics", Some("app"));

@@ -689,6 +689,7 @@ mod tests {
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
+            one_time: false,
         }
     }
 

@@ -33,6 +33,7 @@ import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } 
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { sqlFileTitleFromPath } from "@/lib/sqlFileOpen";
+import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import {
   isCloseTabShortcut,
   isExecuteSqlShortcut,
@@ -95,6 +96,7 @@ const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
 
 const showConnectionDialog = ref(false);
+const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
 const showSettingsDialog = ref(false);
 const showDriverStore = ref(false);
 const agentDriverUpdateCount = ref(0);
@@ -178,7 +180,11 @@ const { getDatabaseOptions } = useDatabaseOptions();
 const { openLineageTarget, openDatabaseSearchTarget, onStructureEditorSaved, openTableTarget } =
   useNavigationTargets(dialogs);
 const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
-const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({ openTableTarget, openSqlFilePath });
+const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
+  openTableTarget,
+  openSqlFilePath,
+  openConnectionDeepLink,
+});
 
 const appVersion = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -394,6 +400,36 @@ async function openPendingSqlFiles() {
   } catch {
     /* ignore startup file-open probing errors */
   }
+}
+
+async function openConnectionDeepLink(url: string) {
+  try {
+    const draft = parseConnectionDeepLink(url);
+    if (!draft) return;
+    connectionStore.stopEditing();
+    connectionStore.stopCreatingConnectionInGroup();
+    connectionDialogPrefill.value = draft;
+    showConnectionDialog.value = true;
+  } catch (e: any) {
+    toast(t("connection.parseConnectionUrlFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function openPendingConnectionLinks() {
+  if (!isTauriRuntime()) return;
+  try {
+    const links = await api.pendingOpenConnectionLinks();
+    for (const link of links) {
+      await openConnectionDeepLink(link);
+    }
+  } catch {
+    /* ignore startup deep-link probing errors */
+  }
+}
+
+function setConnectionDialogOpen(value: boolean) {
+  showConnectionDialog.value = value;
+  if (!value) connectionDialogPrefill.value = null;
 }
 
 async function newQuery() {
@@ -686,6 +722,7 @@ onMounted(async () => {
     .catch(() => {});
   setupTauriListeners();
   void openPendingSqlFiles();
+  void openPendingConnectionLinks();
   console.log(`[STARTUP] onMounted sync done: ${(performance.now() - mountStart).toFixed(0)}ms`);
 });
 
@@ -899,11 +936,12 @@ onUnmounted(() => {
 
         <AppDialogs
           :show-connection-dialog="showConnectionDialog"
+          :connection-prefill="connectionDialogPrefill"
           :show-settings-dialog="showSettingsDialog"
           :app-version="appVersion"
           :show-danger-dialog="showDangerDialog"
           :danger-sql="dangerSql"
-          @update:show-connection-dialog="showConnectionDialog = $event"
+          @update:show-connection-dialog="setConnectionDialogOpen"
           @update:show-settings-dialog="showSettingsDialog = $event"
           @update:show-danger-dialog="showDangerDialog = $event"
           @danger-confirm="onDangerConfirm"
@@ -913,7 +951,7 @@ onUnmounted(() => {
             (msg: string) => toast(t('connection.connectFailed', { message: translateBackendError(t, msg) }), 5000)
           "
           @open-driver-store="
-            showConnectionDialog = false;
+            setConnectionDialogOpen(false);
             showDriverStore = true;
           "
           @structure-editor-saved="onStructureEditorSaved(onReloadData, toast)"

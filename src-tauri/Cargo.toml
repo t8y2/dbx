@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2.7.0"
 tauri-plugin-fs = "2.5.0"
 tauri-plugin-single-instance = "2.4.2"

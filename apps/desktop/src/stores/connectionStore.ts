@@ -601,6 +601,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function disconnect(connectionId: string) {
+    const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
     await api.disconnectDb(connectionId);
     connectedIds.value.delete(connectionId);
     const node = treeNodes.value.find((n) => n.connectionId === connectionId);
@@ -613,6 +614,9 @@ export const useConnectionStore = defineStore("connection", () => {
       activeConnectionId.value = null;
     }
     invalidateCompletionCache(connectionId);
+    if (shouldRemoveOneTimeConnection) {
+      await removeConnection(connectionId);
+    }
   }
 
   async function ensureConnected(connectionId: string) {

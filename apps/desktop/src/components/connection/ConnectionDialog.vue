@@ -16,6 +16,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { applyParsedConnectionUrl, parseConnectionUrl } from "@/lib/connectionUrl";
+import type { ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connectionPresentation";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
@@ -45,6 +46,7 @@ const isDesktop = isTauriRuntime();
 
 const props = defineProps<{
   editConfig?: ConnectionConfig;
+  prefillConfig?: ConnectionDeepLinkDraft | null;
 }>();
 
 const emit = defineEmits<{
@@ -612,6 +614,7 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   config.ssh_connect_timeout_secs = Number.isFinite(sshTimeout) && sshTimeout > 0 ? sshTimeout : 5;
   const proxyPort = Number(config.proxy_port);
   config.proxy_port = Number.isFinite(proxyPort) && proxyPort > 0 ? proxyPort : 1080;
+  if (!config.one_time) config.one_time = undefined;
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
     config.connection_string = undefined;
   }
@@ -678,6 +681,47 @@ function resetForm() {
   resetTestState();
 }
 
+const autoSubmittedPrefill = ref<ConnectionDeepLinkDraft | null>(null);
+
+function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
+  if (!draft.oneTime || autoSubmittedPrefill.value === draft) return;
+  autoSubmittedPrefill.value = draft;
+  void nextTick(() => save());
+}
+
+function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
+  resetForm();
+  applyProfile(draft.driverProfile);
+  form.value = {
+    ...form.value,
+    db_type: draft.dbType,
+    driver_profile: draft.driverProfile,
+    driver_label: draft.driverLabel,
+    host: draft.host ?? form.value.host,
+    port: draft.port ?? form.value.port,
+    username: draft.username ?? form.value.username,
+    password: draft.password ?? form.value.password,
+    database: draft.database ?? form.value.database,
+    url_params: draft.urlParams ?? form.value.url_params,
+    ssl: draft.ssl ?? form.value.ssl,
+    connection_string: draft.connectionString ?? form.value.connection_string,
+    oracle_connection_type: draft.oracleConnectionType ?? form.value.oracle_connection_type,
+    one_time: draft.oneTime || undefined,
+  };
+  selectedType.value = draft.driverProfile;
+  customDriverName.value = isCustomCompatibleProfile() ? draft.driverLabel : "";
+  mongoUseUrl.value = !!draft.useMongoUrl;
+  if (draft.name?.trim()) {
+    form.value.name = draft.name.trim();
+  } else if (!form.value.name.trim()) {
+    form.value.name = draft.database || draft.host || draft.driverLabel;
+  }
+  dialogStep.value = "config";
+  configTab.value = "connection";
+  resetTestState();
+  submitOneTimePrefill(draft);
+}
+
 watch(
   open,
   (value) => {
@@ -687,11 +731,21 @@ watch(
     }
     if (!props.editConfig) {
       resetForm();
+      if (props.prefillConfig) applyConnectionPrefill(props.prefillConfig);
     }
-    void loadJdbcDrivers();
-    void loadAgentDrivers();
+    if (!props.prefillConfig?.oneTime) {
+      void loadJdbcDrivers();
+      void loadAgentDrivers();
+    }
   },
   { immediate: true },
+);
+
+watch(
+  () => props.prefillConfig,
+  (draft) => {
+    if (open.value && draft && !props.editConfig) applyConnectionPrefill(draft);
+  },
 );
 
 watch(canUseSsh, (value) => {
@@ -731,6 +785,7 @@ async function save() {
           emit("connectSucceeded", config.name);
         })
         .catch((e: any) => {
+          if (config.one_time) void store.removeConnection(config.id);
           emit("connectFailed", mongodbAuthFailureHint(String(e?.message || e)));
         });
       return;

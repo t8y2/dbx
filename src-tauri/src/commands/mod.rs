@@ -4,6 +4,7 @@ pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
 pub mod database_export;
+pub mod deep_link;
 pub mod external_sql;
 pub mod history;
 pub mod mcp_bridge;

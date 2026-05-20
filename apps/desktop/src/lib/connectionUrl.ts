@@ -16,7 +16,7 @@ export interface ParsedConnectionUrl {
   useMongoUrl?: boolean;
 }
 
-type ConnectionProfile = {
+export type ConnectionProfile = {
   type: DatabaseType;
   profile: string;
   label: string;
@@ -66,7 +66,7 @@ function databaseFromPath(pathname: string): string | undefined {
   return decodeUrlPart(value.split("/")[0]);
 }
 
-function profileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
+export function connectionProfileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
   if ((scheme === "http" || scheme === "https") && preferredProfile) {
     return HTTP_SELECTED_PROFILES[preferredProfile];
   }
@@ -193,7 +193,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
 
   const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
-  const profile = profileForScheme(scheme, preferredProfile);
+  const profile = connectionProfileForScheme(scheme, preferredProfile);
   if (!profile) {
     throw new Error(`Unsupported connection URL scheme: ${scheme}`);
   }

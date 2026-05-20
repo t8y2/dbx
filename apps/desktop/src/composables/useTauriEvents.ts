@@ -5,10 +5,19 @@ import type { NavigationTarget } from "@/composables/useNavigationTargets";
 export function useTauriEvents(deps: {
   openTableTarget: (target: NavigationTarget) => Promise<void>;
   openSqlFilePath: (path: string) => Promise<void>;
+  openConnectionDeepLink: (url: string) => Promise<void>;
 }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const unlistenHandles: Array<() => void> = [];
+
+  function focusCurrentWindow() {
+    void import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+      getCurrentWindow()
+        .setFocus()
+        .catch(() => {}),
+    );
+  }
 
   function setupTauriListeners() {
     import("@tauri-apps/api/event")
@@ -30,11 +39,7 @@ export function useTauriEvents(deps: {
               } else {
                 deps.openTableTarget({ connectionId: connection_id, database, schema, tableName: table });
               }
-              import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
-                getCurrentWindow()
-                  .setFocus()
-                  .catch(() => {}),
-              );
+              focusCurrentWindow();
             } catch (e) {
               console.error("[DBX] mcp-open-table error:", e);
             }
@@ -60,11 +65,7 @@ export function useTauriEvents(deps: {
             const tabId = queryStore.createTab(connection_id, database, undefined, "query");
             queryStore.updateSql(tabId, sql);
             await queryStore.executeTabSql(tabId, sql);
-            import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
-              getCurrentWindow()
-                .setFocus()
-                .catch(() => {}),
-            );
+            focusCurrentWindow();
           } catch (e) {
             console.error("[DBX] mcp-execute-query error:", e);
           }
@@ -75,13 +76,20 @@ export function useTauriEvents(deps: {
             for (const path of event.payload) {
               await deps.openSqlFilePath(path);
             }
-            import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
-              getCurrentWindow()
-                .setFocus()
-                .catch(() => {}),
-            );
+            focusCurrentWindow();
           } catch (e) {
             console.error("[DBX] dbx-open-sql-files error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen<string[]>("dbx-open-connection-links", async (event) => {
+          try {
+            for (const url of event.payload) {
+              await deps.openConnectionDeepLink(url);
+            }
+            focusCurrentWindow();
+          } catch (e) {
+            console.error("[DBX] dbx-open-connection-links error:", e);
           }
         }).then((unlisten) => unlistenHandles.push(unlisten));
       })

@@ -84,11 +84,8 @@ pub fn run() {
                     state.push(paths.clone());
                 }
                 let _ = app.emit("dbx-open-sql-files", paths);
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
             }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

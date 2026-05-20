@@ -130,6 +130,48 @@ CLI JSON errors use stable codes:
 | `DBX_NOT_RUNNING` | DBX Desktop bridge is unavailable |
 | `ERROR` | Unexpected runtime failure |
 
+## Desktop Deep Links
+
+DBX Desktop supports `dbx://connection/new` links for opening the new connection dialog from browsers, bastion hosts, or scripts with connection fields prefilled.
+
+DSN mode:
+
+```bash
+open 'dbx://connection/new?url=postgres%3A%2F%2Fapp%3Asecret%40db.internal%3A5432%2Forders'
+```
+
+Field mode:
+
+```bash
+open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&password=secret&database=test'
+```
+
+Supported fields:
+
+| Field | Meaning |
+|---|---|
+| `type` | Database type, such as `mysql`, `postgres`, `redis`, or `mongodb` |
+| `url` | Database DSN; URL encoding is recommended |
+| `name` | Display name in DBX; when omitted, DBX uses `database`, then `host` |
+| `host` | Hostname or IP address |
+| `port` | Port |
+| `user` | Username |
+| `password` | Password |
+| `database` | Database name; for Redis this can be a DB index such as `0` |
+| `url_params` | Extra connection parameters, such as `sslmode=require` |
+| `ssl` | Enable SSL when set to `true` |
+| `one_time` | Automatically connect when set to `true`, then delete the connection after disconnecting |
+
+One-time connection example:
+
+```bash
+open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
+```
+
+<Callout type="info">
+Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://connection/new?...'` to test it.
+</Callout>
+
 ## Codex
 
 Codex can call the CLI directly from shell tools:

@@ -130,6 +130,48 @@ CLI JSON 错误使用稳定错误码：
 | `DBX_NOT_RUNNING` | DBX 桌面端 bridge 不可用 |
 | `ERROR` | 未预期的运行时错误 |
 
+## 桌面端 Deep Link
+
+DBX 桌面端支持通过 `dbx://connection/new` 从浏览器、堡垒机或脚本打开新建连接窗口并预填连接信息。
+
+DSN 模式：
+
+```bash
+open 'dbx://connection/new?url=postgres%3A%2F%2Fapp%3Asecret%40db.internal%3A5432%2Forders'
+```
+
+字段模式：
+
+```bash
+open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&password=secret&database=test'
+```
+
+支持的字段：
+
+| 字段 | 含义 |
+|---|---|
+| `type` | 数据库类型，例如 `mysql`、`postgres`、`redis`、`mongodb` |
+| `url` | 数据库 DSN，建议 URL encode |
+| `name` | DBX 中显示的连接名；未传时优先使用 `database`，其次使用 `host` |
+| `host` | 主机地址 |
+| `port` | 端口 |
+| `user` | 用户名 |
+| `password` | 密码 |
+| `database` | 数据库名；Redis 可传 DB index，例如 `0` |
+| `url_params` | 额外连接参数，例如 `sslmode=require` |
+| `ssl` | 是否启用 SSL，`true` 表示启用 |
+| `one_time` | `true` 时自动连接，断开后自动删除连接信息 |
+
+一次性连接示例：
+
+```bash
+open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
+```
+
+<Callout type="info">
+测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://connection/new?...'` 测试。
+</Callout>
+
 ## Codex
 
 Codex 可以直接通过 shell 调用 CLI：

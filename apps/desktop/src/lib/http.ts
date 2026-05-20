@@ -178,6 +178,14 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   await post("/api/agents/invalidate-registry-cache", {});
 }
 
+export async function importAgentsFromZip(_path: string): Promise<number> {
+  throw new Error("Offline ZIP import is only available in the desktop app");
+}
+
+export async function importAgentJar(_dbType: string, _path: string): Promise<void> {
+  throw new Error("Local JAR import is only available in the desktop app");
+}
+
 export async function reinstallJre(jreKey?: string): Promise<void> {
   await post("/api/agents/reinstall-jre", { jreKey });
 }

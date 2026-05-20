@@ -249,7 +249,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
     let status = resp.status().as_u16();
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
 
-    if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
+    if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()).filter(|h| !h.is_empty()) {
         let mut all_keys = Vec::<String>::new();
         let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
             .iter()
@@ -298,6 +298,31 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
             session_id: None,
             has_more: false,
         })
+    } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
+        let (columns, rows) = parse_aggregations(aggs);
+        if !columns.is_empty() {
+            let row_count = rows.len() as u64;
+            Ok(crate::types::QueryResult {
+                columns,
+                rows,
+                affected_rows: row_count,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        } else {
+            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+            Ok(crate::types::QueryResult {
+                columns: vec!["status".to_string(), "response".to_string()],
+                rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        }
     } else {
         let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         Ok(crate::types::QueryResult {
@@ -310,4 +335,77 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
             has_more: false,
         })
     }
+}
+
+fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec<String>, Vec<Vec<serde_json::Value>>) {
+    for (_name, agg_value) in aggs {
+        if let Some(buckets) = agg_value.get("buckets").and_then(|b| b.as_array()) {
+            if buckets.is_empty() {
+                continue;
+            }
+            let mut all_keys = Vec::<String>::new();
+            let mut bucket_rows = Vec::new();
+
+            for bucket in buckets {
+                if let Some(obj) = bucket.as_object() {
+                    let mut row = serde_json::Map::new();
+                    for (k, v) in obj {
+                        if let Some(sub) = v.as_object() {
+                            if let Some(val) = sub.get("value") {
+                                row.insert(k.clone(), val.clone());
+                            } else {
+                                row.insert(k.clone(), serde_json::Value::String(v.to_string()));
+                            }
+                        } else {
+                            row.insert(k.clone(), v.clone());
+                        }
+                    }
+                    for key in row.keys() {
+                        if !all_keys.contains(key) {
+                            all_keys.push(key.clone());
+                        }
+                    }
+                    bucket_rows.push(row);
+                }
+            }
+
+            let rows = bucket_rows
+                .iter()
+                .map(|br| {
+                    all_keys
+                        .iter()
+                        .map(|k| {
+                            br.get(k)
+                                .map(|v| match v {
+                                    serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
+                                    other => serde_json::Value::String(other.to_string()),
+                                })
+                                .unwrap_or(serde_json::Value::Null)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            return (all_keys, rows);
+        }
+    }
+
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+    for (name, agg_value) in aggs {
+        if let Some(obj) = agg_value.as_object() {
+            if let Some(val) = obj.get("value") {
+                columns.push(name.clone());
+                values.push(match val {
+                    serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
+                    other => serde_json::Value::String(other.to_string()),
+                });
+            }
+        }
+    }
+    if !columns.is_empty() {
+        return (columns, vec![values]);
+    }
+
+    (Vec::new(), Vec::new())
 }

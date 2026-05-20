@@ -1,4 +1,4 @@
-use super::file_validator::validate_file_path;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -13,13 +13,37 @@ use std::sync::Mutex;
 pub fn connect_path(path: &str) -> Result<Arc<Mutex<duckdb::Connection>>, String> {
     let is_memory = is_memory_database_path(path);
     if !is_memory {
-        validate_file_path(path, is_network_path)?;
+        validate_duckdb_path(path)?;
     }
 
     let connection = if is_memory { duckdb::Connection::open_in_memory() } else { duckdb::Connection::open(path) }
         .map_err(|e| format!("DuckDb connection failed: {e}"))?;
 
     Ok(Arc::new(Mutex::new(connection)))
+}
+
+fn validate_duckdb_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Database file path cannot be empty".to_string());
+    }
+    if path.contains('\0') {
+        return Err("Database file path contains null characters".to_string());
+    }
+    if is_network_path(path) {
+        return Ok(());
+    }
+    let path_obj = Path::new(path);
+    if path_obj.is_dir() {
+        return Err(format!("Database file path is a directory, not a file: {}", path));
+    }
+    if !path_obj.exists() {
+        if let Some(parent) = path_obj.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(format!("Parent directory does not exist: {}", parent.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_network_path(path: &str) -> bool {

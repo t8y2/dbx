@@ -29,13 +29,89 @@ pub fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryRe
     duckdb_execute_with_max_rows(con, sql, None)
 }
 
-fn duckdb_temporal_value_to_json(row: &duckdb::Row<'_>, idx: usize) -> Option<serde_json::Value> {
-    match row.get_ref(idx).ok()? {
-        ValueRef::Null => Some(serde_json::Value::Null),
-        ValueRef::Date32(days) => duckdb_date32_to_string(days).map(serde_json::Value::String),
-        ValueRef::Time64(unit, value) => duckdb_time64_to_string(unit, value).map(serde_json::Value::String),
-        ValueRef::Timestamp(unit, value) => duckdb_timestamp_to_string(unit, value).map(serde_json::Value::String),
-        _ => None,
+fn duckdb_value_to_json(row: &duckdb::Row<'_>, idx: usize) -> serde_json::Value {
+    let Ok(value_ref) = row.get_ref(idx) else {
+        return serde_json::Value::Null;
+    };
+    match value_ref {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Boolean(b) => serde_json::Value::Bool(b),
+        ValueRef::TinyInt(i) => serde_json::Value::Number((i as i64).into()),
+        ValueRef::SmallInt(i) => serde_json::Value::Number((i as i64).into()),
+        ValueRef::Int(i) => serde_json::Value::Number((i as i64).into()),
+        ValueRef::BigInt(i) => serde_json::Value::Number(i.into()),
+        ValueRef::HugeInt(i) => serde_json::Value::String(i.to_string()),
+        ValueRef::UTinyInt(i) => serde_json::Value::Number((i as u64).into()),
+        ValueRef::USmallInt(i) => serde_json::Value::Number((i as u64).into()),
+        ValueRef::UInt(i) => serde_json::Value::Number((i as u64).into()),
+        ValueRef::UBigInt(i) => serde_json::Value::Number(i.into()),
+        ValueRef::Float(f) => {
+            serde_json::Number::from_f64(f as f64).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+        }
+        ValueRef::Double(f) => {
+            serde_json::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+        }
+        ValueRef::Decimal(d) => serde_json::Value::String(d.to_string()),
+        ValueRef::Date32(days) => {
+            duckdb_date32_to_string(days).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+        }
+        ValueRef::Time64(unit, value) => {
+            duckdb_time64_to_string(unit, value).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+        }
+        ValueRef::Timestamp(unit, value) => {
+            duckdb_timestamp_to_string(unit, value).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+        }
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+        ValueRef::Blob(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            serde_json::Value::String(format!("\\x{hex}"))
+        }
+        ValueRef::Interval { months, days, nanos } => {
+            serde_json::Value::String(duckdb_interval_to_string(months, days, nanos))
+        }
+        _ => row.get::<_, String>(idx).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn duckdb_interval_to_string(months: i32, days: i32, nanos: i64) -> String {
+    let mut parts = Vec::new();
+    if months != 0 {
+        let years = months / 12;
+        let rem = months % 12;
+        if years != 0 {
+            parts.push(format!("{} year{}", years, if years.abs() != 1 { "s" } else { "" }));
+        }
+        if rem != 0 {
+            parts.push(format!("{} mon{}", rem, if rem.abs() != 1 { "s" } else { "" }));
+        }
+    }
+    if days != 0 {
+        parts.push(format!("{} day{}", days, if days.abs() != 1 { "s" } else { "" }));
+    }
+    if nanos != 0 {
+        let total_secs = nanos / 1_000_000_000;
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+        let sub_nanos = (nanos % 1_000_000_000).unsigned_abs();
+        if sub_nanos > 0 {
+            parts.push(format!(
+                "{:02}:{:02}:{:02}.{}",
+                hours,
+                mins,
+                secs,
+                format_temporal_without_empty_fraction(format!("0.{:09}", sub_nanos)).trim_start_matches("0.")
+            ));
+        } else {
+            parts.push(format!("{:02}:{:02}:{:02}", hours, mins, secs));
+        }
+    }
+    if parts.is_empty() {
+        "00:00:00".to_string()
+    } else {
+        parts.join(" ")
     }
 }
 
@@ -107,25 +183,7 @@ pub fn duckdb_execute_with_max_rows(
 
         let mut result_rows = Vec::new();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let vals: Vec<serde_json::Value> = (0..col_count)
-                .map(|i| {
-                    if let Some(value) = duckdb_temporal_value_to_json(row, i) {
-                        return value;
-                    }
-                    row.get::<_, String>(i)
-                        .map(serde_json::Value::String)
-                        .or_else(|_| row.get::<_, i64>(i).map(|v| serde_json::Value::Number(v.into())))
-                        .or_else(|_| {
-                            row.get::<_, f64>(i).map(|v| {
-                                serde_json::Number::from_f64(v)
-                                    .map(serde_json::Value::Number)
-                                    .unwrap_or(serde_json::Value::Null)
-                            })
-                        })
-                        .or_else(|_| row.get::<_, bool>(i).map(serde_json::Value::Bool))
-                        .unwrap_or(serde_json::Value::Null)
-                })
-                .collect();
+            let vals: Vec<serde_json::Value> = (0..col_count).map(|i| duckdb_value_to_json(row, i)).collect();
             result_rows.push(vals);
             if result_rows.len() > row_limit {
                 break;
@@ -1108,6 +1166,54 @@ mod tests {
         assert!(!is_connection_error("ORA-00942: table or view does not exist"));
         assert!(!is_connection_error("syntax error at position 5"));
         assert!(!is_connection_error("os error 13"));
+    }
+
+    #[test]
+    fn duckdb_execute_preserves_double_precision() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        let result = duckdb_execute(
+            &con,
+            "SELECT 3.14159::DOUBLE AS pi, 0.5::DOUBLE AS half, 99.99::DOUBLE AS price, 1.0::DOUBLE AS one",
+        )
+        .expect("execute double query");
+
+        assert_eq!(result.columns, vec!["pi", "half", "price", "one"]);
+        let row = &result.rows[0];
+        assert_eq!(row[0], serde_json::json!(3.14159));
+        assert_eq!(row[1], serde_json::json!(0.5));
+        assert_eq!(row[2], serde_json::json!(99.99));
+        assert_eq!(row[3], serde_json::json!(1.0));
+    }
+
+    #[test]
+    fn duckdb_execute_create_insert_select_double() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("CREATE TABLE tmp1 (tmp_double DOUBLE)").expect("create table");
+        con.execute_batch("INSERT INTO tmp1 VALUES (45.678), (12.345), (99.999)").expect("insert");
+
+        let result = duckdb_execute(&con, "SELECT tmp_double FROM tmp1 ORDER BY tmp_double").expect("select doubles");
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0][0], serde_json::json!(12.345));
+        assert_eq!(result.rows[1][0], serde_json::json!(45.678));
+        assert_eq!(result.rows[2][0], serde_json::json!(99.999));
+    }
+
+    #[test]
+    fn duckdb_execute_handles_various_types() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        let result = duckdb_execute(
+            &con,
+            "SELECT 42 AS int_val, true AS bool_val, 'hello' AS text_val, 3.14::FLOAT AS float_val, 123456789012345::BIGINT AS big_val",
+        )
+        .expect("execute mixed types query");
+
+        let row = &result.rows[0];
+        assert_eq!(row[0], serde_json::json!(42));
+        assert_eq!(row[1], serde_json::json!(true));
+        assert_eq!(row[2], serde_json::Value::String("hello".to_string()));
+        assert!(row[3].is_number());
+        assert_eq!(row[4], serde_json::json!(123456789012345_i64));
     }
 
     #[test]

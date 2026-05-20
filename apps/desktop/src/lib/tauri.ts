@@ -376,6 +376,14 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   return invoke("invalidate_agent_registry_cache");
 }
 
+export async function importAgentsFromZip(path: string): Promise<number> {
+  return invoke("import_agents_from_zip", { path });
+}
+
+export async function importAgentJar(dbType: string, path: string): Promise<void> {
+  return invoke("import_agent_jar_cmd", { dbType, path });
+}
+
 export async function reinstallJre(jreKey?: string): Promise<void> {
   return invoke("reinstall_jre", { jreKey });
 }

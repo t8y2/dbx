@@ -170,7 +170,7 @@ pub async fn connect(url: &str) -> Result<MySqlPool, String> {
     .await;
 
     if let Err(ref e) = result {
-        if e.contains("HandshakeFailure") || e.contains("handshake") {
+        if mysql_error_should_retry_without_ssl(e) {
             if let Some(fallback_url) = ssl_fallback_url(url) {
                 log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
                 return super::with_connection_timeout("MySQL", async {
@@ -188,6 +188,14 @@ pub async fn connect(url: &str) -> Result<MySqlPool, String> {
     }
 
     result
+}
+
+fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("handshakefailure")
+        || error.contains("handshake")
+        || error.contains("tls connection")
+        || error.contains("server closed session")
 }
 
 fn ssl_fallback_url(url: &str) -> Option<String> {
@@ -591,5 +599,14 @@ mod tests {
         assert!(requires_text_protocol_query("show replica status"));
         assert!(!requires_text_protocol_query("SHOW TABLES"));
         assert!(!requires_text_protocol_query("SELECT * FROM users"));
+    }
+
+    #[test]
+    fn mysql_tls_session_close_errors_retry_without_ssl() {
+        let error = "MySQL connection failed: error communicating with database: \
+            encountered error while attempting to establish a TLS connection: \
+            server closed session with no notification";
+
+        assert!(mysql_error_should_retry_without_ssl(error));
     }
 }

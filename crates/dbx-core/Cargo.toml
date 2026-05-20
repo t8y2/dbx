@@ -33,3 +33,4 @@ csv = "1"
 calamine = "0.30.1"
 base64 = "0.22"
 async-trait = "0.1"
+zip = { version = "2", default-features = false, features = ["deflate"] }

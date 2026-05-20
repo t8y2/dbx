@@ -12,6 +12,8 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 const PLUGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,12 +177,10 @@ impl PluginDriverSession {
             let plugin_id = plugin.manifest.id.clone();
             tokio::spawn(async move {
                 let mut stderr = BufReader::new(stderr);
-                let mut line = String::new();
                 loop {
-                    line.clear();
-                    match stderr.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => log::warn!("[plugin:{plugin_id}] {}", line.trim_end()),
+                    match read_plugin_line(&mut stderr, "stderr").await {
+                        Ok(line) => log::warn!("[plugin:{plugin_id}] {}", line.trim_end()),
+                        Err(err) if err.contains("end of stream") => break,
                         Err(err) => {
                             log::warn!("[plugin:{plugin_id}] failed to read stderr: {err}");
                             break;
@@ -244,9 +244,18 @@ impl PluginDriverSession {
         process.stdin.write_all(b"\n").await.map_err(|err| err.to_string())?;
         process.stdin.flush().await.map_err(|err| err.to_string())?;
 
-        let mut response_line = String::new();
-        let read = process.stdout.read_line(&mut response_line).await.map_err(|err| err.to_string())?;
-        if read == 0 {
+        let response_line = match read_plugin_line(&mut process.stdout, "response").await {
+            Ok(line) => line,
+            Err(err) if err.contains("end of stream") => {
+                let status = process.child.try_wait().map_err(|err| err.to_string())?;
+                return Err(match status {
+                    Some(status) => format!("Plugin '{}' exited with status {}", self.plugin.manifest.id, status),
+                    None => format!("Plugin '{}' closed stdout without a response", self.plugin.manifest.id),
+                });
+            }
+            Err(err) => return Err(err),
+        };
+        if response_line.is_empty() {
             let status = process.child.try_wait().map_err(|err| err.to_string())?;
             return Err(match status {
                 Some(status) => format!("Plugin '{}' exited with status {}", self.plugin.manifest.id, status),
@@ -285,13 +294,25 @@ where
     let stdout = child.stdout.take().ok_or("Plugin stdout unavailable")?;
     let mut stderr = child.stderr.take().ok_or("Plugin stderr unavailable")?;
     let mut reader = BufReader::new(stdout);
-    let mut response_line = String::new();
-    let read = reader.read_line(&mut response_line).await.map_err(|err| err.to_string())?;
-    let mut stderr_text = String::new();
-    stderr.read_to_string(&mut stderr_text).await.map_err(|err| err.to_string())?;
+    let response_line_result = read_plugin_line(&mut reader, "response").await;
+    let mut stderr_bytes = Vec::new();
+    stderr.read_to_end(&mut stderr_bytes).await.map_err(|err| err.to_string())?;
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
     let status = child.wait().await.map_err(|err| err.to_string())?;
 
-    if read == 0 {
+    let response_line = match response_line_result {
+        Ok(line) => line,
+        Err(err) if err.contains("end of stream") => {
+            let stderr = stderr_text.trim().to_string();
+            return Err(if stderr.is_empty() {
+                format!("Plugin '{}' exited without a response", plugin.manifest.id)
+            } else {
+                format!("Plugin '{}' exited without a response: {stderr}", plugin.manifest.id)
+            });
+        }
+        Err(err) => return Err(err),
+    };
+    if response_line.is_empty() {
         let stderr = stderr_text.trim().to_string();
         return Err(if stderr.is_empty() {
             format!("Plugin '{}' exited without a response", plugin.manifest.id)
@@ -320,14 +341,33 @@ fn spawn_plugin_child(plugin: &InstalledPlugin) -> Result<Child, String> {
         .ok_or_else(|| format!("Plugin '{}' does not declare an executable", plugin.manifest.id))?;
     let executable_path = resolve_plugin_executable(&plugin.path, executable);
 
-    Command::new(&executable_path)
+    let mut command = Command::new(&executable_path);
+    command
         .current_dir(&plugin.path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|err| format!("Failed to start plugin '{}': {err}", plugin.manifest.id))
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command.spawn().map_err(|err| format!("Failed to start plugin '{}': {err}", plugin.manifest.id))
+}
+
+async fn read_plugin_line<R>(reader: &mut R, context: &str) -> Result<String, String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    reader.read_until(b'\n', &mut bytes).await.map_err(|err| format!("Failed to read plugin {context}: {err}"))?;
+    if bytes.is_empty() {
+        return Err(format!("Failed to read plugin {context}: end of stream"));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn decode_plugin_response<T>(plugin: &InstalledPlugin, request_id: u64, response_line: &str) -> Result<T, String>
@@ -360,4 +400,20 @@ fn resolve_plugin_executable(plugin_dir: &Path, executable: &str) -> PathBuf {
     }
 
     resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_plugin_line;
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn reads_non_utf8_plugin_lines_lossily() {
+        let bytes = vec![b'{', b'"', b'e', b'r', b'r', b'o', b'r', b'"', b':', 0xB2, 0xE2, b'}', b'\n'];
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+
+        let line = read_plugin_line(&mut reader, "response").await.expect("line should be readable");
+
+        assert_eq!(line, format!("{{\"error\":{}}}\n", "\u{fffd}\u{fffd}"));
+    }
 }

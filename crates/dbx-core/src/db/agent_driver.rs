@@ -660,8 +660,25 @@ fn agent_proxy_env_vars() -> &'static [&'static str] {
 }
 
 fn read_agent_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, String> {
+    const MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
     let mut bytes = Vec::new();
-    reader.read_until(b'\n', &mut bytes).map_err(|e| format!("Failed to read {context} from agent: {e}"))?;
+    loop {
+        let available = reader.fill_buf().map_err(|e| format!("Failed to read {context} from agent: {e}"))?;
+        if available.is_empty() {
+            break;
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            bytes.extend_from_slice(&available[..=pos]);
+            reader.consume(pos + 1);
+            break;
+        }
+        bytes.extend_from_slice(available);
+        let len = available.len();
+        reader.consume(len);
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(format!("Agent {context} exceeded maximum size ({} bytes)", MAX_RESPONSE_BYTES));
+        }
+    }
     if bytes.is_empty() {
         return Err(format!("Failed to read {context} from agent: end of stream"));
     }

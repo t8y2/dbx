@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::agent_manager::{AgentDriverInfo, AgentManager, AgentRegistry, InstalledDriver, DEFAULT_JRE_KEY};
 
@@ -184,4 +185,193 @@ pub fn replace_download(tmp: &std::path::Path, dest: &std::path::Path) -> Result
 fn backup_path(dest: &std::path::Path) -> std::path::PathBuf {
     let file_name = dest.file_name().and_then(|name| name.to_str()).unwrap_or("download");
     dest.with_file_name(format!("{file_name}.backup-{}", uuid::Uuid::new_v4()))
+}
+
+// ──────────── Offline import ────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OfflineImportProgress {
+    pub step: String,
+    pub current: u32,
+    pub total: u32,
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OfflineImportResult {
+    pub jre_installed: Vec<String>,
+    pub drivers_installed: Vec<String>,
+    pub drivers_skipped: Vec<String>,
+}
+
+pub fn import_offline_zip(
+    am: &AgentManager,
+    zip_path: &Path,
+    progress: impl Fn(OfflineImportProgress),
+) -> Result<OfflineImportResult, String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid ZIP file: {e}"))?;
+
+    let registry = read_registry_from_zip(&mut archive)?;
+
+    let platform = AgentManager::current_platform();
+    let mut local_state = am.load_state();
+    let mut result =
+        OfflineImportResult { jre_installed: Vec::new(), drivers_installed: Vec::new(), drivers_skipped: Vec::new() };
+
+    let jre_entries: Vec<(String, String)> = (0..archive.len())
+        .filter_map(|i| {
+            let entry = archive.by_index(i).ok()?;
+            let name = entry.name().to_string();
+            if name.starts_with("jre/") && name.ends_with(".tar.gz") && name.contains(platform) {
+                let jre_key = extract_jre_key_from_filename(&name)?;
+                Some((jre_key, name))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let driver_entries: Vec<(String, String)> = (0..archive.len())
+        .filter_map(|i| {
+            let entry = archive.by_index(i).ok()?;
+            let name = entry.name().to_string();
+            if name.starts_with("drivers/") && name.ends_with(".jar") {
+                let db_type = extract_db_type_from_filename(&name)?;
+                Some((db_type, name))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let total = (jre_entries.len() + driver_entries.len()) as u32;
+    let mut current: u32 = 0;
+
+    for (jre_key, entry_name) in &jre_entries {
+        current += 1;
+        let jre_version = registry.resolve_jre(jre_key).map(|j| j.version.clone());
+        let existing_version = local_state.jre_versions.get(jre_key);
+        if am.is_jre_installed(jre_key) && existing_version == jre_version.as_ref() {
+            continue;
+        }
+
+        progress(OfflineImportProgress { step: "jre-extract".into(), current, total, label: format!("JRE {jre_key}") });
+
+        let mut entry = archive.by_name(entry_name).map_err(|e| format!("Failed to read {entry_name}: {e}"))?;
+        let tmp_archive = am.base_dir().join(format!("jre-offline-{jre_key}.tar.gz"));
+        {
+            let mut out =
+                std::fs::File::create(&tmp_archive).map_err(|e| format!("Failed to create temp file: {e}"))?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to extract JRE archive: {e}"))?;
+        }
+
+        let jre_dir = am.jre_dir(jre_key);
+        if jre_dir.exists() {
+            std::fs::remove_dir_all(&jre_dir).ok();
+        }
+        extract_tar_gz(&tmp_archive, &jre_dir)?;
+        std::fs::remove_file(&tmp_archive).ok();
+
+        if let Some(ver) = jre_version {
+            local_state.jre_versions.insert(jre_key.clone(), ver);
+        }
+        result.jre_installed.push(jre_key.clone());
+    }
+
+    for (db_type, entry_name) in &driver_entries {
+        current += 1;
+
+        if let Some(remote_driver) = registry.drivers.get(db_type) {
+            if let Some(installed) = local_state.installed_drivers.get(db_type) {
+                if installed.version != "0.1.0-local"
+                    && installed.version != "local"
+                    && !crate::update::is_newer_version(&remote_driver.version, &installed.version)
+                {
+                    result.drivers_skipped.push(db_type.clone());
+                    continue;
+                }
+            }
+        }
+
+        progress(OfflineImportProgress {
+            step: "driver".into(),
+            current,
+            total,
+            label: AGENT_TYPES
+                .iter()
+                .find(|(k, _)| *k == db_type)
+                .map(|(_, l)| l.to_string())
+                .unwrap_or_else(|| db_type.clone()),
+        });
+
+        let jar_path = am.driver_jar_path(db_type);
+        if let Some(parent) = jar_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut entry = archive.by_name(entry_name).map_err(|e| format!("Failed to read {entry_name}: {e}"))?;
+        let mut out = std::fs::File::create(&jar_path).map_err(|e| format!("Failed to write driver JAR: {e}"))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to copy driver JAR: {e}"))?;
+
+        let version = registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
+        let jre_key =
+            registry.drivers.get(db_type).map(|d| d.jre.clone()).unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
+
+        local_state.installed_drivers.insert(
+            db_type.clone(),
+            InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
+        );
+        result.drivers_installed.push(db_type.clone());
+    }
+
+    am.save_state(&local_state)?;
+    Ok(result)
+}
+
+fn read_registry_from_zip(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<AgentRegistry, String> {
+    let mut entry = archive
+        .by_name("agent-registry.json")
+        .map_err(|_| "ZIP 文件中未找到 agent-registry.json，请确认这是有效的离线驱动包".to_string())?;
+    let mut buf = String::new();
+    entry.read_to_string(&mut buf).map_err(|e| format!("Failed to read agent-registry.json: {e}"))?;
+    serde_json::from_str(&buf).map_err(|e| format!("Invalid agent-registry.json: {e}"))
+}
+
+fn extract_jre_key_from_filename(name: &str) -> Option<String> {
+    let filename = name.rsplit('/').next()?;
+    let rest = filename.strip_prefix("jre-")?;
+    let key = rest.split('-').next()?;
+    if key.is_empty() {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+fn extract_db_type_from_filename(name: &str) -> Option<String> {
+    let filename = name.rsplit('/').next()?;
+    let rest = filename.strip_prefix("dbx-agent-")?;
+    let db_type = rest.strip_suffix(".jar")?;
+    if db_type.is_empty() {
+        return None;
+    }
+    Some(db_type.to_string())
+}
+
+fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let status = std::process::Command::new("tar")
+        .args(["xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy(), "--strip-components=1"])
+        .status()
+        .map_err(|e| format!("Failed to extract archive: {e}"))?;
+    if !status.success() {
+        return Err("Failed to extract JRE archive".to_string());
+    }
+    Ok(())
+}
+
+pub fn import_agent_jar(am: &AgentManager, db_type: &str, jar_path: &Path) -> Result<(), String> {
+    if !jar_path.exists() {
+        return Err(format!("File not found: {}", jar_path.display()));
+    }
+    install_local_agent(am, db_type, jar_path.to_path_buf())
 }

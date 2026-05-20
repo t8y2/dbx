@@ -7,7 +7,8 @@ use dbx_core::agent_manager::{
 };
 use dbx_core::agent_service::{
     build_agent_list, download_temp_path, fetch_registry, find_local_agent_jar, github_url_to_r2_path,
-    install_local_agent, invalidate_registry_cache, replace_download,
+    import_agent_jar, import_offline_zip, install_local_agent, invalidate_registry_cache, replace_download,
+    OfflineImportProgress,
 };
 use dbx_core::connection::AppState;
 
@@ -286,6 +287,42 @@ pub async fn uninstall_jre(state: State<'_, Arc<AppState>>, jre_key: String) -> 
 pub async fn invalidate_agent_registry_cache() -> Result<(), String> {
     invalidate_registry_cache().await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn import_agents_from_zip(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<u32, String> {
+    let am = &state.agent_manager;
+    let zip_path = std::path::PathBuf::from(&path);
+    let app_handle = app.clone();
+    let result = import_offline_zip(am, &zip_path, |p: OfflineImportProgress| {
+        let _ = app_handle.emit(
+            "agent-install-progress",
+            serde_json::json!({
+                "step": p.step,
+                "downloaded": p.current as u64,
+                "total": p.total as u64,
+                "db_type": p.label,
+                "current": p.current,
+                "total_drivers": p.total,
+            }),
+        );
+    })?;
+    let count = result.drivers_installed.len() as u32;
+    let _ = app.emit("agent-install-progress", serde_json::json!({ "step": "done" }));
+    Ok(count)
+}
+
+#[tauri::command]
+pub async fn import_agent_jar_cmd(
+    state: State<'_, Arc<AppState>>,
+    db_type: String,
+    path: String,
+) -> Result<(), String> {
+    import_agent_jar(&state.agent_manager, &db_type, std::path::Path::new(&path))
 }
 
 #[tauri::command]

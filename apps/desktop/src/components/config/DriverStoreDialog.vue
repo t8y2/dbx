@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, Trash2, Download, RotateCcw, Loader2, RefreshCw, Check, Clock3 } from "lucide-vue-next";
+import { FolderOpen, Trash2, Download, RotateCcw, Loader2, RefreshCw, Check, Clock3, FileUp } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -241,6 +241,50 @@ async function uninstallDriver(dbType: string) {
   }
 }
 
+const importingZip = ref(false);
+
+async function importOfflineZip() {
+  if (isWeb || importingZip.value) return;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: "选择离线驱动包",
+    multiple: false,
+    filters: [{ name: "ZIP", extensions: ["zip"] }],
+  });
+  if (typeof selected !== "string") return;
+  importingZip.value = true;
+  progress.value = null;
+  try {
+    const count = await api.importAgentsFromZip(selected);
+    await refreshAgents();
+    toast(`离线导入完成，已安装 ${count} 个驱动`);
+  } catch (e: any) {
+    toast(`离线导入失败: ${e}`);
+  } finally {
+    importingZip.value = false;
+    progress.value = null;
+  }
+}
+
+async function importDriverJar(dbType: string) {
+  if (isWeb) return;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: "选择驱动 JAR 文件",
+    multiple: false,
+    filters: [{ name: "JAR", extensions: ["jar"] }],
+  });
+  if (typeof selected !== "string") return;
+  const label = drivers.value.find((d) => d.db_type === dbType)?.label ?? dbType;
+  try {
+    await api.importAgentJar(dbType, selected);
+    await refreshAgents();
+    toast(`${label} 驱动导入成功`);
+  } catch (e: any) {
+    toast(`${label} 驱动导入失败: ${e}`);
+  }
+}
+
 async function reinstallJre(jreKey: string) {
   reinstallingJre.value = jreKey;
   progress.value = null;
@@ -450,6 +494,16 @@ onUnmounted(() => {
               variant="ghost"
               size="sm"
               class="h-7 rounded-full text-xs gap-1 text-muted-foreground"
+              :disabled="importingZip"
+              @click="importOfflineZip"
+            >
+              <FileUp class="h-3.5 w-3.5" />
+              {{ importingZip ? "导入中..." : "导入离线包" }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 rounded-full text-xs gap-1 text-muted-foreground"
               :disabled="refreshing"
               @click="forceRefresh"
             >
@@ -641,6 +695,19 @@ onUnmounted(() => {
                   >
                     <Download class="h-3 w-3 mr-1" />
                     安装
+                  </Button>
+                  <Button
+                    v-if="
+                      !driver.installed && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)
+                    "
+                    size="sm"
+                    variant="ghost"
+                    class="h-7 w-7 rounded-full text-xs text-muted-foreground"
+                    title="导入本地 JAR"
+                    :disabled="upgradingAll || installing !== null"
+                    @click="importDriverJar(driver.db_type)"
+                  >
+                    <FileUp class="h-3.5 w-3.5" />
                   </Button>
                   <template v-else>
                     <Check class="h-4 w-4 text-green-600" />

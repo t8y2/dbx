@@ -91,6 +91,7 @@ const columnInfoColumns = ref<ColumnInfo[]>([]);
 const columnInfoLoading = ref(false);
 const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
+const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(
   () => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? [],
@@ -209,7 +210,7 @@ function onHandleCloseColumnPanel() {
 function focusSearch(): boolean {
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
-  if (props.activeTab.mode === "query" && props.activeOutputView !== "result") return false;
+  if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
 }
 
@@ -230,6 +231,7 @@ defineExpose({ focusSearch, refreshData });
         <Pane :size="40" :min-size="15">
           <div class="h-full flex flex-col relative">
             <QueryEditor
+              ref="queryEditorRef"
               class="flex-1"
               :model-value="activeTab.sql"
               :connection-id="activeTab.connectionId"

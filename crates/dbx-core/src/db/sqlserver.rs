@@ -554,7 +554,7 @@ pub async fn execute_query_with_max_rows(
     if starts_with_executable_sql_keyword(sql, &["SELECT", "EXEC", "WITH", "TABLE"]) {
         let stream = client.query(sql, &[]).await.map_err(|e| e.to_string())?;
         collect_first_result_limited(stream, start, max_rows).await
-    } else if requires_simple_query_batch(sql) {
+    } else if requires_simple_query_batch(sql) || is_transaction_control(sql) {
         let stream = client.simple_query(sql).await.map_err(|e| e.to_string())?;
         let _ = collect_result_sets_limited(stream, start, max_rows).await?;
         Ok(QueryResult {
@@ -606,6 +606,23 @@ pub async fn execute_batch_with_max_rows(
     }
 
     Ok(results)
+}
+
+fn is_transaction_control(sql: &str) -> bool {
+    let tokens = first_sql_tokens(sql, 2);
+    if tokens.is_empty() {
+        return false;
+    }
+    let first = &tokens[0];
+    if first.eq_ignore_ascii_case("COMMIT") || first.eq_ignore_ascii_case("ROLLBACK") {
+        return true;
+    }
+    if first.eq_ignore_ascii_case("BEGIN") {
+        return tokens
+            .get(1)
+            .map_or(false, |t| t.eq_ignore_ascii_case("TRANSACTION") || t.eq_ignore_ascii_case("TRAN"));
+    }
+    false
 }
 
 fn requires_simple_query_batch(sql: &str) -> bool {

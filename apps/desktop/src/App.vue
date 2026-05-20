@@ -537,7 +537,6 @@ function handleKeydown(e: KeyboardEvent) {
   const shortcuts = settingsStore.editorSettings.shortcuts;
 
   if (isFocusSearchShortcut(e, shortcuts)) {
-    if (activeTab.value?.mode === "query") return;
     const focused = contentAreaRef.value?.focusSearch() || appSidebarRef.value?.focusSearch();
     if (focused) {
       e.preventDefault();

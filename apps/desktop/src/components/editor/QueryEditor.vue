@@ -1,7 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, shallowRef } from "vue";
+import { ref, nextTick, onMounted, onBeforeUnmount, watch, shallowRef } from "vue";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
+import {
+  SearchQuery,
+  setSearchQuery,
+  findNext as cmFindNext,
+  findPrevious as cmFindPrevious,
+  replaceNext as cmReplaceNext,
+  replaceAll as cmReplaceAll,
+  search as cmSearch,
+} from "@codemirror/search";
+import { ChevronUp, ChevronDown, ChevronRight, X } from "lucide-vue-next";
 import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -49,6 +59,17 @@ const settingsStore = useSettingsStore();
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 24;
 const MAX_COMPLETION_TABLES = 200;
+
+const searchVisible = ref(false);
+const searchText = ref("");
+const replaceText = ref("");
+const showReplace = ref(false);
+const caseSensitive = ref(false);
+const useRegex = ref(false);
+const matchCount = ref(0);
+const currentMatchIndex = ref(0);
+const searchInputRef = ref<HTMLInputElement>();
+
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
@@ -587,6 +608,14 @@ onMounted(async () => {
   const state = EditorState.create({
     doc: props.modelValue,
     extensions: [
+      cmSearch({
+        top: true,
+        createPanel: () => {
+          const dom = document.createElement("span");
+          dom.style.display = "none";
+          return { dom };
+        },
+      }),
       basicSetup,
       sql({ dialect }),
       autocompletion({
@@ -621,6 +650,7 @@ onMounted(async () => {
         if (update.selectionSet || update.docChanged) {
           emit("selectionChange", selectedSqlFromView(update.view));
           emit("cursorChange", update.state.selection.main.head);
+          if (searchVisible.value) updateMatchInfo();
         }
       }),
       fontThemeComp.of(
@@ -856,8 +886,230 @@ watch(
 onBeforeUnmount(() => {
   view.value?.destroy();
 });
+
+function dispatchSearchQuery() {
+  const v = view.value;
+  if (!v) return;
+  const q = new SearchQuery({
+    search: searchText.value,
+    caseSensitive: caseSensitive.value,
+    regexp: useRegex.value,
+    replace: replaceText.value,
+  });
+  v.dispatch({ effects: setSearchQuery.of(q) });
+  updateMatchInfo();
+}
+
+function updateMatchInfo() {
+  const v = view.value;
+  if (!v || !searchText.value) {
+    matchCount.value = 0;
+    currentMatchIndex.value = 0;
+    return;
+  }
+  try {
+    const q = new SearchQuery({
+      search: searchText.value,
+      caseSensitive: caseSensitive.value,
+      regexp: useRegex.value,
+    });
+    if (!q.valid) {
+      matchCount.value = 0;
+      currentMatchIndex.value = 0;
+      return;
+    }
+    const iter = q.getCursor(v.state);
+    let count = 0;
+    let curIdx = 0;
+    const selFrom = v.state.selection.main.from;
+    const selTo = v.state.selection.main.to;
+    let r = iter.next();
+    while (!r.done) {
+      count++;
+      if (r.value.from === selFrom && r.value.to === selTo) curIdx = count;
+      r = iter.next();
+    }
+    matchCount.value = count;
+    currentMatchIndex.value = curIdx || (count > 0 ? 1 : 0);
+  } catch {
+    matchCount.value = 0;
+    currentMatchIndex.value = 0;
+  }
+}
+
+function openSearch(): boolean {
+  searchVisible.value = true;
+  const v = view.value;
+  if (v) {
+    const sel = v.state.sliceDoc(v.state.selection.main.from, v.state.selection.main.to);
+    if (sel && !sel.includes("\n")) searchText.value = sel;
+  }
+  nextTick(() => {
+    searchInputRef.value?.focus();
+    searchInputRef.value?.select();
+  });
+  if (searchText.value) dispatchSearchQuery();
+  return true;
+}
+
+function closeSearch() {
+  searchVisible.value = false;
+  showReplace.value = false;
+  const v = view.value;
+  if (v) {
+    v.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: "" })) });
+    v.focus();
+  }
+  matchCount.value = 0;
+  currentMatchIndex.value = 0;
+}
+
+function nextMatch() {
+  const v = view.value;
+  if (!v || !searchText.value) return;
+  cmFindNext(v);
+  updateMatchInfo();
+}
+
+function prevMatch() {
+  const v = view.value;
+  if (!v || !searchText.value) return;
+  cmFindPrevious(v);
+  updateMatchInfo();
+}
+
+function doReplace() {
+  const v = view.value;
+  if (!v || !searchText.value) return;
+  cmReplaceNext(v);
+  updateMatchInfo();
+}
+
+function doReplaceAll() {
+  const v = view.value;
+  if (!v || !searchText.value) return;
+  cmReplaceAll(v);
+  updateMatchInfo();
+}
+
+function onSearchKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeSearch();
+  } else if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    nextMatch();
+  } else if (e.key === "Enter" && e.shiftKey) {
+    e.preventDefault();
+    prevMatch();
+  }
+}
+
+watch([searchText, caseSensitive, useRegex, replaceText], () => {
+  if (searchVisible.value) dispatchSearchQuery();
+});
+
+defineExpose({ openSearch });
 </script>
 
 <template>
-  <div ref="editorRef" data-query-editor-root class="h-full w-full overflow-hidden" />
+  <div class="h-full w-full overflow-hidden relative">
+    <div ref="editorRef" data-query-editor-root class="h-full w-full overflow-hidden" />
+    <Transition
+      enter-active-class="transition-all duration-150"
+      leave-active-class="transition-all duration-100"
+      enter-from-class="opacity-0 -translate-y-1"
+      leave-to-class="opacity-0 -translate-y-1"
+    >
+      <div
+        v-if="searchVisible"
+        class="absolute top-1 right-4 z-20 bg-background border rounded-md shadow-md p-1.5 flex flex-col gap-1"
+      >
+        <div class="flex items-center gap-0.5">
+          <input
+            ref="searchInputRef"
+            v-model="searchText"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            class="w-48 h-6 text-xs bg-input border rounded px-2 outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground"
+            placeholder="查找"
+            @keydown="onSearchKeydown"
+          />
+          <button
+            class="w-6 h-6 flex items-center justify-center rounded text-xs font-mono hover:bg-accent"
+            :class="caseSensitive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'"
+            title="区分大小写"
+            @click="caseSensitive = !caseSensitive"
+          >
+            Aa
+          </button>
+          <button
+            class="w-6 h-6 flex items-center justify-center rounded text-xs font-mono hover:bg-accent"
+            :class="useRegex ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'"
+            title="正则表达式"
+            @click="useRegex = !useRegex"
+          >
+            .*
+          </button>
+          <span v-if="searchText" class="text-xs text-muted-foreground min-w-[3rem] text-center shrink-0">
+            {{ matchCount > 0 ? `${currentMatchIndex}/${matchCount}` : "无结果" }}
+          </span>
+          <button
+            class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="上一个 (Shift+Enter)"
+            @click="prevMatch"
+          >
+            <ChevronUp class="w-3.5 h-3.5" />
+          </button>
+          <button
+            class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="下一个 (Enter)"
+            @click="nextMatch"
+          >
+            <ChevronDown class="w-3.5 h-3.5" />
+          </button>
+          <button
+            class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            :title="showReplace ? '收起替换' : '展开替换'"
+            @click="showReplace = !showReplace"
+          >
+            <ChevronRight class="w-3 h-3 transition-transform" :class="showReplace && 'rotate-90'" />
+          </button>
+          <button
+            class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="关闭 (Esc)"
+            @click="closeSearch"
+          >
+            <X class="w-3.5 h-3.5" />
+          </button>
+        </div>
+        <div v-if="showReplace" class="flex items-center gap-0.5">
+          <input
+            v-model="replaceText"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            class="w-48 h-6 text-xs bg-input border rounded px-2 outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground"
+            placeholder="替换"
+            @keydown.enter.prevent="doReplace"
+          />
+          <button
+            class="h-6 px-1.5 flex items-center justify-center rounded text-xs text-muted-foreground hover:bg-accent hover:text-foreground border"
+            title="替换"
+            @click="doReplace"
+          >
+            替换
+          </button>
+          <button
+            class="h-6 px-1.5 flex items-center justify-center rounded text-xs text-muted-foreground hover:bg-accent hover:text-foreground border"
+            title="全部替换"
+            @click="doReplaceAll"
+          >
+            全部
+          </button>
+        </div>
+      </div>
+    </Transition>
+  </div>
 </template>

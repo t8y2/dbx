@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { RefreshCw, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X } from "lucide-vue-next";
@@ -23,6 +23,14 @@ const props = defineProps<{
 }>();
 
 type JsonRecord = Record<string, unknown>;
+type ViewMode = "document" | "table";
+
+const VIEW_MODE_STORAGE_KEY = "dbx-mongo-view-mode";
+
+function loadViewModePreference(): ViewMode {
+  if (typeof localStorage === "undefined") return "document";
+  return localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "table" ? "table" : "document";
+}
 
 const documents = ref<JsonRecord[]>([]);
 const total = ref(0);
@@ -36,7 +44,7 @@ const isNew = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
 const showDeleteConfirm = ref(false);
-const viewMode = ref<"document" | "table">("document");
+const viewMode = ref<ViewMode>(loadViewModePreference());
 const filterInput = ref("");
 const sortInput = ref("");
 
@@ -420,6 +428,11 @@ function highlightedJson(json: string): string {
     },
   );
 }
+
+watch(viewMode, (value) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(VIEW_MODE_STORAGE_KEY, value);
+});
 
 onMounted(load);
 </script>

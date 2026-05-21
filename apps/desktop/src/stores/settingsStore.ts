@@ -166,6 +166,7 @@ export interface EditorSettings {
   appLayout: "separated" | "classic";
   pageSize: number;
   redisScanPageSize: number;
+  mongoViewMode: "document" | "table";
   shortcuts: ShortcutSettings;
   sidebarActivation: SidebarActivation;
   columnFormatters: Record<string, ColumnFormatterConfig>;
@@ -203,6 +204,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   appLayout: "classic",
   pageSize: 100,
   redisScanPageSize: 1000,
+  mongoViewMode: "document",
   shortcuts: normalizeShortcutSettings(),
   sidebarActivation: "single",
   columnFormatters: {},
@@ -242,6 +244,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>): Edit
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     redisScanPageSize: settings.redisScanPageSize ?? DEFAULT_EDITOR_SETTINGS.redisScanPageSize,
+    mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
     sidebarActivation:
       settings.sidebarActivation === "single" || settings.sidebarActivation === "double"

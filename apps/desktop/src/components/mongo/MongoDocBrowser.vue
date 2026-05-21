@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { RefreshCw, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X } from "lucide-vue-next";
@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import * as api from "@/lib/api";
+import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { QueryResult } from "@/types/database";
@@ -15,6 +16,7 @@ import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
 const { t } = useI18n();
+const settingsStore = useSettingsStore();
 
 const props = defineProps<{
   connectionId: string;
@@ -24,13 +26,6 @@ const props = defineProps<{
 
 type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
-
-const VIEW_MODE_STORAGE_KEY = "dbx-mongo-view-mode";
-
-function loadViewModePreference(): ViewMode {
-  if (typeof localStorage === "undefined") return "document";
-  return localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "table" ? "table" : "document";
-}
 
 const documents = ref<JsonRecord[]>([]);
 const total = ref(0);
@@ -44,7 +39,10 @@ const isNew = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
 const showDeleteConfirm = ref(false);
-const viewMode = ref<ViewMode>(loadViewModePreference());
+const viewMode = computed<ViewMode>({
+  get: () => settingsStore.editorSettings.mongoViewMode,
+  set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
+});
 const filterInput = ref("");
 const sortInput = ref("");
 
@@ -428,11 +426,6 @@ function highlightedJson(json: string): string {
     },
   );
 }
-
-watch(viewMode, (value) => {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(VIEW_MODE_STORAGE_KEY, value);
-});
 
 onMounted(load);
 </script>

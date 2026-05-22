@@ -39,3 +39,12 @@ test("Redis JSON raw content uses Shiki highlighting safely", async () => {
   assert.doesNotMatch(html, /<script>/);
   assert.doesNotMatch(html, /<pre/);
 });
+
+test("Redis collection and stream values are virtualized", () => {
+  assert.match(redisViewerSource, /RecycleScroller/);
+  assert.match(redisViewerSource, /DynamicScroller/);
+  assert.match(redisViewerSource, /:items="collectionRows"/);
+  assert.match(redisViewerSource, /:items="streamRows"/);
+  assert.doesNotMatch(redisViewerSource, /v-for="\(item, idx\) in collectionItems"/);
+  assert.doesNotMatch(redisViewerSource, /v-for="entry in data\.value"/);
+});

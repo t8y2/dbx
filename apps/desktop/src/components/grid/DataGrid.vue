@@ -286,6 +286,7 @@ function typeColorClass(t: string): string {
 }
 const contextCell = ref<{ rowId: number; rowIndex: number; col: number } | null>(null);
 const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
+const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const showCellDetail = ref(false);
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const detailWidth = ref(320);
@@ -1733,6 +1734,24 @@ const multiRowCount = computed(() => {
 });
 
 const isMultiRow = computed(() => multiRowCount.value > 1);
+
+function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
+  hoveredDetailCell.value = { rowIndex, col: actualColIdx };
+  extendCellSelection(rowIndex, visibleColIdx);
+}
+
+function onCellMouseleave(rowIndex: number, actualColIdx: number) {
+  if (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) {
+    hoveredDetailCell.value = null;
+  }
+}
+
+function cellDetailButtonVisible(rowIndex: number, actualColIdx: number) {
+  return (
+    (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) ||
+    (showCellDetail.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx)
+  );
+}
 
 function affectedRowIds(): number[] {
   if (hasRowSelection.value && selectedRowCount.value > 0) {
@@ -4039,7 +4058,8 @@ defineExpose({
                           'line-through': item.isDeleted,
                         }"
                         @mousedown="handleDataCellMousedown(index, visibleColIdx, item.id, $event)"
-                        @mouseenter="extendCellSelection(index, visibleColIdx)"
+                        @mouseenter="onCellMouseenter(index, visibleColIdx, actualColIdx)"
+                        @mouseleave="onCellMouseleave(index, actualColIdx)"
                         @dblclick="canEditCellItem(item, actualColIdx) && startEdit(item.id, actualColIdx)"
                         :data-visible-col-index="visibleColIdx"
                         @contextmenu="onCellContext(item.id, index, actualColIdx, visibleColIdx)"
@@ -4067,7 +4087,8 @@ defineExpose({
                         <template v-else>
                           {{ formatCell(item.data[actualColIdx], actualColIdx) }}
                           <button
-                            class="absolute right-0.5 top-0.5 hidden h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground group-hover/cell:flex"
+                            v-if="cellDetailButtonVisible(index, actualColIdx)"
+                            class="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                             :title="t('grid.cellDetails')"
                             @mousedown.stop
                             @click.stop="showCellDetails(index, actualColIdx)"

@@ -16,6 +16,10 @@ test("app defers cold-start side panels and modal pages behind async components"
   }
 });
 
+test("AI assistant panel stays closed on first launch to preserve startup memory", () => {
+  assert.match(appSource, /const showAiPanel = ref\(localStorage\.getItem\("dbx-ai-panel-open"\) === "true"\)/);
+});
+
 test("app dialogs keep non-primary dialogs out of the startup chunk", () => {
   for (const component of ["ConnectionDialog", "EditorSettingsDialog", "DangerConfirmDialog"]) {
     assert.doesNotMatch(appDialogsSource, new RegExp(`import ${component} from`));

@@ -103,7 +103,7 @@ const showSettingsDialog = ref(false);
 const showDriverStore = ref(false);
 const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
-const showAiPanel = ref(localStorage.getItem("dbx-ai-panel-open") !== "false");
+const showAiPanel = ref(localStorage.getItem("dbx-ai-panel-open") === "true");
 const aiPanelReady = ref(false);
 const { sidebarWidth, aiPanelWidth, historyWidth, startSidebarResize, startAiPanelResize, startHistoryResize } =
   usePanelResize();

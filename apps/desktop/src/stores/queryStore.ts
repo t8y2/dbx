@@ -62,6 +62,22 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function clearResultPayload(tab: QueryTab, options: { evicted?: boolean } = {}) {
+    tab.result = undefined;
+    tab.results = undefined;
+    tab.activeResultIndex = undefined;
+    tab.resultSessionId = undefined;
+    tab.queryAnalysis = undefined;
+    tab.querySourceColumns = undefined;
+    tab.queryEditabilityReason = undefined;
+    tab.resultEvicted = options.evicted ? true : undefined;
+  }
+
+  async function evictCachedResult(tab: QueryTab) {
+    await closeResultSession(tab);
+    clearResultPayload(tab, { evicted: true });
+  }
+
   const _persistSnapshot = computed(() =>
     tabs.value.map((t) => ({
       id: t.id,
@@ -164,8 +180,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
     if (tabs.value[idx].isExplaining) void cancelTabExplain(id);
     void closeResultSession(tabs.value[idx]);
-    tabs.value[idx].result = undefined;
-    tabs.value[idx].results = undefined;
+    clearResultPayload(tabs.value[idx]);
     tabs.value.splice(idx, 1);
     if (activeTabId.value === id) {
       activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
@@ -248,13 +263,11 @@ export const useQueryStore = defineStore("query", () => {
     tab.database = database;
     tab.schema = undefined;
     tab.objectBrowser = undefined;
-    tab.result = undefined;
+    void closeResultSession(tab);
+    clearResultPayload(tab);
     tab.lastExecutedSql = undefined;
     tab.resultBaseSql = undefined;
     tab.resultSortedSql = undefined;
-    tab.queryAnalysis = undefined;
-    tab.querySourceColumns = undefined;
-    tab.queryEditabilityReason = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
   }
@@ -272,13 +285,11 @@ export const useQueryStore = defineStore("query", () => {
     tab.connectionId = connectionId;
     tab.database = database;
     tab.schema = undefined;
-    tab.result = undefined;
+    void closeResultSession(tab);
+    clearResultPayload(tab);
     tab.lastExecutedSql = undefined;
     tab.resultBaseSql = undefined;
     tab.resultSortedSql = undefined;
-    tab.queryAnalysis = undefined;
-    tab.querySourceColumns = undefined;
-    tab.queryEditabilityReason = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
   }
@@ -325,6 +336,9 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.result = toErrorResult(e);
+    tab.results = undefined;
+    tab.activeResultIndex = undefined;
+    tab.resultSessionId = undefined;
     tab.isExecuting = false;
     tab.isCancelling = false;
     tab.executionId = undefined;
@@ -608,7 +622,7 @@ export const useQueryStore = defineStore("query", () => {
         });
       }
     }
-    trimResultCache();
+    await trimResultCache();
   }
 
   async function explainTabSql(id: string, sql: string, databaseType?: DatabaseType) {
@@ -707,17 +721,11 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryEditabilityReason = undefined;
   }
 
-  function trimResultCache() {
-    const inactive = tabs.value.filter((t) => t.id !== activeTabId.value && t.result);
+  async function trimResultCache() {
+    const inactive = tabs.value.filter((t) => t.id !== activeTabId.value && (t.result || t.results));
     if (inactive.length > MAX_CACHED_RESULTS) {
       const toEvict = inactive.slice(0, inactive.length - MAX_CACHED_RESULTS);
-      toEvict.forEach((t) => {
-        t.result = undefined;
-        t.resultEvicted = true;
-        t.queryAnalysis = undefined;
-        t.querySourceColumns = undefined;
-        t.queryEditabilityReason = undefined;
-      });
+      await Promise.all(toEvict.map((t) => evictCachedResult(t)));
     }
   }
 

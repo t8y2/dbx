@@ -164,8 +164,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
     if (tabs.value[idx].isExplaining) void cancelTabExplain(id);
     void closeResultSession(tabs.value[idx]);
-    tabs.value[idx].result = undefined;
-    tabs.value[idx].results = undefined;
+    clearTabResultState(tabs.value[idx], { keepTableMeta: false });
     tabs.value.splice(idx, 1);
     if (activeTabId.value === id) {
       activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
@@ -175,7 +174,12 @@ export const useQueryStore = defineStore("query", () => {
   function closeOtherTabs(id: string) {
     tabs.value.filter((tab) => tab.id !== id && tab.isExecuting).forEach((tab) => void cancelTabExecution(tab.id));
     tabs.value.filter((tab) => tab.id !== id && tab.isExplaining).forEach((tab) => void cancelTabExplain(tab.id));
-    tabs.value.filter((tab) => tab.id !== id).forEach((tab) => void closeResultSession(tab));
+    tabs.value
+      .filter((tab) => tab.id !== id)
+      .forEach((tab) => {
+        void closeResultSession(tab);
+        clearTabResultState(tab, { keepTableMeta: false });
+      });
     const next = closeOtherTabsState(tabs.value, activeTabId.value, id);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
@@ -184,7 +188,10 @@ export const useQueryStore = defineStore("query", () => {
   function closeAllTabs() {
     tabs.value.filter((tab) => tab.isExecuting).forEach((tab) => void cancelTabExecution(tab.id));
     tabs.value.filter((tab) => tab.isExplaining).forEach((tab) => void cancelTabExplain(tab.id));
-    tabs.value.forEach((tab) => void closeResultSession(tab));
+    tabs.value.forEach((tab) => {
+      void closeResultSession(tab);
+      clearTabResultState(tab, { keepTableMeta: false });
+    });
     const next = closeAllTabsState(tabs.value, activeTabId.value);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
@@ -199,6 +206,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.queryAnalysis = undefined;
       tab.querySourceColumns = undefined;
       tab.queryEditabilityReason = undefined;
+      tab.resultEvicted = undefined;
     }
   }
 
@@ -245,18 +253,13 @@ export const useQueryStore = defineStore("query", () => {
   function updateDatabase(id: string, database: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
+    void closeResultSession(tab);
     tab.database = database;
     tab.schema = undefined;
     tab.objectBrowser = undefined;
-    tab.result = undefined;
+    clearTabResultState(tab, { keepTableMeta: false });
     tab.lastExecutedSql = undefined;
-    tab.resultBaseSql = undefined;
-    tab.resultSortedSql = undefined;
-    tab.queryAnalysis = undefined;
-    tab.querySourceColumns = undefined;
-    tab.queryEditabilityReason = undefined;
     clearExplain(tab);
-    tab.tableMeta = undefined;
   }
 
   function updateSchema(id: string, schema: string | undefined) {
@@ -269,18 +272,13 @@ export const useQueryStore = defineStore("query", () => {
   function updateConnection(id: string, connectionId: string, database = "") {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.connectionId === connectionId) return;
+    void closeResultSession(tab);
     tab.connectionId = connectionId;
     tab.database = database;
     tab.schema = undefined;
-    tab.result = undefined;
+    clearTabResultState(tab, { keepTableMeta: false });
     tab.lastExecutedSql = undefined;
-    tab.resultBaseSql = undefined;
-    tab.resultSortedSql = undefined;
-    tab.queryAnalysis = undefined;
-    tab.querySourceColumns = undefined;
-    tab.queryEditabilityReason = undefined;
     clearExplain(tab);
-    tab.tableMeta = undefined;
   }
 
   function setTableMeta(id: string, meta: NonNullable<QueryTab["tableMeta"]>) {
@@ -328,6 +326,27 @@ export const useQueryStore = defineStore("query", () => {
     tab.isExecuting = false;
     tab.isCancelling = false;
     tab.executionId = undefined;
+  }
+
+  function clearTabResultState(
+    tab: QueryTab,
+    options: { markEvicted?: boolean; keepTableMeta?: boolean } = { keepTableMeta: true },
+  ) {
+    tab.result = undefined;
+    tab.results = undefined;
+    tab.activeResultIndex = undefined;
+    tab.resultSessionId = undefined;
+    tab.resultBaseSql = undefined;
+    tab.resultSortedSql = undefined;
+    tab.resultPageSql = undefined;
+    tab.resultPageLimit = undefined;
+    tab.resultPageOffset = undefined;
+    tab.resultCountSql = undefined;
+    tab.queryAnalysis = undefined;
+    tab.querySourceColumns = undefined;
+    tab.queryEditabilityReason = undefined;
+    tab.resultEvicted = options.markEvicted;
+    if (options.keepTableMeta === false) tab.tableMeta = undefined;
   }
 
   async function executeCurrentTab() {
@@ -708,17 +727,25 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function trimResultCache() {
-    const inactive = tabs.value.filter((t) => t.id !== activeTabId.value && t.result);
+    const inactive = tabs.value.filter((t) => t.id !== activeTabId.value && (t.result || t.results));
     if (inactive.length > MAX_CACHED_RESULTS) {
       const toEvict = inactive.slice(0, inactive.length - MAX_CACHED_RESULTS);
       toEvict.forEach((t) => {
-        t.result = undefined;
-        t.resultEvicted = true;
-        t.queryAnalysis = undefined;
-        t.querySourceColumns = undefined;
-        t.queryEditabilityReason = undefined;
+        void closeResultSession(t);
+        clearTabResultState(t, { markEvicted: true });
       });
     }
+  }
+
+  async function clearConnectionRuntimeState(connectionId: string) {
+    const connectionTabs = tabs.value.filter((tab) => tab.connectionId === connectionId);
+    await Promise.all(connectionTabs.map((tab) => closeResultSession(tab)));
+    connectionTabs.forEach((tab) => {
+      if (tab.isExecuting) void cancelTabExecution(tab.id);
+      if (tab.isExplaining) void cancelTabExplain(tab.id);
+      clearTabResultState(tab);
+      clearExplain(tab);
+    });
   }
 
   async function reloadEvictedTab(id: string) {
@@ -759,6 +786,7 @@ export const useQueryStore = defineStore("query", () => {
     explainTabSql,
     cancelTabExecution,
     cancelTabExplain,
+    clearConnectionRuntimeState,
     reloadEvictedTab,
   };
 });

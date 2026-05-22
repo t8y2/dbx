@@ -602,6 +602,12 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function disconnect(connectionId: string) {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
+    try {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      await useQueryStore().clearConnectionRuntimeState(connectionId);
+    } catch (error) {
+      console.warn("[DBX] failed to clear connection query state", error);
+    }
     await api.disconnectDb(connectionId);
     connectedIds.value.delete(connectionId);
     const node = treeNodes.value.find((n) => n.connectionId === connectionId);

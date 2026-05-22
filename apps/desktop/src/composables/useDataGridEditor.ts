@@ -750,7 +750,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const k = cacheKey?.value;
     if (k && hasPendingChanges.value) {
       pendingChangesCache.set(k, {
-        newRows: [...newRows.value.map((r) => [...r])],
+        newRows: newRows.value.map((r) => [...r]),
         dirtyRows: new Map([...dirtyRows.value].map(([i, m]) => [i, new Map(m)])),
         deletedRows: new Set(deletedRows.value),
         columnCount: result.value.columns.length,

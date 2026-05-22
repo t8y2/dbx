@@ -851,58 +851,56 @@ onUnmounted(() => {
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"
                 />
-                <KeepAlive :max="20">
-                  <ContentArea
-                    ref="contentAreaRef"
-                    :key="activeTab.id"
-                    :active-tab="activeTab"
-                    :active-connection="activeConnection"
-                    :executable-sql="executableSql"
-                    :active-output-view="activeOutputView"
-                    :format-sql-request-id="formatSqlRequestId"
-                    :selected-sql="selectedSql"
-                    :cursor-pos="cursorPos"
-                    @update:active-output-view="activeOutputView = $event"
-                    @fix-with-ai="fixWithAi"
-                    @execute="tryExecute()"
-                    @cancel="cancelActiveExecution()"
-                    @explain="tryExplain()"
-                    @editor-update="
-                      (v: string) => {
-                        if (queryStore.activeTabId) queryStore.updateSql(queryStore.activeTabId, v);
-                      }
-                    "
-                    @editor-selection-change="(v: string) => (selectedSql = v)"
-                    @editor-cursor-change="(p: number) => (cursorPos = p)"
-                    @format-error="toast(t('toolbar.formatSqlFailed'))"
-                    @save-sql="void openSaveSqlDialog()"
-                    @reload="
-                      (
-                        sql?: string,
-                        searchText?: string,
-                        whereInput?: string,
-                        orderBy?: string,
-                        limit?: number,
-                        offset?: number,
-                      ) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset)
-                    "
-                    @paginate="onPaginate"
-                    @sort="onSort"
-                    @execute-sql="onExecuteSql"
-                    @click-table="onClickTable"
-                    @open-object-table="
-                      (target) =>
-                        activeTab &&
-                        openTableTarget({
-                          connectionId: activeTab.connectionId,
-                          database: activeTab.database,
-                          schema: target.schema,
-                          tableName: target.tableName,
-                        })
-                    "
-                    @object-schema-change="(schema) => activeTab && queryStore.updateSchema(activeTab.id, schema)"
-                  />
-                </KeepAlive>
+                <ContentArea
+                  ref="contentAreaRef"
+                  :key="activeTab.id"
+                  :active-tab="activeTab"
+                  :active-connection="activeConnection"
+                  :executable-sql="executableSql"
+                  :active-output-view="activeOutputView"
+                  :format-sql-request-id="formatSqlRequestId"
+                  :selected-sql="selectedSql"
+                  :cursor-pos="cursorPos"
+                  @update:active-output-view="activeOutputView = $event"
+                  @fix-with-ai="fixWithAi"
+                  @execute="tryExecute()"
+                  @cancel="cancelActiveExecution()"
+                  @explain="tryExplain()"
+                  @editor-update="
+                    (v: string) => {
+                      if (queryStore.activeTabId) queryStore.updateSql(queryStore.activeTabId, v);
+                    }
+                  "
+                  @editor-selection-change="(v: string) => (selectedSql = v)"
+                  @editor-cursor-change="(p: number) => (cursorPos = p)"
+                  @format-error="toast(t('toolbar.formatSqlFailed'))"
+                  @save-sql="void openSaveSqlDialog()"
+                  @reload="
+                    (
+                      sql?: string,
+                      searchText?: string,
+                      whereInput?: string,
+                      orderBy?: string,
+                      limit?: number,
+                      offset?: number,
+                    ) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset)
+                  "
+                  @paginate="onPaginate"
+                  @sort="onSort"
+                  @execute-sql="onExecuteSql"
+                  @click-table="onClickTable"
+                  @open-object-table="
+                    (target) =>
+                      activeTab &&
+                      openTableTarget({
+                        connectionId: activeTab.connectionId,
+                        database: activeTab.database,
+                        schema: target.schema,
+                        tableName: target.tableName,
+                      })
+                  "
+                  @object-schema-change="(schema) => activeTab && queryStore.updateSchema(activeTab.id, schema)"
+                />
               </div>
               <WelcomeScreen
                 v-else

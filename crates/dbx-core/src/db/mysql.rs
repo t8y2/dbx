@@ -292,7 +292,7 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
         .collect())
 }
 
-fn list_objects_sql(database: &str) -> String {
+fn list_tables_objects_sql(database: &str) -> String {
     format!(
         "SELECT TABLE_NAME AS object_name, \
            CASE WHEN TABLE_TYPE = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
@@ -302,8 +302,14 @@ fn list_objects_sql(database: &str) -> String {
            CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS sort_order \
          FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = {db} \
-         UNION ALL \
-         SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS object_type, NULL AS object_comment, \
+         ORDER BY sort_order, object_name",
+        db = quote_value(database),
+    )
+}
+
+fn list_routines_sql(database: &str) -> String {
+    format!(
+        "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS object_type, NULL AS object_comment, \
            NULL AS created_at, NULL AS updated_at, \
            CASE WHEN ROUTINE_TYPE = 'PROCEDURE' THEN 2 ELSE 3 END AS sort_order \
          FROM information_schema.ROUTINES \
@@ -313,23 +319,44 @@ fn list_objects_sql(database: &str) -> String {
     )
 }
 
-pub async fn list_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
-    let sql = list_objects_sql(database);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
+    ObjectInfo {
+        name: get_str_by_name(row, "object_name"),
+        object_type: get_str_by_name(row, "object_type"),
+        schema: Some(database.to_string()),
+        comment: get_opt_str(row, "object_comment").filter(|s| !s.is_empty()),
+        created_at: get_opt_str(row, "created_at"),
+        updated_at: get_opt_str(row, "updated_at"),
+    }
+}
 
-    Ok(rows
-        .iter()
-        .map(|row| ObjectInfo {
-            name: get_str_by_name(row, "object_name"),
-            object_type: get_str_by_name(row, "object_type"),
-            schema: Some(database.to_string()),
-            comment: get_opt_str(row, "object_comment").filter(|s| !s.is_empty()),
-            created_at: get_opt_str(row, "created_at"),
-            updated_at: get_opt_str(row, "updated_at"),
-        })
-        .collect())
+pub async fn list_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+
+    let tables_sql = list_tables_objects_sql(database);
+    let result = conn.query_iter(&tables_sql).await.map_err(|e| e.to_string())?;
+    let table_rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let mut objects: Vec<ObjectInfo> = table_rows.iter().map(|row| row_to_object(row, database)).collect();
+
+    // Routines are queried separately: some MySQL-compatible servers (sharding proxies,
+    // OceanBase/TiDB variants, restricted accounts) reject information_schema.ROUTINES with
+    // ER_UNKNOWN_ERROR (1105). Degrading gracefully keeps tables/views usable.
+    let routines_sql = list_routines_sql(database);
+    match conn.query_iter(&routines_sql).await {
+        Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+            Ok(routine_rows) => {
+                objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
+            }
+            Err(e) => {
+                log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
+            }
+        },
+        Err(e) => {
+            log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
+        }
+    }
+
+    Ok(objects)
 }
 
 fn columns_sql(database: &str, table: &str) -> String {
@@ -653,13 +680,23 @@ mod tests {
     }
 
     #[test]
-    fn mysql_list_objects_sql_includes_routines() {
-        let sql = list_objects_sql("app");
+    fn mysql_list_tables_objects_sql_includes_timestamps() {
+        let sql = list_tables_objects_sql("app");
 
         assert!(sql.contains("information_schema.TABLES"));
-        assert!(sql.contains("information_schema.ROUTINES"));
+        assert!(!sql.contains("information_schema.ROUTINES"));
+        assert!(!sql.contains("UNION"));
         assert!(sql.contains("CREATE_TIME"));
         assert!(sql.contains("UPDATE_TIME"));
+    }
+
+    #[test]
+    fn mysql_list_routines_sql_is_independent_of_tables() {
+        let sql = list_routines_sql("app");
+
+        assert!(sql.contains("information_schema.ROUTINES"));
+        assert!(!sql.contains("information_schema.TABLES"));
+        assert!(!sql.contains("UNION"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
         assert!(!sql.contains("LAST_ALTERED"));

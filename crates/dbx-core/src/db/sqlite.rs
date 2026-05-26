@@ -1,4 +1,3 @@
-use base64::prelude::{Engine as _, BASE64_STANDARD};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
@@ -542,6 +541,6 @@ fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
             serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
         }
         ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).to_string()),
-        ValueRef::Blob(v) => serde_json::Value::String(BASE64_STANDARD.encode(v)),
+        ValueRef::Blob(v) => super::binary_value_to_json(v),
     }
 }

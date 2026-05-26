@@ -14,7 +14,10 @@ export const BINARY_TYPES = new Set([
 ]);
 
 export function isBinaryType(dataType: string): boolean {
-  const lower = dataType.toLowerCase();
+  const lower = dataType
+    .toLowerCase()
+    .replace(/\s*\([^)]*\)\s*$/, "")
+    .trim();
   return BINARY_TYPES.has(lower);
 }
 

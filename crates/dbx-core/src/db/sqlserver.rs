@@ -241,19 +241,9 @@ fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
         return serde_json::Value::String(v.to_string());
     }
     if let Ok(Some(v)) = <Vec<u8> as tiberius::FromSqlOwned>::from_sql_owned(cell.clone()) {
-        return serde_json::Value::String(format!("0x{}", hex_encode(&v)));
+        return super::binary_value_to_json(&v);
     }
     serde_json::Value::Null
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 pub async fn list_databases(client: &mut SqlServerClient) -> Result<Vec<DatabaseInfo>, String> {

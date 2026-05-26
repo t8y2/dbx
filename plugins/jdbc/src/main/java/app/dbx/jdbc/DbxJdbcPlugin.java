@@ -26,9 +26,9 @@ import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
@@ -236,7 +236,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, i)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i)));
                         }
                         rows.add(row);
                     }
@@ -681,13 +681,17 @@ public final class DbxJdbcPlugin {
         return keys;
     }
 
-    private static Object readValue(ResultSet rs, int index) throws SQLException {
+    private static Object readValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
         Object value = rs.getObject(index);
         if (value == null) {
             return null;
         }
         if (value instanceof byte[] bytes) {
-            return Base64.getEncoder().encodeToString(bytes);
+            return binaryToHex(bytes);
+        }
+        if (isBinaryColumn(meta, index)) {
+            byte[] bytes = rs.getBytes(index);
+            return bytes == null ? null : binaryToHex(bytes);
         }
         if (value instanceof Date || value instanceof Time || value instanceof Timestamp || value instanceof TemporalAccessor) {
             return value.toString();
@@ -699,6 +703,26 @@ public final class DbxJdbcPlugin {
             return value;
         }
         return value.toString();
+    }
+
+    private static boolean isBinaryColumn(ResultSetMetaData meta, int index) throws SQLException {
+        return switch (meta.getColumnType(index)) {
+            case Types.BINARY,
+                 Types.VARBINARY,
+                 Types.LONGVARBINARY,
+                 Types.BLOB -> true;
+            default -> false;
+        };
+    }
+
+    private static String binaryToHex(byte[] bytes) {
+        StringBuilder out = new StringBuilder(2 + bytes.length * 2);
+        out.append("0x");
+        for (byte b : bytes) {
+            out.append(Character.forDigit((b >> 4) & 0x0f, 16));
+            out.append(Character.forDigit(b & 0x0f, 16));
+        }
+        return out.toString();
     }
 
     private static void putNullable(ObjectNode node, String field, String value) {

@@ -5,6 +5,7 @@ import {
   allPrimaryKeysPresent,
   analyzeEditableQuery,
   analyzeEditableQueryEditability,
+  isBinaryType,
   queryEditabilityMessageKey,
 } from "../../apps/desktop/src/lib/sqlAnalysis.ts";
 
@@ -98,4 +99,10 @@ test("accepts aliased primary key source columns for row identity", () => {
     allPrimaryKeysPresent(["id"], ["id", "name"], analyzeEditableQuery("select id, name from users")!),
     true,
   );
+});
+
+test("recognizes binary type declarations with lengths", () => {
+  assert.equal(isBinaryType("binary(16)"), true);
+  assert.equal(isBinaryType("VARBINARY(255)"), true);
+  assert.equal(isBinaryType("varchar(255)"), false);
 });

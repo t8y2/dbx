@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use futures::StreamExt;
-use mysql_async::consts::ColumnType;
+use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::prelude::*;
 use rust_decimal::Decimal;
 use std::borrow::Cow;
@@ -84,6 +84,30 @@ fn is_lossless_integer_column(column: &mysql_async::Column) -> bool {
     matches!(column.column_type(), ColumnType::MYSQL_TYPE_LONGLONG | ColumnType::MYSQL_TYPE_NEWDECIMAL)
 }
 
+fn is_binary_column(column: &mysql_async::Column) -> bool {
+    let binary_flag = column.flags().contains(ColumnFlags::BINARY_FLAG);
+    let binary_charset = column.character_set() == 63;
+    matches!(column.column_type(), ColumnType::MYSQL_TYPE_GEOMETRY)
+        || ((binary_flag || binary_charset)
+            && matches!(
+                column.column_type(),
+                ColumnType::MYSQL_TYPE_BLOB
+                    | ColumnType::MYSQL_TYPE_LONG_BLOB
+                    | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                    | ColumnType::MYSQL_TYPE_TINY_BLOB
+                    | ColumnType::MYSQL_TYPE_STRING
+                    | ColumnType::MYSQL_TYPE_VAR_STRING
+                    | ColumnType::MYSQL_TYPE_VARCHAR
+            ))
+}
+
+fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_json::Value {
+    if is_binary_column(column) {
+        return super::binary_value_to_json(&bytes);
+    }
+    serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
+}
+
 fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
     let Some(column) = row.columns_ref().get(idx) else {
         return serde_json::Value::Null;
@@ -94,6 +118,12 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
     };
     if matches!(value, mysql_async::Value::NULL) {
         return serde_json::Value::Null;
+    }
+
+    if is_binary_column(column) {
+        return row_get::<Vec<u8>, _>(row, idx)
+            .map(|bytes| super::binary_value_to_json(&bytes))
+            .unwrap_or(serde_json::Value::Null);
     }
 
     match column.column_type() {
@@ -114,8 +144,7 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
                     .or_else(|| row_get::<i64, _>(row, idx).map(|v| serde_json::Value::String(v.to_string())))
                     .or_else(|| row_get::<u64, _>(row, idx).map(|v| serde_json::Value::String(v.to_string())))
                     .or_else(|| {
-                        row_get::<Vec<u8>, _>(row, idx)
-                            .map(|b| serde_json::Value::String(String::from_utf8_lossy(&b).to_string()))
+                        row_get::<Vec<u8>, _>(row, idx).map(|bytes| mysql_bytes_to_json(bytes, column))
                     })
                     .unwrap_or(serde_json::Value::Null);
             }
@@ -131,6 +160,15 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
                     let val = bytes.iter().fold(0u64, |acc, &b| (acc << 8) | b as u64);
                     serde_json::Value::String(val.to_string())
                 })
+                .unwrap_or(serde_json::Value::Null);
+        }
+        ColumnType::MYSQL_TYPE_BLOB
+        | ColumnType::MYSQL_TYPE_LONG_BLOB
+        | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+        | ColumnType::MYSQL_TYPE_TINY_BLOB
+        | ColumnType::MYSQL_TYPE_GEOMETRY => {
+            return row_get::<Vec<u8>, _>(row, idx)
+                .map(|bytes| mysql_bytes_to_json(bytes, column))
                 .unwrap_or(serde_json::Value::Null);
         }
         ColumnType::MYSQL_TYPE_TIMESTAMP
@@ -167,7 +205,7 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         })
         .or_else(|| row_get::<bool, _>(row, idx).map(serde_json::Value::Bool))
         .or_else(|| {
-            row_get::<Vec<u8>, _>(row, idx).map(|b| serde_json::Value::String(String::from_utf8_lossy(&b).to_string()))
+            row_get::<Vec<u8>, _>(row, idx).map(|bytes| mysql_bytes_to_json(bytes, column))
         })
         .unwrap_or(serde_json::Value::Null)
 }

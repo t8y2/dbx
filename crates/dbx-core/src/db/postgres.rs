@@ -124,6 +124,13 @@ fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
 fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
     let upper = type_name.to_uppercase();
 
+    if upper == "BYTEA" {
+        return row
+            .try_get::<_, Vec<u8>>(idx)
+            .map(|bytes| super::binary_value_to_json(&bytes))
+            .unwrap_or(serde_json::Value::Null);
+    }
+
     if upper == "JSON" || upper == "JSONB" {
         if let Ok(v) = row.try_get::<_, serde_json::Value>(idx) {
             return serde_json::Value::String(v.to_string());
@@ -195,13 +202,7 @@ fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value
         .or_else(|_| row.try_get::<_, uuid::Uuid>(idx).map(|v| serde_json::Value::String(v.to_string())))
         .or_else(|e| pg_temporal_to_json_value(row, idx).ok_or(e))
         .or_else(|_| {
-            row.try_get::<_, Vec<u8>>(idx).map(|bytes| match std::str::from_utf8(&bytes) {
-                Ok(s) => serde_json::Value::String(s.to_string()),
-                Err(_) => {
-                    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                    serde_json::Value::String(hex)
-                }
-            })
+            row.try_get::<_, Vec<u8>>(idx).map(|bytes| super::binary_value_to_json(&bytes))
         })
         .unwrap_or(serde_json::Value::Null)
 }

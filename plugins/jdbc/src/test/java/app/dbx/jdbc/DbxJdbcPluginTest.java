@@ -61,6 +61,19 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void executeQueryFormatsBinaryColumnsAsHex() throws Exception {
+        JsonNode response = request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "SELECT X'0001ABFF' AS payload"
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals("0x0001abff", response.path("result").path("rows").path(0).path(0).asText());
+    }
+
+    @Test
     void driverQuirksDetectYashanJdbcUrl() throws Exception {
         JsonNode yashan = MAPPER.readTree("""
             {

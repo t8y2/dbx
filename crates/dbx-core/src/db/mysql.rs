@@ -265,12 +265,57 @@ fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
     lower.contains("timestamp") && lower.contains("default null")
 }
 
-async fn enable_explicit_timestamp_defaults_for_query(conn: &mut mysql_async::Conn, sql: &str) {
-    if !should_enable_explicit_timestamp_defaults(sql) {
-        return;
+fn explicit_timestamp_defaults_sql(enabled: bool) -> &'static str {
+    if enabled {
+        "SET SESSION explicit_defaults_for_timestamp = ON"
+    } else {
+        "SET SESSION explicit_defaults_for_timestamp = OFF"
     }
-    if let Err(err) = conn.query_drop("SET SESSION explicit_defaults_for_timestamp = ON").await {
+}
+
+async fn enable_explicit_timestamp_defaults_for_query(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+) -> Option<bool> {
+    if !should_enable_explicit_timestamp_defaults(sql) {
+        return None;
+    }
+
+    let previous = match conn
+        .query_first::<u8, _>("SELECT @@SESSION.explicit_defaults_for_timestamp")
+        .await
+    {
+        Ok(Some(value)) => value != 0,
+        Ok(None) => {
+            log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: variable was empty");
+            return None;
+        }
+        Err(err) => {
+            log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: {err}");
+            return None;
+        }
+    };
+
+    if previous {
+        return None;
+    }
+
+    if let Err(err) = conn.query_drop(explicit_timestamp_defaults_sql(true)).await {
         log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: {err}");
+        return None;
+    }
+
+    Some(previous)
+}
+
+async fn restore_explicit_timestamp_defaults_for_query(
+    conn: &mut mysql_async::Conn,
+    previous: Option<bool>,
+) {
+    if let Some(previous) = previous {
+        if let Err(err) = conn.query_drop(explicit_timestamp_defaults_sql(previous)).await {
+            log::warn!("Failed to restore MySQL explicit timestamp defaults session setting: {err}");
+        }
     }
 }
 
@@ -678,10 +723,27 @@ pub async fn execute_query_with_max_rows(
         }
     } else {
         let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
-        enable_explicit_timestamp_defaults_for_query(&mut conn, sql).await;
-        let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+        let previous_explicit_timestamp_defaults =
+            enable_explicit_timestamp_defaults_for_query(&mut conn, sql).await;
+        let result = match conn.query_iter(sql).await {
+            Ok(result) => result,
+            Err(err) => {
+                restore_explicit_timestamp_defaults_for_query(
+                    &mut conn,
+                    previous_explicit_timestamp_defaults,
+                )
+                .await;
+                return Err(err.to_string());
+            }
+        };
         let affected_rows = result.affected_rows();
-        result.drop_result().await.map_err(|e| e.to_string())?;
+        let drop_result = result.drop_result().await;
+        restore_explicit_timestamp_defaults_for_query(
+            &mut conn,
+            previous_explicit_timestamp_defaults,
+        )
+        .await;
+        drop_result.map_err(|e| e.to_string())?;
 
         Ok(QueryResult {
             columns: vec![],
@@ -914,6 +976,14 @@ mod tests {
         ));
         assert!(!should_enable_explicit_timestamp_defaults("CREATE TABLE t (deleted_at DATETIME(6) DEFAULT NULL)"));
         assert!(!should_enable_explicit_timestamp_defaults("SELECT 'TIMESTAMP DEFAULT NULL'"));
+        assert_eq!(
+            explicit_timestamp_defaults_sql(true),
+            "SET SESSION explicit_defaults_for_timestamp = ON"
+        );
+        assert_eq!(
+            explicit_timestamp_defaults_sql(false),
+            "SET SESSION explicit_defaults_for_timestamp = OFF"
+        );
     }
 
     #[test]

@@ -257,6 +257,23 @@ fn mysql_setup_queries(url: &str) -> Vec<String> {
     vec![format!("SET NAMES {charset}")]
 }
 
+fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
+    if !starts_with_executable_sql_keyword(sql, &["CREATE", "ALTER"]) {
+        return false;
+    }
+    let lower = sql.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    lower.contains("timestamp") && lower.contains("default null")
+}
+
+async fn enable_explicit_timestamp_defaults_for_query(conn: &mut mysql_async::Conn, sql: &str) {
+    if !should_enable_explicit_timestamp_defaults(sql) {
+        return;
+    }
+    if let Err(err) = conn.query_drop("SET SESSION explicit_defaults_for_timestamp = ON").await {
+        log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: {err}");
+    }
+}
+
 fn mysql_connection_charset(url: &str) -> Option<&str> {
     let (_, query) = url.split_once('?')?;
     query.split('&').find_map(|segment| {
@@ -661,6 +678,7 @@ pub async fn execute_query_with_max_rows(
         }
     } else {
         let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+        enable_explicit_timestamp_defaults_for_query(&mut conn, sql).await;
         let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
         let affected_rows = result.affected_rows();
         result.drop_result().await.map_err(|e| e.to_string())?;
@@ -876,6 +894,26 @@ mod tests {
         assert!(requires_text_protocol_query("SHOW GRANTS FOR 'repl'@'%'"));
         assert!(!requires_text_protocol_query("SHOW TABLES"));
         assert!(!requires_text_protocol_query("SELECT * FROM users"));
+    }
+
+    #[test]
+    fn mysql_timestamp_default_null_ddl_enables_explicit_defaults() {
+        let create_sql = r#"
+            CREATE TABLE `referral_record` (
+                `id` BINARY(16) NOT NULL,
+                `created_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                `updated_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+                `deleted_at` TIMESTAMP(6) DEFAULT NULL,
+                PRIMARY KEY (`id`)
+            ) ENGINE = InnoDB
+        "#;
+
+        assert!(should_enable_explicit_timestamp_defaults(create_sql));
+        assert!(should_enable_explicit_timestamp_defaults(
+            "ALTER TABLE referral_record ADD deleted_at TIMESTAMP DEFAULT NULL"
+        ));
+        assert!(!should_enable_explicit_timestamp_defaults("CREATE TABLE t (deleted_at DATETIME(6) DEFAULT NULL)"));
+        assert!(!should_enable_explicit_timestamp_defaults("SELECT 'TIMESTAMP DEFAULT NULL'"));
     }
 
     #[test]

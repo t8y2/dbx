@@ -8,8 +8,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 
 use super::file_validator::validate_file_path;
+
+/// Delay between SSH reconnect attempts.
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 struct SshClient;
 
@@ -33,8 +37,12 @@ async fn connect_and_authenticate(
     ssh_key_passphrase: &str,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
-    let config = Arc::new(Config { nodelay: true, ..Default::default() });
-    let connect_timeout = std::time::Duration::from_secs(connect_timeout_secs);
+    let config = Arc::new(Config {
+        nodelay: true,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        ..Default::default()
+    });
+    let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
     let mut session =
         tokio::time::timeout(connect_timeout, client::connect(config, (ssh_host, ssh_port), SshClient {}))
@@ -79,16 +87,27 @@ async fn connect_and_authenticate(
     Ok(session)
 }
 
-async fn forward_loop(session: Handle<SshClient>, listener: TcpListener, remote_host: String, remote_port: u16) {
+/// Accept connections on the local listener and forward them through the SSH session.
+/// Returns when the SSH session dies (listener error or session.is_closed()).
+async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remote_host: &str, remote_port: u16) {
     loop {
         let (mut stream, peer_addr) = match listener.accept().await {
             Ok(v) => v,
-            Err(_) => break,
+            Err(e) => {
+                log::error!("SSH tunnel listener error: {e}");
+                break;
+            }
         };
+
+        // Check session health before opening a new channel
+        if session.is_closed() {
+            log::warn!("SSH session closed, exiting forward loop");
+            break;
+        }
 
         let mut channel = match session
             .channel_open_direct_tcpip(
-                &remote_host,
+                remote_host,
                 remote_port.into(),
                 peer_addr.ip().to_string(),
                 peer_addr.port().into(),
@@ -98,6 +117,10 @@ async fn forward_loop(session: Handle<SshClient>, listener: TcpListener, remote_
             Ok(c) => c,
             Err(e) => {
                 log::error!("SSH direct-tcpip failed: {e}");
+                if session.is_closed() {
+                    log::warn!("SSH session closed after channel open failure");
+                    break;
+                }
                 continue;
             }
         };
@@ -139,6 +162,68 @@ async fn forward_loop(session: Handle<SshClient>, listener: TcpListener, remote_
     }
 }
 
+/// Main tunnel task: runs the forward loop and automatically reconnects
+/// the SSH session when it drops. The local TcpListener survives across
+/// reconnections so the tunnel appears continuously available to clients.
+async fn tunnel_reconnect_loop(
+    mut session: Handle<SshClient>,
+    ssh_host: String,
+    ssh_port: u16,
+    ssh_user: String,
+    ssh_password: String,
+    ssh_key_path: String,
+    ssh_key_passphrase: String,
+    connect_timeout_secs: u64,
+    listener: TcpListener,
+    remote_host: String,
+    remote_port: u16,
+) {
+    loop {
+        log::info!(
+            "SSH tunnel active: {}:{} -> {}:{}",
+            ssh_host, ssh_port, remote_host, remote_port
+        );
+
+        forward_loop(&session, &listener, &remote_host, remote_port).await;
+
+        log::warn!(
+            "SSH tunnel connection lost ({}:{}), reconnecting...",
+            ssh_host, ssh_port
+        );
+
+        // Reconnect loop with backoff
+        loop {
+            tokio::time::sleep(RECONNECT_DELAY).await;
+
+            match connect_and_authenticate(
+                &ssh_host,
+                ssh_port,
+                &ssh_user,
+                &ssh_password,
+                &ssh_key_path,
+                &ssh_key_passphrase,
+                connect_timeout_secs,
+            )
+            .await
+            {
+                Ok(new_session) => {
+                    session = new_session;
+                    log::info!("SSH tunnel reconnected to {}:{}", ssh_host, ssh_port);
+                    break;
+                }
+                Err(e) => {
+                    log::error!(
+                        "SSH reconnect failed ({}:{}): {e}, retrying in {}s...",
+                        ssh_host,
+                        ssh_port,
+                        RECONNECT_DELAY.as_secs()
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub struct TunnelManager {
     tunnels: Mutex<HashMap<String, (JoinHandle<()>, u16)>>,
 }
@@ -148,6 +233,7 @@ impl TunnelManager {
         Self { tunnels: Mutex::new(HashMap::new()) }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_tunnel(
         &self,
         connection_id: &str,
@@ -164,6 +250,11 @@ impl TunnelManager {
     ) -> Result<u16, String> {
         let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
 
+        let bind_addr = if expose_to_lan { "0.0.0.0" } else { "127.0.0.1" };
+        let listener =
+            TcpListener::bind((bind_addr, local_port)).await.map_err(|e| format!("Failed to bind local port: {e}"))?;
+
+        // Initial connection: fail fast on bad credentials
         let session = connect_and_authenticate(
             ssh_host,
             ssh_port,
@@ -175,12 +266,19 @@ impl TunnelManager {
         )
         .await?;
 
-        let bind_addr = if expose_to_lan { "0.0.0.0" } else { "127.0.0.1" };
-        let listener =
-            TcpListener::bind((bind_addr, local_port)).await.map_err(|e| format!("Failed to bind local port: {e}"))?;
-
-        let remote_host = remote_host.to_string();
-        let handle = tokio::spawn(forward_loop(session, listener, remote_host, remote_port));
+        let handle = tokio::spawn(tunnel_reconnect_loop(
+            session,
+            ssh_host.to_string(),
+            ssh_port,
+            ssh_user.to_string(),
+            ssh_password.to_string(),
+            ssh_key_path.to_string(),
+            ssh_key_passphrase.to_string(),
+            connect_timeout_secs,
+            listener,
+            remote_host.to_string(),
+            remote_port,
+        ));
 
         self.tunnels.lock().await.insert(connection_id.to_string(), (handle, local_port));
 

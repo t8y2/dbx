@@ -37,11 +37,8 @@ async fn connect_and_authenticate(
     ssh_key_passphrase: &str,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
-    let config = Arc::new(Config {
-        nodelay: true,
-        keepalive_interval: Some(Duration::from_secs(30)),
-        ..Default::default()
-    });
+    let config =
+        Arc::new(Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), ..Default::default() });
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
     let mut session =
@@ -179,17 +176,11 @@ async fn tunnel_reconnect_loop(
     remote_port: u16,
 ) {
     loop {
-        log::info!(
-            "SSH tunnel active: {}:{} -> {}:{}",
-            ssh_host, ssh_port, remote_host, remote_port
-        );
+        log::info!("SSH tunnel active: {}:{} -> {}:{}", ssh_host, ssh_port, remote_host, remote_port);
 
         forward_loop(&session, &listener, &remote_host, remote_port).await;
 
-        log::warn!(
-            "SSH tunnel connection lost ({}:{}), reconnecting...",
-            ssh_host, ssh_port
-        );
+        log::warn!("SSH tunnel connection lost ({}:{}), reconnecting...", ssh_host, ssh_port);
 
         // Reconnect loop with backoff
         loop {

@@ -12,8 +12,12 @@ use tokio::time::Duration;
 
 use super::file_validator::validate_file_path;
 
-/// Delay between SSH reconnect attempts.
-const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// Initial delay between SSH reconnect attempts.
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// Maximum delay for exponential backoff.
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+/// Maximum number of consecutive reconnect attempts before giving up.
+const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
 struct SshClient;
 
@@ -162,6 +166,8 @@ async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remot
 /// Main tunnel task: runs the forward loop and automatically reconnects
 /// the SSH session when it drops. The local TcpListener survives across
 /// reconnections so the tunnel appears continuously available to clients.
+/// Uses exponential backoff for reconnect attempts and gives up after
+/// MAX_RECONNECT_ATTEMPTS to avoid log storms from permanent failures.
 async fn tunnel_reconnect_loop(
     mut session: Handle<SshClient>,
     ssh_host: String,
@@ -182,9 +188,19 @@ async fn tunnel_reconnect_loop(
 
         log::warn!("SSH tunnel connection lost ({}:{}), reconnecting...", ssh_host, ssh_port);
 
-        // Reconnect loop with backoff
+        // Reconnect with exponential backoff
+        let mut delay = INITIAL_RECONNECT_DELAY;
+        let mut attempts: u32 = 0;
+
         loop {
-            tokio::time::sleep(RECONNECT_DELAY).await;
+            if attempts >= MAX_RECONNECT_ATTEMPTS {
+                log::error!(
+                    "SSH tunnel ({ssh_host}:{ssh_port}): max reconnect attempts ({MAX_RECONNECT_ATTEMPTS}) exhausted, giving up"
+                );
+                return;
+            }
+
+            tokio::time::sleep(delay).await;
 
             match connect_and_authenticate(
                 &ssh_host,
@@ -199,16 +215,18 @@ async fn tunnel_reconnect_loop(
             {
                 Ok(new_session) => {
                     session = new_session;
-                    log::info!("SSH tunnel reconnected to {}:{}", ssh_host, ssh_port);
+                    log::info!("SSH tunnel reconnected to {}:{} (attempt {})", ssh_host, ssh_port, attempts + 1);
                     break;
                 }
                 Err(e) => {
+                    attempts += 1;
                     log::error!(
-                        "SSH reconnect failed ({}:{}): {e}, retrying in {}s...",
+                        "SSH reconnect failed ({}:{}, attempt {attempts}/{MAX_RECONNECT_ATTEMPTS}): {e}",
                         ssh_host,
                         ssh_port,
-                        RECONNECT_DELAY.as_secs()
                     );
+                    // Exponential backoff: double the delay, cap at MAX_RECONNECT_DELAY
+                    delay = std::cmp::min(delay * 2, MAX_RECONNECT_DELAY);
                 }
             }
         }

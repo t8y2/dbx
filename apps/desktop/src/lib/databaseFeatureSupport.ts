@@ -74,7 +74,7 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
 
 export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType): boolean {
   if (!supportsObjectBrowser(dbType)) return false;
-  if (nodeType === "database" && isSchemaAware(dbType)) return false;
+  if (nodeType === "database" && isSchemaAware(dbType) && dbType !== "sqlserver") return false;
   return nodeType === "database" || nodeType === "schema" || nodeType === "object-browser";
 }
 

@@ -204,9 +204,11 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableTruncate("duckdb"), false);
 });
 
-test("schema-aware database nodes do not open an object browser tab", () => {
+test("object browser entry follows database tree shape", () => {
   assert.equal(supportsObjectBrowserTreeNode("postgres", "database"), false);
   assert.equal(supportsObjectBrowserTreeNode("postgres", "schema"), true);
+  assert.equal(supportsObjectBrowserTreeNode("sqlserver", "database"), true);
+  assert.equal(supportsObjectBrowserTreeNode("sqlserver", "schema"), true);
   assert.equal(supportsObjectBrowserTreeNode("mysql", "database"), true);
   assert.equal(supportsObjectBrowserTreeNode("mongodb", "database"), false);
 });

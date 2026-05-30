@@ -36,6 +36,7 @@ import {
   type AiProvider,
   type AiApiStyle,
   type EditorTheme,
+  type DesktopIconTheme,
 } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -66,6 +67,7 @@ import type { SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/utils";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
+import AppLogo from "@/components/icons/AppLogo.vue";
 import type { AppThemeAppearance } from "@/lib/appTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 
@@ -93,6 +95,7 @@ const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
+const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
@@ -228,6 +231,7 @@ watch(
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
       editAppLayout.value = settingsStore.editorSettings.appLayout;
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
       editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
@@ -266,6 +270,7 @@ function hasChanges(): boolean {
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
+    editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
     editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
@@ -305,6 +310,7 @@ async function persistSettings() {
   });
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
+    icon_theme: editIconTheme.value,
   });
   if (sidebarObjectDisplayChanged) {
     await connectionStore.refreshAllTree();
@@ -329,6 +335,7 @@ function resetDefaults() {
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
+  editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
@@ -360,6 +367,10 @@ function onRedisScanPageSizeChange(v: any) {
 
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
   editSidebarObjectDisplay.value = value;
+}
+
+function setIconTheme(value: DesktopIconTheme) {
+  editIconTheme.value = value;
 }
 
 function onShortcutChange(actionId: ShortcutActionId, value: any) {
@@ -591,6 +602,7 @@ watch(
       await settingsStore.initAiConfig();
       await settingsStore.initDesktopSettings();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       webdavPassword.value = "";
       await refreshWebDavPasswordStatus();
       syncAiEditState();
@@ -1164,6 +1176,43 @@ watch(
                   </Button>
                 </div>
               </div>
+
+              <div v-if="!isWeb" class="space-y-2">
+                <Label>{{ t("settings.iconTheme") }}</Label>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setIconTheme('default')"
+                  >
+                    <div class="flex items-center gap-3 text-left">
+                      <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
+                      <div>
+                        <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
+                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeDefaultDescription") }}</div>
+                      </div>
+                    </div>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setIconTheme('black')"
+                  >
+                    <div class="flex items-center gap-3 text-left">
+                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert" />
+                      <div>
+                        <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
+                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeBlackDescription") }}</div>
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+
               <div
                 v-if="!isWeb"
                 class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2"
@@ -1889,7 +1938,7 @@ watch(
                     {{ t("settings.project") }}
                   </div>
                   <div class="mt-3 flex items-center gap-2 text-sm font-medium">
-                    <img src="/logo.png" alt="DBX" class="h-7 w-7 rounded-md" />
+                    <AppLogo class="h-7 w-7" />
                     {{ t("settings.officialDocs") }}
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>

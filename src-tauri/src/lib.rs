@@ -5,7 +5,7 @@ mod models;
 mod window_state_guard;
 
 use commands::connection::AppState;
-use dbx_core::storage::Storage;
+use dbx_core::storage::{DesktopIconTheme, DesktopSettings, Storage};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(target_os = "macos")]
@@ -21,6 +21,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 const DESKTOP_TRAY_ID: &str = "main-tray";
 #[cfg(target_os = "macos")]
 const MACOS_TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray-macos-template.png");
+const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon-black.png");
 
 fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
@@ -54,15 +55,35 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
 }
 
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<()> {
+fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
+    manager: &M,
+    icon_theme: DesktopIconTheme,
+) -> tauri::Result<()> {
     let menu = MenuBuilder::new(manager).text("show", "Show DBX").separator().text("quit", "Quit DBX").build()?;
     let mut tray =
         TrayIconBuilder::<R>::with_id(DESKTOP_TRAY_ID).tooltip("DBX").menu(&menu).show_menu_on_left_click(false);
     #[cfg(target_os = "macos")]
     {
-        tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
+        match icon_theme {
+            DesktopIconTheme::Default => {
+                tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
+            }
+            DesktopIconTheme::Black => {
+                tray = tray.icon(BLACK_APP_ICON).icon_as_template(false);
+            }
+        }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let icon = match icon_theme {
+            DesktopIconTheme::Default => manager.app_handle().default_window_icon().cloned(),
+            DesktopIconTheme::Black => Some(BLACK_APP_ICON),
+        };
+        if let Some(icon) = icon {
+            tray = tray.icon(icon);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let Some(icon) = manager.app_handle().default_window_icon().cloned() {
             tray = tray.icon(icon);
@@ -86,12 +107,59 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::R
     Ok(())
 }
 
-pub(crate) fn apply_desktop_tray_preference(app: &tauri::AppHandle, show_tray_icon: bool) -> tauri::Result<()> {
+fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        match icon_theme {
+            DesktopIconTheme::Default => {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    window.set_icon(icon)?;
+                }
+            }
+            DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
+        }
+    }
+    Ok(())
+}
+
+fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
+        #[cfg(target_os = "macos")]
+        {
+            match icon_theme {
+                DesktopIconTheme::Default => {
+                    tray.set_icon(Some(MACOS_TRAY_ICON))?;
+                    tray.set_icon_as_template(true)?;
+                }
+                DesktopIconTheme::Black => {
+                    tray.set_icon(Some(BLACK_APP_ICON))?;
+                    tray.set_icon_as_template(false)?;
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let icon = match icon_theme {
+                DesktopIconTheme::Default => app.default_window_icon().cloned(),
+                DesktopIconTheme::Black => Some(BLACK_APP_ICON),
+            };
+            tray.set_icon(icon)?;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tray, icon_theme);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &DesktopSettings) -> tauri::Result<()> {
+    apply_desktop_icon_theme(app, desktop_settings.icon_theme)?;
     if matches!(std::env::consts::OS, "macos" | "windows") {
         if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
-            tray.set_visible(show_tray_icon)?;
-        } else if show_tray_icon {
-            setup_desktop_tray(app)?;
+            tray.set_visible(desktop_settings.show_tray_icon)?;
+            apply_desktop_tray_icon_theme(app, desktop_settings.icon_theme)?;
+        } else if desktop_settings.show_tray_icon {
+            setup_desktop_tray(app, desktop_settings.icon_theme)?;
         }
     }
     Ok(())
@@ -121,7 +189,7 @@ mod tests {
         assert!(!should_setup_desktop_tray("linux", true));
         let source = include_str!("lib.rs");
         assert!(source.contains(
-            "if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon) {\n                setup_desktop_tray(app)?;"
+            "if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon) {\n                setup_desktop_tray(app, desktop_settings.icon_theme)?;"
         ));
     }
 
@@ -134,9 +202,17 @@ mod tests {
     }
 
     #[test]
+    fn can_apply_black_logo_icon_theme() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("const BLACK_APP_ICON"));
+        assert!(source.contains("DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?"));
+        assert!(source.contains("DesktopIconTheme::Black => Some(BLACK_APP_ICON)"));
+    }
+
+    #[test]
     fn desktop_settings_save_treats_runtime_tray_update_as_best_effort() {
         let source = include_str!("commands/app_settings.rs");
-        assert!(source.contains("if let Err(err) = apply_desktop_tray_preference"));
+        assert!(source.contains("if let Err(err) = apply_desktop_settings"));
         assert!(!source.contains("map_err(|err| err.to_string())"));
     }
 
@@ -233,8 +309,9 @@ pub fn run() {
                 }
             }
             if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon) {
-                setup_desktop_tray(app)?;
+                setup_desktop_tray(app, desktop_settings.icon_theme)?;
             }
+            apply_desktop_icon_theme(app.handle(), desktop_settings.icon_theme)?;
             window_state_guard::enforce_main_window_bounds(app.handle());
             if should_show_main_window_after_setup() {
                 show_main_window(app.handle());

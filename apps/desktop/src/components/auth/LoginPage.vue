@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Lock, Loader2, ShieldCheck } from "lucide-vue-next";
+import AppLogo from "@/components/icons/AppLogo.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -55,7 +56,7 @@ async function submit() {
   >
     <div class="w-[360px] space-y-8">
       <div class="flex flex-col items-center gap-4">
-        <img src="/logo.png" alt="DBX" class="w-20 h-20 rounded-2xl shadow-lg shadow-blue-500/20" />
+        <AppLogo class="w-20 h-20 rounded-2xl shadow-lg shadow-blue-500/20" />
         <div class="text-center">
           <h1 class="text-2xl font-bold tracking-tight">DBX</h1>
           <p class="text-sm text-muted-foreground mt-1">

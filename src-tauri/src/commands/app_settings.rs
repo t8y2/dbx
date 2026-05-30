@@ -4,7 +4,7 @@ use dbx_core::storage::DesktopSettings;
 use tauri::{AppHandle, State};
 
 use super::connection::AppState;
-use crate::apply_desktop_tray_preference;
+use crate::apply_desktop_settings;
 
 #[tauri::command]
 pub async fn load_desktop_settings(state: State<'_, Arc<AppState>>) -> Result<DesktopSettings, String> {
@@ -18,8 +18,8 @@ pub async fn save_desktop_settings(
     settings: DesktopSettings,
 ) -> Result<(), String> {
     state.storage.save_desktop_settings(&settings).await?;
-    if let Err(err) = apply_desktop_tray_preference(&app, settings.show_tray_icon) {
-        eprintln!("Failed to apply desktop tray preference: {err}");
+    if let Err(err) = apply_desktop_settings(&app, &settings) {
+        eprintln!("Failed to apply desktop settings: {err}");
     }
     Ok(())
 }

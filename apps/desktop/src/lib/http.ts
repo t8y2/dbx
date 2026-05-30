@@ -789,7 +789,7 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
 }
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
-  return { show_tray_icon: true };
+  return { show_tray_icon: true, icon_theme: "default" };
 }
 
 export async function saveDesktopSettings(_settings: DesktopSettings): Promise<void> {

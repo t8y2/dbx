@@ -38,11 +38,23 @@ export interface AiConfig {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  icon_theme: DesktopIconTheme;
 }
+
+export type DesktopIconTheme = "default" | "black";
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
+  icon_theme: "default",
 };
+
+function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
+  const iconTheme = settings?.icon_theme === "black" ? "black" : DEFAULT_DESKTOP_SETTINGS.icon_theme;
+  return {
+    show_tray_icon: settings?.show_tray_icon ?? DEFAULT_DESKTOP_SETTINGS.show_tray_icon,
+    icon_theme: iconTheme,
+  };
+}
 
 export interface AiProviderPreset extends Omit<AiConfig, "apiKey"> {
   label: string;
@@ -415,7 +427,7 @@ export const useSettingsStore = defineStore("settings", () => {
 
   async function initDesktopSettings() {
     if (isDesktopSettingsLoaded.value) return;
-    desktopSettings.value = await api.loadDesktopSettings().catch(() => ({ ...DEFAULT_DESKTOP_SETTINGS }));
+    desktopSettings.value = normalizeDesktopSettings(await api.loadDesktopSettings().catch(() => null));
     isDesktopSettingsLoaded.value = true;
   }
 
@@ -425,9 +437,9 @@ export const useSettingsStore = defineStore("settings", () => {
       ...desktopSettings.value,
       ...partial,
     };
-    desktopSettings.value = next;
+    desktopSettings.value = normalizeDesktopSettings(next);
     try {
-      await api.saveDesktopSettings(next);
+      await api.saveDesktopSettings(desktopSettings.value);
     } catch (error) {
       desktopSettings.value = previous;
       throw error;

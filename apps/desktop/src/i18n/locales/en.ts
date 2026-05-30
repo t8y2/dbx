@@ -1456,6 +1456,11 @@ export default {
     appLayoutSeparatedDescription: "Clear panel separation with block-style tabs.",
     appLayoutClassic: "Classic compact",
     appLayoutClassicDescription: "Continuous tab bar with compact panel headers.",
+    iconTheme: "Icon and logo style",
+    iconThemeDefault: "Default",
+    iconThemeDefaultDescription: "Use the color DBX app icon.",
+    iconThemeBlack: "Black",
+    iconThemeBlackDescription: "Use the black DBX mark for the window, tray, and logo.",
     showTrayIcon: "Show tray/menu bar icon",
     showTrayIconDescription:
       "When disabled, no icon is shown, but closing the window still hides DBX in the background as before.",

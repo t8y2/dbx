@@ -1349,6 +1349,11 @@ export default {
     appLayoutSeparatedDescription: "Separación clara de paneles con pestañas en bloque.",
     appLayoutClassic: "Clásico compacto",
     appLayoutClassicDescription: "Barra de pestañas continua con encabezados de panel compactos.",
+    iconTheme: "Estilo de icono y logo",
+    iconThemeDefault: "Predeterminado",
+    iconThemeDefaultDescription: "Usar el icono de color de DBX.",
+    iconThemeBlack: "Negro",
+    iconThemeBlackDescription: "Usar la marca negra de DBX en ventana, bandeja y logo.",
     showTrayIcon: "Mostrar icono en bandeja/barra de menú",
     showTrayIconDescription:
       "Si está desactivado, no se muestra el icono, pero cerrar la ventana sigue ocultando DBX en segundo plano como antes.",

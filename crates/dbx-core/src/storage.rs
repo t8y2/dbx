@@ -18,11 +18,28 @@ pub struct Storage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopSettings {
     pub show_tray_icon: bool,
+    pub icon_theme: DesktopIconTheme,
 }
 
 impl Default for DesktopSettings {
     fn default() -> Self {
-        Self { show_tray_icon: true }
+        Self { show_tray_icon: true, icon_theme: DesktopIconTheme::Default }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopIconTheme {
+    Default,
+    Black,
+}
+
+impl DesktopIconTheme {
+    fn from_settings_value(value: Option<&serde_json::Value>) -> Self {
+        match value.and_then(|value| value.as_str()) {
+            Some("black") => Self::Black,
+            _ => Self::Default,
+        }
     }
 }
 
@@ -326,6 +343,10 @@ impl Storage {
         let mut settings = self.load_app_settings_json().await?;
         settings.remove("run_in_background");
         settings.insert("show_tray_icon".to_string(), serde_json::Value::Bool(desktop_settings.show_tray_icon));
+        settings.insert(
+            "icon_theme".to_string(),
+            serde_json::to_value(desktop_settings.icon_theme).map_err(|e| e.to_string())?,
+        );
         self.save_app_settings_json(&settings).await
     }
 
@@ -337,6 +358,7 @@ impl Storage {
                 .and_then(|value| value.as_bool())
                 .or_else(|| settings.get("run_in_background").and_then(|value| value.as_bool()))
                 .unwrap_or_else(|| DesktopSettings::default().show_tray_icon),
+            icon_theme: DesktopIconTheme::from_settings_value(settings.get("icon_theme")),
         })
     }
 
@@ -1063,7 +1085,7 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopSettings, Storage};
+    use super::{DesktopIconTheme, DesktopSettings, Storage};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -1076,7 +1098,7 @@ mod tests {
         let path = temp_db_path("desktop-settings-default");
         let storage = Storage::open(&path).await.unwrap();
 
-        assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings { show_tray_icon: true });
+        assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings::default());
     }
 
     #[tokio::test]
@@ -1087,7 +1109,10 @@ mod tests {
         settings.insert("run_in_background".to_string(), serde_json::Value::Bool(false));
         storage.save_app_settings_json(&settings).await.unwrap();
 
-        assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings { show_tray_icon: false });
+        assert_eq!(
+            storage.load_desktop_settings().await.unwrap(),
+            DesktopSettings { show_tray_icon: false, ..DesktopSettings::default() }
+        );
     }
 
     #[tokio::test]
@@ -1096,10 +1121,16 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         storage.save_password_hash("hash-1").await.unwrap();
-        storage.save_desktop_settings(&DesktopSettings { show_tray_icon: false }).await.unwrap();
+        storage
+            .save_desktop_settings(&DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black })
+            .await
+            .unwrap();
 
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-1".to_string()));
-        assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings { show_tray_icon: false });
+        assert_eq!(
+            storage.load_desktop_settings().await.unwrap(),
+            DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black }
+        );
     }
 
     #[tokio::test]
@@ -1110,11 +1141,18 @@ mod tests {
         settings.insert("run_in_background".to_string(), serde_json::Value::Bool(false));
         storage.save_app_settings_json(&settings).await.unwrap();
 
-        storage.save_desktop_settings(&DesktopSettings { show_tray_icon: true }).await.unwrap();
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                icon_theme: DesktopIconTheme::Black,
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
 
         let settings = storage.load_app_settings_json().await.unwrap();
         assert_eq!(settings.get("run_in_background"), None);
         assert_eq!(settings.get("show_tray_icon").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(settings.get("icon_theme").and_then(|value| value.as_str()), Some("black"));
     }
 
     #[tokio::test]
@@ -1122,11 +1160,17 @@ mod tests {
         let path = temp_db_path("password-preserve-desktop-settings");
         let storage = Storage::open(&path).await.unwrap();
 
-        storage.save_desktop_settings(&DesktopSettings { show_tray_icon: false }).await.unwrap();
+        storage
+            .save_desktop_settings(&DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black })
+            .await
+            .unwrap();
         storage.save_password_hash("hash-2").await.unwrap();
 
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-2".to_string()));
-        assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings { show_tray_icon: false });
+        assert_eq!(
+            storage.load_desktop_settings().await.unwrap(),
+            DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black }
+        );
     }
 
     #[tokio::test]

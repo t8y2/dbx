@@ -97,6 +97,7 @@ export interface DriverStoreUsage {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  icon_theme: "default" | "black";
 }
 
 export interface WebDavConfig {

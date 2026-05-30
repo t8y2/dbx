@@ -19,6 +19,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-vue-next";
@@ -33,6 +34,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sqlHighlighter";
@@ -54,6 +56,7 @@ import * as api from "@/lib/api";
 const { t } = useI18n();
 const { isDark } = useTheme();
 const store = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const rootRef = ref<HTMLElement>();
 
@@ -94,18 +97,149 @@ const warnings = ref<string[]>([]);
 const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const triggers = ref<TriggerInfo[]>([]);
 
-const colWidths = ref([28, 128, 144, 96, 64, 56, 112, 128, 128]);
+const structureDensityValues: StructureEditorDensity[] = ["compact", "standard", "comfortable"];
+const structureDensityMetrics: Record<
+  StructureEditorDensity,
+  {
+    columns: number[];
+    indexes: number[];
+    minColumnWidth: number;
+    minIndexColumnWidth: number;
+    fontSize: number;
+    shellPadding: number;
+    cellPaddingX: number;
+    cellPaddingY: number;
+    headerPaddingY: number;
+    controlHeight: number;
+    controlPaddingX: number;
+    iconSize: number;
+    checkboxSize: number;
+    lineHeight: number;
+  }
+> = {
+  compact: {
+    columns: [24, 104, 120, 72, 54, 46, 92, 104, 104, 96],
+    indexes: [104, 156, 54, 78, 108, 128, 104, 62],
+    minColumnWidth: 24,
+    minIndexColumnWidth: 48,
+    fontSize: 10,
+    shellPadding: 8,
+    cellPaddingX: 4,
+    cellPaddingY: 3,
+    headerPaddingY: 4,
+    controlHeight: 20,
+    controlPaddingX: 6,
+    iconSize: 12,
+    checkboxSize: 12,
+    lineHeight: 1.25,
+  },
+  standard: {
+    columns: [28, 128, 144, 96, 64, 56, 112, 128, 128, 128],
+    indexes: [132, 200, 64, 96, 132, 160, 132, 76],
+    minColumnWidth: 28,
+    minIndexColumnWidth: 60,
+    fontSize: 11,
+    shellPadding: 12,
+    cellPaddingX: 6,
+    cellPaddingY: 4,
+    headerPaddingY: 6,
+    controlHeight: 24,
+    controlPaddingX: 8,
+    iconSize: 14,
+    checkboxSize: 14,
+    lineHeight: 1.35,
+  },
+  comfortable: {
+    columns: [32, 152, 168, 104, 76, 68, 136, 168, 152, 132],
+    indexes: [156, 232, 76, 112, 156, 192, 156, 92],
+    minColumnWidth: 32,
+    minIndexColumnWidth: 64,
+    fontSize: 12,
+    shellPadding: 14,
+    cellPaddingX: 8,
+    cellPaddingY: 6,
+    headerPaddingY: 8,
+    controlHeight: 28,
+    controlPaddingX: 10,
+    iconSize: 15,
+    checkboxSize: 15,
+    lineHeight: 1.45,
+  },
+};
+
+function isStructureEditorDensity(value: unknown): value is StructureEditorDensity {
+  return structureDensityValues.includes(value as StructureEditorDensity);
+}
+
+function metricsForDensity(density: StructureEditorDensity) {
+  return structureDensityMetrics[density];
+}
+
+const structureDensity = computed(() => settingsStore.editorSettings.structureEditorDensity);
+const structureDensityMetric = computed(() => metricsForDensity(structureDensity.value));
+const structureDensityOptions = computed(() => [
+  { value: "compact", label: t("structureEditor.densityCompact") },
+  { value: "standard", label: t("structureEditor.densityStandard") },
+  { value: "comfortable", label: t("structureEditor.densityComfortable") },
+]);
+const structureDensityStyle = computed(() => {
+  const metric = structureDensityMetric.value;
+  return {
+    "--structure-font-size": `${metric.fontSize}px`,
+    "--structure-shell-padding": `${metric.shellPadding}px`,
+    "--structure-cell-px": `${metric.cellPaddingX}px`,
+    "--structure-cell-py": `${metric.cellPaddingY}px`,
+    "--structure-header-py": `${metric.headerPaddingY}px`,
+    "--structure-control-height": `${metric.controlHeight}px`,
+    "--structure-control-px": `${metric.controlPaddingX}px`,
+    "--structure-icon-size": `${metric.iconSize}px`,
+    "--structure-checkbox-size": `${metric.checkboxSize}px`,
+    "--structure-line-height": String(metric.lineHeight),
+  };
+});
+const structureControlClass =
+  "h-[var(--structure-control-height)] min-w-0 px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)]";
+const structureMonoControlClass = `${structureControlClass} font-mono`;
+const structureToolbarButtonClass =
+  "h-[var(--structure-control-height)] gap-1 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]";
+const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
+const structureIconClass = "h-[var(--structure-icon-size)] w-[var(--structure-icon-size)]";
+const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--structure-checkbox-size)]";
+const structureHeaderCellClass =
+  "relative border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left";
+const structureCellClass = "border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+const structureLastCellClass = "border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+
+function applyStructureDensityWidths(density: StructureEditorDensity) {
+  const metric = metricsForDensity(density);
+  colWidths.value = [...metric.columns];
+  indexColWidths.value = [...metric.indexes];
+}
+
+function setStructureDensity(value: unknown) {
+  if (!isStructureEditorDensity(value)) return;
+  settingsStore.updateEditorSettings({ structureEditorDensity: value });
+}
+
+const initialDensityMetric = metricsForDensity(structureDensity.value);
+const colWidths = ref([...initialDensityMetric.columns]);
 const colResizing = ref<{ col: number; startX: number; startW: number } | null>(null);
-const indexColWidths = ref([132, 200, 64, 96, 132, 160, 132, 76]);
+const indexColWidths = ref([...initialDensityMetric.indexes]);
 const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
+
+watch(structureDensity, (density, previousDensity) => {
+  if (density === previousDensity) return;
+  applyStructureDensityWidths(density);
+});
 
 function onColResize(e: MouseEvent, col: number) {
   e.preventDefault();
-  colResizing.value = { col, startX: e.clientX, startW: colWidths.value[col] };
+  const widthIndex = columnWidthIndex(col);
+  colResizing.value = { col: widthIndex, startX: e.clientX, startW: colWidths.value[widthIndex] };
   const onMove = (ev: MouseEvent) => {
     if (!colResizing.value) return;
     const delta = ev.clientX - colResizing.value.startX;
-    colWidths.value[col] = Math.max(28, colResizing.value.startW + delta);
+    colWidths.value[col] = Math.max(structureDensityMetric.value.minColumnWidth, colResizing.value.startW + delta);
   };
   const onUp = () => {
     colResizing.value = null;
@@ -122,7 +256,10 @@ function onIndexColResize(e: MouseEvent, col: number) {
   const onMove = (ev: MouseEvent) => {
     if (!resizing.value) return;
     const delta = ev.clientX - resizing.value.startX;
-    indexColWidths.value[col] = Math.max(60, resizing.value.startW + delta);
+    indexColWidths.value[col] = Math.max(
+      structureDensityMetric.value.minIndexColumnWidth,
+      resizing.value.startW + delta,
+    );
   };
   const onUp = () => {
     resizing.value = null;
@@ -154,6 +291,18 @@ const showExtendedProperties = computed(() => {
   const dt = databaseType.value;
   return dt === "mysql" || dt === "postgres" || dt === "sqlserver";
 });
+const extendedPropertiesColumnIndex = 8;
+const visibleColWidths = computed(() =>
+  showExtendedProperties.value
+    ? colWidths.value
+    : colWidths.value.filter((_, index) => index !== extendedPropertiesColumnIndex),
+);
+
+function columnWidthIndex(visibleIndex: number) {
+  return !showExtendedProperties.value && visibleIndex >= extendedPropertiesColumnIndex
+    ? visibleIndex + 1
+    : visibleIndex;
+}
 
 const colLabels = computed(() => {
   const labels = [
@@ -477,52 +626,58 @@ watch(
 <template>
   <div
     ref="rootRef"
-    class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-3 text-[11px]"
-    data-structure-density="compact"
+    class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]"
+    :data-structure-density="structureDensity"
+    :style="structureDensityStyle"
   >
-    <div class="flex shrink-0 items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-[11px]">
-      <Database class="h-3.5 w-3.5 text-muted-foreground" />
+    <div
+      class="flex shrink-0 items-center gap-2 rounded-md border bg-muted/20 px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]"
+    >
+      <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
       <Badge variant="outline">{{ connection?.driver_label || databaseType }}</Badge>
       <Button
         v-if="!isCreateMode"
         variant="ghost"
         size="sm"
-        class="h-6 gap-1 px-2 text-[11px]"
+        :class="structureToolbarButtonClass"
         :disabled="loading || saving"
         @click="loadStructure()"
       >
-        <RefreshCw class="h-3.5 w-3.5" />
+        <RefreshCw :class="structureIconClass" />
         {{ t("structureEditor.refresh") }}
       </Button>
     </div>
 
     <div v-if="isCreateMode" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t("structureEditor.tableName") }}</label>
+      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.tableName") }}</label>
       <Input
         v-model="newTableName"
         :placeholder="t('contextMenu.duplicateNamePlaceholder')"
-        class="h-6 max-w-[220px] text-[11px]"
+        :class="[structureControlClass, 'max-w-[220px]']"
       />
     </div>
 
     <div class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t("structureEditor.comment") }}</label>
+      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.comment") }}</label>
       <Input
         v-model="tableComment"
         :placeholder="t('structureEditor.tableCommentPlaceholder')"
-        class="h-6 max-w-[320px] text-[11px]"
+        :class="[structureControlClass, 'max-w-[320px]']"
         :disabled="isTableCommentDisabled"
       />
       <Tooltip v-if="isTableCommentDisabled">
         <TooltipTrigger as-child>
-          <Info class="h-4 w-4 shrink-0 text-muted-foreground" />
+          <Info :class="[structureIconClass, 'shrink-0 text-muted-foreground']" />
         </TooltipTrigger>
         <TooltipContent>{{ t("structureEditor.tableCommentUnsupported") }}</TooltipContent>
       </Tooltip>
     </div>
 
-    <div v-if="loading" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+    <div
+      v-if="loading"
+      class="flex min-h-0 flex-1 items-center justify-center gap-2 text-[length:var(--structure-font-size)] text-muted-foreground"
+    >
       <Loader2 class="h-4 w-4 animate-spin" />
       {{ t("common.loading") }}
     </div>
@@ -530,54 +685,72 @@ watch(
     <div v-else class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px] gap-2 overflow-hidden">
       <div class="min-h-0 min-w-0 overflow-hidden rounded-md border">
         <Tabs v-model="activeTab" class="flex h-full min-h-0 flex-col">
-          <div class="flex shrink-0 items-center justify-between border-b px-2 py-1.5">
+          <div class="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-[var(--structure-header-py)]">
             <TabsList>
               <TabsTrigger value="columns">{{ t("structureEditor.columns") }}</TabsTrigger>
               <TabsTrigger value="indexes">{{ t("structureEditor.indexes") }}</TabsTrigger>
               <TabsTrigger value="foreignKeys">{{ t("structureEditor.foreignKeys") }}</TabsTrigger>
               <TabsTrigger value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
             </TabsList>
-            <Button
-              v-if="activeTab === 'columns'"
-              size="sm"
-              class="h-6 gap-1 px-2 text-[11px]"
-              :disabled="!structureCapabilities.addColumn"
-              @click="addColumn"
-            >
-              <Plus class="h-3.5 w-3.5" />
-              {{ t("structureEditor.addColumn") }}
-            </Button>
-            <Button
-              v-if="activeTab === 'indexes'"
-              size="sm"
-              class="h-6 gap-1 px-2 text-[11px]"
-              :disabled="!structureCapabilities.createIndex"
-              @click="addIndex"
-            >
-              <Plus class="h-3.5 w-3.5" />
-              {{ t("structureEditor.addIndex") }}
-            </Button>
+            <div class="flex shrink-0 items-center gap-1.5">
+              <div class="flex items-center gap-1.5">
+                <SlidersHorizontal :class="[structureIconClass, 'text-muted-foreground']" />
+                <Select :model-value="structureDensity" @update:model-value="setStructureDensity">
+                  <SelectTrigger
+                    size="sm"
+                    class="h-[var(--structure-control-height)] w-[108px] rounded-md px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]"
+                    :aria-label="t('structureEditor.density')"
+                  >
+                    <SelectValue :placeholder="t('structureEditor.density')" />
+                  </SelectTrigger>
+                  <SelectContent align="end" class="min-w-28">
+                    <SelectItem v-for="option in structureDensityOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                v-if="activeTab === 'columns'"
+                size="sm"
+                :class="structureToolbarButtonClass"
+                :disabled="!structureCapabilities.addColumn"
+                @click="addColumn"
+              >
+                <Plus :class="structureIconClass" />
+                {{ t("structureEditor.addColumn") }}
+              </Button>
+              <Button
+                v-if="activeTab === 'indexes'"
+                size="sm"
+                :class="structureToolbarButtonClass"
+                :disabled="!structureCapabilities.createIndex"
+                @click="addIndex"
+              >
+                <Plus :class="structureIconClass" />
+                {{ t("structureEditor.addIndex") }}
+              </Button>
+            </div>
           </div>
 
           <TabsContent value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0">
             <table
-              class="border-separate border-spacing-0 text-[11px]"
-              :style="{ minWidth: colWidths.reduce((a, w) => a + w, 0) + 'px' }"
+              class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]"
+              :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }"
             >
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
                   <th
                     v-for="(label, i) in colLabels"
                     :key="i"
-                    class="relative border-b border-r px-1.5 py-1.5 text-left"
-                    :class="{ 'text-center': i === 5 }"
-                    :style="{ width: colWidths[i] + 'px', minWidth: colWidths[i] + 'px' }"
+                    :class="[structureHeaderCellClass, { 'text-center': i === 5 }]"
+                    :style="{ width: visibleColWidths[i] + 'px', minWidth: visibleColWidths[i] + 'px' }"
                   >
                     {{ label }}
                     <div
                       v-if="i < colLabels.length - 1"
                       class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30"
-                      :class="colResizing?.col === i ? 'bg-primary/30' : ''"
+                      :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''"
                       @mousedown="onColResize($event, i)"
                     />
                   </th>
@@ -590,21 +763,21 @@ watch(
                   :class="column.markedForDrop ? 'bg-destructive/5 opacity-60' : ''"
                   :data-new-column-row="!column.original ? 'true' : undefined"
                 >
-                  <td class="border-b border-r px-1.5 py-1 text-muted-foreground">
+                  <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
-                      <KeyRound v-if="column.isPrimaryKey" class="h-3 w-3 text-amber-500" />
+                      <KeyRound v-if="column.isPrimaryKey" :class="[structureIconClass, 'text-amber-500']" />
                     </div>
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <Input
                       v-model="column.name"
-                      class="h-6 min-w-28 text-[11px]"
+                      :class="structureControlClass"
                       :disabled="isColumnNameDisabled(column)"
                       data-column-name-input
                     />
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <SearchableSelect
                       v-if="!isColumnTypeDisabled(column)"
                       :model-value="splitDataType(column.dataType).baseType"
@@ -614,7 +787,7 @@ watch(
                       :empty-text="t('structureEditor.noMatchingType')"
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
-                      trigger-class="h-6 w-full font-mono text-[11px]"
+                      :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="
                         (v: string) =>
                           (column.dataType = combineDataTypeForDatabase(
@@ -627,14 +800,14 @@ watch(
                     <Input
                       v-else
                       :model-value="splitDataType(column.dataType).baseType"
-                      class="h-6 w-full font-mono text-[11px]"
+                      :class="[structureMonoControlClass, 'w-full']"
                       disabled
                     />
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <Input
                       :model-value="splitDataType(column.dataType).params"
-                      class="h-6 min-w-16 font-mono text-[11px]"
+                      :class="structureMonoControlClass"
                       :disabled="isColumnTypeDisabled(column)"
                       @update:model-value="
                         column.dataType = combineDataTypeForDatabase(
@@ -645,22 +818,22 @@ watch(
                       "
                     />
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
                       <input
                         v-model="column.isNullable"
                         type="checkbox"
-                        class="h-3.5 w-3.5"
+                        :class="structureCheckboxClass"
                         :disabled="isColumnNullableDisabled(column)"
                       />
                       <span>{{ column.isNullable ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
                     </label>
                   </td>
-                  <td class="border-b border-r px-1.5 py-1 text-center">
+                  <td :class="[structureCellClass, 'text-center']">
                     <input
                       v-model="column.isPrimaryKey"
                       type="checkbox"
-                      class="h-3.5 w-3.5"
+                      :class="structureCheckboxClass"
                       :disabled="isPrimaryKeyDisabled(column)"
                       @change="
                         () => {
@@ -669,18 +842,18 @@ watch(
                       "
                     />
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <Input
                       v-model="column.defaultValue"
-                      class="h-6 min-w-24 font-mono text-[11px]"
+                      :class="structureMonoControlClass"
                       :disabled="isColumnDefaultDisabled(column)"
                     />
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
-                    <div class="flex min-w-36 items-center gap-1">
+                  <td :class="structureCellClass">
+                    <div class="flex min-w-0 items-center gap-1">
                       <Input
                         v-model="column.comment"
-                        class="h-6 min-w-0 flex-1 text-[11px]"
+                        :class="[structureControlClass, 'flex-1']"
                         :disabled="isColumnCommentDisabled(column)"
                       />
                       <Popover>
@@ -688,12 +861,12 @@ watch(
                           <Button
                             variant="ghost"
                             size="icon"
-                            class="h-6 w-6 shrink-0"
+                            :class="[structureIconButtonClass, 'shrink-0']"
                             :disabled="isColumnCommentDisabled(column)"
                             :aria-label="t('structureEditor.editComment')"
                             :title="t('structureEditor.editComment')"
                           >
-                            <Maximize2 class="h-3.5 w-3.5" />
+                            <Maximize2 :class="structureIconClass" />
                           </Button>
                         </PopoverTrigger>
                         <PopoverContent align="end" class="w-[420px] p-2.5">
@@ -701,13 +874,15 @@ watch(
                             <span class="min-w-0 truncate text-xs font-medium">
                               {{ t("structureEditor.editComment") }}
                             </span>
-                            <span class="max-w-44 truncate font-mono text-[11px] text-muted-foreground">
+                            <span
+                              class="max-w-44 truncate font-mono text-[length:var(--structure-font-size)] text-muted-foreground"
+                            >
                               {{ column.name || t("structureEditor.columnName") }}
                             </span>
                           </div>
                           <textarea
                             v-model="column.comment"
-                            class="min-h-36 w-full resize-y rounded-md border bg-background px-2.5 py-2 text-xs leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50"
+                            class="min-h-36 w-full resize-y rounded-md border bg-background px-[var(--structure-control-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50"
                             :placeholder="t('structureEditor.commentPlaceholder')"
                             :disabled="isColumnCommentDisabled(column)"
                           />
@@ -715,16 +890,20 @@ watch(
                       </Popover>
                     </div>
                   </td>
-                  <td v-if="showExtendedProperties" class="border-b border-r px-1.5 py-1">
+                  <td v-if="showExtendedProperties" :class="structureCellClass">
                     <div class="flex items-center gap-2">
                       <!-- MySQL: AUTO_INCREMENT + ON UPDATE CURRENT_TIMESTAMP -->
                       <template v-if="databaseType === 'mysql'">
-                        <label class="flex items-center gap-1 text-[11px] whitespace-nowrap">
-                          <input v-model="column.extra.autoIncrement" type="checkbox" class="h-3.5 w-3.5" />
+                        <label class="flex items-center gap-1 whitespace-nowrap">
+                          <input v-model="column.extra.autoIncrement" type="checkbox" :class="structureCheckboxClass" />
                           {{ t("structureEditor.autoIncrement") }}
                         </label>
-                        <label class="flex items-center gap-1 text-[11px] whitespace-nowrap">
-                          <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" class="h-3.5 w-3.5" />
+                        <label class="flex items-center gap-1 whitespace-nowrap">
+                          <input
+                            v-model="column.extra.onUpdateCurrentTimestamp"
+                            type="checkbox"
+                            :class="structureCheckboxClass"
+                          />
                           {{ t("structureEditor.onUpdateCurrentTimestamp") }}
                         </label>
                       </template>
@@ -732,7 +911,7 @@ watch(
                       <template v-else-if="databaseType === 'postgres'">
                         <select
                           :value="column.extra.identity?.generation ?? ''"
-                          class="h-6 rounded border bg-background px-1 text-[11px]"
+                          class="h-[var(--structure-control-height)] rounded border bg-background px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]"
                           @change="
                             (e) => {
                               const v = (e.target as HTMLSelectElement).value;
@@ -755,7 +934,7 @@ watch(
                           <Input
                             :model-value="column.extra.identity.seed?.toString() ?? ''"
                             type="number"
-                            class="h-6 w-14 text-[10px]"
+                            :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identitySeed')"
                             @update:model-value="
                               (v) => {
@@ -768,7 +947,7 @@ watch(
                           <Input
                             :model-value="column.extra.identity.increment?.toString() ?? ''"
                             type="number"
-                            class="h-6 w-14 text-[10px]"
+                            :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identityIncrement')"
                             @update:model-value="
                               (v) => {
@@ -782,15 +961,15 @@ watch(
                       </template>
                       <!-- SQL Server: IDENTITY -->
                       <template v-else-if="databaseType === 'sqlserver'">
-                        <label class="flex items-center gap-1 text-[11px] whitespace-nowrap">
-                          <input v-model="column.extra.autoIncrement" type="checkbox" class="h-3.5 w-3.5" />
+                        <label class="flex items-center gap-1 whitespace-nowrap">
+                          <input v-model="column.extra.autoIncrement" type="checkbox" :class="structureCheckboxClass" />
                           {{ t("structureEditor.identity") }}
                         </label>
                         <template v-if="column.extra.autoIncrement">
                           <Input
                             :model-value="column.extra.identity?.seed?.toString() ?? '1'"
                             type="number"
-                            class="h-6 w-14 text-[10px]"
+                            :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identitySeed')"
                             @update:model-value="
                               (v) => {
@@ -802,7 +981,7 @@ watch(
                           <Input
                             :model-value="column.extra.identity?.increment?.toString() ?? '1'"
                             type="number"
-                            class="h-6 w-14 text-[10px]"
+                            :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identityIncrement')"
                             @update:model-value="
                               (v) => {
@@ -815,49 +994,49 @@ watch(
                       </template>
                     </div>
                   </td>
-                  <td class="border-b px-1.5 py-1">
+                  <td :class="structureLastCellClass">
                     <div class="flex items-center gap-1">
                       <Button
                         variant="ghost"
                         size="icon"
-                        class="h-6 w-6"
+                        :class="structureIconButtonClass"
                         :disabled="!canMoveColumn(index, -1)"
                         :title="t('structureEditor.moveColumnUp')"
                         :aria-label="t('structureEditor.moveColumnUp')"
                         @click="moveColumn(index, -1)"
                       >
-                        <ChevronUp class="h-3.5 w-3.5" />
+                        <ChevronUp :class="structureIconClass" />
                       </Button>
                       <Button
                         variant="ghost"
                         size="icon"
-                        class="h-6 w-6"
+                        :class="structureIconButtonClass"
                         :disabled="!canMoveColumn(index, 1)"
                         :title="t('structureEditor.moveColumnDown')"
                         :aria-label="t('structureEditor.moveColumnDown')"
                         @click="moveColumn(index, 1)"
                       >
-                        <ChevronDown class="h-3.5 w-3.5" />
+                        <ChevronDown :class="structureIconClass" />
                       </Button>
                       <Button
                         v-if="column.original"
                         variant="ghost"
                         size="sm"
-                        class="h-6 gap-1 px-1.5 text-[11px]"
+                        :class="structureToolbarButtonClass"
                         :disabled="!canDropColumn(column)"
                         @click="toggleDropColumn(column)"
                       >
-                        <Trash2 class="h-3.5 w-3.5" />
+                        <Trash2 :class="structureIconClass" />
                         {{ column.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
                       </Button>
                       <Button
                         v-else
                         variant="ghost"
                         size="sm"
-                        class="h-6 gap-1 px-1.5 text-[11px]"
+                        :class="structureToolbarButtonClass"
                         @click="removeNewColumn(column)"
                       >
-                        <X class="h-3.5 w-3.5" />
+                        <X :class="structureIconClass" />
                         {{ t("structureEditor.remove") }}
                       </Button>
                     </div>
@@ -868,13 +1047,16 @@ watch(
           </TabsContent>
 
           <TabsContent value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0">
-            <table class="min-w-full border-separate border-spacing-0 text-[11px]">
+            <table
+              class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]"
+              :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }"
+            >
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
                   <th
                     v-for="(label, i) in indexColLabels"
                     :key="i"
-                    class="relative border-b border-r px-1.5 py-1.5 text-left"
+                    :class="structureHeaderCellClass"
                     :style="{
                       width: indexColWidths[i] + 'px',
                       minWidth: indexColWidths[i] + 'px',
@@ -896,17 +1078,17 @@ watch(
                   :key="index.id"
                   :class="index.markedForDrop ? 'bg-destructive/5 opacity-60' : ''"
                 >
-                  <td class="border-b border-r px-1.5 py-1">
-                    <Input v-model="index.name" class="h-6 text-[11px]" :disabled="!canEditIndexDraft(index)" />
+                  <td :class="structureCellClass">
+                    <Input v-model="index.name" :class="structureControlClass" :disabled="!canEditIndexDraft(index)" />
                   </td>
-                  <td class="overflow-hidden border-b border-r px-1.5 py-1">
+                  <td :class="[structureCellClass, 'overflow-hidden']">
                     <DropdownMenu v-if="canEditIndexDraft(index)">
                       <DropdownMenuTrigger as-child>
-                        <Button variant="outline" class="h-6 w-full justify-between px-2 font-mono text-[11px]">
+                        <Button variant="outline" :class="[structureMonoControlClass, 'w-full justify-between']">
                           <span class="truncate">{{
                             toColumnNames(index.columns) || t("structureEditor.indexColumnsPlaceholder")
                           }}</span>
-                          <ChevronDown class="ml-1 h-3 w-3 shrink-0 opacity-50" />
+                          <ChevronDown :class="[structureIconClass, 'ml-1 shrink-0 opacity-50']" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent
@@ -916,10 +1098,10 @@ watch(
                         :avoid-collisions="false"
                         @interactOutside="colSearch = ''"
                       >
-                        <div class="px-1.5 pb-1 pt-0.5">
+                        <div class="px-[var(--structure-cell-px)] pb-1 pt-0.5">
                           <Input
                             v-model="colSearch"
-                            class="h-6 text-[11px]"
+                            :class="structureControlClass"
                             :placeholder="t('grid.search')"
                             @click.stop
                           />
@@ -936,29 +1118,31 @@ watch(
                         </DropdownMenuCheckboxItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-                    <span v-else class="font-mono text-[11px] text-muted-foreground">{{
+                    <span v-else class="font-mono text-[length:var(--structure-font-size)] text-muted-foreground">{{
                       toColumnNames(index.columns)
                     }}</span>
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
                       <input
                         v-model="index.isUnique"
                         type="checkbox"
-                        class="h-3.5 w-3.5"
+                        :class="structureCheckboxClass"
                         :disabled="!canEditIndexDraft(index)"
                       />
                       <span>{{ index.isUnique ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
                     </label>
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <Select
                       v-if="indexTypeOptions.length > 0"
                       :model-value="index.indexType || 'BTREE'"
                       :disabled="!canEditIndexDraft(index)"
                       @update:model-value="(v: any) => (index.indexType = String(v ?? ''))"
                     >
-                      <SelectTrigger class="h-6 font-mono text-[11px]">
+                      <SelectTrigger
+                        class="h-[var(--structure-control-height)] w-full rounded-md px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)]"
+                      >
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -968,19 +1152,19 @@ watch(
                     <Input
                       v-else
                       v-model="index.indexType"
-                      class="h-6 font-mono text-[11px]"
+                      :class="structureMonoControlClass"
                       placeholder="BTREE"
                       :disabled="!canEditIndexDraft(index) || !structureCapabilities.indexType"
                     />
                   </td>
-                  <td class="overflow-hidden border-b border-r px-1.5 py-1">
+                  <td :class="[structureCellClass, 'overflow-hidden']">
                     <DropdownMenu v-if="canEditIndexDraft(index) && structureCapabilities.indexInclude">
                       <DropdownMenuTrigger as-child>
-                        <Button variant="outline" class="h-6 w-full justify-between px-2 font-mono text-[11px]">
+                        <Button variant="outline" :class="[structureMonoControlClass, 'w-full justify-between']">
                           <span class="truncate">{{
                             index.includedColumns.join(", ") || t("structureEditor.includedColumnsPlaceholder")
                           }}</span>
-                          <ChevronDown class="ml-1 h-3 w-3 shrink-0 opacity-50" />
+                          <ChevronDown :class="[structureIconClass, 'ml-1 shrink-0 opacity-50']" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent
@@ -990,10 +1174,10 @@ watch(
                         :avoid-collisions="false"
                         @interactOutside="colSearch = ''"
                       >
-                        <div class="px-1.5 pb-1 pt-0.5">
+                        <div class="px-[var(--structure-cell-px)] pb-1 pt-0.5">
                           <Input
                             v-model="colSearch"
-                            class="h-6 text-[11px]"
+                            :class="structureControlClass"
                             :placeholder="t('grid.search')"
                             @click.stop
                           />
@@ -1010,40 +1194,46 @@ watch(
                         </DropdownMenuCheckboxItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-                    <span v-else class="text-[11px] text-muted-foreground">{{ index.includedColumns.join(", ") }}</span>
+                    <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">{{
+                      index.includedColumns.join(", ")
+                    }}</span>
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
+                  <td :class="structureCellClass">
                     <Input
                       v-model="index.filter"
-                      class="h-6 font-mono text-[11px]"
+                      :class="structureMonoControlClass"
                       :placeholder="index.original?.filter || ''"
                       :disabled="!canEditIndexFilter(index)"
                     />
                   </td>
-                  <td class="border-b border-r px-1.5 py-1">
-                    <Input v-model="index.comment" class="h-6 text-[11px]" :disabled="!canEditIndexComment(index)" />
+                  <td :class="structureCellClass">
+                    <Input
+                      v-model="index.comment"
+                      :class="structureControlClass"
+                      :disabled="!canEditIndexComment(index)"
+                    />
                   </td>
-                  <td class="border-b px-1.5 py-1">
+                  <td :class="structureLastCellClass">
                     <Badge v-if="index.isPrimary" variant="outline">{{ t("structureEditor.primary") }}</Badge>
                     <Button
                       v-else-if="index.original"
                       variant="ghost"
                       size="sm"
-                      class="h-6 gap-1 px-1.5 text-[11px]"
+                      :class="structureToolbarButtonClass"
                       :disabled="!canDropIndex(index)"
                       @click="toggleDropIndex(index)"
                     >
-                      <Trash2 class="h-3.5 w-3.5" />
+                      <Trash2 :class="structureIconClass" />
                       {{ index.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
                     </Button>
                     <Button
                       v-else
                       variant="ghost"
                       size="sm"
-                      class="h-6 gap-1 px-1.5 text-[11px]"
+                      :class="structureToolbarButtonClass"
                       @click="removeNewIndex(index)"
                     >
-                      <X class="h-3.5 w-3.5" />
+                      <X :class="structureIconClass" />
                       {{ t("structureEditor.remove") }}
                     </Button>
                   </td>
@@ -1052,12 +1242,16 @@ watch(
             </table>
           </TabsContent>
 
-          <TabsContent value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-2">
-            <div v-if="foreignKeys.length === 0" class="py-10 text-center text-sm text-muted-foreground">
+          <TabsContent value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+            <div v-if="foreignKeys.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
             <div v-else class="space-y-1.5">
-              <div v-for="fk in foreignKeys" :key="fk.name" class="rounded-md border px-2 py-1.5 text-[11px]">
+              <div
+                v-for="fk in foreignKeys"
+                :key="fk.name"
+                class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]"
+              >
                 <div class="font-medium">{{ fk.name }}</div>
                 <div class="mt-1 font-mono text-muted-foreground">
                   {{ fk.column }} -> {{ fk.ref_table }}.{{ fk.ref_column }}
@@ -1066,12 +1260,16 @@ watch(
             </div>
           </TabsContent>
 
-          <TabsContent value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-2">
-            <div v-if="triggers.length === 0" class="py-10 text-center text-sm text-muted-foreground">
+          <TabsContent value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+            <div v-if="triggers.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
             <div v-else class="space-y-1.5">
-              <div v-for="trigger in triggers" :key="trigger.name" class="rounded-md border px-2 py-1.5 text-[11px]">
+              <div
+                v-for="trigger in triggers"
+                :key="trigger.name"
+                class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]"
+              >
                 <div class="font-medium">{{ trigger.name }}</div>
                 <div class="mt-1 font-mono text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
               </div>
@@ -1081,7 +1279,9 @@ watch(
       </div>
 
       <div class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-md border">
-        <div class="flex shrink-0 items-center justify-between border-b px-2 py-1.5 text-[11px] font-medium">
+        <div
+          class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium"
+        >
           <div class="flex items-center gap-1.5">
             <span>{{ t("structureEditor.sqlPreview") }}</span>
             <Badge
@@ -1103,18 +1303,21 @@ watch(
             <div
               v-for="warning in warnings"
               :key="warning"
-              class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-2 py-1 text-[11px] text-yellow-700 dark:text-yellow-300"
+              class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-yellow-700 dark:text-yellow-300"
             >
-              <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <AlertTriangle :class="[structureIconClass, 'mt-0.5 shrink-0']" />
               <span>{{ warning }}</span>
             </div>
           </div>
           <pre
             v-if="pendingStatements.length"
-            class="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 font-mono text-[11px] leading-4"
+            class="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-[var(--structure-cell-px)] font-mono text-[length:var(--structure-font-size)] leading-4"
             v-html="highlightedSql"
           />
-          <div v-else class="flex h-full items-center justify-center text-sm text-muted-foreground">
+          <div
+            v-else
+            class="flex h-full items-center justify-center text-[length:var(--structure-font-size)] text-muted-foreground"
+          >
             {{ t("structureEditor.noChanges") }}
           </div>
         </div>
@@ -1123,15 +1326,15 @@ watch(
 
     <div
       v-if="errorMessage"
-      class="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive"
+      class="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] text-destructive"
     >
       {{ errorMessage }}
     </div>
 
     <div class="flex shrink-0 items-center justify-end gap-2">
-      <Button :disabled="!canApply" @click="applyChanges">
-        <Loader2 v-if="saving" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
-        <Save v-else class="mr-1.5 h-3.5 w-3.5" />
+      <Button :class="structureToolbarButtonClass" :disabled="!canApply" @click="applyChanges">
+        <Loader2 v-if="saving" :class="[structureIconClass, 'mr-1.5 animate-spin']" />
+        <Save v-else :class="[structureIconClass, 'mr-1.5']" />
         {{ t("structureEditor.apply") }}
       </Button>
     </div>

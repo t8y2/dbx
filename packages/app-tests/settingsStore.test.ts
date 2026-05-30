@@ -93,6 +93,17 @@ test("keeps saved data grid header display settings", () => {
   assert.equal(settings.compactColumnHeaderActions, false);
 });
 
+test("normalizes table structure editor density", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.structureEditorDensity, "compact");
+  assert.equal(normalizeEditorSettings({}).structureEditorDensity, "compact");
+  assert.equal(normalizeEditorSettings({ structureEditorDensity: "standard" }).structureEditorDensity, "standard");
+  assert.equal(
+    normalizeEditorSettings({ structureEditorDensity: "comfortable" }).structureEditorDensity,
+    "comfortable",
+  );
+  assert.equal(normalizeEditorSettings({ structureEditorDensity: "invalid" as any }).structureEditorDensity, "compact");
+});
+
 test("normalizes grid drawer widths", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth, 320);
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth, 320);

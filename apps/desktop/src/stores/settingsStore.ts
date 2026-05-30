@@ -169,6 +169,9 @@ export type EditorTheme =
   | "duotone-dark"
   | "xcode";
 
+const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
+export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
+
 export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
@@ -183,6 +186,7 @@ export interface EditorSettings {
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
   compactColumnHeaderActions: boolean;
+  structureEditorDensity: StructureEditorDensity;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
   shortcuts: ShortcutSettings;
@@ -235,6 +239,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   mongoViewMode: "document",
   showColumnCommentsInHeader: false,
   compactColumnHeaderActions: true,
+  structureEditorDensity: "compact",
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 320,
   shortcuts: normalizeShortcutSettings(),
@@ -261,6 +266,12 @@ function normalizeUiScale(value: unknown): number {
 function normalizeDrawerWidth(value: unknown, min: number, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.min(900, Math.max(min, Math.round(value)));
+}
+
+function normalizeStructureEditorDensity(value: unknown): StructureEditorDensity {
+  return STRUCTURE_EDITOR_DENSITIES.includes(value as StructureEditorDensity)
+    ? (value as StructureEditorDensity)
+    : DEFAULT_EDITOR_SETTINGS.structureEditorDensity;
 }
 
 function normalizeColumnFormatters(value: unknown): Record<string, ColumnFormatterConfig> {
@@ -326,6 +337,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     compactColumnHeaderActions:
       settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
+    structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoDrawerWidth: normalizeDrawerWidth(
       settings.tableInfoDrawerWidth,
       240,
@@ -466,6 +478,8 @@ export const useSettingsStore = defineStore("settings", () => {
       editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.compactColumnHeaderActions !== undefined)
       editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
+    if (partial.structureEditorDensity !== undefined)
+      editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoDrawerWidth !== undefined)
       editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, 320);
     if (partial.cellDetailDrawerWidth !== undefined)

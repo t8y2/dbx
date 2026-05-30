@@ -159,6 +159,7 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
 
 export type EditorTheme =
   | "app"
+  | "idea-dark"
   | "one-dark"
   | "vscode-dark"
   | "vscode-light"
@@ -202,6 +203,7 @@ export interface EditorSettings {
 
 export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }[] = [
   { value: "app", label: "Follow app theme", dark: false },
+  { value: "idea-dark", label: "IDEA Dark", dark: true },
   { value: "one-dark", label: "One Dark", dark: true },
   { value: "vscode-dark", label: "VS Dark+", dark: true },
   { value: "vscode-light", label: "VS Light+", dark: false },

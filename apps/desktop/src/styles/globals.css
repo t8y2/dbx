@@ -5,8 +5,8 @@
   font-weight: 100 900;
   src: url("/fonts/geist-latin-ext-wght-normal.woff2") format("woff2-variations");
   unicode-range:
-    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF,
-    U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
 @font-face {
@@ -16,8 +16,8 @@
   font-weight: 100 900;
   src: url("/fonts/geist-latin-wght-normal.woff2") format("woff2-variations");
   unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC,
+    U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @import "tailwindcss";
@@ -106,37 +106,38 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* IDEA Darcula-inspired defaults: warm gray panels with softened text contrast. */
+  --background: #2b2d30;
+  --foreground: #c9d1d9;
+  --card: #313335;
+  --card-foreground: #c9d1d9;
+  --popover: #313335;
+  --popover-foreground: #c9d1d9;
+  --primary: #6aa9ff;
+  --primary-foreground: #1f2329;
+  --secondary: #3a3d40;
+  --secondary-foreground: #c9d1d9;
+  --muted: #3a3d40;
+  --muted-foreground: #9aa0a6;
+  --accent: #3d4652;
+  --accent-foreground: #d7dde5;
+  --destructive: #ff6b68;
+  --border: #45484a;
+  --input: #3c3f41;
+  --ring: #5f8fd5;
+  --chart-1: #6aa9ff;
+  --chart-2: #73d0ff;
+  --chart-3: #c191ff;
+  --chart-4: #8ccf7e;
+  --chart-5: #ffb86c;
+  --sidebar: #252629;
+  --sidebar-foreground: #c9d1d9;
+  --sidebar-primary: #6aa9ff;
+  --sidebar-primary-foreground: #1f2329;
+  --sidebar-accent: #34373a;
+  --sidebar-accent-foreground: #d7dde5;
+  --sidebar-border: #3c3f41;
+  --sidebar-ring: #5f8fd5;
 }
 
 html.disable-transitions,
@@ -207,7 +208,7 @@ body.dbx-table-reference-dragging * {
   background: oklch(0.965 0 0);
 }
 .dark .app-panel-gutter {
-  background: oklch(0.18 0 0);
+  background: #252629;
 }
 .app-layout-classic .panel-resize-handle {
   width: 3px;
@@ -254,6 +255,6 @@ body.dbx-table-reference-dragging * {
   --tw-ring-shadow: none !important;
 }
 .dark .cn-menu-translucent {
-  background-color: oklch(0.205 0 0 / 0.82) !important;
-  border-color: oklch(1 0 0 / 0.1) !important;
+  background-color: color-mix(in srgb, var(--popover) 86%, transparent) !important;
+  border-color: color-mix(in srgb, var(--border) 82%, transparent) !important;
 }

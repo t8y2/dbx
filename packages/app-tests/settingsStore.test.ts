@@ -27,6 +27,7 @@ test("normalizes editor theme settings", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.theme, "app");
   assert.equal(normalizeEditorSettings({}).theme, "app");
   assert.equal(normalizeEditorSettings({ theme: "app" }).theme, "app");
+  assert.equal(normalizeEditorSettings({ theme: "idea-dark" }).theme, "idea-dark");
   assert.equal(normalizeEditorSettings({ theme: "vscode-light" }).theme, "vscode-light");
   assert.equal(normalizeEditorSettings({ theme: "invalid" as any }).theme, DEFAULT_EDITOR_SETTINGS.theme);
 });

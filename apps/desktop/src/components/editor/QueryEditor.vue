@@ -38,8 +38,8 @@ import {
 import {
   EDITOR_FONT_FAMILY_CSS_VAR,
   EDITOR_FONT_SIZE_CSS_VAR,
-  loadEditorTheme,
   editorFontTheme,
+  loadSqlEditorTheme,
   sqlCompletionTheme,
 } from "@/lib/editorThemes";
 import {
@@ -1209,7 +1209,7 @@ onMounted(async () => {
     keywords: (baseDialect.spec.keywords || "") + " " + extraKeywords,
   });
 
-  const theme = await loadEditorTheme(ss.theme, editorThemeAppearance());
+  const theme = await loadSqlEditorTheme(ss.theme, editorThemeAppearance());
 
   const activeLineHighlighter = ViewPlugin.fromClass(
     class {
@@ -1538,7 +1538,7 @@ watch(
       liveFontSize.value = ss.fontSize;
     }
     syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
-    const themeExt = await loadEditorTheme(ss.theme, editorThemeAppearance());
+    const themeExt = await loadSqlEditorTheme(ss.theme, editorThemeAppearance());
     view.value.dispatch({
       effects: [
         codeMirrorTheme.reconfigure(themeExt),

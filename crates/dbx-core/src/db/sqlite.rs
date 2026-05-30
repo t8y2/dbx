@@ -179,6 +179,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bundled_sqlite_math_functions_are_available() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+
+        let floor_result =
+            execute_query(&pool, "WITH test(x) AS (VALUES (1.1), (1.2), (1.3)) SELECT FLOOR(x) FROM test")
+                .await
+                .expect("FLOOR() should be available");
+
+        assert_eq!(floor_result.rows.len(), 3);
+        for row in floor_result.rows {
+            assert_eq!(row[0].as_f64(), Some(1.0));
+        }
+
+        let result = execute_query(&pool, "SELECT ACOS(1.0), ACOSH(1.0), ASIN(0.0), CEIL(1.2), PI()")
+            .await
+            .expect("SQLite math functions should be available");
+
+        assert_eq!(result.rows[0][0].as_f64(), Some(0.0));
+        assert_eq!(result.rows[0][1].as_f64(), Some(0.0));
+        assert_eq!(result.rows[0][2].as_f64(), Some(0.0));
+        assert_eq!(result.rows[0][3].as_f64(), Some(2.0));
+        let pi = result.rows[0][4].as_f64().expect("PI() returns a real value");
+        assert!((3.14..3.15).contains(&pi));
+    }
+
+    #[tokio::test]
     async fn substring_rewrite_works_in_direct_query() {
         let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
 

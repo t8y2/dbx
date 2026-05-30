@@ -1,2 +1,6 @@
+[env]
+# Enable SQLite's built-in math functions for rusqlite's bundled libsqlite3.
+LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
+
 [target.x86_64-pc-windows-msvc]
 linker = "lld-link"

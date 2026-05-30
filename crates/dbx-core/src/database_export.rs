@@ -670,7 +670,13 @@ mod tests {
     use serde_json::{json, Value};
 
     fn table(name: &str, table_type: &str) -> TableInfo {
-        TableInfo { name: name.to_string(), table_type: table_type.to_string(), comment: None }
+        TableInfo {
+            name: name.to_string(),
+            table_type: table_type.to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }
     }
 
     #[test]

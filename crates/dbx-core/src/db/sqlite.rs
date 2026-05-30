@@ -227,6 +227,8 @@ pub async fn list_tables(pool: &SqliteHandle, _schema: &str) -> Result<Vec<Table
                         name: row.get(0)?,
                         table_type: if table_type == "view" { "VIEW".to_string() } else { "BASE TABLE".to_string() },
                         comment: None,
+                        parent_schema: None,
+                        parent_name: None,
                     })
                 })
                 .map_err(|e| e.to_string())?;

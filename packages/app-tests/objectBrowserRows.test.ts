@@ -96,6 +96,22 @@ test("object browser rows mark partition-like tables when their parent table exi
   assert.equal(rows.find((row) => row.name === "audit_p20220802")?.partitionParentId, undefined);
 });
 
+test("object browser rows use explicit partition metadata before name heuristics", () => {
+  const rows = buildObjectBrowserRows({
+    objects: [
+      { name: "events", object_type: "TABLE", schema: "public" },
+      { name: "events_may", object_type: "TABLE", schema: "public", parent_schema: "public", parent_name: "events" },
+    ],
+    database: "app",
+    fallbackSchema: "public",
+    needsSchema: true,
+  });
+
+  const parent = rows.find((row) => row.name === "events");
+  assert.equal(parent?.partitionCount, 1);
+  assert.equal(rows.find((row) => row.name === "events_may")?.partitionParentId, parent?.id);
+});
+
 test("object browser timestamp display strips timezone suffixes", () => {
   assert.equal(formatObjectBrowserTimestamp("2026-05-22 10:18:24+08"), "2026-05-22 10:18:24");
   assert.equal(formatObjectBrowserTimestamp("2026-05-22 10:18:24.123456+08:00"), "2026-05-22 10:18:24");

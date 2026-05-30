@@ -218,6 +218,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "group-partitions":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     default:
       return { icon: Database, colorClass: "text-muted-foreground" };
   }
@@ -232,6 +234,7 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-views",
   "group-procedures",
   "group-functions",
+  "group-partitions",
   "saved-sql-root",
   "saved-sql-folder",
 ]);
@@ -290,7 +293,8 @@ async function toggle() {
     node.type === "group-tables" ||
     node.type === "group-views" ||
     node.type === "group-procedures" ||
-    node.type === "group-functions"
+    node.type === "group-functions" ||
+    node.type === "group-partitions"
   ) {
     node.isExpanded = !node.isExpanded;
     emit("node-toggled", node, wasExpanded);
@@ -2203,7 +2207,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
       });
       items.push({ label: "", separator: true });
     }
-    if (node.type !== "saved-sql-root" && node.type !== "saved-sql-folder") {
+    if (node.type !== "saved-sql-root" && node.type !== "saved-sql-folder" && node.type !== "group-partitions") {
       items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw });
     }
     return items;
@@ -2314,7 +2318,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
             (node.type === 'group-tables' ||
               node.type === 'group-views' ||
               node.type === 'group-procedures' ||
-              node.type === 'group-functions') &&
+              node.type === 'group-functions' ||
+              node.type === 'group-partitions') &&
             node.objectCount != null
           "
           class="text-muted-foreground text-[10px] shrink-0"

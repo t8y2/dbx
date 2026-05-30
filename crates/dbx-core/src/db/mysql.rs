@@ -715,6 +715,8 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
             name: get_str_by_name(row, "TABLE_NAME"),
             table_type: get_str_by_name(row, "TABLE_TYPE"),
             comment: get_opt_str(row, "TABLE_COMMENT").filter(|s| !s.is_empty()),
+            parent_schema: None,
+            parent_name: None,
         })
         .collect())
 }
@@ -754,6 +756,8 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         comment: get_opt_str(row, "object_comment").filter(|s| !s.is_empty()),
         created_at: get_opt_str(row, "created_at"),
         updated_at: get_opt_str(row, "updated_at"),
+        parent_schema: None,
+        parent_name: None,
     }
 }
 

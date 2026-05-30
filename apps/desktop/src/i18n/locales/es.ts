@@ -844,6 +844,7 @@ export default {
     views: "Vistas",
     procedures: "Procedimientos",
     functions: "Funciones",
+    partitions: "Particiones",
     objectBrowser: "Explorar en el navegador de objetos ({count})",
   },
   objects: {

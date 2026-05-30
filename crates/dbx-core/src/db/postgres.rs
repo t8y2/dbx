@@ -707,6 +707,8 @@ pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, St
             name: row.get::<_, String>(0),
             table_type: row.get::<_, String>(1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+            parent_schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+            parent_name: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
 }
@@ -716,9 +718,14 @@ fn postgres_tables_sql() -> &'static str {
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
            WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
            WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
-         obj_description(c.oid) AS table_comment \
+         obj_description(c.oid) AS table_comment, \
+         pn.nspname AS parent_schema, \
+         pc.relname AS parent_name \
          FROM pg_catalog.pg_class c \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+         LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+         LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
          ORDER BY c.relname"
 }
@@ -738,9 +745,14 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
            THEN pg_xact_commit_timestamp(c.xmin)::text END, \
          stat.modification::text \
        ) AS updated_at, \
+       pn.nspname AS parent_schema, \
+       pc.relname AS parent_name, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
      LEFT JOIN LATERAL pg_stat_file( \
        CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
      ) stat ON true \
@@ -752,6 +764,8 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        NULL::text AS created_at, \
        CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
          THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
        CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
@@ -768,9 +782,14 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        obj_description(c.oid) AS object_comment, \
        NULL::text AS created_at, \
        NULL::text AS updated_at, \
+       pn.nspname AS parent_schema, \
+       pc.relname AS parent_name, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
      WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
      UNION ALL \
      SELECT p.proname AS object_name, \
@@ -778,6 +797,8 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        obj_description(p.oid) AS object_comment, \
        NULL::text AS created_at, \
        NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
        CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
@@ -805,6 +826,8 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
             updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+            parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
+            parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
 }
@@ -1349,6 +1372,9 @@ mod tests {
         assert!(sql.contains("table_name"));
         assert!(sql.contains("table_type"));
         assert!(sql.contains("table_comment"));
+        assert!(sql.contains("pg_catalog.pg_inherits"));
+        assert!(sql.contains("parent_schema"));
+        assert!(sql.contains("parent_name"));
         assert!(sql.contains("$1"));
         assert!(sql.contains("BASE TABLE"));
         assert!(sql.contains("VIEW"));
@@ -1361,6 +1387,9 @@ mod tests {
         let sql = list_objects_sql(true);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(sql.contains("pg_catalog.pg_inherits"));
+        assert!(sql.contains("parent_schema"));
+        assert!(sql.contains("parent_name"));
         assert!(sql.contains("pg_stat_file"));
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));

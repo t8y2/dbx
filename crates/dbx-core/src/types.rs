@@ -10,6 +10,8 @@ pub struct TableInfo {
     pub name: String,
     pub table_type: String, // "TABLE" or "VIEW"
     pub comment: Option<String>,
+    pub parent_schema: Option<String>,
+    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +22,8 @@ pub struct ObjectInfo {
     pub comment: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub parent_schema: Option<String>,
+    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

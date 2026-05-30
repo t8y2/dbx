@@ -66,7 +66,13 @@ pub fn duckdb_query_tables_in_database_with_attached(
     ).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map((database.as_str(), schema), |row| {
-            Ok(db::TableInfo { name: row.get::<_, String>(0)?, table_type: row.get::<_, String>(1)?, comment: None })
+            Ok(db::TableInfo {
+                name: row.get::<_, String>(0)?,
+                table_type: row.get::<_, String>(1)?,
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            })
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -425,7 +431,16 @@ async fn list_tables_once(
 }
 
 fn collection_names_to_tables(names: Vec<String>, table_type: &str) -> Vec<db::TableInfo> {
-    names.into_iter().map(|name| db::TableInfo { name, table_type: table_type.to_string(), comment: None }).collect()
+    names
+        .into_iter()
+        .map(|name| db::TableInfo {
+            name,
+            table_type: table_type.to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        })
+        .collect()
 }
 
 fn filter_table_infos(tables: Vec<db::TableInfo>, filter: Option<&str>, limit: Option<usize>) -> Vec<db::TableInfo> {
@@ -526,6 +541,8 @@ async fn list_objects_once(
                         comment: table.comment,
                         created_at: None,
                         updated_at: None,
+                        parent_schema: table.parent_schema,
+                        parent_name: table.parent_name,
                     })
                     .collect())
             })
@@ -572,6 +589,8 @@ async fn list_objects_once(
                     comment: table.comment,
                     created_at: None,
                     updated_at: None,
+                    parent_schema: table.parent_schema,
+                    parent_name: table.parent_name,
                 })
                 .collect())
         }

@@ -929,6 +929,7 @@ export default {
     views: "视图",
     procedures: "存储过程",
     functions: "函数",
+    partitions: "分区",
     objectBrowser: "在对象浏览器中查看 ({count})",
   },
   objects: {

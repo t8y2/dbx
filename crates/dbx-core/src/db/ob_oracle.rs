@@ -56,7 +56,16 @@ pub async fn list_tables(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<T
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| TableInfo { name: get_str(row, 0), table_type: get_str(row, 1), comment: None }).collect())
+    Ok(rows
+        .iter()
+        .map(|row| TableInfo {
+            name: get_str(row, 0),
+            table_type: get_str(row, 1),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        })
+        .collect())
 }
 
 fn list_objects_sql(schema: &str) -> String {
@@ -90,6 +99,8 @@ pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<
             comment: None,
             created_at: None,
             updated_at: None,
+            parent_schema: None,
+            parent_name: None,
         })
         .collect())
 }

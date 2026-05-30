@@ -192,6 +192,8 @@ pub async fn list_tables(client: &ChClient, database: &str) -> Result<Vec<TableI
                 name: row[0].as_str().unwrap_or("").to_string(),
                 table_type: table_type.to_string(),
                 comment: None,
+                parent_schema: None,
+                parent_name: None,
             }
         })
         .collect())

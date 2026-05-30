@@ -153,6 +153,8 @@ export interface TableInfo {
   name: string;
   table_type: string;
   comment?: string | null;
+  parent_schema?: string | null;
+  parent_name?: string | null;
 }
 
 export type DatabaseObjectType = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION";
@@ -164,6 +166,8 @@ export interface ObjectInfo {
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  parent_schema?: string | null;
+  parent_name?: string | null;
 }
 
 export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION";
@@ -264,6 +268,7 @@ export type TreeNodeType =
   | "group-views"
   | "group-procedures"
   | "group-functions"
+  | "group-partitions"
   | "object-browser"
   | "saved-sql-root"
   | "saved-sql-folder"

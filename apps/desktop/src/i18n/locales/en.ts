@@ -951,6 +951,7 @@ export default {
     views: "Views",
     procedures: "Procedures",
     functions: "Functions",
+    partitions: "Partitions",
     objectBrowser: "Browse in Object Browser ({count})",
   },
   objects: {

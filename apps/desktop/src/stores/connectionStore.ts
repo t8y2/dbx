@@ -35,6 +35,7 @@ import {
   buildTableTreeNodes,
   expandCachedObjectBrowserNodes,
   objectGroupRefreshParentId,
+  tablePartitionGroups,
 } from "@/lib/tableTree";
 import {
   hasTreeNodeDatabaseContext,
@@ -1055,6 +1056,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!node) return;
 
     const children: TreeNode[] = [
+      ...tablePartitionGroups(node),
       {
         id: `${parentId}:__columns`,
         label: "tree.columns",
@@ -1317,7 +1319,8 @@ export const useConnectionStore = defineStore("connection", () => {
       node.type === "group-tables" ||
       node.type === "group-views" ||
       node.type === "group-procedures" ||
-      node.type === "group-functions"
+      node.type === "group-functions" ||
+      node.type === "group-partitions"
     ) {
       node.isExpanded = true;
     }

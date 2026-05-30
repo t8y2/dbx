@@ -79,6 +79,30 @@ function queryParamValue(params: string, key: string): string | undefined {
   return undefined;
 }
 
+function extractMysqlCredentialParams(params: string): { username?: string; password?: string; urlParams: string } {
+  let username: string | undefined;
+  let password: string | undefined;
+  let foundCredentialParam = false;
+  const urlParams: string[] = [];
+
+  for (const part of params.split(/[&;]/)) {
+    if (!part) continue;
+    const [rawKey, ...rest] = part.split("=");
+    const key = decodeUrlPart(rawKey).trim().toLowerCase();
+    if (key === "user") {
+      username = decodeUrlPart(rest.join("=")).trim();
+      foundCredentialParam = true;
+    } else if (key === "password") {
+      password = decodeUrlPart(rest.join("=")).trim();
+      foundCredentialParam = true;
+    } else {
+      urlParams.push(part);
+    }
+  }
+
+  return { username, password, urlParams: foundCredentialParam ? urlParams.join("&") : params };
+}
+
 function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
   if (dbType === "mysql") {
     const requireSsl = queryParamValue(params, "require_ssl")?.toLowerCase();
@@ -243,7 +267,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (jdbcOracle) return jdbcOracle;
   const jdbcSqlServer = parseJdbcSqlServerUrl(input);
   if (jdbcSqlServer) return jdbcSqlServer;
-  const source = input.replace(/^jdbc:/i, "");
+  const isJdbcUrl = /^jdbc:/i.test(input);
+  const source = isJdbcUrl ? input.replace(/^jdbc:/i, "") : input;
 
   let parsed: URL;
   try {
@@ -264,6 +289,9 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     profile.type === "redis" && normalizedFragment === "insecure"
       ? [urlParams, "insecure=true"].filter(Boolean).join("&")
       : urlParams;
+  const mysqlCredentials =
+    isJdbcUrl && profile.type === "mysql" ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
+  const effectiveUrlParams = mysqlCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
     return {
       dbType: profile.type,
@@ -287,11 +315,11 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     driverLabel: profile.label,
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : profile.defaultPort,
-    username: decodeUrlPart(parsed.username),
-    password: decodeUrlPart(parsed.password),
+    username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
+    password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
     database: databaseFromPath(parsed.pathname),
-    urlParams: parsedUrlParams,
-    ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, parsedUrlParams),
+    urlParams: effectiveUrlParams,
+    ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams),
   };
 }
 

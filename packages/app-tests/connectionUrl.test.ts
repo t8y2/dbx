@@ -35,6 +35,28 @@ test("parses mysql TLS URL params into the SSL switch state", () => {
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?require_ssl=true").ssl, true);
 });
 
+test("parses MySQL JDBC user and password URL params as credentials", () => {
+  const parsed = parseConnectionUrl(
+    "jdbc:mysql://127.0.0.1:1234/example?user=admin&password=pwd&useUnicode=true&characterEncoding=UTF8&useSSL=false",
+  );
+
+  assert.equal(parsed.dbType, "mysql");
+  assert.equal(parsed.host, "127.0.0.1");
+  assert.equal(parsed.port, 1234);
+  assert.equal(parsed.username, "admin");
+  assert.equal(parsed.password, "pwd");
+  assert.equal(parsed.database, "example");
+  assert.equal(parsed.urlParams, "useUnicode=true&characterEncoding=UTF8&useSSL=false");
+});
+
+test("leaves non-JDBC MySQL user and password URL params untouched", () => {
+  const parsed = parseConnectionUrl("mysql://127.0.0.1:1234/example?user=admin&password=pwd&charset=utf8mb4");
+
+  assert.equal(parsed.username, "");
+  assert.equal(parsed.password, "");
+  assert.equal(parsed.urlParams, "user=admin&password=pwd&charset=utf8mb4");
+});
+
 test("parses Redis insecure TLS URL fragments into URL params", () => {
   const parsed = parseConnectionUrl("rediss://default:secret@redis.example.com:6379/0#insecure");
 

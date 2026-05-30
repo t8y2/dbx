@@ -8,6 +8,10 @@ export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
   return options.silent !== true;
 }
 
+export function canDownloadAndInstallUpdate(info: api.UpdateInfo | null, isDesktop: boolean) {
+  return isDesktop && info?.update_available === true && info.portable_mode !== true;
+}
+
 export async function resolveUpdaterProxy(): Promise<string | undefined> {
   if (!isTauriRuntime()) return undefined;
   try {
@@ -80,6 +84,10 @@ export function useAppUpdater() {
 
   async function downloadAndInstallUpdate() {
     if (!isTauriRuntime() || isDownloadingUpdate.value) return;
+    if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
+      openLatestRelease();
+      return;
+    }
     isDownloadingUpdate.value = true;
     downloadProgress.value = 0;
     try {

@@ -35,6 +35,7 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: String,
     pub update_available: bool,
+    pub portable_mode: bool,
     pub release_name: String,
     pub release_url: String,
     pub release_notes: String,
@@ -227,6 +228,7 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
 
     UpdateInfo {
         update_available: is_newer_version(&latest_version, current_version),
+        portable_mode: false,
         current_version: current_version.to_string(),
         release_name,
         release_url,
@@ -391,5 +393,6 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
         assert_eq!(info.release_name, "DBX v0.5.3");
         assert_eq!(info.release_url, "https://github.com/t8y2/dbx/releases/tag/v0.5.3");
         assert_eq!(info.release_notes, "### 新功能\n\n真实发布说明");
+        assert!(!info.portable_mode);
     }
 }

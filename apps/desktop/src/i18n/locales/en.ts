@@ -55,6 +55,8 @@ export default {
       "GitHub update checks are temporarily rate limited. You can still open the release page to check manually.",
     openRelease: "Open Release",
     downloadAndInstall: "Download & Install",
+    portableManualUpdate:
+      "Portable builds cannot use the in-app installer. Download the portable ZIP from the release page, then extract it over the current DBX folder to keep portable.dbx and data.",
     downloading: "Downloading {progress}%",
     downloadFailed: "Update download failed: {error}",
     restart: "Exit & Restart",

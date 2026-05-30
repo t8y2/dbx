@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { UpdateInfo } from "@/lib/api";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { canDownloadAndInstallUpdate } from "@/composables/useAppUpdater";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -98,6 +99,12 @@ watch(
           <code class="bg-muted px-1 py-0.5 rounded text-[11px]">docker compose pull && docker compose up -d</code>
           {{ t("updates.toUpdate") }}
         </p>
+        <p
+          v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode"
+          class="text-xs text-muted-foreground"
+        >
+          {{ t("updates.portableManualUpdate") }}
+        </p>
       </div>
       <DialogFooter>
         <Button v-if="!isDownloadingUpdate && !updateReady" variant="outline" @click="open = false">{{
@@ -105,7 +112,7 @@ watch(
         }}</Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
-          <template v-if="isDesktop">
+          <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
             <div v-if="updateReady" class="flex flex-col items-end gap-1">
               <Button @click="emit('restart')">{{ t("updates.restart") }}</Button>
               <span class="text-xs text-muted-foreground">{{ t("updates.reopenHint") }}</span>

@@ -3,6 +3,7 @@ export * from "./bridge.js";
 export * from "./connections.js";
 export * from "./database.js";
 export * from "./diagnostics.js";
+export * from "./entrypoint.js";
 export * from "./format.js";
 export * from "./paths.js";
 export * from "./schema-context.js";

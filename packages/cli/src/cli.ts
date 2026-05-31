@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import {
   buildSchemaContext,
   createBackend,
@@ -9,6 +8,7 @@ import {
   evaluateSqlSafety,
   formatSchemaContext,
   getDbxDiagnostics,
+  isMainModule,
   postBridge,
   sqlSafetyFromEnv,
   type Backend,
@@ -406,7 +406,7 @@ async function main() {
   process.exitCode = result.exitCode;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

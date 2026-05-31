@@ -2,7 +2,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
   buildSchemaContext,
@@ -11,6 +10,7 @@ import {
   evaluateSqlSafety,
   formatCell,
   formatSchemaContext,
+  isMainModule,
   mdTable,
   notifyReload,
   parseMongoAggregateCommand,
@@ -284,7 +284,7 @@ async function main() {
   await server.connect(transport);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((e) => {
     console.error("MCP Server failed to start:", e);
     process.exit(1);

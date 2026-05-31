@@ -16,6 +16,7 @@
     "./connections": "./dist/connections.js",
     "./database": "./dist/database.js",
     "./diagnostics": "./dist/diagnostics.js",
+    "./entrypoint": "./dist/entrypoint.js",
     "./format": "./dist/format.js",
     "./paths": "./dist/paths.js",
     "./schema-context": "./dist/schema-context.js",

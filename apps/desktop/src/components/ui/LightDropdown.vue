@@ -201,7 +201,12 @@ onBeforeUnmount(close);
             class="h-3 w-3 shrink-0"
             :class="[isItemSelected(item) ? selectedCheckClass : 'opacity-0']"
           />
-          <span v-if="item.leadingText" class="text-base leading-none">{{ item.leadingText }}</span>
+          <span
+            v-if="item.leadingText"
+            class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none"
+          >
+            {{ item.leadingText }}
+          </span>
           <component
             :is="item.icon"
             v-if="item.icon"

@@ -1142,7 +1142,11 @@ watch(
                   <SelectContent>
                     <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
                       <div class="flex items-center gap-2">
-                        <span>{{ locale.flag }}</span>
+                        <span
+                          class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none"
+                        >
+                          {{ locale.flag }}
+                        </span>
                         <span>{{ locale.label }}</span>
                       </div>
                     </SelectItem>

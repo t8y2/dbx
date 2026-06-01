@@ -2,7 +2,11 @@
 import { useI18n } from "vue-i18n";
 import { FilePlus2, Plus, History, Upload, Database, Search, ShieldCheck, Sparkles } from "lucide-vue-next";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import { connectionDriverLabel, connectionIconType, connectionOptionSubtitle } from "@/lib/connectionPresentation";
+import {
+  connectionDriverLabel,
+  connectionIconType,
+  connectionRedactedOptionSubtitle,
+} from "@/lib/connectionPresentation";
 import type { ConnectionConfig } from "@/types/database";
 
 defineProps<{
@@ -66,7 +70,7 @@ const { t } = useI18n();
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm font-medium">{{ connection.name }}</div>
                 <div class="truncate text-xs text-muted-foreground">
-                  {{ connectionOptionSubtitle(connection) || connectionDriverLabel(connection) }}
+                  {{ connectionRedactedOptionSubtitle(connection) || connectionDriverLabel(connection) }}
                 </div>
               </div>
               <FilePlus2 class="h-4 w-4 text-muted-foreground" />

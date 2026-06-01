@@ -6,6 +6,8 @@ type ConnectionPresentationConfig = Pick<
 >;
 
 const LOCAL_DATABASE_TYPES = new Set(["sqlite", "duckdb", "access"]);
+const REDACTED_HOST_SEGMENT = "***";
+const REDACTED_PORT = "****";
 
 export function connectionIconType(connection?: Pick<ConnectionConfig, "db_type" | "driver_profile">): string {
   return connection?.driver_profile || connection?.db_type || "postgres";
@@ -22,6 +24,43 @@ export function connectionEndpointLabel(connection?: ConnectionPresentationConfi
   }
   if (connection.host && connection.port) return `${connection.host}:${connection.port}`;
   return connection.host || connection.database || "";
+}
+
+function redactConnectionHost(host: string): string {
+  const normalizedHost = host.trim();
+  if (!normalizedHost) return "";
+
+  const unwrappedHost =
+    normalizedHost.startsWith("[") && normalizedHost.endsWith("]") ? normalizedHost.slice(1, -1) : normalizedHost;
+  const separator = unwrappedHost.includes(":") ? ":" : ".";
+  const segments = unwrappedHost.split(separator).filter(Boolean);
+
+  if (segments.length >= 3) {
+    return [segments[0], ...segments.slice(1, -1).map(() => REDACTED_HOST_SEGMENT), segments[segments.length - 1]].join(
+      separator,
+    );
+  }
+
+  if (segments.length === 2) {
+    return [segments[0], REDACTED_HOST_SEGMENT].join(separator);
+  }
+
+  return REDACTED_HOST_SEGMENT;
+}
+
+export function connectionRedactedEndpointLabel(connection?: ConnectionPresentationConfig): string {
+  if (!connection) return "";
+  if (LOCAL_DATABASE_TYPES.has(connection.db_type)) {
+    return connectionEndpointLabel(connection);
+  }
+
+  const redactedHost = connection.host ? redactConnectionHost(connection.host) : "";
+  if (redactedHost && connection.port) {
+    const endpointHost = redactedHost.includes(":") ? `[${redactedHost}]` : redactedHost;
+    return `${endpointHost}:${REDACTED_PORT}`;
+  }
+
+  return redactedHost || connection.database || "";
 }
 
 export function connectionUrlPlaceholder(dbType: DatabaseType): string {
@@ -89,4 +128,8 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
 export function connectionOptionSubtitle(connection?: ConnectionPresentationConfig): string {
   return [connectionDriverLabel(connection), connectionEndpointLabel(connection)].filter(Boolean).join(" · ");
+}
+
+export function connectionRedactedOptionSubtitle(connection?: ConnectionPresentationConfig): string {
+  return [connectionDriverLabel(connection), connectionRedactedEndpointLabel(connection)].filter(Boolean).join(" · ");
 }

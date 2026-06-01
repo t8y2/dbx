@@ -2,19 +2,20 @@ import { createI18n } from "vue-i18n";
 import zhCN from "./locales/zh-CN";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 
-export type Locale = "en" | "es" | "zh-CN";
+export type Locale = "en" | "es" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
 type I18nGlobal = {
   locale: { value: Locale };
   setLocaleMessage: (locale: Locale, messages: LocaleMessages) => void;
 };
 
-const supportedLocales: Locale[] = ["en", "es", "zh-CN"];
+const supportedLocales: Locale[] = ["en", "es", "zh-CN", "zh-TW"];
 const defaultLocale: Locale = "zh-CN";
 const loadedLocales = new Set<Locale>([defaultLocale]);
 const localeLoaders: Record<Exclude<Locale, "zh-CN">, () => Promise<{ default: LocaleMessages }>> = {
   en: () => import("./locales/en"),
   es: () => import("./locales/es"),
+  "zh-TW": () => import("./locales/zh-TW"),
 };
 
 export function normalizeLocale(value: string | null): Locale | null {
@@ -27,8 +28,17 @@ export function normalizeLocale(value: string | null): Locale | null {
 export function localeFromLanguageTag(value: string | null | undefined): Locale | null {
   if (!value) return null;
   const normalized = value.replace("_", "-").toLowerCase();
-  if (normalized === "zh-cn" || normalized.startsWith("zh-")) return "zh-CN";
-  if (normalized === "zh") return "zh-CN";
+  if (normalized === "zh" || normalized.startsWith("zh-")) {
+    if (
+      normalized.includes("hant") ||
+      normalized.startsWith("zh-tw") ||
+      normalized.startsWith("zh-hk") ||
+      normalized.startsWith("zh-mo")
+    ) {
+      return "zh-TW";
+    }
+    return "zh-CN";
+  }
   if (normalized === "en" || normalized.startsWith("en-")) return "en";
   if (normalized === "es" || normalized.startsWith("es-")) return "es";
   return null;

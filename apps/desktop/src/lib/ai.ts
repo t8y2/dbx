@@ -10,13 +10,17 @@ import type {
   QueryTab,
 } from "@/types/database";
 import * as api from "@/lib/api";
-import { currentLocale } from "@/i18n";
+import { currentLocale, type Locale } from "@/i18n";
 import { aiTableMentionKey, type AiTableMention } from "@/lib/aiTableMentions";
 import { aiSkillForAction } from "@/lib/aiSkills";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 
 export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData";
 export type AiAssistantMode = "ask" | "agent";
+
+function isChineseLocale(locale: Locale): boolean {
+  return locale === "zh-CN" || locale === "zh-TW";
+}
 
 export interface AiSchemaTable {
   schema?: string;
@@ -47,7 +51,7 @@ export interface AiRequestInput {
 }
 
 export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
-  const isZh = currentLocale() === "zh-CN";
+  const isZh = isChineseLocale(currentLocale());
   const skill = aiSkillForAction(input.action);
   const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
   const instruction = isZh ? skill.userInstruction.zh : skill.userInstruction.en;
@@ -78,7 +82,7 @@ export async function runAiStream(
   sessionId?: string,
   onReasoningDelta?: (delta: string) => void,
 ): Promise<void> {
-  const isZh = currentLocale() === "zh-CN";
+  const isZh = isChineseLocale(currentLocale());
   const skill = aiSkillForAction(input.action);
   const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
   const instruction = isZh ? skill.userInstruction.zh : skill.userInstruction.en;
@@ -136,7 +140,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
   const lastError = context.lastError ? `\nLast error:\n${context.lastError}\n` : "";
 
-  const isZh = currentLocale() === "zh-CN";
+  const isZh = isChineseLocale(currentLocale());
 
   const lines: string[] = [
     ...buildBasePromptLines(isZh),

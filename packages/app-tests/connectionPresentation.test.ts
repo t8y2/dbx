@@ -7,6 +7,7 @@ import {
   connectionIconType,
   connectionOptionSubtitle,
   connectionRedactedEndpointLabel,
+  connectionRedactedNameLabel,
   connectionRedactedOptionSubtitle,
 } from "../../apps/desktop/src/lib/connectionPresentation.ts";
 
@@ -81,6 +82,39 @@ test("redacts network endpoint labels for quick connection cards", () => {
       port: 5432,
     }),
     "[2001:***:***:***:***:7334]:****",
+  );
+});
+
+test("redacts host-like quick connection names", () => {
+  assert.equal(
+    connectionRedactedNameLabel({
+      ...baseConnection,
+      name: "db.prod.example.com",
+      host: "db.prod.example.com",
+      port: 5432,
+    }),
+    "db.***.***.com:****",
+  );
+  assert.equal(
+    connectionRedactedNameLabel({
+      ...baseConnection,
+      name: "[2001:db8:85a3::8a2e:370:7334]:5432",
+      host: "2001:db8:85a3::8a2e:370:7334",
+      port: 5432,
+    }),
+    "[2001:***:***:***:***:7334]:****",
+  );
+});
+
+test("keeps friendly quick connection names readable", () => {
+  assert.equal(
+    connectionRedactedNameLabel({
+      ...baseConnection,
+      name: "Production Analytics",
+      host: "db.prod.example.com",
+      port: 5432,
+    }),
+    "Production Analytics",
   );
 });
 

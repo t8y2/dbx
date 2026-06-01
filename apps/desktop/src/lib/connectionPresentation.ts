@@ -4,6 +4,7 @@ type ConnectionPresentationConfig = Pick<
   ConnectionConfig,
   "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database"
 >;
+type ConnectionNamePresentationConfig = ConnectionPresentationConfig & Pick<ConnectionConfig, "name">;
 
 const LOCAL_DATABASE_TYPES = new Set(["sqlite", "duckdb", "access"]);
 const REDACTED_HOST_SEGMENT = "***";
@@ -61,6 +62,25 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
   }
 
   return redactedHost || connection.database || "";
+}
+
+export function connectionRedactedNameLabel(connection?: ConnectionNamePresentationConfig): string {
+  const name = connection?.name.trim() || "";
+  if (!connection || !name || LOCAL_DATABASE_TYPES.has(connection.db_type)) return name;
+
+  const host = connection.host.trim();
+  if (!host) return name;
+
+  const unwrappedHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  const hostNames = new Set([host, unwrappedHost]);
+  if (connection.port) {
+    hostNames.add(`${host}:${connection.port}`);
+    if (unwrappedHost.includes(":")) {
+      hostNames.add(`[${unwrappedHost}]:${connection.port}`);
+    }
+  }
+
+  return hostNames.has(name) ? connectionRedactedEndpointLabel(connection) : name;
 }
 
 export function connectionUrlPlaceholder(dbType: DatabaseType): string {

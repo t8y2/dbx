@@ -299,6 +299,31 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId.value = next.activeTabId;
   }
 
+  function closeTabsForConnection(connectionId: string, database?: string) {
+    const idsToClose = new Set(
+      tabs.value
+        .filter((t) => t.connectionId === connectionId && (database == null || t.database === database))
+        .map((t) => t.id),
+    );
+    if (idsToClose.size === 0) return;
+
+    tabs.value
+      .filter((t) => idsToClose.has(t.id))
+      .forEach((tab) => {
+        if (tab.isExecuting) void cancelTabExecution(tab.id);
+        if (tab.isExplaining) void cancelTabExplain(tab.id);
+        void closeResultSession(tab);
+        void closeClientConnectionSession(tab);
+        clearResultPayload(tab);
+      });
+
+    tabs.value = tabs.value.filter((t) => !idsToClose.has(t.id));
+
+    if (activeTabId.value && idsToClose.has(activeTabId.value)) {
+      activeTabId.value = tabs.value[tabs.value.length - 1]?.id ?? null;
+    }
+  }
+
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
@@ -1064,6 +1089,7 @@ export const useQueryStore = defineStore("query", () => {
     closeTab,
     closeOtherTabs,
     closeAllTabs,
+    closeTabsForConnection,
     updateSql,
     openObjectBrowser,
     openTableStructure,

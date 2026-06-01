@@ -45,6 +45,7 @@ import {
 import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/schemaTreeCache";
 import { prunePinnedTreeNodeIdsForConnection } from "@/lib/pinnedTreeNodeIds";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
@@ -659,6 +660,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function disconnect(connectionId: string) {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
+    // Close tabs first — always clean up frontend state even if the backend call fails
+    useQueryStore().closeTabsForConnection(connectionId);
     await api.disconnectDb(connectionId);
     connectedIds.value.delete(connectionId);
     const node = findNode(treeNodes.value, connectionId);
@@ -677,6 +680,8 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function closeDatabaseConnection(connectionId: string, database: string) {
+    // Close tabs first — always clean up frontend state even if the backend call fails
+    useQueryStore().closeTabsForConnection(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database);
     if (node) {

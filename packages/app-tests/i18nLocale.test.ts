@@ -10,13 +10,15 @@ test("normalizes exact supported locales", () => {
   assert.equal(normalizeLocale("en"), "en");
   assert.equal(normalizeLocale("es"), "es");
   assert.equal(normalizeLocale("zh-CN"), "zh-CN");
+  assert.equal(normalizeLocale("zh-TW"), "zh-TW");
   assert.equal(normalizeLocale("fr-FR"), null);
   assert.equal(normalizeLocale(null), null);
 });
 
 test("maps user language tags to supported locales", () => {
   assert.equal(localeFromLanguageTag("zh-Hans-CN"), "zh-CN");
-  assert.equal(localeFromLanguageTag("zh_TW"), "zh-CN");
+  assert.equal(localeFromLanguageTag("zh_TW"), "zh-TW");
+  assert.equal(localeFromLanguageTag("zh-Hant-HK"), "zh-TW");
   assert.equal(localeFromLanguageTag("en-US"), "en");
   assert.equal(localeFromLanguageTag("es-MX"), "es");
   assert.equal(localeFromLanguageTag("fr-FR"), null);

@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "start": "tsx src/index.ts",
-    "test": "pnpm --filter @dbx-app/node-core build && tsx --test tests/*.test.ts",
+    "test": "pnpm --filter @dbx-app/mcp-server build && tsx --test tests/*.test.ts",
     "build": "pnpm --filter @dbx-app/node-core build && tsc",
     "prepublishOnly": "tsc"
   },

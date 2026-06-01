@@ -167,7 +167,7 @@ dbx query local "select 1" --json
 **Homebrew (macOS)：**
 
 ```bash
-brew install --cask t8y2/tap/dbx
+brew install --cask dbx
 ```
 
 **Scoop (Windows)：**

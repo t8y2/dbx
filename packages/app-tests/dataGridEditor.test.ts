@@ -443,3 +443,90 @@ test("saving manually typed JSON from a MySQL grid normalizes smart quotes", asy
     `UPDATE "settings" SET "payload" = '{"2:3":"3:4","3:2":"4:3","21:9":"16:9"}' WHERE "id" = 1;`,
   ]);
 });
+
+test("failed table data save records a failed history entry", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const permissionError = "Statement 1 failed: Server error: ERROR 42000 (1142): UPDATE command denied to user";
+  const savedHistoryEntries: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-data-grid-save") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const options = body.options as DataGridSaveStatementOptions;
+      return new Response(
+        JSON.stringify({
+          statements: mockPreparedSaveStatements(options),
+          rollbackStatements: [`UPDATE "pp_questions" SET "title" = 'Old title' WHERE "id" = 1;`],
+          executionSchema: options.tableMeta.schema,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-in-transaction") {
+      return new Response(permissionError, { status: 500 });
+    }
+    if (url === "/api/history/save") {
+      savedHistoryEntries.push(JSON.parse(String(init?.body ?? "{}")).entry);
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(`unexpected request: ${url}`, { status: 500 });
+  }) as typeof fetch;
+
+  const result = computed(() => ({
+    columns: ["id", "title"],
+    rows: [[1, "Old title"] as CellValue[]],
+  }));
+  const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
+  const editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "mysql"),
+    connectionId: computed(() => "conn-1"),
+    database: computed(() => "app_db"),
+    tableMeta: computed(() => ({
+      tableName: "pp_questions",
+      columns: [column("id", true), column("title")],
+      primaryKeys: ["id"],
+    })),
+    onExecuteSql: computed(() => undefined),
+    customSave: computed(() => undefined),
+    sql: computed(() => "SELECT id, title FROM pp_questions"),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    rowStatusFilter,
+    pageSize: ref(50),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      if (rowId !== 0) return undefined;
+      return {
+        id: 0,
+        sourceIndex: 0,
+        data: result.value.rows[0],
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, false],
+        status: "clean",
+      };
+    },
+    emit: () => {},
+  });
+
+  editor.applyCellValue(0, 1, "New title");
+  await editor.saveChanges();
+
+  assert.equal(editor.saveError.value, permissionError);
+  assert.equal(editor.dirtyRows.value.size, 1);
+  assert.equal(savedHistoryEntries.length, 1);
+  const historyEntry = savedHistoryEntries[0];
+  assert.equal(historyEntry.success, false);
+  assert.equal(historyEntry.error, permissionError);
+  assert.equal(historyEntry.activity_kind, "data_change");
+  assert.equal(historyEntry.operation, "UPDATE");
+  assert.equal(historyEntry.target, "pp_questions");
+  assert.equal(historyEntry.rollback_sql, undefined);
+  assert.equal(historyEntry.affected_rows, undefined);
+  assert.equal(historyEntry.sql, `UPDATE "pp_questions" SET "title" = 'New title' WHERE "id" = 1;`);
+});

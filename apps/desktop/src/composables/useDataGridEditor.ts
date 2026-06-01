@@ -577,10 +577,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     statements: string[],
     rollbackStatements: string[],
     elapsed: number,
-    historyResult?: { affected_rows?: number },
+    historyResult?: { affected_rows?: number; success?: boolean; error?: string },
   ) {
     if (!connectionId.value || !database.value || !tableMeta.value) return;
     const connName = connectionStore.getConfig(connectionId.value)?.name || "";
+    const success = historyResult?.success ?? true;
     const details = {
       schema: tableMeta.value.schema,
       table: tableMeta.value.tableName,
@@ -588,7 +589,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       updated_rows: dirtyRows.value.size,
       deleted_rows: deletedRows.value.size,
       statements,
-      rollback_statements: rollbackStatements,
+      rollback_statements: success ? rollbackStatements : [],
+      error: success ? undefined : historyResult?.error,
     };
     await historyStore.add({
       connection_id: connectionId.value,
@@ -596,14 +598,33 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       database: database.value,
       sql: statements.join("\n"),
       execution_time_ms: elapsed,
-      success: true,
+      success,
+      error: success ? undefined : historyResult?.error,
       activity_kind: "data_change",
       operation: dataChangeOperation(),
       target: tableHistoryTarget(),
-      affected_rows: historyResult?.affected_rows ?? statements.length,
-      rollback_sql: rollbackStatements.length ? rollbackStatements.join("\n") : undefined,
+      affected_rows: success ? (historyResult?.affected_rows ?? statements.length) : undefined,
+      rollback_sql: success && rollbackStatements.length ? rollbackStatements.join("\n") : undefined,
       details_json: JSON.stringify(details),
     });
+  }
+
+  async function recordFailedDataGridHistory(
+    statements: string[],
+    rollbackStatements: string[],
+    start: number,
+    error: unknown,
+  ) {
+    const message = normalizeDataGridSaveError(databaseType.value, error);
+    try {
+      await recordDataGridHistory(statements, rollbackStatements, Date.now() - start, {
+        success: false,
+        error: message,
+      });
+    } catch (historyError) {
+      console.warn("[DBX] failed to record data grid history", historyError);
+    }
+    return message;
   }
 
   function reloadCurrentData() {
@@ -691,7 +712,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           preparedSave?.executionSchema,
         );
       } catch (e: any) {
-        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+        saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, e);
         isSaving.value = false;
         return;
       }
@@ -699,7 +720,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       try {
         apiResult = await api.executeBatch(connectionId.value, database.value, stmts);
       } catch (e: any) {
-        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+        saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, e);
         isSaving.value = false;
         return;
       }
@@ -709,7 +730,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           await onExecuteSql.value(sqlStmt);
         }
       } catch (e: any) {
-        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+        saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, e);
         isSaving.value = false;
         return;
       }

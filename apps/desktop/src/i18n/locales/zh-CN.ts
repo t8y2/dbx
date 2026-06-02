@@ -637,6 +637,18 @@ export default {
     sortUnsupported: "当前 SQL 不支持全量排序，请改为单条 SELECT 查询后再尝试。",
     truncatedHint: "结果已截断，仅显示前 {count} 行。可通过底部分页继续加载，或调整每页行数。",
   },
+  exportProgress: {
+    title: "导出表数据",
+    fetching: "正在从数据库获取数据...",
+    writing: "正在写入文件...",
+    done: "导出完成！",
+    error: "导出失败",
+    cancelled: "导出已取消。",
+    rowsCount: "已导出 {exported} / {total} 行",
+    rowsExported: "已导出 {count} 行",
+    cancel: "取消",
+    close: "关闭",
+  },
   welcome: {
     title: "数据库工作台",
     subtitle:

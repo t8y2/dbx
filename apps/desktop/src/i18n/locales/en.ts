@@ -647,6 +647,18 @@ export default {
     sortUnsupported: "This SQL does not support full-result sorting. Try again with a single SELECT query.",
     truncatedHint: "Results truncated to {count} rows. Use the footer pagination or adjust rows per page.",
   },
+  exportProgress: {
+    title: "Exporting Table Data",
+    fetching: "Fetching data from database...",
+    writing: "Writing to file...",
+    done: "Export completed!",
+    error: "Export failed",
+    cancelled: "Export cancelled.",
+    rowsCount: "{exported} / {total} rows",
+    rowsExported: "{count} rows exported",
+    cancel: "Cancel",
+    close: "Close",
+  },
   welcome: {
     title: "Database Workspace",
     subtitle: "Choose a connection on the left to browse schema, or open a query tab directly.",

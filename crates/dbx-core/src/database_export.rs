@@ -45,6 +45,7 @@ pub struct ExportProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExportStatus {
     Running,
+    Writing,
     Done,
     Error,
     Cancelled,

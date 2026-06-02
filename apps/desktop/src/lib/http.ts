@@ -49,6 +49,8 @@ import type {
   TableImportProgress,
   DatabaseExportRequest,
   ExportProgress,
+  TableExportRequest,
+  TableExportProgress,
   XlsxCellValue,
   QueryPaginationExecutionPlanOptions,
   QueryPaginationExecutionPlan,
@@ -1068,6 +1070,38 @@ export async function exportDatabaseSql(
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await post("/api/export/database/cancel", { exportId });
+}
+
+// --- Table Export ---
+
+export async function startTableExport(
+  request: TableExportRequest,
+  onProgress: (progress: TableExportProgress) => void,
+): Promise<TableExportProgress> {
+  const { exportId } = request;
+  // POST to start the export
+  await post("/api/export/table", request);
+  // Connect to SSE for progress
+  return new Promise((resolve, reject) => {
+    const eventSource = new EventSource(`/api/export/table/progress/${exportId}`);
+    eventSource.onmessage = (event) => {
+      const progress: TableExportProgress = JSON.parse(event.data);
+      onProgress(progress);
+      if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
+        eventSource.close();
+        if (progress.status === "error") reject(new Error(progress.errorMessage || "Export failed"));
+        else resolve(progress);
+      }
+    };
+    eventSource.onerror = () => {
+      eventSource.close();
+      reject(new Error("Export progress connection lost"));
+    };
+  });
+}
+
+export async function cancelTableExport(exportId: string): Promise<void> {
+  return post("/api/export/table/cancel", { exportId });
 }
 
 export async function exportQueryResultCsv(

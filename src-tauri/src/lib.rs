@@ -499,6 +499,8 @@ pub fn run() {
             commands::transfer::cancel_transfer,
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,
+            commands::table_export::start_table_export,
+            commands::table_export::cancel_table_export,
             commands::csv_export::export_query_result_csv,
             commands::xlsx_export::export_query_result_xlsx,
             commands::text_export::export_query_result_json,

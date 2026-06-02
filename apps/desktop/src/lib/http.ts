@@ -720,6 +720,12 @@ export async function prepareDataCompareFromTables(
   return post("/api/data-compare/prepare-from-tables", options);
 }
 
+export async function prepareDataCompareMissingTarget(
+  options: import("@/lib/dataCompare").DataCompareMissingTargetOptions,
+): Promise<DataCompareFromTablesPreparation> {
+  return post("/api/data-compare/prepare-missing-target", options);
+}
+
 export async function buildDataCompareSyncPlan(options: DataCompareSyncPlanOptions): Promise<DataCompareSyncPlan> {
   return post("/api/data-compare/build-sync-plan", options);
 }

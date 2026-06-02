@@ -441,6 +441,7 @@ pub fn run() {
             commands::query::build_database_sql_export,
             commands::data_compare::prepare_data_compare,
             commands::data_compare::prepare_data_compare_from_tables,
+            commands::data_compare::prepare_data_compare_missing_target,
             commands::data_compare::build_data_compare_sync_plan,
             commands::sql_file::preview_sql_file,
             commands::sql_file::execute_sql_file,

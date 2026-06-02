@@ -719,6 +719,12 @@ export async function prepareDataCompareFromTables(
   return invoke("prepare_data_compare_from_tables", { options });
 }
 
+export async function prepareDataCompareMissingTarget(
+  options: import("@/lib/dataCompare").DataCompareMissingTargetOptions,
+): Promise<DataCompareFromTablesPreparation> {
+  return invoke("prepare_data_compare_missing_target", { options });
+}
+
 export async function buildDataCompareSyncPlan(options: DataCompareSyncPlanOptions): Promise<DataCompareSyncPlan> {
   return invoke("build_data_compare_sync_plan", { options });
 }

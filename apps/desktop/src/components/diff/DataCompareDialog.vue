@@ -74,6 +74,7 @@ interface DataCompareTableResult {
   sourceTruncated: boolean;
   targetTruncated: boolean;
   databaseType?: DatabaseType;
+  preSyncStatements?: string[];
   diff: SelectableDataCompareResult;
   expanded: boolean;
   showAll: Record<DiffKind, boolean>;
@@ -171,8 +172,7 @@ const canCompare = computed(
     selectedSourceTableNames.value.length > 0 &&
     targetConnectionId.value &&
     targetDatabase.value &&
-    targetSchema.value &&
-    (!isBatchCompare.value ? !!targetTable.value : true),
+    targetSchema.value,
 );
 const keyColumns = computed(() =>
   keyColumnsText.value
@@ -278,7 +278,7 @@ function buildCompareTasks(): DataCompareTableTask[] {
   if (!selectedSourceTableNames.value.length) return [];
   if (!isBatchCompare.value) {
     const table = selectedSourceTableNames.value[0];
-    return targetTable.value ? [{ sourceTable: table, targetTable: targetTable.value }] : [];
+    return table ? [{ sourceTable: table, targetTable: targetTable.value || table }] : [];
   }
   return selectedSourceTableNames.value.map((table) => ({
     sourceTable: table,
@@ -586,8 +586,15 @@ function buildSyncPlanTables(): DataCompareSyncPlanTableOptions[] {
       keyColumns: table.keyColumns,
       diff: buildSelectedDiff(table),
       databaseType: table.databaseType,
+      preSyncStatements: table.preSyncStatements ?? [],
     }))
-    .filter((table) => table.diff.added.length > 0 || table.diff.removed.length > 0 || table.diff.modified.length > 0);
+    .filter(
+      (table) =>
+        table.preSyncStatements.length > 0 ||
+        table.diff.added.length > 0 ||
+        table.diff.removed.length > 0 ||
+        table.diff.modified.length > 0,
+    );
 }
 
 async function rebuildSyncPlan() {
@@ -641,7 +648,49 @@ async function startCompare() {
 
       try {
         if (!targetTables.value.includes(task.targetTable)) {
-          throw new Error(t("dataCompare.targetTableMissing", { table: task.targetTable }));
+          const sourceColumns = await loadColumnsWithCache(
+            sourceColumnCache,
+            sourceConnectionId.value,
+            sourceDatabase.value,
+            sourceSchema.value,
+            task.sourceTable,
+          );
+          const resolvedKeys = keyColumns.value.length > 0 ? keyColumns.value : [];
+          const preparation = await api.prepareDataCompareMissingTarget({
+            sourceConnectionId: sourceConnectionId.value,
+            sourceDatabase: sourceDatabase.value,
+            sourceSchema: sourceSchema.value,
+            sourceTable: task.sourceTable,
+            targetConnectionId: targetConnectionId.value,
+            targetDatabase: targetDatabase.value,
+            targetSchema: targetSchema.value,
+            targetTable: task.targetTable,
+            keyColumns: resolvedKeys,
+          });
+          results.push({
+            sourceTable: task.sourceTable,
+            targetTable: task.targetTable,
+            keyColumns: resolvedKeys,
+            columns: sourceColumns.map((column) => column.name),
+            status: "different",
+            added: preparation.result.added.length,
+            removed: 0,
+            modified: 0,
+            sourceRowCount: preparation.sourceRowCount,
+            targetRowCount: 0,
+            sourceTruncated: preparation.sourceTruncated,
+            targetTruncated: false,
+            databaseType: currentTargetDatabaseType,
+            preSyncStatements: preparation.preSyncStatements,
+            diff: toSelectableDiff(preparation.result),
+            expanded: preparation.result.added.length > 0,
+            showAll: {
+              added: false,
+              removed: false,
+              modified: false,
+            },
+          });
+          continue;
         }
 
         const resolvedKeys =
@@ -732,6 +781,7 @@ async function startCompare() {
           sourceTruncated: false,
           targetTruncated: false,
           databaseType: currentTargetDatabaseType,
+          preSyncStatements: [],
           diff: { added: [], removed: [], modified: [] },
           expanded: false,
           showAll: {

@@ -58,7 +58,21 @@ export interface DataCompareFromTablesOptions {
   fetchBatchSize?: number;
 }
 
+export interface DataCompareMissingTargetOptions {
+  sourceConnectionId: string;
+  sourceDatabase: string;
+  sourceSchema: string;
+  sourceTable: string;
+  targetConnectionId: string;
+  targetDatabase: string;
+  targetSchema: string;
+  targetTable: string;
+  keyColumns: string[];
+  fetchBatchSize?: number;
+}
+
 export interface DataCompareFromTablesPreparation extends DataComparePreparation {
+  preSyncStatements: string[];
   sourceRowCount: number;
   targetRowCount: number;
   sourceTruncated: boolean;
@@ -72,6 +86,7 @@ export interface DataCompareSyncPlanTableOptions {
   keyColumns: string[];
   diff: DataCompareResult;
   databaseType?: DatabaseType;
+  preSyncStatements?: string[];
 }
 
 export interface DataCompareSyncPlanOptions {

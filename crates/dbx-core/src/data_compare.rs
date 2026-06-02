@@ -6,7 +6,9 @@ use serde_json::Value;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::query::{execute_sql_statement_with_options, QueryExecutionOptions};
+use crate::schema::get_columns_core;
 use crate::sql_dialect::{build_count_table_sql, qualified_table_name, quote_table_identifier, uses_fetch_first};
+use crate::transfer::{generate_comment_ddl, generate_create_table_ddl};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +49,23 @@ pub struct DataCompareFromTablesOptions {
     pub target_schema: String,
     pub target_table: String,
     pub columns: Vec<String>,
+    pub key_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_batch_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataCompareMissingTargetOptions {
+    pub source_connection_id: String,
+    pub source_database: String,
+    pub source_schema: String,
+    pub source_table: String,
+    pub target_connection_id: String,
+    pub target_database: String,
+    pub target_schema: String,
+    pub target_table: String,
+    #[serde(default)]
     pub key_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
@@ -105,6 +124,8 @@ pub struct DataCompareSyncPlanTableOptions {
     pub diff: DataCompareResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_sync_statements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +152,8 @@ pub struct DataCompareFromTablesPreparation {
     pub result: DataCompareResult,
     pub sync_statements: Vec<String>,
     pub sync_sql: String,
+    #[serde(default)]
+    pub pre_sync_statements: Vec<String>,
     pub source_row_count: u64,
     pub target_row_count: u64,
     pub source_truncated: bool,
@@ -152,6 +175,7 @@ pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<Da
             key_columns: options.key_columns,
             diff: result.clone(),
             database_type: options.database_type,
+            pre_sync_statements: Vec::new(),
         }],
     });
     Ok(DataComparePreparation { result, sync_statements: sync_plan.sync_statements, sync_sql: sync_plan.sync_sql })
@@ -232,8 +256,101 @@ pub async fn prepare_data_compare_from_tables(
         result: preparation.result,
         sync_statements: preparation.sync_statements,
         sync_sql: preparation.sync_sql,
+        pre_sync_statements: Vec::new(),
         source_row_count,
         target_row_count,
+        source_truncated: false,
+        target_truncated: false,
+    })
+}
+
+pub async fn prepare_data_compare_missing_target(
+    state: &AppState,
+    options: DataCompareMissingTargetOptions,
+) -> Result<DataCompareFromTablesPreparation, String> {
+    let source_database_type = connection_database_type(state, &options.source_connection_id).await?;
+    let target_database_type = connection_database_type(state, &options.target_connection_id).await?;
+    let fetch_batch_size = options.fetch_batch_size.unwrap_or(1000).max(1);
+    let source_columns = get_columns_core(
+        state,
+        &options.source_connection_id,
+        &options.source_database,
+        &options.source_schema,
+        &options.source_table,
+    )
+    .await?;
+    let column_names = source_columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
+
+    let source_count_sql =
+        build_count_table_sql(Some(source_database_type), Some(&options.source_schema), &options.source_table);
+    let source_count_result = execute_sql_statement_with_options(
+        state,
+        &options.source_connection_id,
+        &options.source_database,
+        &source_count_sql,
+        Some(&options.source_schema),
+        None,
+        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+    )
+    .await?;
+    let source_row_count = first_count(&source_count_result.rows)?;
+    let source_rows = fetch_compare_rows(
+        state,
+        &options.source_connection_id,
+        &options.source_database,
+        &options.source_schema,
+        &options.source_table,
+        &column_names,
+        &options.key_columns,
+        source_database_type,
+        fetch_batch_size,
+    )
+    .await?;
+    let result = missing_target_diff(&column_names, &options.key_columns, source_rows);
+    let mut pre_sync_statements = Vec::new();
+    pre_sync_statements.push(format!(
+        "{};",
+        generate_create_table_ddl(
+            &source_columns,
+            &options.target_table,
+            &options.source_schema,
+            &options.target_schema,
+            &target_database_type,
+            &source_database_type,
+            None,
+        )
+    ));
+    pre_sync_statements.extend(
+        generate_comment_ddl(
+            &source_columns,
+            &options.target_table,
+            &options.target_schema,
+            &target_database_type,
+            None,
+        )
+        .into_iter()
+        .map(|statement| format!("{statement};")),
+    );
+
+    let sync_plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+        tables: vec![DataCompareSyncPlanTableOptions {
+            table_name: options.target_table,
+            schema: Some(options.target_schema),
+            columns: column_names,
+            key_columns: options.key_columns,
+            diff: result.clone(),
+            database_type: Some(target_database_type),
+            pre_sync_statements: pre_sync_statements.clone(),
+        }],
+    });
+
+    Ok(DataCompareFromTablesPreparation {
+        result,
+        sync_statements: sync_plan.sync_statements,
+        sync_sql: sync_plan.sync_sql,
+        pre_sync_statements,
+        source_row_count,
+        target_row_count: 0,
         source_truncated: false,
         target_truncated: false,
     })
@@ -249,6 +366,7 @@ pub fn build_data_compare_sync_plan(options: DataCompareSyncPlanOptions) -> Data
         insert_count += table.diff.added.len();
         update_count += table.diff.modified.len();
         delete_count += table.diff.removed.len();
+        sync_statements.extend(table.pre_sync_statements);
         sync_statements.extend(generate_data_sync_statements(&GenerateDataSyncSqlOptions {
             table_name: table.table_name,
             schema: table.schema,
@@ -262,6 +380,20 @@ pub fn build_data_compare_sync_plan(options: DataCompareSyncPlanOptions) -> Data
     let statement_count = sync_statements.len();
     let sync_sql = sync_statements.join("\n");
     DataCompareSyncPlan { insert_count, update_count, delete_count, statement_count, sync_statements, sync_sql }
+}
+
+fn missing_target_diff(columns: &[String], key_columns: &[String], source_rows: Vec<Vec<Value>>) -> DataCompareResult {
+    let added = source_rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let values = row_object(columns, row);
+            let key = if key_columns.is_empty() { index.to_string() } else { key_for(&values, key_columns) };
+            DataCompareRow { key, key_values: key_values(&values, key_columns), values }
+        })
+        .collect();
+
+    DataCompareResult { added, removed: Vec::new(), modified: Vec::new() }
 }
 
 pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareResult, String> {
@@ -724,6 +856,7 @@ mod tests {
                     }],
                 },
                 database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: Vec::new(),
             }],
         });
 
@@ -731,6 +864,34 @@ mod tests {
         assert_eq!(plan.update_count, 1);
         assert_eq!(plan.delete_count, 0);
         assert_eq!(plan.statement_count, 2);
+    }
+
+    #[test]
+    fn build_sync_plan_keeps_missing_target_create_table_statement() {
+        let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "users".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec!["id".to_string(), "name".to_string()],
+                key_columns: Vec::new(),
+                diff: DataCompareResult {
+                    added: vec![DataCompareRow {
+                        key: "0".to_string(),
+                        key_values: HashMap::new(),
+                        values: HashMap::from([(String::from("id"), json!(1)), (String::from("name"), json!("Ada"))]),
+                    }],
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                },
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: vec!["CREATE TABLE \"public\".\"users\" (\"id\" integer);".to_string()],
+            }],
+        });
+
+        assert_eq!(plan.insert_count, 1);
+        assert_eq!(plan.statement_count, 2);
+        assert!(plan.sync_sql.starts_with("CREATE TABLE"));
+        assert!(plan.sync_sql.contains("INSERT INTO \"public\".\"users\""));
     }
 
     #[test]

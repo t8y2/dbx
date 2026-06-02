@@ -168,6 +168,7 @@ import {
 
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
+import ExportProgressDialog from "@/components/export/ExportProgressDialog.vue";
 import { DATA_GRID_ROW_NUM_WIDTH, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
@@ -2923,6 +2924,23 @@ function setRowStatusFilter(value: string) {
   rowStatusFilter.value = value as RowStatusFilter;
 }
 
+// --- Export progress dialog state ---
+const exportProgressDialog = ref(false);
+const exportProgressState = ref({
+  title: "",
+  tableName: "",
+  format: "csv" as string,
+  rowsExported: 0,
+  totalRows: null as number | null,
+  status: "",
+  errorMessage: null as string | null,
+});
+
+async function cancelGridExport() {
+  // Grid export cancellation is handled by closing the dialog
+  exportProgressDialog.value = false;
+}
+
 // --- Export composable ---
 const {
   copyText,
@@ -2964,6 +2982,8 @@ const {
   selectedRowIds,
   hasRowSelection,
   fullExportResult: props.fullExportResult,
+  exportProgressDialog,
+  exportProgressState,
 });
 
 const pageSizeMenuItems = computed(() =>
@@ -7053,6 +7073,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       @confirm="confirmDeleteRow"
     />
     <ImagePreviewDialog v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
+    <ExportProgressDialog v-model:open="exportProgressDialog" v-bind="exportProgressState" @cancel="cancelGridExport" />
   </div>
 </template>
 

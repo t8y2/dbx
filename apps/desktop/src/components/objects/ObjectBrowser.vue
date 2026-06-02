@@ -42,6 +42,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import ExportProgressDialog from "@/components/export/ExportProgressDialog.vue";
 import * as api from "@/lib/api";
 import type { ConnectionConfig, ObjectInfo, ObjectSourceKind } from "@/types/database";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
@@ -69,6 +70,7 @@ import {
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/objectRenameSql";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { generateDatabaseExportId } from "@/lib/databaseExport";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
@@ -153,6 +155,16 @@ const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
 const batchDropPreviewSql = ref("");
 let loadId = 0;
+
+// Export progress state
+const showExportProgress = ref(false);
+const exportProgressId = ref("");
+const exportProgressTableName = ref("");
+const exportProgressFormat = ref("");
+const exportProgressRows = ref(0);
+const exportProgressTotal = ref<number | null>(null);
+const exportProgressStatus = ref<string>("");
+const exportProgressError = ref<string | null>(null);
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type));
 const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE").length);
@@ -771,7 +783,7 @@ async function exportStructure(row: ObjectBrowserRow) {
   }
 }
 
-async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql") {
+async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
   try {
     const schema = row.schema || selectedSchema.value;
     const queryColumns =
@@ -787,22 +799,6 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
       columns: queryColumns,
       executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
     });
-
-    if (format === "csv") {
-      let outputPath = `${row.name}.csv`;
-      if (isTauriRuntime()) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
-        const path = await save({
-          defaultPath: outputPath,
-          filters: [{ name: "CSV", extensions: ["csv"] }],
-        });
-        if (!path) return;
-        outputPath = path as string;
-      }
-      await api.exportQueryResultCsv(outputPath, result.columns, result.rows);
-      toast(t("grid.exported"));
-      return;
-    }
 
     if (format === "json") {
       let outputPath = `${row.name}.json`;
@@ -834,37 +830,111 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
   }
 }
 
-async function exportDataXlsx(row: ObjectBrowserRow) {
-  try {
-    const schema = row.schema || selectedSchema.value;
-    const queryColumns =
-      props.connection.db_type === "neo4j"
-        ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map(
-            (column) => column.name,
-          )
-        : undefined;
-    const result = await fetchTableDataForExport({
-      databaseType: props.connection.db_type,
-      schema,
-      tableName: row.name,
-      columns: queryColumns,
-      executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
-    });
+async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql") {
+  if (format === "csv") {
+    await exportTableData(row, "csv");
+    return;
+  }
+  await exportDataLegacy(row, format);
+}
 
-    let outputPath = `${row.name}.xlsx`;
-    if (isTauriRuntime()) {
+async function exportDataXlsx(row: ObjectBrowserRow) {
+  await exportTableData(row, "xlsx");
+}
+
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
+  const schema = row.schema || selectedSchema.value;
+
+  // Save dialog first
+  let filePath = "";
+  const defaultName = `${row.name}.${format}`;
+
+  if (isTauriRuntime()) {
+    try {
       const { save } = await import("@tauri-apps/plugin-dialog");
+      const filter = format === "csv" ? { name: "CSV", extensions: ["csv"] } : { name: "Excel", extensions: ["xlsx"] };
       const path = await save({
-        defaultPath: outputPath,
-        filters: [{ name: "Excel", extensions: ["xlsx"] }],
+        defaultPath: defaultName,
+        filters: [filter],
       });
       if (!path) return;
-      outputPath = path as string;
+      filePath = path as string;
+    } catch (e: any) {
+      toast(e?.message || String(e), 5000);
+      return;
     }
-    await api.exportQueryResultXlsx(outputPath, row.name, result.columns, result.rows);
+  } else {
+    const webExportId = generateDatabaseExportId();
+    filePath = `__web_export_${webExportId}.${format}`;
+  }
+
+  // Set up progress state and open dialog
+  const exportId = generateDatabaseExportId();
+  exportProgressId.value = exportId;
+  exportProgressTableName.value = row.name;
+  exportProgressFormat.value = format;
+  exportProgressRows.value = 0;
+  exportProgressTotal.value = null;
+  exportProgressStatus.value = "fetching";
+  exportProgressError.value = null;
+  showExportProgress.value = true;
+
+  // Get columns for neo4j only
+  const queryColumns =
+    props.connection.db_type === "neo4j"
+      ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map(
+          (column) => column.name,
+        )
+      : undefined;
+
+  const request: api.TableExportRequest = {
+    exportId,
+    connectionId: props.connection.id,
+    database: props.database,
+    schema,
+    tableName: row.name,
+    filePath,
+    format,
+    columns: queryColumns,
+  };
+
+  try {
+    function normalizeExportStatus(s: string): string {
+      switch (s) {
+        case "Running":
+          return "fetching";
+        case "Writing":
+          return "writing";
+        case "Done":
+          return "done";
+        case "Error":
+          return "error";
+        case "Cancelled":
+          return "cancelled";
+        default:
+          return s;
+      }
+    }
+
+    await api.startTableExport(request, (progress) => {
+      exportProgressRows.value = progress.rowsExported;
+      exportProgressTotal.value = progress.totalRows;
+      exportProgressStatus.value = normalizeExportStatus(progress.status);
+      exportProgressError.value = progress.errorMessage || null;
+    });
     toast(t("grid.exported"));
   } catch (e: any) {
-    toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
+    if (exportProgressStatus.value !== "cancelled") {
+      exportProgressStatus.value = "error";
+      exportProgressError.value = e?.message || String(e);
+      toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
+    }
+  }
+}
+
+async function cancelExport() {
+  if (exportProgressId.value) {
+    await api.cancelTableExport(exportProgressId.value);
   }
 }
 
@@ -1655,6 +1725,18 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <ExportProgressDialog
+    v-model:open="showExportProgress"
+    :title="t('grid.exporting')"
+    :table-name="exportProgressTableName"
+    :format="exportProgressFormat"
+    :rows-exported="exportProgressRows"
+    :total-rows="exportProgressTotal"
+    :status="exportProgressStatus"
+    :error-message="exportProgressError"
+    @cancel="cancelExport"
+  />
 </template>
 
 <style scoped>

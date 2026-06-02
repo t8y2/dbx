@@ -1477,6 +1477,51 @@ export interface ExportProgress {
   error: string | null;
 }
 
+// --- Table Export ---
+export type TableExportStatus = "fetching" | "writing" | "done" | "error" | "cancelled";
+
+export interface TableExportRequest {
+  exportId: string;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  tableName: string;
+  filePath: string;
+  format: "csv" | "xlsx";
+  columns?: string[];
+}
+
+export interface TableExportProgress {
+  exportId: string;
+  tableName: string;
+  rowsExported: number;
+  totalRows: number | null;
+  status: TableExportStatus;
+  errorMessage?: string;
+}
+
+export async function startTableExport(
+  request: TableExportRequest,
+  onProgress: (progress: TableExportProgress) => void,
+): Promise<TableExportProgress> {
+  const unlisten = await listen<TableExportProgress>("table-export-progress", (event) => {
+    onProgress(event.payload);
+    if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
+      unlisten();
+    }
+  });
+  try {
+    return await invoke<TableExportProgress>("start_table_export", { request });
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
+}
+
+export async function cancelTableExport(exportId: string): Promise<void> {
+  return invoke("cancel_table_export", { exportId });
+}
+
 export async function exportDatabaseSql(
   request: DatabaseExportRequest,
   onProgress: (progress: ExportProgress) => void,

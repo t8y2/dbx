@@ -20,6 +20,14 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Opti
     configs.get(connection_id).map(|config| config.db_type)
 }
 
+async fn connection_mysql_query_dialect(state: &AppState, connection_id: &str) -> db::mysql::MySqlQueryDialect {
+    let configs = state.configs.read().await;
+    configs
+        .get(connection_id)
+        .map(|config| db::mysql::MySqlQueryDialect::for_connection(config.db_type, config.driver_profile.as_deref()))
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct QueryExecutionOptions {
     pub max_rows: Option<usize>,
@@ -447,6 +455,7 @@ fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
 pub async fn do_execute(
     state: &AppState,
     pool_key: &str,
+    mysql_dialect: db::mysql::MySqlQueryDialect,
     database: Option<&str>,
     sql: &str,
     schema: Option<&str>,
@@ -489,7 +498,7 @@ pub async fn do_execute(
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
-                db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows),
+                db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows, mysql_dialect),
             )
             .await
         }
@@ -682,7 +691,10 @@ pub async fn execute_sql_statement_with_options(
         return Err(canceled_error());
     }
 
-    let result = do_execute(state, &pool_key, Some(database), sql, schema, cancel_token.clone(), options.clone()).await;
+    let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+    let result =
+        do_execute(state, &pool_key, mysql_dialect, Some(database), sql, schema, cancel_token.clone(), options.clone())
+            .await;
 
     match &result {
         Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
@@ -692,7 +704,7 @@ pub async fn execute_sql_statement_with_options(
             } else {
                 state.reconnect_pool_for_session(connection_id, db_opt, options.client_session_id.as_deref()).await?
             };
-            do_execute(state, &new_key, Some(database), sql, schema, cancel_token, options).await
+            do_execute(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options).await
         }
         _ => result,
     }
@@ -800,7 +812,8 @@ pub async fn execute_multi_core_with_options(
     }
 
     if let Some((pool, mode)) = mysql_pool {
-        return execute_multi_mysql(&pool, mode, &statements, cancel_token, options).await;
+        let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+        return execute_multi_mysql(&pool, mode, mysql_dialect, &statements, cancel_token, options).await;
     }
 
     let mut results = Vec::with_capacity(statements.len());
@@ -833,6 +846,7 @@ pub async fn execute_multi_core_with_options(
 async fn execute_multi_mysql(
     pool: &db::mysql::MySqlPool,
     mode: crate::connection::MysqlMode,
+    dialect: db::mysql::MySqlQueryDialect,
     statements: &[String],
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
@@ -855,7 +869,7 @@ async fn execute_multi_mysql(
         match wait_for_query_opt(
             cancel_token.clone(),
             query_timeout,
-            db::mysql::execute_query_on_conn_with_max_rows(&mut conn, stmt, bare, max_rows),
+            db::mysql::execute_query_on_conn_with_max_rows(&mut conn, stmt, bare, max_rows, dialect),
         )
         .await
         {
@@ -967,9 +981,21 @@ pub async fn execute_statements(
 
     let mut total_affected: u64 = 0;
     let start = std::time::Instant::now();
+    let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
 
     for (i, sql) in statements.iter().enumerate() {
-        match do_execute(state, &pool_key, Some(database), sql, schema, None, QueryExecutionOptions::default()).await {
+        match do_execute(
+            state,
+            &pool_key,
+            mysql_dialect,
+            Some(database),
+            sql,
+            schema,
+            None,
+            QueryExecutionOptions::default(),
+        )
+        .await
+        {
             Ok(result) => {
                 total_affected += result.affected_rows;
             }
@@ -1043,9 +1069,13 @@ pub async fn execute_statements_in_transaction(
         Some(TxPath::Mysql(pool, _bare)) => exec_tx_mysql_inner(pool, statements, start).await,
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::Explicit) => {
-            exec_tx_explicit_inner(state, &pool_key, Some(database), statements, schema, start).await
+            let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+            exec_tx_explicit_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
         }
-        Some(TxPath::None) => exec_tx_none_inner(state, &pool_key, Some(database), statements, schema, start).await,
+        Some(TxPath::None) => {
+            let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+            exec_tx_none_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
+        }
         None => Err("Connection not found for transaction".to_string()),
     }
 }
@@ -1180,6 +1210,7 @@ async fn exec_tx_sqlite_inner(
 async fn exec_tx_explicit_inner(
     state: &AppState,
     pool_key: &str,
+    mysql_dialect: db::mysql::MySqlQueryDialect,
     database: Option<&str>,
     statements: &[String],
     schema: Option<&str>,
@@ -1193,20 +1224,39 @@ async fn exec_tx_explicit_inner(
     }
     drop(conns);
 
-    do_execute(state, pool_key, database, "BEGIN TRANSACTION", schema, None, QueryExecutionOptions::default())
-        .await
-        .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+    do_execute(
+        state,
+        pool_key,
+        mysql_dialect,
+        database,
+        "BEGIN TRANSACTION",
+        schema,
+        None,
+        QueryExecutionOptions::default(),
+    )
+    .await
+    .map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
-        match do_execute(state, pool_key, database, sql, schema, None, QueryExecutionOptions::default()).await {
+        match do_execute(state, pool_key, mysql_dialect, database, sql, schema, None, QueryExecutionOptions::default())
+            .await
+        {
             Ok(result) => {
                 total_affected += result.affected_rows;
             }
             Err(e) => {
-                if let Err(rb_err) =
-                    do_execute(state, pool_key, database, "ROLLBACK", schema, None, QueryExecutionOptions::default())
-                        .await
+                if let Err(rb_err) = do_execute(
+                    state,
+                    pool_key,
+                    mysql_dialect,
+                    database,
+                    "ROLLBACK",
+                    schema,
+                    None,
+                    QueryExecutionOptions::default(),
+                )
+                .await
                 {
                     log::error!("ROLLBACK failed after statement {} error: {}", i + 1, rb_err);
                 }
@@ -1215,7 +1265,7 @@ async fn exec_tx_explicit_inner(
         }
     }
 
-    do_execute(state, pool_key, database, "COMMIT", schema, None, QueryExecutionOptions::default())
+    do_execute(state, pool_key, mysql_dialect, database, "COMMIT", schema, None, QueryExecutionOptions::default())
         .await
         .map_err(|e| format!("COMMIT failed: {}", e))?;
 
@@ -1233,6 +1283,7 @@ async fn exec_tx_explicit_inner(
 async fn exec_tx_none_inner(
     state: &AppState,
     pool_key: &str,
+    mysql_dialect: db::mysql::MySqlQueryDialect,
     database: Option<&str>,
     statements: &[String],
     schema: Option<&str>,
@@ -1241,7 +1292,9 @@ async fn exec_tx_none_inner(
     let mut total_affected: u64 = 0;
     for (i, sql) in statements.iter().enumerate() {
         log::info!("[query][tx-none:statement:start] index={} sql={}", i + 1, sql);
-        match do_execute(state, pool_key, database, sql, schema, None, QueryExecutionOptions::default()).await {
+        match do_execute(state, pool_key, mysql_dialect, database, sql, schema, None, QueryExecutionOptions::default())
+            .await
+        {
             Ok(result) => {
                 total_affected += result.affected_rows;
                 log::info!("[query][tx-none:statement:done] index={} affected_rows={}", i + 1, result.affected_rows);

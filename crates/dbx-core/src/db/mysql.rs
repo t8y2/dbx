@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::models::connection::DatabaseType;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, QueryResult, TableInfo, TriggerInfo,
@@ -17,6 +18,21 @@ use crate::types::{
 use super::file_validator::validate_file_path;
 
 pub type MySqlPool = mysql_async::Pool;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MySqlQueryDialect {
+    supports_admin_show_results: bool,
+}
+
+impl MySqlQueryDialect {
+    pub fn for_connection(db_type: DatabaseType, driver_profile: Option<&str>) -> Self {
+        let profile = driver_profile.map(str::to_ascii_lowercase);
+        Self {
+            supports_admin_show_results: matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks)
+                || profile.as_deref().is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks")),
+        }
+    }
+}
 
 fn quote_value(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
@@ -936,7 +952,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 }
 
 pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<QueryResult, String> {
-    execute_query_with_max_rows(pool, sql, bare, None).await
+    execute_query_with_max_rows(pool, sql, bare, None, MySqlQueryDialect::default()).await
 }
 
 pub async fn execute_query_with_max_rows(
@@ -944,9 +960,10 @@ pub async fn execute_query_with_max_rows(
     sql: &str,
     bare: bool,
     max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
 ) -> Result<QueryResult, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows).await
+    execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, dialect).await
 }
 
 pub async fn execute_query_on_conn_with_max_rows(
@@ -954,12 +971,13 @@ pub async fn execute_query_on_conn_with_max_rows(
     sql: &str,
     bare: bool,
     max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if is_result_set_query(sql) {
-        if bare || requires_text_protocol_query(sql) {
+    if is_result_set_query(sql, dialect) {
+        if bare || requires_text_protocol_query(sql, dialect) {
             execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, start).await
         } else {
             match execute_result_set_with_prepared_protocol_on_conn(conn, sql, row_limit, start).await {
@@ -996,13 +1014,13 @@ pub async fn execute_query_on_conn_with_max_rows(
     }
 }
 
-fn is_result_set_query(sql: &str) -> bool {
+fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
     starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"])
-        || is_admin_show_query(sql)
+        || dialect.supports_admin_show_results && is_admin_show_query(sql)
 }
 
-fn requires_text_protocol_query(sql: &str) -> bool {
-    if is_admin_show_query(sql) {
+fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
+    if dialect.supports_admin_show_results && is_admin_show_query(sql) {
         return true;
     }
 
@@ -1176,33 +1194,63 @@ mod tests {
     #[test]
     fn mysql_with_queries_are_treated_as_result_sets() {
         let sql = "WITH RECURSIVE org_tree AS (SELECT 1 AS id) SELECT id FROM org_tree";
-        assert!(is_result_set_query(sql));
+        assert!(is_result_set_query(sql, MySqlQueryDialect::default()));
     }
 
     #[test]
     fn mysql_desc_queries_are_treated_as_result_sets() {
-        assert!(is_result_set_query("DESC users"));
+        assert!(is_result_set_query("DESC users", MySqlQueryDialect::default()));
     }
 
     #[test]
-    fn mysql_admin_show_queries_are_treated_as_result_sets() {
+    fn starrocks_admin_show_queries_are_treated_as_result_sets() {
         let sql = "ADMIN SHOW FRONTEND CONFIG LIKE '%default_replication_num%'";
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::StarRocks, None);
 
-        assert!(is_result_set_query(sql));
-        assert!(requires_text_protocol_query(sql));
+        assert!(is_result_set_query(sql, dialect));
+        assert!(requires_text_protocol_query(sql, dialect));
     }
 
     #[test]
-    fn mysql_admin_show_detection_skips_leading_comments() {
+    fn doris_admin_show_queries_are_treated_as_result_sets() {
+        let sql = "ADMIN SHOW FRONTEND CONFIG LIKE '%default_replication_num%'";
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Doris, None);
+
+        assert!(is_result_set_query(sql, dialect));
+        assert!(requires_text_protocol_query(sql, dialect));
+    }
+
+    #[test]
+    fn mysql_starrocks_profile_admin_show_queries_are_treated_as_result_sets() {
+        let sql = "ADMIN SHOW FRONTEND CONFIG LIKE '%default_replication_num%'";
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, Some("starrocks"));
+
+        assert!(is_result_set_query(sql, dialect));
+        assert!(requires_text_protocol_query(sql, dialect));
+    }
+
+    #[test]
+    fn mysql_admin_show_queries_are_not_treated_as_result_sets() {
+        let sql = "ADMIN SHOW FRONTEND CONFIG LIKE '%default_replication_num%'";
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::Mysql, None);
+
+        assert!(!is_result_set_query(sql, dialect));
+        assert!(!requires_text_protocol_query(sql, dialect));
+    }
+
+    #[test]
+    fn admin_show_detection_skips_leading_comments() {
         let sql = "-- inspect FE config\nADMIN /* StarRocks */ SHOW FRONTEND CONFIG";
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::StarRocks, None);
 
-        assert!(is_result_set_query(sql));
-        assert!(requires_text_protocol_query(sql));
+        assert!(is_result_set_query(sql, dialect));
+        assert!(requires_text_protocol_query(sql, dialect));
     }
 
     #[test]
-    fn mysql_admin_set_queries_are_not_treated_as_result_sets() {
-        assert!(!is_result_set_query("ADMIN SET FRONTEND CONFIG ('default_replication_num' = '1')"));
+    fn admin_set_queries_are_not_treated_as_result_sets() {
+        let dialect = MySqlQueryDialect::for_connection(DatabaseType::StarRocks, None);
+        assert!(!is_result_set_query("ADMIN SET FRONTEND CONFIG ('default_replication_num' = '1')", dialect));
     }
 
     #[test]
@@ -1327,14 +1375,14 @@ mod tests {
 
     #[test]
     fn mysql_management_show_queries_use_text_protocol() {
-        assert!(requires_text_protocol_query("SHOW PROCESSLIST"));
-        assert!(requires_text_protocol_query("show full processlist"));
-        assert!(requires_text_protocol_query("SHOW SLAVE STATUS"));
-        assert!(requires_text_protocol_query("show replica status"));
-        assert!(requires_text_protocol_query("SHOW GRANTS"));
-        assert!(requires_text_protocol_query("SHOW GRANTS FOR 'repl'@'%'"));
-        assert!(!requires_text_protocol_query("SHOW TABLES"));
-        assert!(!requires_text_protocol_query("SELECT * FROM users"));
+        assert!(requires_text_protocol_query("SHOW PROCESSLIST", MySqlQueryDialect::default()));
+        assert!(requires_text_protocol_query("show full processlist", MySqlQueryDialect::default()));
+        assert!(requires_text_protocol_query("SHOW SLAVE STATUS", MySqlQueryDialect::default()));
+        assert!(requires_text_protocol_query("show replica status", MySqlQueryDialect::default()));
+        assert!(requires_text_protocol_query("SHOW GRANTS", MySqlQueryDialect::default()));
+        assert!(requires_text_protocol_query("SHOW GRANTS FOR 'repl'@'%'", MySqlQueryDialect::default()));
+        assert!(!requires_text_protocol_query("SHOW TABLES", MySqlQueryDialect::default()));
+        assert!(!requires_text_protocol_query("SELECT * FROM users", MySqlQueryDialect::default()));
     }
 
     #[test]

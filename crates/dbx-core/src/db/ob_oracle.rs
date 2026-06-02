@@ -214,7 +214,7 @@ pub async fn list_foreign_keys(
 ) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
         "SELECT ac.CONSTRAINT_NAME, acc.COLUMN_NAME, \
-         ac2.TABLE_NAME AS R_TABLE, acc2.COLUMN_NAME AS R_COLUMN \
+         ac2.OWNER AS R_OWNER, ac2.TABLE_NAME AS R_TABLE, acc2.COLUMN_NAME AS R_COLUMN \
          FROM ALL_CONSTRAINTS ac \
          JOIN ALL_CONS_COLUMNS acc ON ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME AND ac.OWNER = acc.OWNER \
          JOIN ALL_CONSTRAINTS ac2 ON ac.R_CONSTRAINT_NAME = ac2.CONSTRAINT_NAME AND ac.R_OWNER = ac2.OWNER \
@@ -234,8 +234,9 @@ pub async fn list_foreign_keys(
         .map(|row| ForeignKeyInfo {
             name: get_str(row, 0),
             column: get_str(row, 1),
-            ref_table: get_str(row, 2),
-            ref_column: get_str(row, 3),
+            ref_schema: Some(get_str(row, 2)),
+            ref_table: get_str(row, 3),
+            ref_column: get_str(row, 4),
         })
         .collect())
 }

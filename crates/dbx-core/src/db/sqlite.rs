@@ -451,6 +451,7 @@ pub async fn list_foreign_keys(pool: &SqliteHandle, _schema: &str, table: &str) 
                     Ok(ForeignKeyInfo {
                         name: format!("fk_{}", row.get::<_, i32>("id")?),
                         column: row.get("from")?,
+                        ref_schema: None,
                         ref_table: row.get("table")?,
                         ref_column: row.get("to")?,
                     })

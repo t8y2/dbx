@@ -271,7 +271,8 @@ fn generate_postgres_foreign_key_ddl(foreign_keys: &[db::ForeignKeyInfo], table:
             .map(|foreign_key| quote_identifier(&foreign_key.ref_column, &DatabaseType::Postgres))
             .collect::<Vec<_>>()
             .join(", ");
-        let referenced_table = qualified_table(&group[0].ref_table, schema, &DatabaseType::Postgres);
+        let referenced_schema = group[0].ref_schema.as_deref().unwrap_or(schema);
+        let referenced_table = qualified_table(&group[0].ref_table, referenced_schema, &DatabaseType::Postgres);
         statements.push(format!(
             "ALTER TABLE {full_table} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({ref_columns})",
             quote_identifier(name, &DatabaseType::Postgres)
@@ -2761,12 +2762,14 @@ mod tests {
             db::ForeignKeyInfo {
                 name: "orders_user_id_fkey".to_string(),
                 column: "user_id".to_string(),
+                ref_schema: None,
                 ref_table: "users".to_string(),
                 ref_column: "id".to_string(),
             },
             db::ForeignKeyInfo {
                 name: "orders_user_id_fkey".to_string(),
                 column: "tenant_id".to_string(),
+                ref_schema: None,
                 ref_table: "users".to_string(),
                 ref_column: "tenant_id".to_string(),
             },

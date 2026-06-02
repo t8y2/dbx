@@ -608,6 +608,14 @@ export interface SqlCompletionColumn {
   isNullable?: boolean;
 }
 
+export interface SqlCompletionForeignKey {
+  name: string;
+  column: string;
+  ref_schema?: string | null;
+  ref_table: string;
+  ref_column: string;
+}
+
 export interface SqlCompletionItem {
   label: string;
   type: "keyword" | "table" | "column" | "snippet" | "function" | "schema";
@@ -671,6 +679,7 @@ export function buildSqlCompletionItems(
   input: {
     tables: SqlCompletionTable[];
     columnsByTable: Map<string, SqlCompletionColumn[]>;
+    foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>;
     schemas?: string[];
     translations?: SqlCompletionTranslations;
     dialect?: "mysql" | "postgres" | "sqlserver";
@@ -685,6 +694,7 @@ export function buildSqlCompletionItemsFromContext(
   input: {
     tables: SqlCompletionTable[];
     columnsByTable: Map<string, SqlCompletionColumn[]>;
+    foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>;
     schemas?: string[];
     translations?: SqlCompletionTranslations;
     snippets?: SqlSnippet[];
@@ -714,7 +724,7 @@ export function buildSqlCompletionItemsFromContext(
   }
 
   if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && context.suggestJoinConditions) {
-    items.push(...buildJoinConditionItems(context, input.columnsByTable, dialect));
+    items.push(...buildJoinConditionItems(context, input.columnsByTable, input.foreignKeysByTable, dialect));
   }
 
   if (context.suggestKeywords) {
@@ -1836,6 +1846,7 @@ function buildColumnDetail(column: SqlCompletionColumn): string {
 function buildJoinConditionItems(
   context: SqlCompletionContext,
   columnsByTable: Map<string, SqlCompletionColumn[]>,
+  foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>,
   dialect?: "mysql" | "postgres" | "sqlserver",
 ): SqlCompletionItem[] {
   const refs = context.referencedTables;
@@ -1849,6 +1860,7 @@ function buildJoinConditionItems(
     const previousColumns = columnsForReferencedTable(previous, columnsByTable);
     const latestColumns = columnsForReferencedTable(latest, columnsByTable);
     items.push(
+      ...buildForeignKeyJoinConditionItemsForPair(previous, latest, foreignKeysByTable, context.prefix, dialect),
       ...buildJoinConditionItemsForPair(previous, previousColumns, latest, latestColumns, context.prefix, dialect),
     );
   }
@@ -1868,6 +1880,128 @@ function columnsForReferencedTable(
   return [];
 }
 
+function foreignKeysForReferencedTable(
+  table: SqlCompletionReferencedTable,
+  foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>,
+): SqlCompletionForeignKey[] {
+  if (!foreignKeysByTable) return [];
+  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
+  for (const key of keys) {
+    const foreignKeys = foreignKeysByTable.get(key);
+    if (foreignKeys) return foreignKeys;
+  }
+  return [];
+}
+
+function buildForeignKeyJoinConditionItemsForPair(
+  left: SqlCompletionReferencedTable,
+  right: SqlCompletionReferencedTable,
+  foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>,
+  prefix = "",
+  dialect?: "mysql" | "postgres" | "sqlserver",
+): SqlCompletionItem[] {
+  if (!foreignKeysByTable) return [];
+  return [
+    ...buildDirectionalForeignKeyJoinConditionItems(
+      left,
+      right,
+      foreignKeysForReferencedTable(left, foreignKeysByTable),
+      prefix,
+      dialect,
+    ),
+    ...buildDirectionalForeignKeyJoinConditionItems(
+      right,
+      left,
+      foreignKeysForReferencedTable(right, foreignKeysByTable),
+      prefix,
+      dialect,
+    ),
+  ];
+}
+
+function buildDirectionalForeignKeyJoinConditionItems(
+  owner: SqlCompletionReferencedTable,
+  referenced: SqlCompletionReferencedTable,
+  foreignKeys: SqlCompletionForeignKey[],
+  prefix: string,
+  dialect?: "mysql" | "postgres" | "sqlserver",
+): SqlCompletionItem[] {
+  const matchingForeignKeys = foreignKeys.filter((foreignKey) =>
+    referencedTableMatchesName(referenced, foreignKey.ref_table, foreignKey.ref_schema),
+  );
+  const groups = groupForeignKeysByConstraint(matchingForeignKeys);
+  const items: SqlCompletionItem[] = [];
+
+  for (const group of groups) {
+    const parts = group.map((foreignKey) =>
+      buildJoinConditionPart(owner, foreignKey.column, referenced, foreignKey.ref_column, dialect),
+    );
+    const label = parts.map((part) => part.label).join(" AND ");
+    if (!label || (prefix && !matchesPrefix(label, prefix))) continue;
+    const apply = parts.map((part) => part.apply).join(" AND ");
+    items.push({
+      label,
+      type: "snippet",
+      detail: group.length > 1 ? "JOIN condition from composite foreign key" : "JOIN condition from foreign key",
+      apply,
+      boost: 3200 + group.length,
+    });
+  }
+
+  return items;
+}
+
+function buildJoinConditionPart(
+  owner: SqlCompletionReferencedTable,
+  ownerColumn: string,
+  referenced: SqlCompletionReferencedTable,
+  referencedColumn: string,
+  dialect?: "mysql" | "postgres" | "sqlserver",
+): { label: string; apply: string } {
+  const ownerRef = owner.alias || owner.name;
+  const referencedRef = referenced.alias || referenced.name;
+  const ownerApplyRef = owner.alias ? owner.alias : quoteSqlIdentifier(owner.name, dialect);
+  const referencedApplyRef = referenced.alias ? referenced.alias : quoteSqlIdentifier(referenced.name, dialect);
+  return {
+    label: `${ownerRef}.${ownerColumn} = ${referencedRef}.${referencedColumn}`,
+    apply: `${ownerApplyRef}.${quoteSqlIdentifier(ownerColumn, dialect)} = ${referencedApplyRef}.${quoteSqlIdentifier(referencedColumn, dialect)}`,
+  };
+}
+
+function groupForeignKeysByConstraint(foreignKeys: SqlCompletionForeignKey[]): SqlCompletionForeignKey[][] {
+  const groups = new Map<string, SqlCompletionForeignKey[]>();
+  for (const foreignKey of foreignKeys) {
+    const key = `${foreignKey.name || `${foreignKey.column}->${foreignKey.ref_table}.${foreignKey.ref_column}`}:${foreignKey.ref_table}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(foreignKey);
+  }
+  return [...groups.values()];
+}
+
+function referencedTableMatchesName(
+  table: SqlCompletionReferencedTable,
+  candidate: string,
+  candidateSchema?: string | null,
+): boolean {
+  const normalizedCandidate = normalizeTableName(candidate);
+  if (normalizeTableName(table.name) !== normalizedCandidate) return false;
+  if (!candidateSchema || !table.schema) return true;
+  return normalizeIdentifierPart(table.schema) === normalizeIdentifierPart(candidateSchema);
+}
+
+function normalizeTableName(name: string): string {
+  return name
+    .split(".")
+    .filter(Boolean)
+    .pop()!
+    .replace(/^["`[]|["`\]]$/g, "")
+    .toLowerCase();
+}
+
+function normalizeIdentifierPart(name: string): string {
+  return name.replace(/^["`[]|["`\]]$/g, "").toLowerCase();
+}
+
 function buildJoinConditionItemsForPair(
   left: SqlCompletionReferencedTable,
   leftColumns: SqlCompletionColumn[],
@@ -1884,70 +2018,220 @@ function buildJoinConditionItemsForPair(
   const leftTableKey = singularTableName(left.name);
   const rightTableKey = singularTableName(right.name);
 
+  const leftByName = indexColumnsByLowerName(leftColumns);
+  const rightByName = indexColumnsByLowerName(rightColumns);
+  const emittedPairs = new Set<string>();
+
+  const addPair = (
+    leftColumn: SqlCompletionColumn | undefined,
+    rightColumn: SqlCompletionColumn | undefined,
+    boost: number,
+  ) => {
+    if (!leftColumn || !rightColumn || !areJoinColumnTypesCompatible(leftColumn, rightColumn)) return;
+    const key = `${leftColumn.name.toLowerCase()}:${rightColumn.name.toLowerCase()}`;
+    if (emittedPairs.has(key)) return;
+    emittedPairs.add(key);
+    const label = `${leftRef}.${leftColumn.name} = ${rightRef}.${rightColumn.name}`;
+    if (prefix && !matchesPrefix(label, prefix)) return;
+    const apply = `${leftApplyRef}.${quoteSqlIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteSqlIdentifier(rightColumn.name, dialect)}`;
+    items.push({
+      label,
+      type: "snippet",
+      detail: "JOIN condition",
+      apply,
+      boost,
+    });
+  };
+
+  const leftId = leftByName.get("id")?.[0];
+  const rightId = rightByName.get("id")?.[0];
+
+  // Pattern 1: a.id = b.{singular_a}_id  (e.g., users.id = orders.user_id)
+  addPair(leftId, rightByName.get(`${leftTableKey}_id`)?.[0], 2300);
+  // Pattern 2: a.{singular_b}_id = b.id  (e.g., orders.user_id = users.id)
+  addPair(leftByName.get(`${rightTableKey}_id`)?.[0], rightId, 2300);
+
+  // Pattern 3/4: same-name columns, with FK-looking names above generic shared columns.
+  for (const [name, leftMatches] of leftByName.entries()) {
+    if (name === "id") continue;
+    const rightMatches = rightByName.get(name);
+    if (!rightMatches?.length) continue;
+    addPair(leftMatches[0], rightMatches[0], name.endsWith("_id") ? 2000 : 1700);
+  }
+
+  // Pattern 5: parent_id -> id (self-referencing / hierarchical)
+  if (leftTableKey === rightTableKey) {
+    addPair(leftByName.get("parent_id")?.[0], rightId, 2100);
+    addPair(leftId, rightByName.get("parent_id")?.[0], 2100);
+  }
+
+  // Pattern 6: created_by / modified_by / owned_by -> users.id
+  for (const auditColumnName of ["created_by", "modified_by", "owned_by"]) {
+    addPair(leftId, rightByName.get(auditColumnName)?.[0], 1800);
+    addPair(leftByName.get(auditColumnName)?.[0], rightId, 1800);
+  }
+
+  // Pattern 7: Generic FK column -> id when table names do not reveal the relationship.
   for (const leftColumn of leftColumns) {
-    for (const rightColumn of rightColumns) {
-      const leftName = leftColumn.name.toLowerCase();
-      const rightName = rightColumn.name.toLowerCase();
-      const leftLabel = `${leftRef}.${leftColumn.name}`;
-      const rightLabel = `${rightRef}.${rightColumn.name}`;
-      let boost = 0;
+    const leftName = leftColumn.name.toLowerCase();
+    if (leftName !== "id" && leftName.endsWith("_id")) addPair(leftColumn, rightId, 1650);
+  }
+  for (const rightColumn of rightColumns) {
+    const rightName = rightColumn.name.toLowerCase();
+    if (rightName !== "id" && rightName.endsWith("_id")) addPair(leftId, rightColumn, 1650);
+  }
 
-      // Pattern 1: a.id = b.{singular_a}_id  (e.g., users.id = orders.user_id)
-      if (leftName === "id" && rightName === `${leftTableKey}_id`) {
-        boost = 2300;
-      }
-      // Pattern 2: a.{singular_b}_id = b.id  (e.g., orders.user_id = users.id)
-      else if (rightName === "id" && leftName === `${rightTableKey}_id`) {
-        boost = 2300;
-      }
-      // Pattern 3: Same FK column name in both tables (e.g., both have user_id)
-      else if (leftName === rightName && leftName.endsWith("_id")) {
-        boost = 2000;
-      }
-      // Pattern 4: Same column name that isn't "id" (e.g., both have "code", "email")
-      else if (leftName !== "id" && leftName === rightName) {
-        boost = 1700;
-      }
-      // Pattern 5: parent_id → id (self-referencing / hierarchical)
-      else if (leftName === "parent_id" && rightName === "id" && leftTableKey === rightTableKey) {
-        boost = 2100;
-      } else if (rightName === "parent_id" && leftName === "id" && leftTableKey === rightTableKey) {
-        boost = 2100;
-      }
-      // Pattern 6: created_by / modified_by / owned_by → users.id
-      else if (
-        leftName === "id" &&
-        (rightName === "created_by" || rightName === "modified_by" || rightName === "owned_by")
-      ) {
-        boost = 1800;
-      } else if (
-        rightName === "id" &&
-        (leftName === "created_by" || leftName === "modified_by" || leftName === "owned_by")
-      ) {
-        boost = 1800;
-      }
-      // Pattern 7: Generic FK column → id when table names do not reveal the relationship.
-      else if (leftName !== "id" && leftName.endsWith("_id") && rightName === "id") {
-        boost = 1650;
-      } else if (rightName !== "id" && rightName.endsWith("_id") && leftName === "id") {
-        boost = 1650;
-      }
+  items.push(
+    ...buildCompositeHeuristicJoinConditionItems(left, leftColumns, right, leftByName, rightByName, prefix, dialect),
+  );
 
-      if (!boost) continue;
-      const label = `${leftLabel} = ${rightLabel}`;
-      if (prefix && !matchesPrefix(label, prefix)) continue;
-      const apply = `${leftApplyRef}.${quoteSqlIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteSqlIdentifier(rightColumn.name, dialect)}`;
-      items.push({
-        label,
-        type: "snippet",
-        detail: "JOIN condition",
-        apply,
-        boost,
-      });
+  return items;
+}
+
+function indexColumnsByLowerName(columns: SqlCompletionColumn[]): Map<string, SqlCompletionColumn[]> {
+  const index = new Map<string, SqlCompletionColumn[]>();
+  for (const column of columns) {
+    const key = column.name.toLowerCase();
+    const existing = index.get(key);
+    if (existing) existing.push(column);
+    else index.set(key, [column]);
+  }
+  return index;
+}
+
+function buildCompositeHeuristicJoinConditionItems(
+  left: SqlCompletionReferencedTable,
+  leftColumns: SqlCompletionColumn[],
+  right: SqlCompletionReferencedTable,
+  leftByName: Map<string, SqlCompletionColumn[]>,
+  rightByName: Map<string, SqlCompletionColumn[]>,
+  prefix: string,
+  dialect?: "mysql" | "postgres" | "sqlserver",
+): SqlCompletionItem[] {
+  const leftId = leftByName.get("id")?.[0];
+  const rightId = rightByName.get("id")?.[0];
+  const leftTableKey = singularTableName(left.name);
+  const rightTableKey = singularTableName(right.name);
+  const candidates: Array<{ parent: "left" | "right"; parentId: SqlCompletionColumn; childFk: SqlCompletionColumn }> =
+    [];
+  const rightNamedFk = rightByName.get(`${leftTableKey}_id`)?.[0];
+  const leftNamedFk = leftByName.get(`${rightTableKey}_id`)?.[0];
+  if (leftId && rightNamedFk && areJoinColumnTypesCompatible(leftId, rightNamedFk)) {
+    candidates.push({ parent: "left", parentId: leftId, childFk: rightNamedFk });
+  }
+  if (rightId && leftNamedFk && areJoinColumnTypesCompatible(leftNamedFk, rightId)) {
+    candidates.push({ parent: "right", parentId: rightId, childFk: leftNamedFk });
+  }
+  if (candidates.length === 0) return [];
+
+  const sharedScopeColumns = leftColumns
+    .map((leftColumn) => {
+      const name = leftColumn.name.toLowerCase();
+      const rightColumn = rightByName.get(name)?.[0];
+      if (!rightColumn || !isLikelyScopeColumnName(name) || !areJoinColumnTypesCompatible(leftColumn, rightColumn)) {
+        return null;
+      }
+      return { leftColumn, rightColumn };
+    })
+    .filter((value): value is { leftColumn: SqlCompletionColumn; rightColumn: SqlCompletionColumn } => !!value)
+    .slice(0, 2);
+  if (sharedScopeColumns.length === 0) return [];
+
+  const leftRef = left.alias || left.name;
+  const rightRef = right.alias || right.name;
+  const leftApplyRef = left.alias ? left.alias : quoteSqlIdentifier(left.name, dialect);
+  const rightApplyRef = right.alias ? right.alias : quoteSqlIdentifier(right.name, dialect);
+  const items: SqlCompletionItem[] = [];
+
+  for (const candidate of candidates.slice(0, 2)) {
+    const parts = sharedScopeColumns.map(({ leftColumn, rightColumn }) =>
+      buildHeuristicJoinConditionPart(leftRef, leftApplyRef, leftColumn, rightRef, rightApplyRef, rightColumn, dialect),
+    );
+    if (candidate.parent === "left") {
+      parts.push(
+        buildHeuristicJoinConditionPart(
+          leftRef,
+          leftApplyRef,
+          candidate.parentId,
+          rightRef,
+          rightApplyRef,
+          candidate.childFk,
+          dialect,
+        ),
+      );
+    } else {
+      parts.push(
+        buildHeuristicJoinConditionPart(
+          leftRef,
+          leftApplyRef,
+          candidate.childFk,
+          rightRef,
+          rightApplyRef,
+          candidate.parentId,
+          dialect,
+        ),
+      );
     }
+    const label = parts.map((part) => part.label).join(" AND ");
+    if (prefix && !matchesPrefix(label, prefix)) continue;
+    items.push({
+      label,
+      type: "snippet",
+      detail: "Likely composite JOIN condition",
+      apply: parts.map((part) => part.apply).join(" AND "),
+      boost: 2400 + parts.length,
+    });
   }
 
   return items;
+}
+
+function buildHeuristicJoinConditionPart(
+  leftRef: string,
+  leftApplyRef: string,
+  leftColumn: SqlCompletionColumn,
+  rightRef: string,
+  rightApplyRef: string,
+  rightColumn: SqlCompletionColumn,
+  dialect?: "mysql" | "postgres" | "sqlserver",
+): { label: string; apply: string } {
+  return {
+    label: `${leftRef}.${leftColumn.name} = ${rightRef}.${rightColumn.name}`,
+    apply: `${leftApplyRef}.${quoteSqlIdentifier(leftColumn.name, dialect)} = ${rightApplyRef}.${quoteSqlIdentifier(rightColumn.name, dialect)}`,
+  };
+}
+
+function isLikelyScopeColumnName(name: string): boolean {
+  return (
+    name !== "id" &&
+    (name.endsWith("_id") ||
+      name === "tenant" ||
+      name === "tenant_id" ||
+      name === "account_id" ||
+      name === "workspace_id" ||
+      name === "organization_id" ||
+      name === "org_id")
+  );
+}
+
+function areJoinColumnTypesCompatible(left: SqlCompletionColumn, right: SqlCompletionColumn): boolean {
+  const leftType = normalizeJoinType(left.dataType);
+  const rightType = normalizeJoinType(right.dataType);
+  if (!leftType || !rightType) return true;
+  return leftType === rightType;
+}
+
+function normalizeJoinType(dataType?: string): string | null {
+  if (!dataType) return null;
+  const type = dataType.toLowerCase();
+  if (/\b(uuid|uniqueidentifier)\b/.test(type)) return "uuid";
+  if (/\b(bigint|int8|integer|int|int4|smallint|int2|tinyint|serial|bigserial|number|numeric|decimal)\b/.test(type)) {
+    return "number";
+  }
+  if (/\b(char|text|clob|string|varchar|nvarchar|nchar|uuid)\b/.test(type)) return "text";
+  if (/\b(bool|boolean|bit)\b/.test(type)) return "boolean";
+  if (/\b(date|time|timestamp|datetime)\b/.test(type)) return "temporal";
+  return type.replace(/\(.+\)/, "").trim() || null;
 }
 
 function singularTableName(name: string): string {

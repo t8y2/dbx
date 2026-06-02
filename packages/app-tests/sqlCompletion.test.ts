@@ -9,6 +9,7 @@ import {
   getSqlCompletionContext,
   recordCompletionSelection,
   type SqlCompletionColumn,
+  type SqlCompletionForeignKey,
   type SqlCompletionTable,
 } from "../../apps/desktop/src/lib/sqlCompletion.ts";
 
@@ -956,6 +957,194 @@ test("getSqlCompletionContext returns nonAggregatedSelectColumns", () => {
 });
 
 // --- Better FK join inference ---
+
+test("prefers explicit foreign-key join condition with table aliases", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    [
+      "public.orders",
+      [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_column: "id" }],
+    ],
+  ]);
+  const sql = "select * from public.orders o join public.customers c on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", schema: "public", type: "table" },
+      { name: "customers", schema: "public", type: "table" },
+    ],
+    columnsByTable,
+    foreignKeysByTable,
+  });
+
+  assert.deepEqual(items[0], {
+    label: "o.customer_id = c.id",
+    type: "snippet",
+    detail: "JOIN condition from foreign key",
+    apply: "o.customer_id = c.id",
+    boost: 3201,
+  });
+});
+
+test("suggests explicit foreign-key join when the joined table owns the key", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    [
+      "public.orders",
+      [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_column: "id" }],
+    ],
+  ]);
+  const sql = "select * from public.customers c join public.orders o on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "customers", schema: "public", type: "table" },
+      { name: "orders", schema: "public", type: "table" },
+    ],
+    columnsByTable,
+    foreignKeysByTable,
+  });
+
+  const fkJoin = items.find((item) => item.label === "o.customer_id = c.id");
+  assert.ok(fkJoin, "should suggest FK join when the right side owns the foreign key");
+});
+
+test("suggests composite explicit foreign-key join conditions", () => {
+  const colsWithCompositeFk = new Map<string, SqlCompletionColumn[]>([
+    [
+      "public.products",
+      [
+        { name: "tenant_id", table: "products", schema: "public", dataType: "text" },
+        { name: "id", table: "products", schema: "public", dataType: "text" },
+      ],
+    ],
+    [
+      "public.order_lines",
+      [
+        { name: "tenant_id", table: "order_lines", schema: "public", dataType: "text" },
+        { name: "product_id", table: "order_lines", schema: "public", dataType: "text" },
+      ],
+    ],
+  ]);
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    [
+      "public.order_lines",
+      [
+        { name: "order_lines_product_fkey", column: "tenant_id", ref_table: "products", ref_column: "tenant_id" },
+        { name: "order_lines_product_fkey", column: "product_id", ref_table: "products", ref_column: "id" },
+      ],
+    ],
+  ]);
+  const sql = "select * from public.order_lines ol join public.products p on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "order_lines", schema: "public", type: "table" },
+      { name: "products", schema: "public", type: "table" },
+    ],
+    columnsByTable: colsWithCompositeFk,
+    foreignKeysByTable,
+  });
+
+  const fkJoin = items.find((item) => item.label === "ol.tenant_id = p.tenant_id AND ol.product_id = p.id");
+  assert.ok(fkJoin, "should suggest full composite FK join");
+  assert.equal(fkJoin?.detail, "JOIN condition from composite foreign key");
+});
+
+test("uses referenced schema to disambiguate explicit foreign-key joins", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    [
+      "sales.orders",
+      [
+        {
+          name: "orders_customer_id_fkey",
+          column: "customer_id",
+          ref_schema: "crm",
+          ref_table: "customers",
+          ref_column: "id",
+        },
+      ],
+    ],
+  ]);
+  const sql = "select * from sales.orders o join public.customers pc on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", schema: "sales", type: "table" },
+      { name: "customers", schema: "public", type: "table" },
+      { name: "customers", schema: "crm", type: "table" },
+    ],
+    columnsByTable,
+    foreignKeysByTable,
+  });
+
+  assert.equal(
+    items.some((item) => item.label === "o.customer_id = pc.id" && item.detail === "JOIN condition from foreign key"),
+    false,
+  );
+});
+
+test("suggests likely composite joins from shared scope columns and id naming", () => {
+  const colsWithTenantRelationship = new Map<string, SqlCompletionColumn[]>([
+    [
+      "public.orders",
+      [
+        { name: "tenant_id", table: "orders", schema: "public", dataType: "text" },
+        { name: "id", table: "orders", schema: "public", dataType: "uuid" },
+      ],
+    ],
+    [
+      "public.order_lines",
+      [
+        { name: "tenant_id", table: "order_lines", schema: "public", dataType: "text" },
+        { name: "order_id", table: "order_lines", schema: "public", dataType: "uuid" },
+        { name: "article_id", table: "order_lines", schema: "public", dataType: "text" },
+      ],
+    ],
+  ]);
+  const sql = "select * from public.orders o join public.order_lines ol on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", schema: "public", type: "table" },
+      { name: "order_lines", schema: "public", type: "table" },
+    ],
+    columnsByTable: colsWithTenantRelationship,
+  });
+
+  const compositeJoin = items.find((item) => item.label === "o.tenant_id = ol.tenant_id AND o.id = ol.order_id");
+  assert.ok(compositeJoin, "should combine tenant scope with id/FK naming");
+  assert.equal(compositeJoin?.detail, "Likely composite JOIN condition");
+});
+
+test("does not suggest heuristic joins for incompatible column types", () => {
+  const colsWithIncompatibleIds = new Map<string, SqlCompletionColumn[]>([
+    [
+      "public.users",
+      [
+        { name: "id", table: "users", schema: "public", dataType: "uuid" },
+        { name: "tenant_id", table: "users", schema: "public", dataType: "text" },
+      ],
+    ],
+    [
+      "public.orders",
+      [
+        { name: "user_id", table: "orders", schema: "public", dataType: "bigint" },
+        { name: "tenant_id", table: "orders", schema: "public", dataType: "text" },
+      ],
+    ],
+  ]);
+  const sql = "select * from public.users u join public.orders o on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "users", schema: "public", type: "table" },
+      { name: "orders", schema: "public", type: "table" },
+    ],
+    columnsByTable: colsWithIncompatibleIds,
+  });
+
+  assert.equal(
+    items.some((item) => item.label === "u.id = o.user_id"),
+    false,
+  );
+  assert.equal(
+    items.some((item) => item.label === "u.tenant_id = o.tenant_id AND u.id = o.user_id"),
+    false,
+  );
+});
 
 test("suggests join condition for same FK column in both tables", () => {
   const colsWithFk = new Map<string, SqlCompletionColumn[]>([

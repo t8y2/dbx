@@ -221,6 +221,7 @@ export interface IndexInfo {
 export interface ForeignKeyInfo {
   name: string;
   column: string;
+  ref_schema?: string | null;
   ref_table: string;
   ref_column: string;
 }

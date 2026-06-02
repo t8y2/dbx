@@ -1099,17 +1099,24 @@ pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let stmt = client
         .prepare_cached(
-            "SELECT kcu.constraint_name, kcu.column_name, \
-             ccu.table_name AS ref_table, ccu.column_name AS ref_column \
-             FROM information_schema.key_column_usage kcu \
+            "SELECT fk.constraint_name, fk.column_name, \
+             pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage fk \
+               ON fk.constraint_name = tc.constraint_name \
+               AND fk.constraint_schema = tc.constraint_schema \
+               AND fk.table_schema = tc.table_schema \
+               AND fk.table_name = tc.table_name \
              JOIN information_schema.referential_constraints rc \
-               ON kcu.constraint_name = rc.constraint_name \
-               AND kcu.constraint_schema = rc.constraint_schema \
-             JOIN information_schema.constraint_column_usage ccu \
-               ON rc.unique_constraint_name = ccu.constraint_name \
-               AND rc.unique_constraint_schema = ccu.constraint_schema \
-             WHERE kcu.table_schema = $1 AND kcu.table_name = $2 \
-             ORDER BY kcu.constraint_name",
+               ON rc.constraint_name = tc.constraint_name \
+               AND rc.constraint_schema = tc.constraint_schema \
+             JOIN information_schema.key_column_usage pk \
+               ON pk.constraint_name = rc.unique_constraint_name \
+               AND pk.constraint_schema = rc.unique_constraint_schema \
+               AND pk.ordinal_position = fk.position_in_unique_constraint \
+             WHERE tc.constraint_type = 'FOREIGN KEY' \
+               AND fk.table_schema = $1 AND fk.table_name = $2 \
+             ORDER BY fk.constraint_name, fk.ordinal_position",
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1120,8 +1127,9 @@ pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result
         .map(|row| ForeignKeyInfo {
             name: row.get::<_, String>(0),
             column: row.get::<_, String>(1),
-            ref_table: row.get::<_, String>(2),
-            ref_column: row.get::<_, String>(3),
+            ref_schema: Some(row.get::<_, String>(2)),
+            ref_table: row.get::<_, String>(3),
+            ref_column: row.get::<_, String>(4),
         })
         .collect())
 }

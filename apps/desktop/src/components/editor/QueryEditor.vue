@@ -57,8 +57,14 @@ import {
   shouldRunSqlSemanticDiagnostics,
   type SqlSemanticDiagnostic,
 } from "@/lib/sqlSemanticDiagnostics";
-import type { SqlCompletionColumn } from "@/lib/sqlCompletion";
-import type { DatabaseType, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { SqlCompletionColumn, SqlCompletionForeignKey } from "@/lib/sqlCompletion";
+import type {
+  DatabaseType,
+  ForeignKeyInfo,
+  SqlReferenceAnalysis,
+  SqlTableReference,
+  SqlTextSpan,
+} from "@/types/database";
 import { vscodeSelectionLayer } from "@/lib/codemirrorVscodeSelectionLayer";
 
 const props = defineProps<{
@@ -195,6 +201,7 @@ function editorThemeAppearance() {
 let cachedTables: Array<{ name: string; schema?: string; type?: "table" | "view" }> = [];
 // Persistent column cache keyed by "schema.table" or "table"
 const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
+const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 
 const zoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
   if (settingsStore.editorSettings.fontSize === fontSize) return;
@@ -427,6 +434,28 @@ async function ensureColumnsForTable(table: { name: string; schema?: string | nu
   );
   if (columns.length === 0) return;
   cachedColumnsByTable.set(cacheKey, columns);
+}
+
+async function ensureForeignKeysForTable(table: { name: string; schema?: string | null }) {
+  const cacheKey = completionCacheKey(table);
+  if (cachedForeignKeysByTable.has(cacheKey) || !props.connectionId || props.database == null) return;
+  const querySchema = table.schema ?? props.database;
+  try {
+    const foreignKeys = await api.listForeignKeys(props.connectionId, props.database, querySchema, table.name);
+    cachedForeignKeysByTable.set(
+      cacheKey,
+      foreignKeys.map((foreignKey: ForeignKeyInfo) => ({
+        name: foreignKey.name,
+        column: foreignKey.column,
+        ref_schema: foreignKey.ref_schema,
+        ref_table: foreignKey.ref_table,
+        ref_column: foreignKey.ref_column,
+      })),
+    );
+  } catch (e) {
+    console.warn(`[DBX] Failed to load foreign keys for ${cacheKey}:`, e);
+    cachedForeignKeysByTable.set(cacheKey, []);
+  }
 }
 
 function createHoverDom(title: string, detail: string, rows: string[] = []) {
@@ -1027,8 +1056,19 @@ async function performAsyncCompletionWithResult(
   );
   if (epoch !== completionEpoch) return null;
 
+  if (completionContext.suggestJoinConditions) {
+    await Promise.all(
+      refs.map(async (refTable) => {
+        if (refTable.columns && refTable.columns.length > 0) return;
+        await ensureForeignKeysForTable(refTable);
+      }),
+    );
+    if (epoch !== completionEpoch) return null;
+  }
+
   // Build columnsByTable — from cache or CTE definitions
   const columnsByTable = new Map<string, SqlCompletionColumn[]>();
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
   if (insertColumnsByTable.size > 0) {
     for (const [key, cols] of insertColumnsByTable.entries()) {
       columnsByTable.set(key, cols);
@@ -1052,6 +1092,10 @@ async function performAsyncCompletionWithResult(
       if (cached) {
         columnsByTable.set(cacheKey, cached);
       }
+      const cachedForeignKeys = cachedForeignKeysByTable.get(cacheKey);
+      if (cachedForeignKeys) {
+        foreignKeysByTable.set(cacheKey, cachedForeignKeys);
+      }
     }
   }
 
@@ -1068,6 +1112,7 @@ async function performAsyncCompletionWithResult(
   const items = buildSqlCompletionItemsFromContext(effectiveContext, {
     tables,
     columnsByTable,
+    foreignKeysByTable,
     schemas: schemaNames,
     translations: completionTranslations.value,
     snippets: settingsStore.editorSettings.snippets,
@@ -1088,6 +1133,7 @@ function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlC
 async function refreshCompletionCache() {
   cachedTables = [];
   cachedColumnsByTable.clear();
+  cachedForeignKeysByTable.clear();
 }
 
 onMounted(async () => {

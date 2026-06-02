@@ -1140,11 +1140,11 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
         "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
-         kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
+         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
          FROM information_schema.KEY_COLUMN_USAGE kcu \
          WHERE kcu.TABLE_SCHEMA = {} AND kcu.TABLE_NAME = {} \
          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
-         ORDER BY kcu.CONSTRAINT_NAME",
+         ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     );
@@ -1157,6 +1157,7 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
         .map(|row| ForeignKeyInfo {
             name: get_str_by_name(row, "CONSTRAINT_NAME"),
             column: get_str_by_name(row, "COLUMN_NAME"),
+            ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
             ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
             ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
         })

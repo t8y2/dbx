@@ -462,6 +462,13 @@ pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -
         if source_fk.ref_table != target_fk.ref_table {
             changes.push(format!("ref table: {} → {}", target_fk.ref_table, source_fk.ref_table));
         }
+        if source_fk.ref_schema != target_fk.ref_schema {
+            changes.push(format!(
+                "ref schema: {} → {}",
+                target_fk.ref_schema.as_deref().unwrap_or(""),
+                source_fk.ref_schema.as_deref().unwrap_or("")
+            ));
+        }
         if source_fk.ref_column != target_fk.ref_column {
             changes.push(format!("ref column: {} → {}", target_fk.ref_column, source_fk.ref_column));
         }
@@ -872,6 +879,7 @@ mod tests {
         ForeignKeyInfo {
             name: if overrides.name.is_empty() { "orders_user_id_fk".to_string() } else { overrides.name },
             column: if overrides.column.is_empty() { "user_id".to_string() } else { overrides.column },
+            ref_schema: overrides.ref_schema,
             ref_table: if overrides.ref_table.is_empty() { "users".to_string() } else { overrides.ref_table },
             ref_column: if overrides.ref_column.is_empty() { "id".to_string() } else { overrides.ref_column },
         }
@@ -929,12 +937,14 @@ mod tests {
                 foreign_key(ForeignKeyInfo {
                     name: "orders_user_id_fk".to_string(),
                     column: String::new(),
+                    ref_schema: None,
                     ref_table: String::new(),
                     ref_column: String::new(),
                 }),
                 foreign_key(ForeignKeyInfo {
                     name: "orders_account_id_fk".to_string(),
                     column: "account_id".to_string(),
+                    ref_schema: None,
                     ref_table: "accounts".to_string(),
                     ref_column: String::new(),
                 }),
@@ -943,12 +953,14 @@ mod tests {
                 foreign_key(ForeignKeyInfo {
                     name: "orders_user_id_fk".to_string(),
                     column: String::new(),
+                    ref_schema: None,
                     ref_table: "members".to_string(),
                     ref_column: String::new(),
                 }),
                 foreign_key(ForeignKeyInfo {
                     name: "orders_region_id_fk".to_string(),
                     column: "region_id".to_string(),
+                    ref_schema: None,
                     ref_table: "regions".to_string(),
                     ref_column: String::new(),
                 }),
@@ -995,6 +1007,7 @@ mod tests {
                 source: Some(foreign_key(ForeignKeyInfo {
                     name: "orders_user_id_fk".to_string(),
                     column: String::new(),
+                    ref_schema: None,
                     ref_table: "users".to_string(),
                     ref_column: String::new(),
                 })),

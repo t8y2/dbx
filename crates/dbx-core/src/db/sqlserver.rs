@@ -528,14 +528,14 @@ pub async fn list_foreign_keys(
     table: &str,
 ) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
-        "SELECT fk.name, c.name, rt.name, rc.name \
+        "SELECT fk.name, c.name, SCHEMA_NAME(rt.schema_id), rt.name, rc.name \
          FROM sys.foreign_keys fk \
          JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
          JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id \
          JOIN sys.tables rt ON fkc.referenced_object_id = rt.object_id \
          JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id \
          WHERE fk.parent_object_id = OBJECT_ID('{s}.{t}') \
-         ORDER BY fk.name",
+         ORDER BY fk.name, fkc.constraint_column_id",
         s = schema.replace('\'', "''"),
         t = table.replace('\'', "''")
     );
@@ -546,8 +546,9 @@ pub async fn list_foreign_keys(
         .map(|row| ForeignKeyInfo {
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             column: row.get::<&str, _>(1).unwrap_or("").to_string(),
-            ref_table: row.get::<&str, _>(2).unwrap_or("").to_string(),
-            ref_column: row.get::<&str, _>(3).unwrap_or("").to_string(),
+            ref_schema: Some(row.get::<&str, _>(2).unwrap_or("").to_string()),
+            ref_table: row.get::<&str, _>(3).unwrap_or("").to_string(),
+            ref_column: row.get::<&str, _>(4).unwrap_or("").to_string(),
         })
         .collect())
 }

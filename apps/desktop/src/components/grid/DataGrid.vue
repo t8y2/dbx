@@ -4,7 +4,17 @@ const globalDdlOpen = ref(false);
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, watch, type Component } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  onActivated,
+  onDeactivated,
+  useSlots,
+  watch,
+  type Component,
+} from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowUp,
@@ -46,7 +56,6 @@ import {
   PanelBottom,
   PanelRight,
   TableProperties,
-  LockKeyhole,
 } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -144,6 +153,7 @@ import {
   isToggleTransposeShortcut,
 } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
+import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
 import {
   appendColumnValueFilterCondition,
@@ -179,6 +189,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { nextDataGridSortState, type DataGridSortDirection } from "@/lib/dataGridSort";
 
 const { t } = useI18n();
+const slots = useSlots();
 const settingsStore = useSettingsStore();
 const { isDark } = useTheme();
 const { toast } = useToast();
@@ -201,7 +212,6 @@ const props = defineProps<{
   schema?: string;
   context?: "results" | "table-data";
   sourceColumns?: Array<string | undefined>;
-  queryEditabilityReason?: string;
   initialWhereInput?: string;
   initialOrderByInput?: string;
   sortColumn?: string;
@@ -309,11 +319,17 @@ const columnCommentMap = computed(() => {
     for (const col of props.tableMeta.columns) {
       if (col.comment) map.set(col.name, col.comment);
     }
+    for (const col of props.tableMeta.columns) {
+      if (!col.comment) continue;
+      const normalizedName = col.name.toLowerCase();
+      if (!map.has(normalizedName)) map.set(normalizedName, col.comment);
+    }
   }
   return map;
 });
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
+const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 
 function headerColumnComment(column: string): string {
   if (!showColumnCommentsInHeader.value) return "";
@@ -1505,7 +1521,7 @@ function scrollToTableInfoColumn(columnName: string) {
 }
 
 // --- Column resize composable ---
-const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, columnVars, getIsResizing } =
+const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } =
   useDataGridColumnResize({
     columns: visibleColumns,
     sourceRows: computed(() => props.result.rows),
@@ -1519,6 +1535,15 @@ const gridStyle = computed(() => ({
 }));
 const gridHorizontalScrollLeft = ref(0);
 const gridViewportWidth = ref(0);
+const renderedColumnOffsets = computed(() => {
+  const widths = renderedColumnWidths.value;
+  const offsets = Array.from({ length: widths.length + 1 }, () => 0);
+  offsets[0] = 0;
+  for (let index = 0; index < widths.length; index++) {
+    offsets[index + 1] = offsets[index] + (widths[index] ?? 0);
+  }
+  return offsets;
+});
 
 function updateGridHorizontalViewport(element: HTMLElement) {
   gridHorizontalScrollLeft.value = element.scrollLeft;
@@ -1528,6 +1553,17 @@ function updateGridHorizontalViewport(element: HTMLElement) {
 function updateGridScrollbarGutter(element: HTMLElement) {
   gridScrollbarGutter.value = scrollbarGutterWidth(element);
 }
+
+function refreshGridScrollerMetrics() {
+  const scrollerEl = gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller");
+  if (!scrollerEl) return;
+  updateGridScrollbarGutter(scrollerEl);
+  updateGridHorizontalViewport(scrollerEl);
+  if (headerRef.value) {
+    headerRef.value.scrollLeft = scrollerEl.scrollLeft;
+  }
+}
+
 function syncHeaderScroll(e: Event) {
   const target = e.target as HTMLElement;
   updateGridScrollbarGutter(target);
@@ -1547,6 +1583,7 @@ interface RenderedGridColumn {
 
 const horizontalColumnWindow = computed(() => {
   const widths = renderedColumnWidths.value;
+  const offsets = renderedColumnOffsets.value;
   const totalColumns = visibleColumnIndexes.value.length;
   if (totalColumns === 0 || widths.length === 0) {
     return { start: 0, end: 0, beforeWidth: 0, afterWidth: 0 };
@@ -1560,22 +1597,23 @@ const horizontalColumnWindow = computed(() => {
     Math.max(gridViewportWidth.value, 1) +
     Math.max(0, gridHorizontalScrollLeft.value - DATA_GRID_ROW_NUM_WIDTH) +
     HORIZONTAL_COLUMN_BUFFER_PX;
-  let start = 0;
-  let offset = 0;
-
-  while (start < totalColumns && offset + (widths[start] ?? 0) < viewportStart) {
-    offset += widths[start] ?? 0;
-    start++;
+  let low = 0;
+  let high = totalColumns - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if ((offsets[mid + 1] ?? 0) < viewportStart) low = mid + 1;
+    else high = mid;
   }
+  const start = low;
+  const offset = offsets[start] ?? 0;
 
   let end = start;
-  let visibleWidth = offset;
-  while (end < totalColumns && visibleWidth < viewportEnd) {
-    visibleWidth += widths[end] ?? 0;
+  while (end < totalColumns && (offsets[end] ?? 0) < viewportEnd) {
     end++;
   }
+  const visibleWidth = offsets[end] ?? offset;
 
-  const columnsWidth = widths.reduce((sum, width) => sum + width, 0);
+  const columnsWidth = offsets[totalColumns] ?? 0;
   return {
     start,
     end,
@@ -1604,12 +1642,7 @@ function renderedColumnStyle(visibleColIdx: number) {
 }
 
 function columnContentOffsetLeft(visibleColIdx: number): number {
-  const widths = renderedColumnWidths.value;
-  let offset = DATA_GRID_ROW_NUM_WIDTH;
-  for (let i = 0; i < visibleColIdx; i++) {
-    offset += widths[i] ?? 0;
-  }
-  return offset;
+  return DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0);
 }
 
 let scrollingTimer = 0;
@@ -1637,10 +1670,7 @@ watch(() => visibleColumns.value.length, initColumnWidths);
 watch(
   () => [visibleColumnCount.value, renderedColumnWidths.value.length],
   () => {
-    nextTick(() => {
-      const scrollerEl = gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller");
-      if (scrollerEl) updateGridHorizontalViewport(scrollerEl);
-    });
+    nextTick(refreshGridScrollerMetrics);
   },
 );
 const localFilterScopeKey = computed(() =>
@@ -1695,16 +1725,9 @@ const showTruncationWarning = computed(
   () => props.result.truncated === true && typeof props.pageLimit !== "number" && props.result.has_more !== true,
 );
 const isResultsContext = computed(() => props.context === "results");
-const resultEditStatus = computed(() => {
-  if (!isResultsContext.value || !hasData.value) return null;
-  if (props.editable && props.tableMeta) return "editable";
-  if (props.queryEditabilityReason) return "readonly";
-  return null;
-});
-const queryEditabilityHint = computed(() => {
-  const reason = props.queryEditabilityReason;
-  return reason ? t(`grid.queryEditUnsupported.${reason}`) : "";
-});
+const showQueryEditReadyBadge = computed(
+  () => isResultsContext.value && hasData.value && !!props.editable && !!props.tableMeta,
+);
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
 const tableUsesSyntheticRowId = computed(() =>
   usesSyntheticRowIdKey(props.databaseType, props.tableMeta?.primaryKeys ?? []),
@@ -1935,6 +1958,19 @@ const saveToolbarState = computed(() =>
     isSaving: isSaving.value,
   }),
 );
+const hasSearchBarSlot = computed(() => !!slots["search-bar"]);
+const showDataGridTopbar = computed(
+  () =>
+    (useTransaction.value && !!props.editable && (!!props.tableMeta || !!props.customSave)) ||
+    hasLocalColumnFilters.value ||
+    canUseWhereSearch.value ||
+    hasSearchBarSlot.value ||
+    showQueryEditReadyBadge.value ||
+    props.context !== "results" ||
+    (!!props.editable && (!!props.tableMeta || !!props.customSave)) ||
+    transactionActive.value ||
+    saveToolbarState.value.showActions,
+);
 
 function canEditRowItem(item: RowItem | undefined): boolean {
   return !!props.editable && !!item && !item.isDeleted && (item.isNew || canEditExistingRows.value);
@@ -2108,8 +2144,15 @@ const searchMatchSet = computed(() => {
   return set;
 });
 
+const currentSearchMatch = computed(() => {
+  const idx = currentMatchIndex.value;
+  if (idx < 0 || idx >= searchMatches.value.length) return null;
+  return searchMatches.value[idx] ?? null;
+});
+
 watch(searchMatches, (matches) => {
   currentMatchIndex.value = matches.length > 0 ? 0 : -1;
+  if (matches.length > 0) nextTick(scrollToCurrentMatch);
 });
 
 function cellIsSearchMatch(displayRow: number, col: number): boolean {
@@ -2119,9 +2162,8 @@ function cellIsSearchMatch(displayRow: number, col: number): boolean {
 
 function cellIsCurrentMatch(displayRow: number, col: number): boolean {
   if (isScrolling.value) return false;
-  const idx = currentMatchIndex.value;
-  if (idx < 0 || idx >= searchMatches.value.length) return false;
-  const m = searchMatches.value[idx];
+  const m = currentSearchMatch.value;
+  if (!m) return false;
   return m.displayRow === displayRow && m.col === col;
 }
 
@@ -2140,6 +2182,17 @@ function scrollToCurrentMatch() {
   if (visibleColIdx >= 0) scrollGridColumnIntoView(visibleColIdx);
   const scrollEl = gridRef.value;
   if (!scrollEl) return;
+  if (useCanvasGridRows.value) {
+    const scroller = canvasScrollerElement();
+    if (!scroller) return;
+    const targetTop = Math.max(
+      0,
+      match.displayRow * CANVAS_DATA_GRID_ROW_HEIGHT - (scroller.clientHeight - CANVAS_DATA_GRID_ROW_HEIGHT) / 2,
+    );
+    scroller.scrollTop = targetTop;
+    syncCanvasViewport();
+    return;
+  }
   const rowEl = scrollEl.querySelector(`[data-row-index="${match.displayRow}"]`) as HTMLElement | null;
   if (rowEl) rowEl.scrollIntoView({ block: "center" });
 }
@@ -2182,6 +2235,13 @@ const hasActiveFilter = computed(
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() =>
   hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription"),
+);
+watch(
+  () => [hasVisibleRows.value, props.result.columns.length] as const,
+  () => {
+    nextTick(refreshGridScrollerMetrics);
+  },
+  { immediate: true },
 );
 const isErrorResult = computed(
   () => props.result.columns.length === 1 && props.result.columns[0] === "Error" && props.result.rows.length > 0,
@@ -2920,6 +2980,407 @@ function rowCellsUseSelectionVisual(rowId: number): boolean {
   return hasRowSelection.value && isRowSelected(rowId) && !hasCellSelection.value;
 }
 
+const canvasRef = ref<HTMLCanvasElement>();
+const canvasOverlayRef = ref<HTMLElement>();
+const canvasViewportWidth = ref(0);
+const canvasViewportHeight = ref(0);
+const canvasScrollTop = ref(0);
+const canvasHoverCell = ref<{ rowIndex: number; visibleColIdx: number } | null>(null);
+const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
+const canvasContentHeight = computed(() => Math.max(1, displayItems.value.length * CANVAS_DATA_GRID_ROW_HEIGHT));
+const canvasRenderStyleKey = computed(
+  () => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${isDark.value}`,
+);
+let canvasResizeObserver: ResizeObserver | null = null;
+let canvasDrawFrame = 0;
+let dataGridIsActive = true;
+
+function toggleDataGridRenderMode() {
+  settingsStore.updateEditorSettings({
+    dataGridRenderMode: dataGridRenderMode.value === "canvas" ? "dom" : "canvas",
+  });
+}
+
+function canvasScrollerElement(): HTMLElement | null {
+  const scroller = scrollerRef.value;
+  if (!scroller) return null;
+  if (scroller instanceof HTMLElement) return scroller;
+  if (scroller.$el instanceof HTMLElement) return scroller.$el;
+  if (scroller.el instanceof HTMLElement) return scroller.el;
+  if (scroller.el?.value instanceof HTMLElement) return scroller.el.value;
+  return null;
+}
+
+function syncCanvasViewport() {
+  if (!dataGridIsActive) return;
+  const scroller = canvasScrollerElement();
+  if (!scroller) return;
+  canvasViewportWidth.value = scroller.clientWidth;
+  canvasViewportHeight.value = scroller.clientHeight;
+  canvasScrollTop.value = scroller.scrollTop;
+  updateGridScrollbarGutter(scroller);
+  updateGridHorizontalViewport(scroller);
+  drawCanvasGridNow();
+}
+
+function attachCanvasResizeObserver() {
+  canvasResizeObserver?.disconnect();
+  canvasResizeObserver = null;
+  if (!dataGridIsActive) return;
+  if (!useCanvasGridRows.value) return;
+  const scroller = canvasScrollerElement();
+  if (!scroller) return;
+  syncCanvasViewport();
+  if (typeof ResizeObserver === "undefined") return;
+  canvasResizeObserver = new ResizeObserver(syncCanvasViewport);
+  canvasResizeObserver.observe(scroller);
+}
+
+function scheduleCanvasDraw() {
+  if (!dataGridIsActive) return;
+  if (!useCanvasGridRows.value || canvasDrawFrame) return;
+  canvasDrawFrame = requestAnimationFrame(() => {
+    canvasDrawFrame = 0;
+    drawCanvasGrid();
+  });
+}
+
+function drawCanvasGridNow() {
+  if (!useCanvasGridRows.value) return;
+  if (canvasDrawFrame) {
+    cancelAnimationFrame(canvasDrawFrame);
+    canvasDrawFrame = 0;
+  }
+  drawCanvasGrid();
+}
+
+function canvasColumnAt(contentX: number): number {
+  const offsets = renderedColumnOffsets.value;
+  const totalColumns = renderedColumnWidths.value.length;
+  if (contentX < 0 || totalColumns === 0 || contentX >= (offsets[totalColumns] ?? 0)) return -1;
+  let low = 0;
+  let high = totalColumns - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if ((offsets[mid + 1] ?? 0) <= contentX) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
+function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: number; rowNumber: boolean } | null {
+  const canvas = canvasRef.value;
+  const scroller = canvasScrollerElement();
+  if (!canvas || !scroller) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const rowIndex = Math.floor((scroller.scrollTop + y) / CANVAS_DATA_GRID_ROW_HEIGHT);
+  if (rowIndex < 0 || rowIndex >= displayItems.value.length) return null;
+  if (x < DATA_GRID_ROW_NUM_WIDTH) return { rowIndex, visibleColIdx: -1, rowNumber: true };
+  const visibleColIdx = canvasColumnAt(scroller.scrollLeft + x - DATA_GRID_ROW_NUM_WIDTH);
+  if (visibleColIdx < 0) return null;
+  return { rowIndex, visibleColIdx, rowNumber: false };
+}
+
+function onCanvasScroll(event: Event) {
+  const target = event.target;
+  const scroller = target instanceof HTMLElement ? target : canvasScrollerElement();
+  if (!scroller) return;
+
+  const scrollTop = scroller.scrollTop;
+  const scrollLeft = scroller.scrollLeft;
+  const viewportWidth = scroller.clientWidth;
+  const viewportHeight = scroller.clientHeight;
+  if (canvasScrollTop.value !== scrollTop) canvasScrollTop.value = scrollTop;
+  if (canvasViewportWidth.value !== viewportWidth) canvasViewportWidth.value = viewportWidth;
+  if (canvasViewportHeight.value !== viewportHeight) canvasViewportHeight.value = viewportHeight;
+  if (gridHorizontalScrollLeft.value !== scrollLeft || gridViewportWidth.value !== viewportWidth) {
+    updateGridHorizontalViewport(scroller);
+  }
+  const gutter = scrollbarGutterWidth(scroller);
+  if (gridScrollbarGutter.value !== gutter) gridScrollbarGutter.value = gutter;
+  if (headerRef.value && headerRef.value.scrollLeft !== scrollLeft) headerRef.value.scrollLeft = scrollLeft;
+  markGridScrolling();
+  scheduleCanvasDraw();
+}
+
+function onCanvasMouseMove(event: MouseEvent) {
+  const hit = canvasHitTest(event);
+  const hitItem = hit ? displayItems.value[hit.rowIndex] : undefined;
+  const next =
+    hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
+  const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
+  if (canvasRef.value) {
+    canvasRef.value.style.cursor = hit?.rowNumber
+      ? "default"
+      : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx)
+        ? "text"
+        : "cell";
+  }
+  if (
+    next?.rowIndex === canvasHoverCell.value?.rowIndex &&
+    next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx
+  ) {
+    return;
+  }
+  const previous = canvasHoverCell.value;
+  if (previous) {
+    const previousActualColIdx = visibleColumnIndexes.value[previous.visibleColIdx];
+    if (previousActualColIdx !== undefined) onCellMouseleave(previous.rowIndex, previousActualColIdx);
+  }
+  canvasHoverCell.value = next;
+  if (next && actualColIdx !== undefined) onCellMouseenter(next.rowIndex, next.visibleColIdx, actualColIdx);
+  scheduleCanvasDraw();
+}
+
+function onCanvasMouseLeave(event?: MouseEvent) {
+  const relatedTarget = event?.relatedTarget;
+  if (relatedTarget instanceof Node && canvasOverlayRef.value?.contains(relatedTarget)) return;
+  const previous = canvasHoverCell.value;
+  if (previous) {
+    const previousActualColIdx = visibleColumnIndexes.value[previous.visibleColIdx];
+    if (previousActualColIdx !== undefined) onCellMouseleave(previous.rowIndex, previousActualColIdx);
+  }
+  canvasHoverCell.value = null;
+  scheduleCanvasDraw();
+}
+
+function keepCanvasDetailHover() {
+  const cell = canvasDetailButtonCell.value;
+  if (!cell) return;
+  canvasHoverCell.value = { rowIndex: cell.rowIndex, visibleColIdx: cell.visibleColIdx };
+  hoveredDetailCell.value = { rowIndex: cell.rowIndex, col: cell.actualColIdx };
+  scheduleCanvasDraw();
+}
+
+function clearCanvasDetailHover(event?: MouseEvent) {
+  const relatedTarget = event?.relatedTarget;
+  if (
+    relatedTarget instanceof Node &&
+    (canvasOverlayRef.value?.contains(relatedTarget) || canvasRef.value?.contains(relatedTarget))
+  ) {
+    return;
+  }
+  onCanvasMouseLeave();
+}
+
+function onCanvasMouseDown(event: MouseEvent) {
+  if (event.button !== 0) return;
+  commitHiddenCanvasEditBeforeCellInteraction();
+  const hit = canvasHitTest(event);
+  if (!hit) return;
+  const item = displayItems.value[hit.rowIndex];
+  if (!item) return;
+  if (hit.rowNumber) {
+    handleRowClick(item.displayIndex, item.id, event);
+  } else {
+    handleDataCellMousedown(item.displayIndex, hit.visibleColIdx, item.id, event);
+  }
+  gridRef.value?.focus({ preventScroll: true });
+  scheduleCanvasDraw();
+}
+
+function onCanvasContext(event: MouseEvent) {
+  commitHiddenCanvasEditBeforeCellInteraction();
+  const hit = canvasHitTest(event);
+  if (!hit) return;
+  const item = displayItems.value[hit.rowIndex];
+  if (!item) return;
+  if (hit.rowNumber) {
+    onRowContext(item.id, item.displayIndex);
+    return;
+  }
+  const actualColIdx = visibleColumnIndexes.value[hit.visibleColIdx];
+  if (actualColIdx === undefined) return;
+  onCellContext(item.id, item.displayIndex, actualColIdx, hit.visibleColIdx);
+}
+
+function onCanvasDblClick(event: MouseEvent) {
+  const hit = canvasHitTest(event);
+  if (!hit) return;
+  if (hit.rowNumber) {
+    const item = displayItems.value[hit.rowIndex];
+    if (item) toggleTranspose(item.displayIndex);
+    return;
+  }
+  const item = displayItems.value[hit.rowIndex];
+  const actualColIdx = visibleColumnIndexes.value[hit.visibleColIdx];
+  if (!item || actualColIdx === undefined || !canEditCellItem(item, actualColIdx)) return;
+  startEdit(item.id, actualColIdx);
+}
+
+function canvasCellViewportRect(rowIndex: number, visibleColIdx: number) {
+  const widths = renderedColumnWidths.value;
+  const colWidth = widths[visibleColIdx];
+  if (colWidth === undefined) return null;
+  const left =
+    DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - gridHorizontalScrollLeft.value;
+  return {
+    left,
+    top: rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - canvasScrollTop.value,
+    width: colWidth,
+    height: CANVAS_DATA_GRID_ROW_HEIGHT,
+  };
+}
+
+function canvasEditingCellViewportRect() {
+  const editing = editingCell.value;
+  if (!editing || !useCanvasGridRows.value) return null;
+  const rowIndex = displayItems.value.findIndex((item) => item.id === editing.rowId);
+  const visibleColIdx = visibleColumnIndexes.value.indexOf(editing.col);
+  if (rowIndex < 0 || visibleColIdx < 0) return null;
+  return canvasCellViewportRect(rowIndex, visibleColIdx);
+}
+
+function canvasEditingCellIsVisible() {
+  const rect = canvasEditingCellViewportRect();
+  if (!rect) return false;
+  const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
+  const clippedRight = Math.min(canvasViewportWidth.value, rect.left + rect.width);
+  return rect.top + rect.height > 0 && rect.top < canvasViewportHeight.value && clippedRight - clippedLeft > 0;
+}
+
+function commitHiddenCanvasEditBeforeCellInteraction() {
+  if (!editingCell.value || !useCanvasGridRows.value) return;
+  if (canvasEditingCellIsVisible()) return;
+  commitEdit();
+}
+
+const canvasEditingCell = computed(() => {
+  const editing = editingCell.value;
+  if (!editing || !useCanvasGridRows.value) return null;
+  const rowIndex = displayItems.value.findIndex((item) => item.id === editing.rowId);
+  const visibleColIdx = visibleColumnIndexes.value.indexOf(editing.col);
+  if (rowIndex < 0 || visibleColIdx < 0) return null;
+  const rect = canvasCellViewportRect(rowIndex, visibleColIdx);
+  if (!rect) return null;
+  return { rowIndex, visibleColIdx, actualColIdx: editing.col, rect };
+});
+
+const canvasEditingCellIsNumeric = computed(() => {
+  const cell = canvasEditingCell.value;
+  if (!cell) return false;
+  return typeof displayItems.value[cell.rowIndex]?.data[cell.actualColIdx] === "number";
+});
+
+const canvasSingleSelectedCell = computed(() => {
+  const range = selectedRange.value;
+  if (!range || range.startRow !== range.endRow || range.startCol !== range.endCol) return null;
+  return { rowIndex: range.startRow, visibleColIdx: range.startCol };
+});
+
+const canvasEditingCellStyle = computed(() => {
+  const cell = canvasEditingCell.value;
+  if (!cell) return {};
+  const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left);
+  const clippedRight = Math.min(canvasViewportWidth.value, cell.rect.left + cell.rect.width);
+  return {
+    left: `${clippedLeft}px`,
+    top: `${cell.rect.top}px`,
+    width: `${Math.max(0, clippedRight - clippedLeft)}px`,
+    height: `${cell.rect.height}px`,
+  };
+});
+
+const canvasDetailButtonCell = computed(() => {
+  if (!useCanvasGridRows.value || isScrolling.value) return null;
+  const target = hoveredDetailCell.value ?? (showCellDetail.value ? detailCell.value : null);
+  if (!target || !cellDetailButtonVisible(target.rowIndex, target.col)) return null;
+  const visibleColIdx = visibleColumnIndexes.value.indexOf(target.col);
+  if (visibleColIdx < 0) return null;
+  const rect = canvasCellViewportRect(target.rowIndex, visibleColIdx);
+  if (!rect) return null;
+  const visibleLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
+  const visibleRight = Math.min(canvasViewportWidth.value, rect.left + rect.width);
+  if (rect.top < 0 || rect.top > canvasViewportHeight.value - 1 || visibleRight - visibleLeft < 24) return null;
+  return { rowIndex: target.rowIndex, visibleColIdx, actualColIdx: target.col, rect };
+});
+
+const canvasDetailButtonStyle = computed(() => {
+  const cell = canvasDetailButtonCell.value;
+  if (!cell) return {};
+  return {
+    left: `${cell.rect.left + cell.rect.width - 22}px`,
+    top: `${cell.rect.top + 2}px`,
+  };
+});
+
+function drawCanvasGrid() {
+  const canvas = canvasRef.value;
+  const scroller = canvasScrollerElement();
+  if (!canvas || !scroller || !useCanvasGridRows.value) return;
+
+  drawCanvasDataGrid({
+    canvas,
+    scroller,
+    width: Math.max(1, canvasViewportWidth.value || scroller.clientWidth),
+    height: Math.max(1, canvasViewportHeight.value || scroller.clientHeight),
+    isDark: isDark.value,
+    styleKey: canvasRenderStyleKey.value,
+    rows: displayItems.value,
+    renderedColumnWidths: renderedColumnWidths.value,
+    renderedColumnOffsets: renderedColumnOffsets.value,
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    rowNumberWidth: DATA_GRID_ROW_NUM_WIDTH,
+    hoverCell: canvasHoverCell.value,
+    isScrolling: isScrolling.value,
+    editingCell: editingCell.value,
+    singleSelectedCell: canvasSingleSelectedCell.value,
+    searchMatchKeys: searchMatchSet.value,
+    currentSearchMatch: currentSearchMatch.value,
+    formatCell: formatCellCached,
+    isRowActive,
+    isRowSelected,
+    rowCellsUseSelectionVisual,
+    cellIsSelected,
+    cellCanHover: canEditCellItem,
+  });
+}
+
+watch(useCanvasGridRows, () => nextTick(attachCanvasResizeObserver), { immediate: true });
+watch(
+  [
+    displayItems,
+    renderedColumnWidths,
+    visibleColumnIndexes,
+    selectedRange,
+    selectedRowIds,
+    hasCellSelection,
+    hasRowSelection,
+    searchMatchSet,
+    currentSearchMatch,
+    isDark,
+    canvasRenderStyleKey,
+    isScrolling,
+    hoveredDetailCell,
+    detailCell,
+    showCellDetail,
+    editingCell,
+  ],
+  scheduleCanvasDraw,
+);
+
+function pauseCanvasGridWork() {
+  dataGridIsActive = false;
+  canvasResizeObserver?.disconnect();
+  canvasResizeObserver = null;
+  if (canvasDrawFrame) {
+    cancelAnimationFrame(canvasDrawFrame);
+    canvasDrawFrame = 0;
+  }
+}
+
+function resumeCanvasGridWork() {
+  dataGridIsActive = true;
+  nextTick(attachCanvasResizeObserver);
+}
+
+onMounted(resumeCanvasGridWork);
+onActivated(resumeCanvasGridWork);
+onDeactivated(pauseCanvasGridWork);
+onUnmounted(pauseCanvasGridWork);
+
 function setRowStatusFilter(value: string) {
   rowStatusFilter.value = value as RowStatusFilter;
 }
@@ -3230,6 +3691,10 @@ function currentSelectedCellPosition() {
 function scrollCellIntoView(rowIndex: number, colIndex: number) {
   nextTick(() => {
     scrollGridColumnIntoView(colIndex);
+    if (useCanvasGridRows.value) {
+      scrollCanvasRowIntoView(rowIndex, "nearest");
+      return;
+    }
     nextTick(() => {
       const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"]`);
       const cellEl = rowEl?.querySelector<HTMLElement>(`[data-visible-col-index="${colIndex}"]`);
@@ -3254,11 +3719,30 @@ function scrollGridColumnIntoView(visibleColIdx: number) {
 
   updateGridHorizontalViewport(scroller);
   if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
+  if (useCanvasGridRows.value) syncCanvasViewport();
+}
+
+function scrollCanvasRowIntoView(rowIndex: number, block: "nearest" | "start") {
+  const target = Math.max(0, Math.min(displayItems.value.length - 1, rowIndex));
+  const scroller = canvasScrollerElement();
+  if (!scroller) return;
+  const rowTop = target * CANVAS_DATA_GRID_ROW_HEIGHT;
+  const rowBottom = rowTop + CANVAS_DATA_GRID_ROW_HEIGHT;
+  if (block === "start" || rowTop < scroller.scrollTop) {
+    scroller.scrollTop = rowTop;
+  } else if (rowBottom > scroller.scrollTop + scroller.clientHeight) {
+    scroller.scrollTop = Math.max(0, rowBottom - scroller.clientHeight);
+  }
+  syncCanvasViewport();
 }
 
 function scrollGridRowIntoView(rowIndex: number) {
   const target = Math.max(0, Math.min(displayItems.value.length - 1, rowIndex));
   nextTick(() => {
+    if (useCanvasGridRows.value) {
+      scrollCanvasRowIntoView(target, "start");
+      return;
+    }
     const scroller = scrollerRef.value;
     if (scroller && !(scroller instanceof HTMLElement)) {
       scroller.scrollToItem?.(target);
@@ -3609,10 +4093,7 @@ function getTransposeRecordWidth(recordIndex: number): number {
 function ensureTransposeRecordWidths(count: number) {
   if (transposeRecordWidths.value.length !== count) {
     const prev = transposeRecordWidths.value;
-    const next = new Array(count);
-    for (let i = 0; i < count; i++) {
-      next[i] = i < prev.length ? prev[i] : calcTransposeRecordWidth(i);
-    }
+    const next = Array.from({ length: count }, (_, i) => (i < prev.length ? prev[i] : calcTransposeRecordWidth(i)));
     transposeRecordWidths.value = next;
   }
 }
@@ -4018,6 +4499,10 @@ const searchQuery = ref("");
 const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
 const cellDetailPanelIsBottom = computed(() => cellDetailPanelLayout.value === "bottom");
 
+watch([showCellDetail, showTableInfo], () => {
+  if (useCanvasGridRows.value) nextTick(syncCanvasViewport);
+});
+
 watch(activeTableInfoTab, () => {
   searchQuery.value = "";
 });
@@ -4310,21 +4795,32 @@ const loadingElapsed = ref(0);
 let _loadingTimer: ReturnType<typeof setInterval> | undefined;
 let _loadingStart = 0;
 
+function stopLoadingElapsedTimer() {
+  clearInterval(_loadingTimer);
+  _loadingTimer = undefined;
+}
+
+function startLoadingElapsedTimer() {
+  stopLoadingElapsedTimer();
+  if (!dataGridIsActive || !props.loading) return;
+  _loadingStart = Date.now();
+  loadingElapsed.value = 0;
+  _loadingTimer = setInterval(() => {
+    loadingElapsed.value = Date.now() - _loadingStart;
+  }, 100);
+}
+
 watch(
   () => props.loading,
   (isLoading) => {
-    clearInterval(_loadingTimer);
+    stopLoadingElapsedTimer();
     console.info(isLoading ? "[DBX][DataGrid:loading:start]" : "[DBX][DataGrid:loading:stop]", {
       traceId: dataGridTraceId,
       cacheKey: props.cacheKey,
       elapsedSinceSetup: dataGridElapsed(),
     });
     if (isLoading) {
-      _loadingStart = Date.now();
-      loadingElapsed.value = 0;
-      _loadingTimer = setInterval(() => {
-        loadingElapsed.value = Date.now() - _loadingStart;
-      }, 100);
+      startLoadingElapsedTimer();
     } else {
       nextTick(() => {
         requestAnimationFrame(() => {
@@ -4338,6 +4834,9 @@ watch(
     }
   },
 );
+
+onActivated(startLoadingElapsedTimer);
+onDeactivated(stopLoadingElapsedTimer);
 
 onUnmounted(() => {
   cleanupFrames();
@@ -4634,6 +5133,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       >
         <!-- Search bar -->
         <div
+          v-if="showDataGridTopbar"
           class="data-grid-topbar-scroll shrink-0 overflow-x-auto border-b bg-muted/20"
           @scroll="
             updateWhereSuggestionPosition();
@@ -4955,7 +5455,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <slot name="search-bar" />
 
             <div class="flex shrink-0 items-center gap-1 px-1 ml-auto">
-              <Tooltip v-if="resultEditStatus === 'editable'">
+              <Tooltip v-if="showQueryEditReadyBadge">
                 <TooltipTrigger as-child>
                   <div
                     class="flex h-5 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300"
@@ -4965,19 +5465,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="max-w-sm">
                   {{ t("grid.queryEditReadyHint", { table: tableMeta?.tableName }) }}
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip v-else-if="resultEditStatus === 'readonly' && queryEditabilityHint">
-                <TooltipTrigger as-child>
-                  <div
-                    class="flex h-5 items-center gap-1 rounded border border-border bg-background px-1.5 text-xs font-medium text-muted-foreground"
-                  >
-                    <LockKeyhole class="h-3 w-3" />
-                    {{ t("grid.queryEditReadOnly") }}
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" class="max-w-sm">
-                  {{ queryEditabilityHint }}
                 </TooltipContent>
               </Tooltip>
               <Button
@@ -4992,6 +5479,23 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <RefreshCcw v-else class="w-3 h-3 mr-1" />
                 {{ t("grid.refresh") }}
               </Button>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-5 text-xs px-1.5 shrink-0"
+                    :class="dataGridRenderMode === 'canvas' ? 'text-primary bg-primary/10' : ''"
+                    @click="toggleDataGridRenderMode"
+                  >
+                    <SquareDashed class="w-3 h-3 mr-1" />
+                    {{ dataGridRenderMode === "canvas" ? t("grid.canvasRenderMode") : t("grid.domRenderMode") }}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-sm">
+                  {{ t("grid.renderModeHint") }}
+                </TooltipContent>
+              </Tooltip>
               <Button
                 v-if="editable && (tableMeta || customSave)"
                 variant="ghost"
@@ -5822,24 +6326,108 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </div>
               </div>
 
+              <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
+                <div
+                  class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none"
+                  :class="{ 'is-scrolling': isScrolling }"
+                  @scroll="onScrollerScroll"
+                >
+                  <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />
+                </div>
+                <div
+                  class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground"
+                >
+                  <component
+                    :is="hasActiveFilter ? SearchX : Inbox"
+                    class="h-8 w-8 text-muted-foreground/50"
+                    aria-hidden="true"
+                  />
+                  <div class="space-y-1">
+                    <div class="text-sm font-medium text-foreground">{{ emptyTitle }}</div>
+                    <div class="text-xs">{{ emptyDescription }}</div>
+                  </div>
+                </div>
+              </div>
+
               <div
-                v-if="!hasVisibleRows"
-                class="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground"
+                v-else-if="useCanvasGridRows"
+                ref="scrollerRef"
+                class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none bg-background"
+                :class="{ 'is-scrolling': isScrolling }"
+                @scroll="onCanvasScroll"
               >
-                <component
-                  :is="hasActiveFilter ? SearchX : Inbox"
-                  class="h-8 w-8 text-muted-foreground/50"
-                  aria-hidden="true"
-                />
-                <div class="space-y-1">
-                  <div class="text-sm font-medium text-foreground">{{ emptyTitle }}</div>
-                  <div class="text-xs">{{ emptyDescription }}</div>
+                <div class="relative" :style="{ width: `${totalWidth}px`, height: `${canvasContentHeight}px` }">
+                  <canvas
+                    ref="canvasRef"
+                    class="canvas-grid-surface sticky left-0 top-0 z-0 block text-xs font-sans font-normal"
+                    :style="{ width: `${canvasViewportWidth}px`, height: `${canvasViewportHeight}px` }"
+                    @mousemove="onCanvasMouseMove"
+                    @mouseleave="onCanvasMouseLeave"
+                    @mousedown="onCanvasMouseDown"
+                    @contextmenu="onCanvasContext"
+                    @dblclick="onCanvasDblClick"
+                  />
+                  <div
+                    ref="canvasOverlayRef"
+                    class="canvas-grid-overlay sticky left-0 top-0 z-10 overflow-hidden"
+                    :style="{
+                      width: `${canvasViewportWidth}px`,
+                      height: `${canvasViewportHeight}px`,
+                      marginTop: `-${canvasViewportHeight}px`,
+                    }"
+                  >
+                    <div
+                      v-if="canvasEditingCell"
+                      class="absolute pointer-events-auto z-20"
+                      :class="{ 'tabular-nums': canvasEditingCellIsNumeric }"
+                      :style="canvasEditingCellStyle"
+                      @mousedown.stop
+                      @click.stop
+                    >
+                      <TemporalCellEditor
+                        v-if="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)"
+                        v-model="editValue"
+                        :kind="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)!"
+                        @cancel="cancelEdit"
+                        @commit="commitGridEdit"
+                      />
+                      <input
+                        v-else
+                        v-model="editValue"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        spellcheck="false"
+                        class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 text-xs leading-[22px] outline-none z-10"
+                        @blur="commitEdit"
+                        @click.stop
+                        @keydown.stop="onEditKeydown"
+                      />
+                    </div>
+                    <button
+                      v-if="canvasDetailButtonCell"
+                      class="absolute pointer-events-auto z-20 flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                      :style="canvasDetailButtonStyle"
+                      :title="t('grid.cellDetails')"
+                      @mouseenter="keepCanvasDetailHover"
+                      @mouseleave="clearCanvasDetailHover"
+                      @mousedown.stop
+                      @click.stop="
+                        showCellDetailsForVisibleCell(
+                          canvasDetailButtonCell.rowIndex,
+                          canvasDetailButtonCell.visibleColIdx,
+                          canvasDetailButtonCell.actualColIdx,
+                        )
+                      "
+                    >
+                      <Info class="h-3 w-3" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
               <!-- Virtual scrolled rows -->
               <RecycleScroller
-                v-else
+                v-else-if="hasVisibleRows"
                 ref="scrollerRef"
                 class="data-grid-scroller flex-1 overflow-x-auto overscroll-none"
                 :class="{ 'is-scrolling': isScrolling }"
@@ -7078,6 +7666,38 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 </template>
 
 <style scoped>
+[data-grid-root] {
+  --data-grid-row-muted-bg: color-mix(in oklab, var(--muted) 30%, transparent);
+  --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
+  --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
+  --data-grid-cell-active-bg: color-mix(in oklab, var(--primary) 15%, transparent);
+  --data-grid-cell-dirty-bg: color-mix(in oklab, oklch(79.5% 0.184 86.047) 10%, transparent);
+  --data-grid-cell-selected-bg: color-mix(in oklab, var(--primary) 25%, transparent);
+  --data-grid-cell-selected-dirty-bg: color-mix(
+    in oklab,
+    oklch(0.8 0.15 85) 30%,
+    color-mix(in oklab, var(--primary) 18%, transparent)
+  );
+  --data-grid-cell-selected-border: color-mix(in oklab, var(--primary) 70%, transparent);
+  --data-grid-cell-hover-bg: color-mix(in oklab, var(--accent) 50%, transparent);
+  --data-grid-cell-search-bg: rgb(253 245 184);
+  --data-grid-cell-current-search-bg: rgb(253 224 71 / 52%);
+  --data-grid-cell-current-search-border: rgb(234 179 8 / 82%);
+  --data-grid-row-number-default-bg: rgb(255 255 255);
+  --data-grid-row-number-new-bg: color-mix(in oklab, rgb(16 185 129) 15%, var(--background));
+  --data-grid-row-number-edited-bg: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
+  --data-grid-row-number-deleted-bg: color-mix(in oklab, var(--destructive) 15%, var(--background));
+  --data-grid-row-number-active-bg: color-mix(in oklab, var(--primary) 15%, var(--background));
+  --data-grid-row-number-selected-bg: color-mix(in oklab, var(--primary) 25%, var(--background));
+}
+
+:global(.dark) [data-grid-root] {
+  --data-grid-cell-search-bg: rgb(72 57 8);
+  --data-grid-cell-current-search-bg: rgb(116 87 0);
+  --data-grid-cell-current-search-border: rgb(239 177 0);
+  --data-grid-row-number-default-bg: rgb(15 15 15);
+}
+
 .data-grid-topbar {
   min-width: 760px;
 }
@@ -7102,6 +7722,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-scroller.is-scrolling :deep(.vue-recycle-scroller__item-view) {
+  pointer-events: none;
+}
+
+.canvas-grid-surface {
+  cursor: cell;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1rem;
+  outline: none;
+}
+
+.canvas-grid-overlay {
   pointer-events: none;
 }
 
@@ -7132,56 +7765,56 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .cell-selected {
-  background-color: color-mix(in oklab, var(--primary) 25%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 70%, transparent);
+  background-color: var(--data-grid-cell-selected-bg);
+  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
 }
 
 .row-cell-selected {
-  background-color: color-mix(in oklab, var(--primary) 25%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 70%, transparent);
+  background-color: var(--data-grid-cell-selected-bg);
+  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
 }
 
 .transpose-record-header-selected {
-  background-color: color-mix(in oklab, var(--primary) 25%, var(--background));
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 70%, transparent);
+  background-color: var(--data-grid-row-number-selected-bg);
+  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
 }
 
 .transpose-record-header-active {
-  background-color: color-mix(in oklab, var(--primary) 25%, var(--background));
+  background-color: var(--data-grid-row-number-selected-bg);
 }
 
 .cell-selected-dirty {
-  background-color: color-mix(in oklab, oklch(0.8 0.15 85) 30%, color-mix(in oklab, var(--primary) 18%, transparent));
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 70%, transparent);
+  background-color: var(--data-grid-cell-selected-dirty-bg);
+  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
 }
 
 .row-cell-selected-dirty {
-  background-color: color-mix(in oklab, oklch(0.8 0.15 85) 30%, color-mix(in oklab, var(--primary) 18%, transparent));
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 70%, transparent);
+  background-color: var(--data-grid-cell-selected-dirty-bg);
+  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
 }
 
 .data-grid-row-number.bg-emerald-500\/15 {
-  background-color: color-mix(in oklab, rgb(16 185 129) 15%, var(--background));
+  background-color: var(--data-grid-row-number-new-bg);
 }
 
 .data-grid-row-number.bg-amber-500\/15 {
-  background-color: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
+  background-color: var(--data-grid-row-number-edited-bg);
 }
 
 .data-grid-row-number.bg-destructive\/15 {
-  background-color: color-mix(in oklab, var(--destructive) 15%, var(--background));
+  background-color: var(--data-grid-row-number-deleted-bg);
 }
 
 .active-row > div:not(.cell-dirty) {
-  background-color: color-mix(in oklab, var(--primary) 15%, transparent);
+  background-color: var(--data-grid-cell-active-bg);
 }
 
 .active-row > .data-grid-row-number:not(.cell-dirty) {
-  background-color: color-mix(in oklab, var(--primary) 15%, var(--background));
+  background-color: var(--data-grid-row-number-active-bg);
 }
 
 .data-grid-row-number.\!bg-primary\/25 {
-  background-color: color-mix(in oklab, var(--primary) 25%, var(--background)) !important;
+  background-color: var(--data-grid-row-number-selected-bg) !important;
 }
 
 .ddl-code :deep(.ddl-kw) {

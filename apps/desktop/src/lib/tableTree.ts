@@ -208,8 +208,12 @@ export function sortDatabaseObjectsByPrefixPriority<T>(items: readonly T[], getN
   return [...items].sort((left, right) => compareNames(getName(left), getName(right)));
 }
 
+export function sortDatabaseObjectsByName<T>(items: readonly T[], getName: (item: T) => string): T[] {
+  return [...items].sort((left, right) => databaseObjectNameCollator.compare(getName(left), getName(right)));
+}
+
 function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, database: string): TreeNode[] {
-  const orderedEntries = sortDatabaseObjectsByPrefixPriority(entries, (entry) => entry.node.label);
+  const orderedEntries = sortDatabaseObjectsByName(entries, (entry) => entry.node.label);
   const byKey = new Map<string, TableTreeEntry>();
   for (const entry of orderedEntries) {
     byKey.set(entry.key, entry);
@@ -368,7 +372,7 @@ export function buildSimpleObjectTreeNodes({
 
   return [
     ...buildPartitionTree(tableEntries, connectionId, database),
-    ...sortDatabaseObjectsByPrefixPriority(viewNodes, (node) => node.label),
+    ...sortDatabaseObjectsByName(viewNodes, (node) => node.label),
   ];
 }
 
@@ -471,7 +475,7 @@ export function buildGroupedObjectTreeNodes({
           objects: items,
           objectType: def.objectTypes[0] as "TABLE" | "VIEW",
         })
-      : sortDatabaseObjectsByPrefixPriority(items, (obj) => obj.name).map((obj) => {
+      : sortDatabaseObjectsByName(items, (obj) => obj.name).map((obj) => {
           const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
           const objectType = normalizeObjectType(obj.object_type);
           const childType = typeof def.childType === "function" ? def.childType(objectType) : def.childType;

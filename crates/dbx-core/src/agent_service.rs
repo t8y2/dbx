@@ -46,6 +46,7 @@ impl AgentProgressEvent {
 
 pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> Vec<AgentDriverInfo> {
     let local_state = am.load_state();
+    let use_managed_jre = local_state.java_runtime.mode == JavaRuntimeMode::Managed;
     agent_catalog::driver_store_entries()
         .map(|(key, label)| {
             let installed = am.is_driver_installed(key);
@@ -56,8 +57,9 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
                 .or_else(|| local.map(|l| l.jre.clone()))
                 .unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
             let remote_jre_version = registry.and_then(|r| r.resolve_jre(&jre_key)).map(|j| &j.version);
-            let local_jre_version = local_state.jre_versions.get(&jre_key);
+            let local_jre_version = installed_jre_version(&local_state, &jre_key);
             let jre_update_available = installed
+                && use_managed_jre
                 && (!am.is_jre_installed(&jre_key)
                     || remote_jre_version.is_some_and(|version| local_jre_version != Some(version)));
             AgentDriverInfo {
@@ -76,6 +78,13 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
             }
         })
         .collect()
+}
+
+fn installed_jre_version<'a>(state: &'a crate::agent_manager::AgentState, jre_key: &str) -> Option<&'a String> {
+    state
+        .jre_versions
+        .get(jre_key)
+        .or_else(|| (jre_key == DEFAULT_JRE_KEY).then_some(state.jre_version.as_ref()).flatten())
 }
 
 pub fn jre_needs_install(am: &AgentManager, registry: &AgentRegistry, jre_key: &str) -> bool {

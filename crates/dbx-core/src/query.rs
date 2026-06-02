@@ -316,6 +316,9 @@ pub fn agent_execute_query_params(
     if let Some(fetch_size) = options.fetch_size {
         params["fetchSize"] = serde_json::json!(fetch_size);
     }
+    if let Some(timeout_secs) = options.timeout_secs {
+        params["timeoutSecs"] = serde_json::json!(timeout_secs);
+    }
     params
 }
 
@@ -338,6 +341,9 @@ pub fn agent_execute_query_page_params(
     }
     if let Some(fetch_size) = options.fetch_size {
         params["fetchSize"] = serde_json::json!(fetch_size);
+    }
+    if let Some(timeout_secs) = options.timeout_secs {
+        params["timeoutSecs"] = serde_json::json!(timeout_secs);
     }
     params
 }
@@ -580,18 +586,19 @@ pub async fn do_execute(
             let database = database.map(|s| s.to_string());
             let schema = schema.map(|s| s.to_string());
             let max_rows = options.max_rows;
+            let rpc_timeout = query_timeout;
             drop(connections);
             wait_for_query_opt(cancel_token, query_timeout, async move {
                 let mut client = client.lock().await;
                 if let Some(session_id) = options.result_session_id.as_deref() {
                     let params = agent_fetch_query_page_params(session_id, options.page_size.unwrap_or(MAX_ROWS));
-                    client.fetch_query_page(params).await
+                    client.fetch_query_page_with_timeout(params, rpc_timeout).await
                 } else if options.page_size.is_some() {
                     let params = agent_execute_query_page_params(&sql, database.as_deref(), schema.as_deref(), options);
-                    client.execute_query_page(params).await
+                    client.execute_query_page_with_timeout(params, rpc_timeout).await
                 } else {
                     let params = agent_execute_query_params(&sql, database.as_deref(), schema.as_deref(), options);
-                    client.execute_query(params).await
+                    client.execute_query_with_timeout(params, rpc_timeout).await
                 }
             })
             .await
@@ -621,10 +628,12 @@ pub async fn do_execute(
             let schema = schema.map(str::to_string);
             let database = config.effective_database().unwrap_or("").to_string();
             let max_rows = options.max_rows;
+            let plugin_timeout = query_timeout;
             drop(connections);
             wait_for_query_opt(cancel_token, query_timeout, async move {
-                let params = external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref());
-                session.invoke::<db::QueryResult>("executeQuery", params).await
+                let params =
+                    external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
+                session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
             })
             .await
             .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)))
@@ -637,13 +646,22 @@ fn external_driver_query_params(
     sql: &str,
     database: &str,
     schema: Option<&str>,
+    options: &QueryExecutionOptions,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "connection": config,
         "sql": sql,
         "database": database,
         "schema": schema,
-    })
+        "maxRows": options.max_rows.unwrap_or(MAX_ROWS),
+    });
+    if let Some(fetch_size) = options.fetch_size {
+        params["fetchSize"] = serde_json::json!(fetch_size);
+    }
+    if let Some(timeout_secs) = options.timeout_secs {
+        params["timeoutSecs"] = serde_json::json!(timeout_secs);
+    }
+    params
 }
 
 pub async fn execute_sql_statement(
@@ -1534,12 +1552,26 @@ mod tests {
             one_time: false,
         };
 
-        let params = external_driver_query_params(&config, "SELECT * FROM events", "analytics", Some("app"));
+        let params = external_driver_query_params(
+            &config,
+            "SELECT * FROM events",
+            "analytics",
+            Some("app"),
+            &QueryExecutionOptions {
+                max_rows: Some(500),
+                fetch_size: Some(250),
+                timeout_secs: Some(600),
+                ..Default::default()
+            },
+        );
 
         assert_eq!(params["connection"]["id"], "jdbc-1");
         assert_eq!(params["sql"], "SELECT * FROM events");
         assert_eq!(params["database"], "analytics");
         assert_eq!(params["schema"], "app");
+        assert_eq!(params["maxRows"], 500);
+        assert_eq!(params["fetchSize"], 250);
+        assert_eq!(params["timeoutSecs"], 600);
     }
 
     #[test]
@@ -1548,7 +1580,12 @@ mod tests {
             "SELECT * FROM events",
             Some("analytics"),
             Some("app"),
-            QueryExecutionOptions { max_rows: Some(500), fetch_size: Some(250), ..Default::default() },
+            QueryExecutionOptions {
+                max_rows: Some(500),
+                fetch_size: Some(250),
+                timeout_secs: Some(600),
+                ..Default::default()
+            },
         );
 
         assert_eq!(params["sql"], "SELECT * FROM events");
@@ -1556,6 +1593,7 @@ mod tests {
         assert_eq!(params["schema"], "app");
         assert_eq!(params["maxRows"], 500);
         assert_eq!(params["fetchSize"], 250);
+        assert_eq!(params["timeoutSecs"], 600);
     }
 
     #[test]
@@ -1567,6 +1605,7 @@ mod tests {
         assert!(params.get("schema").is_none());
         assert_eq!(params["maxRows"], MAX_ROWS);
         assert!(params.get("fetchSize").is_none());
+        assert!(params.get("timeoutSecs").is_none());
     }
 
     #[test]
@@ -1575,7 +1614,12 @@ mod tests {
             "SELECT * FROM events",
             Some("analytics"),
             Some("app"),
-            QueryExecutionOptions { page_size: Some(500), fetch_size: Some(250), ..Default::default() },
+            QueryExecutionOptions {
+                page_size: Some(500),
+                fetch_size: Some(250),
+                timeout_secs: Some(600),
+                ..Default::default()
+            },
         );
 
         assert_eq!(params["sql"], "SELECT * FROM events");
@@ -1583,6 +1627,7 @@ mod tests {
         assert_eq!(params["schema"], "app");
         assert_eq!(params["pageSize"], 500);
         assert_eq!(params["fetchSize"], 250);
+        assert_eq!(params["timeoutSecs"], 600);
         assert_eq!(params["maxRows"], MAX_ROWS);
     }
 

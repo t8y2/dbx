@@ -139,7 +139,15 @@ impl AppState {
     pub async fn test_external_driver(&self, driver_id: &str, config: &ConnectionConfig) -> Result<String, String> {
         let params = serde_json::json!({ "connection": config });
         let env = self.external_driver_runtime_env(driver_id)?;
-        self.plugins.invoke_driver_with_env::<serde_json::Value>(driver_id, "testConnection", params, env).await?;
+        self.plugins
+            .invoke_driver_with_env_and_timeout::<serde_json::Value>(
+                driver_id,
+                "testConnection",
+                params,
+                env,
+                Some(external_driver_connect_timeout(config)),
+            )
+            .await?;
         Ok("Connection successful".to_string())
     }
 
@@ -147,7 +155,9 @@ impl AppState {
         let env = self.external_driver_runtime_env(driver_id)?;
         let session = self.plugins.start_driver_session_with_env(driver_id, env).await?;
         let params = serde_json::json!({ "connection": config });
-        session.invoke::<serde_json::Value>("connect", params).await?;
+        session
+            .invoke_with_timeout::<serde_json::Value>("connect", params, Some(external_driver_connect_timeout(config)))
+            .await?;
         Ok(PoolKind::ExternalDriver { driver_id: driver_id.to_string(), config: Arc::new(config.clone()), session })
     }
 
@@ -830,6 +840,10 @@ pub fn redacted_connection_url_for_endpoint(config: &ConnectionConfig, host: &st
     } else {
         config.redacted_connection_url_with_host(host, port)
     }
+}
+
+fn external_driver_connect_timeout(config: &ConnectionConfig) -> std::time::Duration {
+    std::time::Duration::from_secs(config.effective_connect_timeout_secs().max(30))
 }
 
 fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionConfig> {

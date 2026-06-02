@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, nextTick, watch } from "vue";
+import { ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { EditorView } from "@codemirror/view";
+import { EditorSelection } from "@codemirror/state";
 import {
   SearchQuery,
   setSearchQuery,
+  openSearchPanel as cmOpenSearchPanel,
   findNext as cmFindNext,
   findPrevious as cmFindPrevious,
   replaceNext as cmReplaceNext,
@@ -28,6 +30,12 @@ const matchCount = ref(0);
 const currentMatchIndex = ref(0);
 const searchInputRef = ref<HTMLInputElement>();
 const replaceInputRef = ref<HTMLInputElement>();
+const matchCountLimited = ref(false);
+
+const SEARCH_UPDATE_DELAY_MS = 120;
+const MATCH_COUNT_LIMIT = 1000;
+
+let searchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
 function dispatchSearchQuery() {
   const v = props.view;
@@ -39,14 +47,27 @@ function dispatchSearchQuery() {
     replace: replaceText.value,
   });
   v.dispatch({ effects: setSearchQuery.of(q) });
-  updateMatchInfo();
 }
 
-function updateMatchInfo() {
+function clearSearchQuery() {
+  const v = props.view;
+  if (!v) return;
+  const selection = v.state.selection.main;
+  v.dispatch({
+    selection: EditorSelection.single(selection.head),
+    effects: setSearchQuery.of(new SearchQuery({ search: "" })),
+  });
+  matchCount.value = 0;
+  currentMatchIndex.value = 0;
+  matchCountLimited.value = false;
+}
+
+function updateMatchInfo(autoSelect = false) {
   const v = props.view;
   if (!v || !searchText.value) {
     matchCount.value = 0;
     currentMatchIndex.value = 0;
+    matchCountLimited.value = false;
     return;
   }
   try {
@@ -58,7 +79,11 @@ function updateMatchInfo() {
     if (!q.valid) {
       matchCount.value = 0;
       currentMatchIndex.value = 0;
+      matchCountLimited.value = false;
       return;
+    }
+    if (autoSelect) {
+      cmFindNext(v);
     }
     const iter = q.getCursor(v.state);
     let count = 0;
@@ -69,20 +94,40 @@ function updateMatchInfo() {
     while (!r.done) {
       count++;
       if (r.value.from === selFrom && r.value.to === selTo) curIdx = count;
+      if (count >= MATCH_COUNT_LIMIT) break;
       r = iter.next();
     }
     matchCount.value = count;
+    matchCountLimited.value = count >= MATCH_COUNT_LIMIT && !r.done;
     currentMatchIndex.value = curIdx || (count > 0 ? 1 : 0);
   } catch {
     matchCount.value = 0;
     currentMatchIndex.value = 0;
+    matchCountLimited.value = false;
   }
+}
+
+function scheduleSearchUpdate(autoSelect = false) {
+  if (searchUpdateTimer) {
+    clearTimeout(searchUpdateTimer);
+    searchUpdateTimer = null;
+  }
+  if (!searchText.value) {
+    clearSearchQuery();
+    return;
+  }
+  dispatchSearchQuery();
+  searchUpdateTimer = setTimeout(() => {
+    searchUpdateTimer = null;
+    updateMatchInfo(autoSelect);
+  }, SEARCH_UPDATE_DELAY_MS);
 }
 
 function openSearch(): boolean {
   searchVisible.value = true;
   const v = props.view;
   if (v) {
+    cmOpenSearchPanel(v);
     const sel = v.state.sliceDoc(v.state.selection.main.from, v.state.selection.main.to);
     if (sel && !sel.includes("\n")) searchText.value = sel;
   }
@@ -90,7 +135,7 @@ function openSearch(): boolean {
     searchInputRef.value?.focus();
     searchInputRef.value?.select();
   });
-  if (searchText.value) dispatchSearchQuery();
+  if (searchText.value) scheduleSearchUpdate(true);
   return true;
 }
 
@@ -110,11 +155,9 @@ function closeSearch() {
   showReplace.value = false;
   const v = props.view;
   if (v) {
-    v.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: "" })) });
+    clearSearchQuery();
     v.focus();
   }
-  matchCount.value = 0;
-  currentMatchIndex.value = 0;
   return wasVisible;
 }
 
@@ -159,8 +202,19 @@ function onSearchKeydown(e: KeyboardEvent) {
   }
 }
 
-watch([searchText, caseSensitive, useRegex, replaceText], () => {
+watch([searchText, caseSensitive, useRegex], () => {
+  if (searchVisible.value) scheduleSearchUpdate(true);
+});
+
+watch(replaceText, () => {
   if (searchVisible.value) dispatchSearchQuery();
+});
+
+onBeforeUnmount(() => {
+  if (searchUpdateTimer) {
+    clearTimeout(searchUpdateTimer);
+    searchUpdateTimer = null;
+  }
 });
 
 defineExpose({ openSearch, openReplace, closeSearch });
@@ -175,7 +229,7 @@ defineExpose({ openSearch, openReplace, closeSearch });
   >
     <div
       v-if="searchVisible"
-      class="absolute top-1 right-4 z-20 bg-background border rounded-md shadow-md p-1.5 flex flex-col gap-1"
+      class="absolute top-1 right-4 z-[9999] isolate flex flex-col gap-1 rounded-md border bg-popover p-1.5 text-popover-foreground shadow-lg"
     >
       <div class="flex items-center gap-0.5">
         <button
@@ -212,7 +266,11 @@ defineExpose({ openSearch, openReplace, closeSearch });
           .*
         </button>
         <span class="text-xs text-muted-foreground min-w-[3rem] text-center shrink-0">
-          {{ searchText && matchCount > 0 ? `${currentMatchIndex}/${matchCount}` : t("editor.search.noResults") }}
+          {{
+            searchText && matchCount > 0
+              ? `${currentMatchIndex}/${matchCount}${matchCountLimited ? "+" : ""}`
+              : t("editor.search.noResults")
+          }}
         </span>
         <button
           class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"

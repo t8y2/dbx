@@ -287,6 +287,17 @@ impl AgentDriverClient {
         method: &str,
         params: Value,
     ) -> Result<T, String> {
+        self.call_with_timeout(method, params, Some(Duration::from_secs(RPC_TIMEOUT_SECS))).await
+    }
+
+    /// Send a JSON-RPC 2.0 request and wait for the response.
+    /// `None` disables the client-side RPC timeout for long-running query calls.
+    pub async fn call_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         self.next_id += 1;
         let id = self.next_id;
 
@@ -317,37 +328,42 @@ impl AgentDriverClient {
         // Read response from stdout (blocking, with timeout)
         let mut reader = self.stdout.take().ok_or("Agent stdout not available")?;
 
-        let (returned_reader, result) = tokio::time::timeout(
-            Duration::from_secs(RPC_TIMEOUT_SECS),
-            tokio::task::spawn_blocking(move || {
-                let line = match read_agent_line(&mut reader, "response") {
-                    Ok(line) => line,
-                    Err(e) => return (reader, Err(e)),
-                };
+        let response_task = tokio::task::spawn_blocking(move || {
+            let line = match read_agent_line(&mut reader, "response") {
+                Ok(line) => line,
+                Err(e) => return (reader, Err(e)),
+            };
 
-                let resp: Value = match serde_json::from_str(line.trim()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return (reader, Err(format!("Invalid JSON response from agent: {e}")));
-                    }
-                };
+            let resp: Value = match serde_json::from_str(line.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (reader, Err(format!("Invalid JSON response from agent: {e}")));
+                }
+            };
 
-                let result = if let Some(err) = resp.get("error") {
-                    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown agent error");
-                    let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-                    Err(format!("Agent RPC error ({code}): {msg}"))
-                } else if let Some(result_val) = resp.get("result") {
-                    serde_json::from_value::<T>(result_val.clone())
-                        .map_err(|e| format!("Failed to deserialize agent result: {e}"))
-                } else {
-                    Err(format!("Agent response missing both 'result' and 'error': {line}"))
-                };
+            let result = if let Some(err) = resp.get("error") {
+                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown agent error");
+                let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+                Err(format!("Agent RPC error ({code}): {msg}"))
+            } else if let Some(result_val) = resp.get("result") {
+                serde_json::from_value::<T>(result_val.clone())
+                    .map_err(|e| format!("Failed to deserialize agent result: {e}"))
+            } else {
+                Err(format!("Agent response missing both 'result' and 'error': {line}"))
+            };
 
-                (reader, result)
-            }),
-        )
-        .await
-        .map_err(|_| format!("Agent RPC call timed out ({RPC_TIMEOUT_SECS}s)"))?
+            (reader, result)
+        });
+        let (returned_reader, result) = match timeout_duration {
+            Some(duration) => match tokio::time::timeout(duration, response_task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.kill();
+                    return Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()));
+                }
+            },
+            None => response_task.await,
+        }
         .map_err(|e| format!("Agent RPC task failed: {e}"))?;
 
         let _ = self.stdout.insert(returned_reader);
@@ -360,6 +376,15 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call(method.as_str(), params).await
+    }
+
+    pub async fn call_method_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: AgentMethod,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_with_timeout(method.as_str(), params, timeout_duration).await
     }
 
     pub async fn connect(&mut self, params: Value) -> Result<Value, String> {
@@ -458,6 +483,14 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::ExecuteQuery, params).await
     }
 
+    pub async fn execute_query_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::ExecuteQuery, params, timeout_duration).await
+    }
+
     pub async fn execute_query_page<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -465,8 +498,24 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::ExecuteQueryPage, params).await
     }
 
+    pub async fn execute_query_page_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::ExecuteQueryPage, params, timeout_duration).await
+    }
+
     pub async fn fetch_query_page<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
         self.call_method(AgentMethod::FetchQueryPage, params).await
+    }
+
+    pub async fn fetch_query_page_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::FetchQueryPage, params, timeout_duration).await
     }
 
     pub async fn close_query_session<T: DeserializeOwned + Send + 'static>(

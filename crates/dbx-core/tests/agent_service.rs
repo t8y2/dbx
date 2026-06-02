@@ -1,5 +1,6 @@
 use dbx_core::agent_manager::{
-    AgentManager, AgentRegistry, ArtifactInfo, DriverInfo, InstalledDriver, JreInfo, DEFAULT_JRE_KEY,
+    AgentManager, AgentRegistry, ArtifactInfo, DriverInfo, InstalledDriver, JavaRuntimeConfig, JavaRuntimeMode,
+    JreInfo, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
     build_agent_list, github_url_to_r2_path, import_agent_jar, import_agents_from_zip, is_app_version_compatible,
@@ -111,6 +112,71 @@ fn agent_list_marks_update_when_installed_managed_jre_version_differs() {
     let h2 = agents.iter().find(|agent| agent.db_type == "h2").unwrap();
 
     assert!(h2.update_available);
+}
+
+#[test]
+fn agent_list_does_not_mark_jre_update_for_system_java_runtime() {
+    let manager = test_manager("system-java-no-jre-update");
+    let jar_path = manager.driver_jar_path("dameng");
+    std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+    std::fs::write(&jar_path, b"jar").unwrap();
+    manager
+        .save_state(&dbx_core::agent_manager::AgentState {
+            java_runtime: JavaRuntimeConfig { mode: JavaRuntimeMode::System, custom_java_path: None },
+            installed_drivers: [(
+                "dameng".to_string(),
+                InstalledDriver {
+                    version: "0.2.0".to_string(),
+                    installed_at: "2026-05-18T00:00:00Z".to_string(),
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+    let registry = registry_with_jre_driver("dameng", "0.2.0", DEFAULT_JRE_KEY, "21.0.11");
+
+    let agents = build_agent_list(&manager, Some(&registry));
+    let dameng = agents.iter().find(|agent| agent.db_type == "dameng").unwrap();
+
+    assert!(dameng.installed);
+    assert!(!dameng.jre_installed);
+    assert!(!dameng.update_available);
+}
+
+#[test]
+fn agent_list_uses_legacy_default_jre_version_when_checking_updates() {
+    let manager = test_manager("legacy-jre-version");
+    let jar_path = manager.driver_jar_path("dameng");
+    let java_path = manager.jre_java_path(DEFAULT_JRE_KEY);
+    std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
+    std::fs::write(&jar_path, b"jar").unwrap();
+    std::fs::write(&java_path, b"java").unwrap();
+    manager
+        .save_state(&dbx_core::agent_manager::AgentState {
+            jre_version: Some("21.0.11".to_string()),
+            installed_drivers: [(
+                "dameng".to_string(),
+                InstalledDriver {
+                    version: "0.2.0".to_string(),
+                    installed_at: "2026-05-18T00:00:00Z".to_string(),
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+    let registry = registry_with_jre_driver("dameng", "0.2.0", DEFAULT_JRE_KEY, "21.0.11");
+
+    let agents = build_agent_list(&manager, Some(&registry));
+    let dameng = agents.iter().find(|agent| agent.db_type == "dameng").unwrap();
+
+    assert!(!dameng.update_available);
 }
 
 #[test]

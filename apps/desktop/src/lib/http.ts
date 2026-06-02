@@ -51,6 +51,7 @@ import type {
   ExportProgress,
   TableExportRequest,
   TableExportProgress,
+  TableCsvExportOptions,
   XlsxCellValue,
   QueryPaginationExecutionPlanOptions,
   QueryPaginationExecutionPlan,
@@ -1119,6 +1120,10 @@ export async function exportQueryResultCsv(
   a.download = fileName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export async function exportTableDataCsv(_options: TableCsvExportOptions): Promise<number> {
+  throw new Error("Streaming table CSV export is only available in the desktop runtime");
 }
 
 function downloadTextFile(filePath: string, fallbackFileName: string, content: string, mimeType: string): void {

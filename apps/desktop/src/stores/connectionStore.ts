@@ -25,6 +25,7 @@ import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes } from "@/lib/da
 import { buildSqlServerDatabaseTreeNodes, SQLSERVER_DEFAULT_SCHEMA } from "@/lib/sqlServerTree";
 import { findDatabaseTreeNode } from "@/lib/treeRefreshTarget";
 import { shouldMarkDisconnected } from "@/lib/connectionHealth";
+import { connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
 import {
   filterDatabaseNamesForConnection,
   filterVisibleDatabaseNames,
@@ -193,6 +194,21 @@ export const useConnectionStore = defineStore("connection", () => {
       if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
     }
     recordConnectionError(connectionId, error);
+  }
+
+  async function withConnectionAttemptTimeout<T>(promise: Promise<T>, config: ConnectionConfig): Promise<T> {
+    const timeoutMs = connectionAttemptTimeoutMs(config);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(connectionAttemptTimeoutMessage(timeoutMs))), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   function normalizeConnection(config: ConnectionConfig): ConnectionConfig {
@@ -642,7 +658,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (pendingNode) pendingNode.isLoading = true;
     try {
       await beforeConnectHandler?.(config);
-      const id = await api.connectDb(config);
+      const id = await withConnectionAttemptTimeout(api.connectDb(config), config);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
       clearConnectionError(config.id);
@@ -720,7 +736,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     try {
       await beforeConnectHandler?.(config);
-      await api.connectDb(config);
+      await withConnectionAttemptTimeout(api.connectDb(config), config);
       connectedIds.value.add(connectionId);
       activeConnectionId.value = connectionId;
       clearConnectionError(connectionId);

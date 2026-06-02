@@ -1032,7 +1032,7 @@ onUnmounted(() => {
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"
                 />
-                <KeepAlive :max="20">
+                <KeepAlive :max="8">
                   <ContentArea
                     ref="contentAreaRef"
                     :key="activeTab.id"

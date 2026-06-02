@@ -281,7 +281,7 @@ impl ConnectionConfig {
         if self.query_timeout_secs == 0 {
             0
         } else {
-            self.query_timeout_secs.clamp(1, 300)
+            self.query_timeout_secs.max(1)
         }
     }
 
@@ -1259,6 +1259,14 @@ mod tests {
         config.query_timeout_secs = 0;
 
         assert_eq!(config.effective_query_timeout_secs(), 0);
+    }
+
+    #[test]
+    fn query_timeout_preserves_long_running_exports() {
+        let mut config = mysql_config("root", "", None);
+        config.query_timeout_secs = 3600;
+
+        assert_eq!(config.effective_query_timeout_secs(), 3600);
     }
 
     #[test]

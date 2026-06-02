@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
 import java.net.URL;
@@ -62,15 +64,19 @@ public final class DbxJdbcPlugin {
     }
 
     public static void main(String[] args) throws Exception {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
+        try (
+            BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8))
+        ) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
                 ObjectNode response = handleLine(line);
-                System.out.println(MAPPER.writeValueAsString(response));
-                System.out.flush();
+                writer.write(MAPPER.writeValueAsString(response));
+                writer.newLine();
+                writer.flush();
                 if (response.path("_dbx_close").asBoolean(false)) {
                     break;
                 }
@@ -120,7 +126,10 @@ public final class DbxJdbcPlugin {
                 connection,
                 requireText(params, "sql"),
                 optionalText(params, "database"),
-                optionalText(params, "schema")
+                optionalText(params, "schema"),
+                positiveInt(params, "maxRows", MAX_ROWS),
+                nonNegativeInt(params, "fetchSize", 0),
+                nonNegativeInt(params, "timeoutSecs", -1)
             );
             case "listDatabases" -> listDatabases(connection);
             case "listSchemas" -> listSchemas(connection, optionalText(params, "database"));
@@ -207,6 +216,7 @@ public final class DbxJdbcPlugin {
         if (password != null) {
             properties.setProperty("password", password);
         }
+        applyConnectTimeout(connection, properties);
         if (isOracleUrl(url)) {
             properties.putIfAbsent("remarksReporting", "false");
             properties.putIfAbsent("restrictGetTables", "true");
@@ -218,12 +228,28 @@ public final class DbxJdbcPlugin {
         return sharedConnection;
     }
 
-    private static JsonNode executeQuery(JsonNode connection, String sql, String database, String schema) throws SQLException {
+    private static void applyConnectTimeout(JsonNode connection, Properties properties) {
+        int connectTimeoutSecs = positiveInt(connection, "connect_timeout_secs", 30);
+        DriverManager.setLoginTimeout(connectTimeoutSecs);
+        String value = Integer.toString(connectTimeoutSecs);
+        properties.putIfAbsent("loginTimeout", value);
+        properties.putIfAbsent("connectTimeout", value);
+    }
+
+    private static JsonNode executeQuery(
+        JsonNode connection,
+        String sql,
+        String database,
+        String schema,
+        int maxRows,
+        int fetchSize,
+        int timeoutSecs
+    ) throws SQLException {
         long start = System.nanoTime();
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
         try (Statement statement = conn.createStatement()) {
-            statement.setMaxRows(MAX_ROWS + 1);
+            applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs);
             boolean hasResultSet = statement.execute(trimStatementSql(sql));
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
@@ -239,7 +265,7 @@ public final class DbxJdbcPlugin {
                         columns.add(label == null || label.isBlank() ? meta.getColumnName(i) : label);
                     }
                     while (rs.next()) {
-                        if (rows.size() >= MAX_ROWS) {
+                        if (rows.size() >= maxRows) {
                             truncated = true;
                             break;
                         }
@@ -258,6 +284,23 @@ public final class DbxJdbcPlugin {
             result.put("execution_time_ms", (System.nanoTime() - start) / 1_000_000);
             result.put("truncated", truncated);
             return result;
+        }
+    }
+
+    private static void applyStatementOptions(Statement statement, int maxRows, int fetchSize, int timeoutSecs)
+        throws SQLException {
+        statement.setMaxRows((int) Math.min(Integer.MAX_VALUE, (long) maxRows + 1L));
+        if (fetchSize > 0) {
+            try {
+                statement.setFetchSize(fetchSize);
+            } catch (SQLFeatureNotSupportedException ignored) {
+            }
+        }
+        if (timeoutSecs >= 0) {
+            try {
+                statement.setQueryTimeout(timeoutSecs);
+            } catch (SQLFeatureNotSupportedException ignored) {
+            }
         }
     }
 
@@ -925,6 +968,21 @@ public final class DbxJdbcPlugin {
         }
         String text = value.asText("").trim();
         return text.isEmpty() ? null : text;
+    }
+
+    private static int positiveInt(JsonNode node, String field, int defaultValue) {
+        return Math.max(1, nonNegativeInt(node, field, defaultValue));
+    }
+
+    private static int nonNegativeInt(JsonNode node, String field, int defaultValue) {
+        JsonNode value = node.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            return defaultValue;
+        }
+        if (!value.canConvertToInt()) {
+            return defaultValue;
+        }
+        return Math.max(0, value.asInt(defaultValue));
     }
 
     private static String emptyToNull(String value) {

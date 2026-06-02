@@ -23,6 +23,7 @@ import {
 import { AGENT_DRIVER_TYPES } from "@/lib/databaseCapabilities";
 import { editablePrimaryKeys } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
+import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -665,6 +666,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortedSql?: string | undefined;
       pagination?: { limit: number; offset: number; sessionId?: string };
       mongoSafety?: MongoAggregateSafetyOptions;
+      preserveResultDuringExecution?: boolean;
     },
   ) {
     const tab = tabs.value.find((t) => t.id === id);
@@ -680,7 +682,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.lastExecutedSql = sql;
     tab.resultTotalRowCount = undefined;
     const previousResultSessionClose = closeResultSession(tab, options?.pagination?.sessionId);
-    clearResultPayload(tab);
+    if (!options?.preserveResultDuringExecution || !tab.result) {
+      clearResultPayload(tab);
+    }
     console.info("[DBX][executeTabSql:start]", {
       traceId,
       tabId: id,
@@ -702,12 +706,7 @@ export const useQueryStore = defineStore("query", () => {
       await connStore.ensureConnected(tab.connectionId);
       const conn = connStore.getConfig(tab.connectionId);
       const useAgentCursor = !!conn?.db_type && AGENT_DRIVER_TYPES.has(conn.db_type);
-      const queryTimeoutSecs =
-        typeof conn?.query_timeout_secs === "number" &&
-        Number.isFinite(conn.query_timeout_secs) &&
-        conn.query_timeout_secs >= 0
-          ? conn.query_timeout_secs
-          : 30;
+      const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
       await previousResultSessionClose;
       if (tab.mode === "query") {
@@ -907,13 +906,28 @@ export const useQueryStore = defineStore("query", () => {
         ...(clientSessionId ? { clientSessionId } : {}),
         timeoutSecs: queryTimeoutSecs,
       };
-      const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
-      const timeoutError = new Error(t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }));
       const executionSchema = tab.mode === "data" ? undefined : tab.schema;
-      const results = await Promise.race([
-        api.executeMulti(tab.connectionId, tab.database, sqlToExecute, executionSchema, executionId, executionOptions),
-        new Promise<never>((_, reject) => setTimeout(() => reject(timeoutError), frontendTimeoutSecs * 1000)),
-      ]);
+      const executionPromise = api.executeMulti(
+        tab.connectionId,
+        tab.database,
+        sqlToExecute,
+        executionSchema,
+        executionId,
+        executionOptions,
+      );
+      const results =
+        queryTimeoutSecs === 0
+          ? await executionPromise
+          : await Promise.race([
+              executionPromise,
+              new Promise<never>((_, reject) => {
+                const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
+                setTimeout(
+                  () => reject(new Error(t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))),
+                  frontendTimeoutSecs * 1000,
+                );
+              }),
+            ]);
       console.info("[DBX][executeTabSql:execute-multi:done]", {
         traceId,
         resultCount: results.length,
@@ -1030,12 +1044,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return { ok: false as const, reason: "empty" as const };
     const conn = useConnectionStore().getConfig(tab.connectionId);
-    const queryTimeoutSecs =
-      typeof conn?.query_timeout_secs === "number" &&
-      Number.isFinite(conn.query_timeout_secs) &&
-      conn.query_timeout_secs >= 0
-        ? conn.query_timeout_secs
-        : 30;
+    const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
 
     const built = await buildExplainSql(databaseType, sql);
     if (!built.ok) {
@@ -1190,6 +1199,7 @@ export const useQueryStore = defineStore("query", () => {
     const connStore = useConnectionStore();
     await connStore.ensureConnected(tab.connectionId);
     const conn = connStore.getConfig(tab.connectionId);
+    const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
     const useAgentCursor = !!conn?.db_type && AGENT_DRIVER_TYPES.has(conn.db_type);
     const queryBaseSql = tab.resultBaseSql ?? sql;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
@@ -1217,8 +1227,9 @@ export const useQueryStore = defineStore("query", () => {
               pageSize: plan.pageLimit,
               resultSessionId: sessionId,
               clientSessionId,
+              timeoutSecs: queryTimeoutSecs,
             }
-          : { maxRows: plan.pageLimit, fetchSize: plan.pageLimit };
+          : { maxRows: plan.pageLimit, fetchSize: plan.pageLimit, timeoutSecs: queryTimeoutSecs };
         const results = await api.executeMulti(
           tab.connectionId,
           tab.database,

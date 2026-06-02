@@ -773,38 +773,45 @@ async function openData() {
     });
     queryStore.updateSql(tabId, sql);
 
-    const loadTableMeta = async () => {
-      try {
-        console.info("[DBX][openData:get-columns:start]", {
-          traceId,
-          database: node.database,
-          schema: querySchema,
-          table: node.label,
-          elapsed: elapsed(),
-        });
-        const columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
-        console.info("[DBX][openData:get-columns:done]", {
-          traceId,
-          columnCount: columns.length,
-          primaryKeys: columns.filter((column) => column.is_primary_key).map((column) => column.name),
-          elapsed: elapsed(),
-        });
-        const pks = editablePrimaryKeys(config.db_type, columns);
-        queryStore.setTableMeta(tabId, {
-          schema: node.schema,
-          tableName: node.label,
-          columns,
-          primaryKeys: pks,
-        });
-      } catch (error) {
-        console.warn("[DBX][openData:get-columns:error]", { traceId, elapsed: elapsed(), error });
-      }
-    };
+    queryStore.setTableMeta(tabId, {
+      schema: node.schema,
+      tableName: node.label,
+      columns: [],
+      primaryKeys: [],
+    });
+
+    console.info("[DBX][openData:get-columns:start]", {
+      traceId,
+      database: node.database,
+      schema: querySchema,
+      table: node.label,
+      elapsed: elapsed(),
+    });
+    const columnsPromise = api.getColumns(node.connectionId, node.database, querySchema, node.label);
 
     console.info("[DBX][openData:execute:start]", { traceId, tabId, elapsed: elapsed() });
-    await queryStore.executeTabSql(tabId, sql);
+    const dataPromise = queryStore.executeTabSql(tabId, sql);
+    const [columnsResult, dataResult] = await Promise.allSettled([columnsPromise, dataPromise]);
+    if (columnsResult.status === "fulfilled") {
+      const columns = columnsResult.value;
+      console.info("[DBX][openData:get-columns:done]", {
+        traceId,
+        columnCount: columns.length,
+        primaryKeys: columns.filter((column) => column.is_primary_key).map((column) => column.name),
+        elapsed: elapsed(),
+      });
+      const pks = editablePrimaryKeys(config.db_type, columns);
+      queryStore.setTableMeta(tabId, {
+        schema: node.schema,
+        tableName: node.label,
+        columns,
+        primaryKeys: pks,
+      });
+    } else {
+      console.warn("[DBX][openData:get-columns:error]", { traceId, elapsed: elapsed(), error: columnsResult.reason });
+    }
+    if (dataResult.status === "rejected") throw dataResult.reason;
     console.info("[DBX][openData:execute:done]", { traceId, tabId, elapsed: elapsed() });
-    void loadTableMeta();
   } catch (e: any) {
     console.error("[DBX][openData:error]", { traceId, elapsed: elapsed(), error: e });
     queryStore.setErrorResult(tabId, e);
@@ -2072,12 +2079,36 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
             (column) => column.name,
           )
         : undefined;
+
+    if (format === "csv" && isTauriRuntime()) {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const outputPath = await save({
+        defaultPath: `${node.label}.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!outputPath) return;
+      await api.exportTableDataCsv({
+        filePath: outputPath as string,
+        connectionId,
+        database,
+        schema: node.schema,
+        tableName: node.label,
+        columns: queryColumns,
+        timeoutSecs: queryTimeoutSecsForConnection(config),
+      });
+      toast(t("grid.exported"));
+      return;
+    }
+
     const result = await fetchTableDataForExport({
       databaseType: config.db_type,
       schema: node.schema,
       tableName: node.label,
       columns: queryColumns,
-      executePage: (sql) => api.executeQuery(connectionId, database, sql),
+      executePage: (sql) =>
+        api.executeQuery(connectionId, database, sql, undefined, undefined, {
+          timeoutSecs: queryTimeoutSecsForConnection(config),
+        }),
     });
 
     if (format === "csv") {

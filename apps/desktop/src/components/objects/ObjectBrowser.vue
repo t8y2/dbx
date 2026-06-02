@@ -74,6 +74,7 @@ import { generateDatabaseExportId } from "@/lib/databaseExport";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
+import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -792,12 +793,36 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
             (column) => column.name,
           )
         : undefined;
+
+    if (format === "csv" && isTauriRuntime()) {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const outputPath = await save({
+        defaultPath: `${row.name}.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!outputPath) return;
+      await api.exportTableDataCsv({
+        filePath: outputPath as string,
+        connectionId: props.connection.id,
+        database: props.database,
+        schema,
+        tableName: row.name,
+        columns: queryColumns,
+        timeoutSecs: queryTimeoutSecsForConnection(props.connection),
+      });
+      toast(t("grid.exported"));
+      return;
+    }
+
     const result = await fetchTableDataForExport({
       databaseType: props.connection.db_type,
       schema,
       tableName: row.name,
       columns: queryColumns,
-      executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
+      executePage: (sql) =>
+        api.executeQuery(props.connection.id, props.database, sql, undefined, undefined, {
+          timeoutSecs: queryTimeoutSecsForConnection(props.connection),
+        }),
     });
 
     if (format === "json") {

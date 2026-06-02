@@ -160,6 +160,7 @@ const filteredNodes = computed(() => {
 });
 
 const flatNodes = computed<FlatTreeNode[]>(() => flattenTree(filteredNodes.value));
+const visibleNodes = computed<TreeNode[]>(() => flatNodes.value.map((item) => item.node));
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
 const sidebarTreeOverflowClass = computed(() =>
@@ -507,6 +508,7 @@ defineExpose({ focusSearch, createNewGroup });
           :drag-disabled="isFiltering"
           :pending-rename="pendingRenameGroupId === item.node.id"
           :highlighted="highlightedNodeId === item.node.id"
+          :visible-nodes="visibleNodes"
           @node-toggled="onNodeToggled"
           @search-toggle="onSearchToggle"
           @rename-started="pendingRenameGroupId = null"
@@ -527,6 +529,7 @@ defineExpose({ focusSearch, createNewGroup });
         :drag-disabled="isFiltering"
         :pending-rename="pendingRenameGroupId === item.node.id"
         :highlighted="highlightedNodeId === item.id"
+        :visible-nodes="visibleNodes"
         @node-toggled="onNodeToggled"
         @search-toggle="onSearchToggle"
         @rename-started="pendingRenameGroupId = null"

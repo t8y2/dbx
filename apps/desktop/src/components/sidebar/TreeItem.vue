@@ -120,6 +120,10 @@ import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
 import { sidebarDisplayTableName } from "@/lib/sidebarTableNameDisplay";
+import {
+  selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes,
+  treeSelectionRangeIds,
+} from "@/lib/sidebarTreeSelection";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -163,6 +167,7 @@ const props = defineProps<{
   dragDisabled?: boolean;
   pendingRename?: boolean;
   highlighted?: boolean;
+  visibleNodes?: TreeNode[];
 }>();
 
 const emit = defineEmits<{
@@ -435,13 +440,12 @@ function runRowClickAction() {
 }
 
 function visibleTreeNodes(): TreeNode[] {
+  if (props.visibleNodes) return props.visibleNodes;
   return flattenTree(connectionStore.treeNodes).map((item) => item.node);
 }
 
 function selectedTreeNodesInVisibleOrder(): TreeNode[] {
-  const selectedIds = new Set(connectionStore.selectedTreeNodeIds);
-  if (!selectedIds.size) return [];
-  return visibleTreeNodes().filter((node) => selectedIds.has(node.id));
+  return orderSelectedTreeNodes(visibleTreeNodes(), connectionStore.selectedTreeNodeIds);
 }
 
 function selectSingleTreeNode(node: TreeNode) {
@@ -462,15 +466,12 @@ function toggleTreeNodeSelection(node: TreeNode) {
 function selectTreeNodeRange(node: TreeNode) {
   const visible = visibleTreeNodes();
   const anchorId = connectionStore.treeSelectionAnchorId || connectionStore.selectedTreeNodeId || node.id;
-  const anchorIndex = visible.findIndex((item) => item.id === anchorId);
-  const currentIndex = visible.findIndex((item) => item.id === node.id);
-  if (anchorIndex < 0 || currentIndex < 0) {
+  if (!visible.some((item) => item.id === anchorId) || !visible.some((item) => item.id === node.id)) {
     selectSingleTreeNode(node);
     return;
   }
-  const start = Math.min(anchorIndex, currentIndex);
-  const end = Math.max(anchorIndex, currentIndex);
-  connectionStore.selectedTreeNodeIds = visible.slice(start, end + 1).map((item) => item.id);
+  const rangeIds = treeSelectionRangeIds(visible, node.id, anchorId, connectionStore.selectedTreeNodeId);
+  connectionStore.selectedTreeNodeIds = rangeIds;
   connectionStore.selectedTreeNodeId = node.id;
 }
 

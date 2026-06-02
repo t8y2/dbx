@@ -2167,7 +2167,7 @@ async function exportTableData(format: "csv" | "xlsx") {
       format,
       rowsExported: 0,
       totalRows: null,
-      status: "fetching",
+      status: "Running",
       errorMessage: null,
     };
     exportProgressDialogOpen.value = true;
@@ -2190,35 +2190,17 @@ async function exportTableData(format: "csv" | "xlsx") {
       columns: queryColumns,
     };
 
-    function normalizeExportStatus(s: string): string {
-      switch (s) {
-        case "Running":
-          return "fetching";
-        case "Writing":
-          return "writing";
-        case "Done":
-          return "done";
-        case "Error":
-          return "error";
-        case "Cancelled":
-          return "cancelled";
-        default:
-          return s;
-      }
-    }
-
     await api.startTableExport(request, (progress) => {
-      const normalized = normalizeExportStatus(progress.status);
       exportProgress.value = {
         ...exportProgress.value,
         rowsExported: progress.rowsExported,
         totalRows: progress.totalRows,
-        status: normalized,
+        status: progress.status,
         errorMessage: progress.errorMessage || null,
       };
-      if (normalized === "done") {
+      if (progress.status === "Done") {
         toast(t("grid.exported"));
-      } else if (normalized === "error") {
+      } else if (progress.status === "Error") {
         toast(t("grid.exportFailed", { message: progress.errorMessage || "" }), 5000);
       }
     });
@@ -2226,7 +2208,7 @@ async function exportTableData(format: "csv" | "xlsx") {
     if (!exportCancelled.value) {
       exportProgress.value = {
         ...exportProgress.value,
-        status: "error",
+        status: "Error",
         errorMessage: e?.message || String(e),
       };
       toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);

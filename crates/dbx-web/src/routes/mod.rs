@@ -16,6 +16,7 @@ pub mod schema;
 pub mod schema_cache;
 pub mod schema_diff;
 pub mod sql_file;
+pub mod table_export;
 pub mod table_import;
 pub mod text_export;
 pub mod transfer;

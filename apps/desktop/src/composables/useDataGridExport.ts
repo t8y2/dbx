@@ -461,7 +461,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             format: "csv",
             rowsExported: 0,
             totalRows: null,
-            status: "fetching",
+            status: "Running",
             errorMessage: null,
           };
           exportProgressDialog.value = true;
@@ -471,7 +471,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
-            status: "writing",
+            status: "Writing",
             rowsExported: result.rows.length,
           };
         }
@@ -492,7 +492,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
-            status: "done",
+            status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
           };
@@ -502,7 +502,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
-            status: "error",
+            status: "Error",
             errorMessage: e?.message || String(e),
           };
         }
@@ -576,7 +576,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             format: "xlsx",
             rowsExported: 0,
             totalRows: null,
-            status: "fetching",
+            status: "Running",
             errorMessage: null,
           };
           exportProgressDialog.value = true;
@@ -585,7 +585,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
-            status: "writing",
+            status: "Writing",
             rowsExported: result.rows.length,
           };
         }
@@ -598,7 +598,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
-            status: "done",
+            status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
           };
@@ -608,7 +608,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
-            status: "error",
+            status: "Error",
             errorMessage: e?.message || String(e),
           };
         }

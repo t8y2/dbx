@@ -24,8 +24,8 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
 
-const isActive = computed(() => props.status === "fetching" || props.status === "writing");
-const isFinished = computed(() => props.status === "done" || props.status === "error" || props.status === "cancelled");
+const isActive = computed(() => props.status === "Running" || props.status === "Writing");
+const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
 const progressPercent = computed(() => {
   if (!props.totalRows || props.totalRows <= 0) return 0;
   return Math.min(100, Math.round((props.rowsExported / props.totalRows) * 100));
@@ -62,33 +62,33 @@ const rowsText = computed(() => {
         <!-- Progress bar -->
         <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
           <div
-            v-if="status === 'fetching' || status === 'writing'"
+            v-if="status === 'Running' || status === 'Writing'"
             class="h-full bg-primary rounded-full transition-all duration-300"
             :class="{ 'animate-pulse': !totalRows }"
             :style="{ width: totalRows ? `${progressPercent}%` : '50%' }"
           />
-          <div v-else-if="status === 'done'" class="h-full bg-green-500 rounded-full" style="width: 100%" />
+          <div v-else-if="status === 'Done'" class="h-full bg-green-500 rounded-full" style="width: 100%" />
         </div>
 
         <!-- Status message -->
         <div class="flex items-center gap-2 text-sm">
-          <template v-if="status === 'fetching'">
+          <template v-if="status === 'Running'">
             <Loader2 class="h-4 w-4 animate-spin text-primary" />
             <span>{{ t("exportProgress.fetching") }}</span>
           </template>
-          <template v-else-if="status === 'writing'">
+          <template v-else-if="status === 'Writing'">
             <Loader2 class="h-4 w-4 animate-spin text-primary" />
             <span>{{ t("exportProgress.writing") }}</span>
           </template>
-          <template v-else-if="status === 'done'">
+          <template v-else-if="status === 'Done'">
             <CheckCircle2 class="h-4 w-4 text-green-500" />
             <span class="text-green-700 dark:text-green-400">{{ t("exportProgress.done") }}</span>
           </template>
-          <template v-else-if="status === 'error'">
+          <template v-else-if="status === 'Error'">
             <XCircle class="h-4 w-4 text-destructive" />
             <span class="text-destructive">{{ errorMessage || t("exportProgress.error") }}</span>
           </template>
-          <template v-else-if="status === 'cancelled'">
+          <template v-else-if="status === 'Cancelled'">
             <AlertCircle class="h-4 w-4 text-yellow-500" />
             <span class="text-yellow-700 dark:text-yellow-400">{{ t("exportProgress.cancelled") }}</span>
           </template>

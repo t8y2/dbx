@@ -338,7 +338,7 @@ pub async fn export_database_sql_core(
                 status: ExportStatus::Cancelled,
                 error: None,
             });
-            return Err("Export cancelled".to_string());
+            return Ok(());
         }
 
         let table_name = &table_info.name;
@@ -433,7 +433,7 @@ pub async fn export_database_sql_core(
                             status: ExportStatus::Cancelled,
                             error: None,
                         });
-                        return Err("Export cancelled".to_string());
+                        return Ok(());
                     }
 
                     let sql = crate::transfer::pagination_sql(

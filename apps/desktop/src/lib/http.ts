@@ -1080,16 +1080,16 @@ export async function startTableExport(
 ): Promise<TableExportProgress> {
   const { exportId } = request;
   // POST to start the export
-  await post("/api/export/table", request);
+  await post("/api/export/table", { request });
   // Connect to SSE for progress
   return new Promise((resolve, reject) => {
     const eventSource = new EventSource(`/api/export/table/progress/${exportId}`);
     eventSource.onmessage = (event) => {
       const progress: TableExportProgress = JSON.parse(event.data);
       onProgress(progress);
-      if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
+      if (progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled") {
         eventSource.close();
-        if (progress.status === "error") reject(new Error(progress.errorMessage || "Export failed"));
+        if (progress.status === "Error") reject(new Error(progress.errorMessage || "Export failed"));
         else resolve(progress);
       }
     };

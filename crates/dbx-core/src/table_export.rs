@@ -141,7 +141,7 @@ pub async fn export_table_data_core(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    return Err("Export cancelled".to_string());
+                    return Ok(());
                 }
 
                 let sql = pagination_sql(
@@ -203,7 +203,7 @@ pub async fn export_table_data_core(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    return Err("Export cancelled".to_string());
+                    return Ok(());
                 }
 
                 let sql = pagination_sql(

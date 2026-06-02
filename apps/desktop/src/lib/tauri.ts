@@ -1478,7 +1478,7 @@ export interface ExportProgress {
 }
 
 // --- Table Export ---
-export type TableExportStatus = "fetching" | "writing" | "done" | "error" | "cancelled";
+export type TableExportStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";
 
 export interface TableExportRequest {
   exportId: string;
@@ -1504,18 +1504,29 @@ export async function startTableExport(
   request: TableExportRequest,
   onProgress: (progress: TableExportProgress) => void,
 ): Promise<TableExportProgress> {
-  const unlisten = await listen<TableExportProgress>("table-export-progress", (event) => {
-    onProgress(event.payload);
-    if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
-      unlisten();
-    }
+  return new Promise((resolve, reject) => {
+    let unlisten: (() => void) | undefined;
+    listen<TableExportProgress>("table-export-progress", (event) => {
+      if (event.payload.exportId !== request.exportId) return;
+      onProgress(event.payload);
+      if (event.payload.status === "Done" || event.payload.status === "Error" || event.payload.status === "Cancelled") {
+        unlisten?.();
+        if (event.payload.status === "Error") {
+          reject(new Error(event.payload.errorMessage || "Export failed"));
+        } else {
+          resolve(event.payload);
+        }
+      }
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(reject);
+    invoke("start_table_export", { request }).catch((e) => {
+      unlisten?.();
+      reject(e);
+    });
   });
-  try {
-    return await invoke<TableExportProgress>("start_table_export", { request });
-  } catch (e) {
-    unlisten();
-    throw e;
-  }
 }
 
 export async function cancelTableExport(exportId: string): Promise<void> {

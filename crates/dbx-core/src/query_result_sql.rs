@@ -129,6 +129,10 @@ pub fn build_query_pagination_execution_plan(
         return plan;
     }
 
+    if options.database_type == Some(DatabaseType::SqlServer) && starts_with_cte(&options.query_base_sql) {
+        return plan;
+    }
+
     if options.use_agent_cursor && options.pagination.offset == 0 {
         plan.sql_to_execute = options.query_base_sql;
         plan.page_limit = Some(options.pagination.limit);
@@ -287,7 +291,7 @@ fn single_selectable_statement(original_sql: &str) -> Result<String, ()> {
     if statement.len() != base_sql.trim_end_matches(';').trim().len() {
         return Err(());
     }
-    let upper = statement.trim_start().to_ascii_uppercase();
+    let upper = statement.trim_start_matches(';').trim_start().to_ascii_uppercase();
     if !(upper.starts_with("SELECT") || upper.starts_with("WITH")) {
         return Err(());
     }
@@ -296,6 +300,10 @@ fn single_selectable_statement(original_sql: &str) -> Result<String, ()> {
     }
 
     Ok(statement)
+}
+
+fn starts_with_cte(sql: &str) -> bool {
+    sql.trim_start().trim_start_matches(';').trim_start().to_ascii_uppercase().starts_with("WITH")
 }
 
 fn single_statement_error_reason(original_sql: &str) -> &'static str {
@@ -639,6 +647,35 @@ mod tests {
 
         assert_eq!(result.ok, true);
         assert_eq!(result.sql.unwrap(), "SELECT TOP 1000 * FROM TicketInfo");
+    }
+
+    #[test]
+    fn sqlserver_cte_pagination_plan_executes_original_sql() {
+        let sql = ";WITH ranked AS (SELECT id FROM dbo.users) SELECT * FROM ranked".to_string();
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.clone(),
+            query_base_sql: sql.clone(),
+            database_type: Some(DatabaseType::SqlServer),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, sql);
+        assert!(plan.page_sql.is_none());
+        assert!(plan.count_sql.is_none());
+        assert_eq!(plan.page_limit, None);
+        assert_eq!(plan.page_offset, None);
+    }
+
+    #[test]
+    fn sqlserver_cte_count_query_is_not_wrapped_as_derived_table() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: ";WITH cte AS (SELECT 1 AS id) SELECT * FROM cte".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+        });
+
+        assert_eq!(result.ok, false);
+        assert!(result.sql.is_none());
     }
 
     #[test]

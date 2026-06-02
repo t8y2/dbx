@@ -313,13 +313,8 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId.value = next.activeTabId;
   }
 
-  function closeDatabaseTabs(connectionId: string, database: string) {
-    const closingModes = new Set<QueryTab["mode"]>(["data", "objects", "structure", "mongo"]);
-    const closingIds = new Set(
-      tabs.value
-        .filter((tab) => tab.connectionId === connectionId && tab.database === database && closingModes.has(tab.mode))
-        .map((tab) => tab.id),
-    );
+  function closeTabsWhere(predicate: (tab: QueryTab) => boolean) {
+    const closingIds = new Set(tabs.value.filter((tab) => predicate(tab)).map((tab) => tab.id));
     if (closingIds.size === 0) return;
 
     tabs.value
@@ -337,6 +332,14 @@ export const useQueryStore = defineStore("query", () => {
     if (activeClosingIndex >= 0) {
       activeTabId.value = tabs.value[Math.min(activeClosingIndex, tabs.value.length - 1)]?.id ?? null;
     }
+  }
+
+  function closeConnectionTabs(connectionId: string) {
+    closeTabsWhere((tab) => tab.connectionId === connectionId);
+  }
+
+  function closeDatabaseTabs(connectionId: string, database: string) {
+    closeTabsWhere((tab) => tab.connectionId === connectionId && tab.database === database);
   }
 
   function updateSql(id: string, sql: string) {
@@ -1257,6 +1260,7 @@ export const useQueryStore = defineStore("query", () => {
     closeTab,
     closeOtherTabs,
     closeAllTabs,
+    closeConnectionTabs,
     closeDatabaseTabs,
     updateSql,
     renameTab,

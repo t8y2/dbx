@@ -675,6 +675,8 @@ export const useConnectionStore = defineStore("connection", () => {
   async function disconnect(connectionId: string) {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
     await api.disconnectDb(connectionId);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    useQueryStore().closeConnectionTabs(connectionId);
     connectedIds.value.delete(connectionId);
     const node = findNode(treeNodes.value, connectionId);
     if (node) {
@@ -693,6 +695,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function closeDatabaseConnection(connectionId: string, database: string) {
     await api.closeDatabaseConnection(connectionId, database);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    useQueryStore().closeDatabaseTabs(connectionId, database);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database);
     if (node) {
       node.isExpanded = false;

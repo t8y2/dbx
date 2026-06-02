@@ -345,15 +345,98 @@ test("closing database tabs removes browser tabs for that database only", async 
 
     assert.deepEqual(
       store.tabs.map((tab) => tab.id),
-      [queryId, otherDbId, otherConnectionId],
+      [otherDbId, otherConnectionId],
     );
     assert.equal(store.activeTabId, otherConnectionId);
     assert.equal(
-      store.tabs.some((tab) => [dataId, objectsId, structureId, mongoId].includes(tab.id)),
+      store.tabs.some((tab) => [dataId, objectsId, structureId, mongoId, queryId].includes(tab.id)),
       false,
     );
     assert.equal(structureTab.result, undefined);
     assert.equal(structureTab.resultSessionId, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("closing connection tabs removes every tab for that connection only", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useQueryStore();
+    const queryId = store.createTab("conn-1", "db", "draft query", "query");
+    const dataId = store.createTab("conn-1", "db", "users", "data", "public");
+    const objectsId = store.openObjectBrowser("conn-1", "db", "public");
+    const otherConnectionId = store.createTab("conn-2", "db", "users", "data", "public");
+    const queryTab = store.tabs.find((item) => item.id === queryId);
+
+    assert.ok(queryTab);
+    queryTab.result = {
+      columns: ["payload"],
+      rows: [["query"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      session_id: "session-query",
+    };
+    queryTab.resultSessionId = "session-query";
+    store.activeTabId = queryId;
+
+    store.closeConnectionTabs("conn-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(
+      store.tabs.map((tab) => tab.id),
+      [otherConnectionId],
+    );
+    assert.equal(store.activeTabId, otherConnectionId);
+    assert.equal(
+      store.tabs.some((tab) => [queryId, dataId, objectsId].includes(tab.id)),
+      false,
+    );
+    assert.equal(queryTab.result, undefined);
+    assert.equal(queryTab.resultSessionId, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("disconnecting a connection closes every tab for that connection", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    connectionStore.addEphemeralConnection(conn("conn-1"));
+    connectionStore.addEphemeralConnection(conn("conn-2"));
+    const queryId = queryStore.createTab("conn-1", "db", "draft query", "query");
+    const dataId = queryStore.createTab("conn-1", "db", "users", "data", "public");
+    const otherConnectionId = queryStore.createTab("conn-2", "db", "users", "data", "public");
+
+    queryStore.activeTabId = dataId;
+    await connectionStore.disconnect("conn-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(
+      queryStore.tabs.map((tab) => tab.id),
+      [otherConnectionId],
+    );
+    assert.equal(queryStore.activeTabId, otherConnectionId);
+    assert.equal(
+      queryStore.tabs.some((tab) => [queryId, dataId].includes(tab.id)),
+      false,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

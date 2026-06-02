@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, nextTick, ref, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Search,
@@ -95,6 +95,8 @@ const createKeyField = ref("");
 const createKeyScore = ref("0");
 const createKeyError = ref("");
 let searchRequestId = 0;
+let redisBrowserIsActive = true;
+let redisDbFlushedListenerRegistered = false;
 
 const valueQuery = computed(() => searchPattern.value.trim());
 const effectivePattern = computed(() => (searchMode.value === "key" ? searchPattern.value.trim() || "*" : "*"));
@@ -216,6 +218,7 @@ async function fillInitialKeyBatch(requestId: number) {
 }
 
 async function loadKeys() {
+  if (!redisBrowserIsActive) return;
   const requestId = ++searchRequestId;
   loading.value = true;
   flatKeys.value = [];
@@ -574,22 +577,49 @@ function onSearchKeydown(event: KeyboardEvent) {
   void loadKeys();
 }
 
-onUnmounted(() => {
-  searchRequestId++;
-  if (searchTimer) clearTimeout(searchTimer);
-  window.removeEventListener("dbx-redis-db-flushed", onRedisDbFlushed);
-});
-
 function onRedisDbFlushed(event: Event) {
   const detail = (event as CustomEvent<{ connectionId: string; db: number }>).detail;
   if (!detail || detail.connectionId !== props.connectionId || detail.db !== props.db) return;
   resetLoadedKeys();
 }
 
-onMounted(() => {
+function registerRedisDbFlushedListener() {
+  if (redisDbFlushedListenerRegistered) return;
   window.addEventListener("dbx-redis-db-flushed", onRedisDbFlushed);
+  redisDbFlushedListenerRegistered = true;
+}
+
+function unregisterRedisDbFlushedListener() {
+  if (!redisDbFlushedListenerRegistered) return;
+  window.removeEventListener("dbx-redis-db-flushed", onRedisDbFlushed);
+  redisDbFlushedListenerRegistered = false;
+}
+
+function pauseRedisBrowserBackgroundWork() {
+  redisBrowserIsActive = false;
+  searchRequestId++;
+  loading.value = false;
+  loadingMore.value = false;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = null;
+  unregisterRedisDbFlushedListener();
+}
+
+function resumeRedisBrowserBackgroundWork() {
+  redisBrowserIsActive = true;
+  registerRedisDbFlushedListener();
+}
+
+onMounted(() => {
+  resumeRedisBrowserBackgroundWork();
   void loadKeys();
 });
+
+onActivated(resumeRedisBrowserBackgroundWork);
+
+onDeactivated(pauseRedisBrowserBackgroundWork);
+
+onUnmounted(pauseRedisBrowserBackgroundWork);
 
 watch(
   () => props.db,

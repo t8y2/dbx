@@ -75,7 +75,7 @@ test("buildTableTreeNodes keeps partitions visible when their parent is not load
   );
 });
 
-test("buildTableTreeNodes keeps base-prefixed tables before prefixed variants", () => {
+test("buildTableTreeNodes keeps sidebar tables in natural name order", () => {
   const nodes = buildTableTreeNodes({
     nodeId: "conn:app:public",
     connectionId: "conn",
@@ -86,7 +86,21 @@ test("buildTableTreeNodes keeps base-prefixed tables before prefixed variants", 
 
   assert.deepEqual(
     nodes.map((node) => node.label),
-    ["staff", "staff_his", "chat_staff", "chat_staff_his"],
+    ["chat_staff", "chat_staff_his", "staff", "staff_his"],
+  );
+});
+
+test("buildTableTreeNodes does not relocate prefixed business tables by suffix", () => {
+  const nodes = buildTableTreeNodes({
+    nodeId: "conn:app",
+    connectionId: "conn",
+    database: "app",
+    tables: [table("CurrentStock"), table("YonSuite_CurrentStock"), table("YonSuite_LocationStock")],
+  });
+
+  assert.deepEqual(
+    nodes.map((node) => node.label),
+    ["CurrentStock", "YonSuite_CurrentStock", "YonSuite_LocationStock"],
   );
 });
 
@@ -112,7 +126,7 @@ test("buildGroupedObjectTreeNodes nests partitions inside the tables group", () 
   );
 });
 
-test("buildGroupedObjectTreeNodes applies prefix-priority sorting inside object groups", () => {
+test("buildGroupedObjectTreeNodes applies natural name sorting inside object groups", () => {
   const groups = buildGroupedObjectTreeNodes({
     nodeId: "conn:app:public",
     connectionId: "conn",
@@ -124,7 +138,7 @@ test("buildGroupedObjectTreeNodes applies prefix-priority sorting inside object 
   const tableGroup = groups.find((node) => node.type === "group-tables");
   assert.deepEqual(
     tableGroup?.children?.map((node) => node.label),
-    ["staff", "staff_his", "chat_staff", "chat_staff_his"],
+    ["chat_staff", "chat_staff_his", "staff", "staff_his"],
   );
 });
 

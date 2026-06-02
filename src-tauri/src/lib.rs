@@ -502,6 +502,7 @@ pub fn run() {
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,
             commands::csv_export::export_query_result_csv,
+            commands::csv_export::export_table_data_csv,
             commands::xlsx_export::export_query_result_xlsx,
             commands::text_export::export_query_result_json,
             commands::text_export::export_query_result_markdown,

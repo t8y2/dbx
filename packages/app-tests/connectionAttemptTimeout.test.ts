@@ -1,0 +1,33 @@
+import { strict as assert } from "node:assert";
+import test from "node:test";
+import {
+  CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS,
+  connectionAttemptTimeoutMessage,
+  connectionAttemptTimeoutMs,
+} from "../../apps/desktop/src/lib/connectionAttemptTimeout.ts";
+
+test("uses connection timeout with a small UI buffer", () => {
+  assert.equal(connectionAttemptTimeoutMs({ connect_timeout_secs: 8 }), 8_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+});
+
+test("falls back to the default connection timeout", () => {
+  assert.equal(connectionAttemptTimeoutMs({}), 5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+  assert.equal(connectionAttemptTimeoutMs({ connect_timeout_secs: 0 }), 5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+});
+
+test("honors slower SSH tunnel connection timeouts", () => {
+  assert.equal(
+    connectionAttemptTimeoutMs({
+      connect_timeout_secs: 5,
+      ssh_enabled: true,
+      ssh_connect_timeout_secs: 12,
+      ssh_tunnels: [{ id: "hop-1", host: "bastion", port: 22, user: "dbx", connect_timeout_secs: 20 }],
+    }),
+    20_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS,
+  );
+});
+
+test("formats connection attempt timeout messages", () => {
+  assert.match(connectionAttemptTimeoutMessage(7_001), /timed out after 8s/);
+  assert.match(connectionAttemptTimeoutMessage(7_001), /VPN/);
+});

@@ -52,7 +52,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const tab = activeTab.value;
     if (!tab) return;
     queryStore.updateSql(tab.id, sql);
-    await queryStore.executeTabSql(tab.id, sql);
+    await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
   }
 
   async function onReloadData(
@@ -71,13 +71,17 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const pageOffset = offset ?? 0;
       const nextSql = await buildTableSql(tab, { whereInput, orderBy, limit: pageLimit, offset: pageOffset });
       queryStore.updateSql(tab.id, nextSql);
-      await queryStore.executeTabSql(tab.id, nextSql, { pagination: { limit: pageLimit, offset: pageOffset } });
+      await queryStore.executeTabSql(tab.id, nextSql, {
+        pagination: { limit: pageLimit, offset: pageOffset },
+        preserveResultDuringExecution: true,
+      });
       return;
     }
     if (tab.resultSortedSql) {
       await queryStore.executeTabSql(tab.id, tab.resultSortedSql, {
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         resultSortedSql: tab.resultSortedSql,
+        preserveResultDuringExecution: true,
       });
       return;
     }
@@ -85,6 +89,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       await queryStore.executeTabSql(tab.id, sql, {
         resultBaseSql: sql,
         resultSortedSql: undefined,
+        preserveResultDuringExecution: true,
       });
       return;
     }
@@ -106,6 +111,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         resultSortedSql: tab.resultSortedSql,
         pagination: { offset, limit, sessionId },
+        preserveResultDuringExecution: true,
       });
       return;
     }
@@ -114,7 +120,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     tab.whereInput = whereInput ?? "";
     const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy });
     queryStore.updateSql(tab.id, sql);
-    await queryStore.executeTabSql(tab.id, sql, { pagination: { offset, limit } });
+    await queryStore.executeTabSql(tab.id, sql, {
+      pagination: { offset, limit },
+      preserveResultDuringExecution: true,
+    });
   }
 
   async function onSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string) {
@@ -134,7 +143,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         : undefined;
       const sql = await buildTableSql(tab, { orderBy, whereInput });
       queryStore.updateSql(tab.id, sql);
-      await queryStore.executeCurrentTab();
+      await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
       return;
     }
 
@@ -145,6 +154,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       await queryStore.executeTabSql(tab.id, baseSql, {
         resultBaseSql: baseSql,
         resultSortedSql: undefined,
+        preserveResultDuringExecution: true,
       });
       return;
     }
@@ -166,6 +176,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeTabSql(tab.id, built.sql, {
       resultBaseSql: baseSql,
       resultSortedSql: built.sql,
+      preserveResultDuringExecution: true,
     });
   }
 

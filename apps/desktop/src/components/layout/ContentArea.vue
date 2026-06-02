@@ -468,7 +468,6 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 :loading="activeTab.isExecuting"
                 :editable="!!activeTab.queryAnalysis"
                 :source-columns="activeTab.querySourceColumns"
-                :query-editability-reason="activeTab.queryEditabilityReason"
                 context="results"
                 :database-type="activeConnection?.db_type"
                 :connection-id="activeTab.connectionId"

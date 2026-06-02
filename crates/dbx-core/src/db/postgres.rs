@@ -744,8 +744,8 @@ fn postgres_tables_sql() -> &'static str {
            WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
            WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
          obj_description(c.oid) AS table_comment, \
-         pn.nspname AS parent_schema, \
-         pc.relname AS parent_name \
+         CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
+         CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name \
          FROM pg_catalog.pg_class c \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
          LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
@@ -770,8 +770,8 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
            THEN pg_xact_commit_timestamp(c.xmin)::text END, \
          stat.modification::text \
        ) AS updated_at, \
-       pn.nspname AS parent_schema, \
-       pc.relname AS parent_name, \
+       CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
+       CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -807,8 +807,8 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        obj_description(c.oid) AS object_comment, \
        NULL::text AS created_at, \
        NULL::text AS updated_at, \
-       pn.nspname AS parent_schema, \
-       pc.relname AS parent_name, \
+       CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
+       CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -1534,6 +1534,7 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_inherits"));
         assert!(sql.contains("parent_schema"));
         assert!(sql.contains("parent_name"));
+        assert!(sql.contains("pc.relkind = 'p'"));
         assert!(sql.contains("$1"));
         assert!(sql.contains("BASE TABLE"));
         assert!(sql.contains("VIEW"));
@@ -1572,6 +1573,7 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_inherits"));
         assert!(sql.contains("parent_schema"));
         assert!(sql.contains("parent_name"));
+        assert!(sql.contains("pc.relkind = 'p'"));
         assert!(sql.contains("pg_stat_file"));
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));

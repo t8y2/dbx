@@ -185,6 +185,8 @@ const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as con
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
 const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
 export type CellDetailPanelLayout = (typeof CELL_DETAIL_PANEL_LAYOUTS)[number];
+const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
+export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 
 export interface EditorSettings {
   fontFamily: string;
@@ -200,6 +202,7 @@ export interface EditorSettings {
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
   compactColumnHeaderActions: boolean;
+  dataGridRenderMode: DataGridRenderMode;
   structureEditorDensity: StructureEditorDensity;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
@@ -255,6 +258,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   mongoViewMode: "document",
   showColumnCommentsInHeader: false,
   compactColumnHeaderActions: true,
+  dataGridRenderMode: "canvas",
   structureEditorDensity: "compact",
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 320,
@@ -296,6 +300,12 @@ function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
   return CELL_DETAIL_PANEL_LAYOUTS.includes(value as CellDetailPanelLayout)
     ? (value as CellDetailPanelLayout)
     : DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout;
+}
+
+function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
+  return DATA_GRID_RENDER_MODES.includes(value as DataGridRenderMode)
+    ? (value as DataGridRenderMode)
+    : DEFAULT_EDITOR_SETTINGS.dataGridRenderMode;
 }
 
 function normalizeColumnFormatters(value: unknown): Record<string, ColumnFormatterConfig> {
@@ -361,6 +371,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     compactColumnHeaderActions:
       settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
+    dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoDrawerWidth: normalizeDrawerWidth(
       settings.tableInfoDrawerWidth,
@@ -505,6 +516,8 @@ export const useSettingsStore = defineStore("settings", () => {
       editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.compactColumnHeaderActions !== undefined)
       editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
+    if (partial.dataGridRenderMode !== undefined)
+      editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.structureEditorDensity !== undefined)
       editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoDrawerWidth !== undefined)

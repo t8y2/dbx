@@ -17,4 +17,8 @@ else
   exit 127
 fi
 
-exec "$JAVA_BIN" -jar "$DIR/../lib/dbx-jdbc-plugin.jar"
+exec "$JAVA_BIN" \
+  -Dfile.encoding=UTF-8 \
+  -Dsun.stdout.encoding=UTF-8 \
+  -Dsun.stderr.encoding=UTF-8 \
+  -jar "$DIR/../lib/dbx-jdbc-plugin.jar"

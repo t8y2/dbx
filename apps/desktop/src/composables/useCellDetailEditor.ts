@@ -10,6 +10,7 @@ import {
 } from "@codemirror/view";
 import { vscodeSelectionLayer } from "@/lib/codemirrorVscodeSelectionLayer";
 import { json } from "@codemirror/lang-json";
+import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching } from "@codemirror/language";
 import {
@@ -179,6 +180,13 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const state = EditorState.create({
       doc,
       extensions: [
+        cmSearch({
+          createPanel: () => {
+            const dom = document.createElement("span");
+            dom.style.display = "none";
+            return { dom };
+          },
+        }),
         // Minimal setup without line numbers
         highlightSpecialChars(),
         history(),

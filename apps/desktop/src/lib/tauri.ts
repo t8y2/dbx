@@ -1354,23 +1354,25 @@ export async function startTransfer(
   request: TransferRequest,
   onProgress: (progress: TransferProgress) => void,
 ): Promise<void> {
-  return new Promise(async (resolve, reject) => {
+  return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
-    try {
-      unlisten = await listen<TransferProgress>("transfer-progress", (event) => {
-        if (event.payload.transferId !== request.transferId) return;
-        onProgress(event.payload);
-        if (event.payload.status === "done" || event.payload.status === "cancelled") {
-          unlisten?.();
-          resolve();
-        }
-      });
+    void (async () => {
+      try {
+        unlisten = await listen<TransferProgress>("transfer-progress", (event) => {
+          if (event.payload.transferId !== request.transferId) return;
+          onProgress(event.payload);
+          if (event.payload.status === "done" || event.payload.status === "cancelled") {
+            unlisten?.();
+            resolve();
+          }
+        });
 
-      await invoke("start_transfer", { request });
-    } catch (e) {
-      unlisten?.();
-      reject(e);
-    }
+        await invoke("start_transfer", { request });
+      } catch (e) {
+        unlisten?.();
+        reject(e);
+      }
+    })();
   });
 }
 
@@ -1491,6 +1493,17 @@ export interface TableExportRequest {
   columns?: string[];
 }
 
+export interface TableCsvExportOptions {
+  filePath: string;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  tableName: string;
+  columns?: string[];
+  pageSize?: number;
+  timeoutSecs?: number;
+}
+
 export interface TableExportProgress {
   exportId: string;
   tableName: string;
@@ -1569,6 +1582,10 @@ export async function exportQueryResultCsv(
       rows,
     },
   });
+}
+
+export async function exportTableDataCsv(options: TableCsvExportOptions): Promise<number> {
+  return invoke("export_table_data_csv", { request: options });
 }
 
 export async function exportQueryResultXlsx(

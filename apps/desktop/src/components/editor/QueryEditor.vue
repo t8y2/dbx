@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, shallowRef, computed } from "vue";
+import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed } from "vue";
 import { Play, Copy, TextSelect } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
@@ -192,6 +192,8 @@ let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSema
 let semanticDiagnostics: SqlSemanticDiagnostic[] = [];
 let semanticDiagnosticTimer: ReturnType<typeof setTimeout> | null = null;
 let semanticDiagnosticRunId = 0;
+let editorIsActive = true;
+let tableReferenceDropListenerRegistered = false;
 
 function editorThemeAppearance() {
   return isDark.value ? "dark" : "light";
@@ -724,6 +726,7 @@ async function refreshSemanticDiagnostics() {
 }
 
 function scheduleSemanticDiagnostics(delay = 500) {
+  if (!editorIsActive) return;
   if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
   semanticDiagnosticTimer = setTimeout(() => {
     semanticDiagnosticTimer = null;
@@ -807,6 +810,18 @@ function onTableReferenceDropEvent(event: Event) {
   if (target instanceof Element && editorRef.value?.contains(target)) {
     insertTableReferencePayload(currentView, detail.payload, detail);
   }
+}
+
+function registerTableReferenceDropListener() {
+  if (tableReferenceDropListenerRegistered) return;
+  window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  tableReferenceDropListenerRegistered = true;
+}
+
+function unregisterTableReferenceDropListener() {
+  if (!tableReferenceDropListenerRegistered) return;
+  window.removeEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  tableReferenceDropListenerRegistered = false;
 }
 
 let completionEpoch = 0;
@@ -1528,7 +1543,7 @@ onMounted(async () => {
   view.value = new EditorView({ state, parent: editorRef.value });
   syncContextMenuState(view.value);
   syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
-  window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  registerTableReferenceDropListener();
 
   cachedTables = [];
   scheduleSemanticDiagnostics();
@@ -1625,10 +1640,28 @@ watch(
   { deep: true },
 );
 
-onBeforeUnmount(() => {
-  zoomCommitScheduler.dispose();
+function pauseQueryEditorBackgroundWork() {
+  editorIsActive = false;
+  semanticDiagnosticRunId++;
   if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
-  window.removeEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  semanticDiagnosticTimer = null;
+  completionEpoch++;
+  unregisterTableReferenceDropListener();
+}
+
+function resumeQueryEditorBackgroundWork() {
+  editorIsActive = true;
+  registerTableReferenceDropListener();
+  scheduleSemanticDiagnostics();
+}
+
+onActivated(resumeQueryEditorBackgroundWork);
+
+onDeactivated(pauseQueryEditorBackgroundWork);
+
+onBeforeUnmount(() => {
+  pauseQueryEditorBackgroundWork();
+  zoomCommitScheduler.dispose();
   view.value?.destroy();
 });
 

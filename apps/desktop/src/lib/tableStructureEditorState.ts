@@ -294,7 +294,14 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
     if (lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
-  } else if (databaseType === "postgres") {
+  } else if (
+    databaseType === "postgres" ||
+    databaseType === "gaussdb" ||
+    databaseType === "opengauss" ||
+    databaseType === "highgo" ||
+    databaseType === "vastbase" ||
+    databaseType === "kingbase"
+  ) {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
     if (identityMatch) {
       const sequenceMatch = lower.match(/start\s+with\s*(-?\d+)\s+increment\s+by\s*(-?\d+)/i);

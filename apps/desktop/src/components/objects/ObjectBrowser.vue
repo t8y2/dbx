@@ -167,7 +167,12 @@ const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(props.connection.db_type));
 const supportsTruncateTable = computed(() => supportsTableTruncate(props.connection.db_type));
 const sourceDialect = computed<"mysql" | "postgres" | "sqlserver">(() => {
-  if (props.connection.db_type === "postgres" || props.connection.db_type === "gaussdb") return "postgres";
+  if (
+    props.connection.db_type === "postgres" ||
+    props.connection.db_type === "gaussdb" ||
+    props.connection.db_type === "opengauss"
+  )
+    return "postgres";
   if (props.connection.db_type === "sqlserver") return "sqlserver";
   return "mysql";
 });
@@ -178,6 +183,9 @@ const sourceFormatDialect = computed<SqlFormatDialect>(() => {
     case "sqlite":
     case "sqlserver":
       return props.connection.db_type;
+    case "gaussdb":
+    case "opengauss":
+      return "postgres";
     default:
       return "generic";
   }

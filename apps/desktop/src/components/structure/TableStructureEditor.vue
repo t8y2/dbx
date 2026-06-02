@@ -284,6 +284,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => connection.value?.db_type);
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value));
+const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
 const dataTypeOptions = computed(() => getDataTypeOptions(databaseType.value));
 
@@ -295,12 +296,23 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlite: ["BTREE"],
 };
 const indexTypeOptions = computed(() =>
-  structureCapabilities.value.indexType ? (indexTypesByDb[databaseType.value ?? ""] ?? []) : [],
+  structureCapabilities.value.indexType ? (indexTypesByDb[structureDialect.value] ?? []) : [],
 );
+
+function isPostgresIdentityType(dbType: string | undefined): boolean {
+  return (
+    dbType === "postgres" ||
+    dbType === "gaussdb" ||
+    dbType === "opengauss" ||
+    dbType === "highgo" ||
+    dbType === "vastbase" ||
+    dbType === "kingbase"
+  );
+}
 
 const showExtendedProperties = computed(() => {
   const dt = databaseType.value;
-  return dt === "mysql" || dt === "postgres" || dt === "sqlserver";
+  return dt === "mysql" || isPostgresIdentityType(dt) || dt === "sqlserver";
 });
 const extendedPropertiesColumnIndex = 8;
 const visibleColWidths = computed(() =>
@@ -1010,7 +1022,7 @@ watch(
                   <td v-if="showExtendedProperties" :class="structureCellClass">
                     <div class="flex items-center gap-2">
                       <!-- MySQL: AUTO_INCREMENT + ON UPDATE CURRENT_TIMESTAMP -->
-                      <template v-if="databaseType === 'mysql'">
+                      <template v-if="structureDialect === 'mysql'">
                         <label class="flex items-center gap-1 whitespace-nowrap">
                           <input v-model="column.extra.autoIncrement" type="checkbox" :class="structureCheckboxClass" />
                           {{ t("structureEditor.autoIncrement") }}
@@ -1025,7 +1037,7 @@ watch(
                         </label>
                       </template>
                       <!-- PostgreSQL: IDENTITY -->
-                      <template v-else-if="databaseType === 'postgres'">
+                      <template v-else-if="structureDialect === 'postgres'">
                         <Select
                           :model-value="column.extra.identity?.generation ?? 'none'"
                           @update:model-value="
@@ -1083,7 +1095,7 @@ watch(
                         </template>
                       </template>
                       <!-- SQL Server: IDENTITY -->
-                      <template v-else-if="databaseType === 'sqlserver'">
+                      <template v-else-if="structureDialect === 'sqlserver'">
                         <label class="flex items-center gap-1 whitespace-nowrap">
                           <input v-model="column.extra.autoIncrement" type="checkbox" :class="structureCheckboxClass" />
                           {{ t("structureEditor.identity") }}

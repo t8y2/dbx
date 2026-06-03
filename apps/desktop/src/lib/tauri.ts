@@ -1517,29 +1517,44 @@ export async function startTableExport(
   request: TableExportRequest,
   onProgress: (progress: TableExportProgress) => void,
 ): Promise<TableExportProgress> {
-  return new Promise((resolve, reject) => {
-    let unlisten: (() => void) | undefined;
-    listen<TableExportProgress>("table-export-progress", (event) => {
+  let unlisten: UnlistenFn | undefined;
+  let settled = false;
+  let resolveTerminal: (progress: TableExportProgress) => void = () => {};
+  let rejectTerminal: (error: unknown) => void = () => {};
+
+  const terminalProgress = new Promise<TableExportProgress>((resolve, reject) => {
+    resolveTerminal = resolve;
+    rejectTerminal = reject;
+  });
+
+  const finish = (callback: () => void) => {
+    if (settled) return;
+    settled = true;
+    unlisten?.();
+    callback();
+  };
+
+  try {
+    unlisten = await listen<TableExportProgress>("table-export-progress", (event) => {
       if (event.payload.exportId !== request.exportId) return;
       onProgress(event.payload);
       if (event.payload.status === "Done" || event.payload.status === "Error" || event.payload.status === "Cancelled") {
-        unlisten?.();
         if (event.payload.status === "Error") {
-          reject(new Error(event.payload.errorMessage || "Export failed"));
+          finish(() => rejectTerminal(new Error(event.payload.errorMessage || "Export failed")));
         } else {
-          resolve(event.payload);
+          finish(() => resolveTerminal(event.payload));
         }
       }
-    })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(reject);
-    invoke("start_table_export", { request }).catch((e) => {
-      unlisten?.();
-      reject(e);
     });
-  });
+    await invoke("start_table_export", { request });
+    return await terminalProgress;
+  } catch (error) {
+    if (!settled) {
+      settled = true;
+      unlisten?.();
+    }
+    throw error;
+  }
 }
 
 export async function cancelTableExport(exportId: string): Promise<void> {

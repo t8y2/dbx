@@ -1,11 +1,17 @@
-use std::sync::Arc;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Response, Sse};
 use axum::Json;
-use dbx_core::table_export::{self, TableExportProgress, TableExportRequest};
+use dbx_core::table_export::{self, ExportStatus, TableExportProgress, TableExportRequest};
 use futures::stream::Stream;
 use serde::Deserialize;
 
@@ -46,14 +52,21 @@ pub async fn start_table_export(
     // Store export file mapping for download
     state.export_files.write().await.insert(export_id.clone(), (file_path, req.format.clone()));
 
-    let (tx, _) = tokio::sync::broadcast::channel::<String>(256);
-    state.sse_channels.write().await.insert(export_id.clone(), tx.clone());
+    let tx = {
+        let mut channels = state.sse_channels.write().await;
+        channels.entry(export_id.clone()).or_insert_with(|| tokio::sync::broadcast::channel::<String>(256).0).clone()
+    };
 
     let app = state.app.clone();
     let state_clone = state.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_progress = cancelled.clone();
 
     tokio::spawn(async move {
         let result = table_export::export_table_data_core(&app, &req, |progress| {
+            if matches!(progress.status, ExportStatus::Cancelled) {
+                cancelled_progress.store(true, Ordering::SeqCst);
+            }
             if let Ok(json) = serde_json::to_string(&progress) {
                 let _ = tx.send(json);
             }
@@ -61,22 +74,26 @@ pub async fn start_table_export(
         .await;
 
         if let Err(e) = result {
-            // Remove the failed temp file
+            let _ = tokio::fs::remove_file(&req.file_path).await;
             state_clone.export_files.write().await.remove(&req.export_id);
             let progress = TableExportProgress {
                 export_id: req.export_id.clone(),
                 table_name: req.table_name.clone(),
                 rows_exported: 0,
                 total_rows: None,
-                status: dbx_core::table_export::ExportStatus::Error,
+                status: ExportStatus::Error,
                 error_message: Some(e),
             };
             if let Ok(json) = serde_json::to_string(&progress) {
                 let _ = tx.send(json);
             }
+        } else if cancelled.load(Ordering::SeqCst) {
+            let _ = tokio::fs::remove_file(&req.file_path).await;
+            state_clone.export_files.write().await.remove(&req.export_id);
         }
 
         dbx_core::database_export::clear_export_cancelled(&req.export_id).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         state_clone.remove_sse_channel(&req.export_id).await;
     });
 
@@ -87,10 +104,11 @@ pub async fn table_export_progress(
     State(state): State<Arc<WebState>>,
     Path(export_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, AppError> {
-    let channels = state.sse_channels.read().await;
-    let tx = channels.get(&export_id).ok_or_else(|| AppError("Export not found".to_string()))?;
+    let tx = {
+        let mut channels = state.sse_channels.write().await;
+        channels.entry(export_id).or_insert_with(|| tokio::sync::broadcast::channel::<String>(256).0).clone()
+    };
     let rx = tx.subscribe();
-    drop(channels);
     Ok(crate::sse::sse_from_channel(rx))
 }
 

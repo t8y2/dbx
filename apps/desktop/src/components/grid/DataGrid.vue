@@ -3397,11 +3397,6 @@ const exportProgressState = ref({
   errorMessage: null as string | null,
 });
 
-async function cancelGridExport() {
-  // Grid export cancellation is handled by closing the dialog
-  exportProgressDialog.value = false;
-}
-
 // --- Export composable ---
 const {
   copyText,
@@ -7661,7 +7656,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       @confirm="confirmDeleteRow"
     />
     <ImagePreviewDialog v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
-    <ExportProgressDialog v-model:open="exportProgressDialog" v-bind="exportProgressState" @cancel="cancelGridExport" />
+    <ExportProgressDialog v-model:open="exportProgressDialog" v-bind="exportProgressState" disable-cancel />
   </div>
 </template>
 

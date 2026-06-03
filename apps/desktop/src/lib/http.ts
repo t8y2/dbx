@@ -1080,30 +1080,45 @@ export async function startTableExport(
   onProgress: (progress: TableExportProgress) => void,
 ): Promise<TableExportProgress> {
   const { exportId } = request;
-  // POST to start the export
-  await post("/api/export/table", { request });
-  // Connect to SSE for progress
+
   return new Promise((resolve, reject) => {
+    let started = false;
+    let settled = false;
     const eventSource = new EventSource(`/api/export/table/progress/${exportId}`);
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      eventSource.close();
+      callback();
+    };
+
+    eventSource.onopen = () => {
+      if (started) return;
+      started = true;
+      post("/api/export/table", { request }).catch((error) => {
+        finish(() => reject(error));
+      });
+    };
+
     eventSource.onmessage = (event) => {
       const progress: TableExportProgress = JSON.parse(event.data);
       onProgress(progress);
       if (progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled") {
-        eventSource.close();
         if (progress.status === "Error") {
-          reject(new Error(progress.errorMessage || "Export failed"));
+          finish(() => reject(new Error(progress.errorMessage || "Export failed")));
         } else if (progress.status === "Done") {
           // Trigger browser download
           downloadTableExportFile(exportId, request.format);
-          resolve(progress);
+          finish(() => resolve(progress));
         } else {
-          resolve(progress);
+          finish(() => resolve(progress));
         }
       }
     };
+
     eventSource.onerror = () => {
-      eventSource.close();
-      reject(new Error("Export progress connection lost"));
+      finish(() => reject(new Error("Export progress connection lost")));
     };
   });
 }

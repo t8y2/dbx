@@ -1090,8 +1090,15 @@ export async function startTableExport(
       onProgress(progress);
       if (progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled") {
         eventSource.close();
-        if (progress.status === "Error") reject(new Error(progress.errorMessage || "Export failed"));
-        else resolve(progress);
+        if (progress.status === "Error") {
+          reject(new Error(progress.errorMessage || "Export failed"));
+        } else if (progress.status === "Done") {
+          // Trigger browser download
+          downloadTableExportFile(exportId, request.format);
+          resolve(progress);
+        } else {
+          resolve(progress);
+        }
       }
     };
     eventSource.onerror = () => {
@@ -1099,6 +1106,14 @@ export async function startTableExport(
       reject(new Error("Export progress connection lost"));
     };
   });
+}
+
+function downloadTableExportFile(exportId: string, format: string): void {
+  const ext = format === "csv" ? "csv" : "xlsx";
+  const a = document.createElement("a");
+  a.href = `/api/export/table/download/${exportId}`;
+  a.download = `table_export_${exportId}.${ext}`;
+  a.click();
 }
 
 export async function cancelTableExport(exportId: string): Promise<void> {

@@ -18,6 +18,8 @@ pub struct WebState {
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
+    /// Table export temp files: export_id -> (file_path, format)
+    pub export_files: RwLock<HashMap<String, (String, String)>>,
 }
 
 impl WebState {

@@ -3,4 +3,4 @@
 LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
 [target.x86_64-pc-windows-msvc]
-linker = "link"
+linker = "lld-link"

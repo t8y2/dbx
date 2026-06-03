@@ -67,6 +67,7 @@ async fn main() {
         sse_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        export_files: RwLock::new(HashMap::new()),
     });
 
     // CORS
@@ -265,6 +266,7 @@ async fn main() {
         // Table export
         .route("/export/table", post(routes::table_export::start_table_export))
         .route("/export/table/progress/{exportId}", get(routes::table_export::table_export_progress))
+        .route("/export/table/download/{exportId}", get(routes::table_export::table_export_download))
         .route("/export/table/cancel", post(routes::table_export::cancel_table_export))
         // SQL file
         .route("/sql-file/preview", post(routes::sql_file::preview_sql_file))

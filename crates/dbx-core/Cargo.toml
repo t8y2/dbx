@@ -28,7 +28,7 @@ webpki-roots = "0.26"
 rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
 mysql_async = { version = "0.36", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = "0.62.0"
-redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "sentinel", "cluster-async"] }
+redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 duckdb = "1.3.2"

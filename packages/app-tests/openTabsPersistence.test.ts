@@ -97,6 +97,51 @@ test("serializes table tabs with reload context", () => {
   );
 });
 
+test("serializes evicted result cache handles", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      resultEvicted: true,
+      resultCacheKey: "tab:tab-1:result",
+    }),
+  ]);
+
+  assert.equal(saved[0]?.resultEvicted, true);
+  assert.equal(saved[0]?.resultCacheKey, "tab:tab-1:result");
+});
+
+test("does not persist table data result cache handles across restarts", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      mode: "data",
+      resultEvicted: true,
+      resultCacheKey: "tab:tab-1:result",
+    }),
+  ]);
+
+  assert.equal(saved[0]?.resultEvicted, undefined);
+  assert.equal(saved[0]?.resultCacheKey, undefined);
+});
+
+test("restores evicted result cache handles as disk-backed runtime state", () => {
+  const raw = JSON.stringify([queryTab({ resultEvicted: true, resultCacheKey: "tab:tab-1:result" })]);
+
+  const restored = restoreOpenTabsState(raw, "tab-1");
+
+  assert.equal(restored.tabs[0]?.resultEvicted, true);
+  assert.equal(restored.tabs[0]?.resultCacheKey, "tab:tab-1:result");
+  assert.equal(restored.tabs[0]?.resultCacheState, "disk");
+});
+
+test("ignores legacy table data result cache handles on restore", () => {
+  const raw = JSON.stringify([queryTab({ mode: "data", resultEvicted: true, resultCacheKey: "tab:tab-1:result" })]);
+
+  const restored = restoreOpenTabsState(raw, "tab-1");
+
+  assert.equal(restored.tabs[0]?.resultEvicted, undefined);
+  assert.equal(restored.tabs[0]?.resultCacheKey, undefined);
+  assert.equal(restored.tabs[0]?.resultCacheState, undefined);
+});
+
 test("restores unsaved query tabs and active tab after restart", () => {
   const raw = JSON.stringify([
     queryTab({ id: "tab-1", sql: "select 1" }),

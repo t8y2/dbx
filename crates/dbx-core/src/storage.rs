@@ -19,6 +19,16 @@ pub struct Storage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabRuntimeCacheEntry {
+    pub key: String,
+    pub payload: Vec<u8>,
+    pub row_count: i64,
+    pub column_count: i64,
+    pub byte_size: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopSettings {
     pub show_tray_icon: bool,
     pub icon_theme: DesktopIconTheme,
@@ -98,6 +108,14 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS schema_cache (
         cache_key TEXT PRIMARY KEY,
         payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS tab_runtime_cache (
+        cache_key TEXT PRIMARY KEY,
+        payload BLOB NOT NULL,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        column_count INTEGER NOT NULL DEFAULT 0,
+        byte_size INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS saved_sql_folders (
@@ -1031,6 +1049,69 @@ impl Storage {
     }
 }
 
+// Tab runtime cache
+
+impl Storage {
+    pub async fn save_tab_runtime_cache(
+        &self,
+        key: &str,
+        payload: Vec<u8>,
+        row_count: i64,
+        column_count: i64,
+    ) -> Result<(), String> {
+        let key = key.to_string();
+        let byte_size = payload.len() as i64;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO tab_runtime_cache \
+                 (cache_key, payload, row_count, column_count, byte_size, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now')) \
+                 ON CONFLICT(cache_key) DO UPDATE SET \
+                 payload = excluded.payload, row_count = excluded.row_count, column_count = excluded.column_count, \
+                 byte_size = excluded.byte_size, updated_at = excluded.updated_at",
+                params![key, payload, row_count, column_count, byte_size],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_tab_runtime_cache(&self, key: &str) -> Result<Option<TabRuntimeCacheEntry>, String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT cache_key, payload, row_count, column_count, byte_size, updated_at \
+                 FROM tab_runtime_cache WHERE cache_key = ?1",
+                [key],
+                |row| {
+                    Ok(TabRuntimeCacheEntry {
+                        key: row.get(0)?,
+                        payload: row.get(1)?,
+                        row_count: row.get(2)?,
+                        column_count: row.get(3)?,
+                        byte_size: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn delete_tab_runtime_cache(&self, key: &str) -> Result<(), String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM tab_runtime_cache WHERE cache_key = ?1", [key])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+}
+
 // JSON migration
 
 impl Storage {
@@ -1325,5 +1406,23 @@ mod tests {
             vec!["conn-1".to_string(), "conn-1:db:main".to_string()]
         );
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn tab_runtime_cache_roundtrips_binary_payloads() {
+        let path = temp_db_path("tab-runtime-cache");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_tab_runtime_cache("tab:1:result", vec![1, 2, 3, 4], 10, 3).await.unwrap();
+        let entry = storage.load_tab_runtime_cache("tab:1:result").await.unwrap().unwrap();
+
+        assert_eq!(entry.key, "tab:1:result");
+        assert_eq!(entry.payload, vec![1, 2, 3, 4]);
+        assert_eq!(entry.row_count, 10);
+        assert_eq!(entry.column_count, 3);
+        assert_eq!(entry.byte_size, 4);
+
+        storage.delete_tab_runtime_cache("tab:1:result").await.unwrap();
+        assert_eq!(storage.load_tab_runtime_cache("tab:1:result").await.unwrap(), None);
     }
 }

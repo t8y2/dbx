@@ -1844,6 +1844,7 @@ name = "dbx"
 version = "0.5.29"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "calamine",
  "chrono",
  "csv",

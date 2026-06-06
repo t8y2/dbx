@@ -361,6 +361,8 @@ export interface QueryTab {
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultAccessedAt?: number;
+  resultCacheKey?: string;
+  resultCacheState?: "memory" | "disk" | "missing";
   pinned?: boolean;
   result?: QueryResult;
   results?: QueryResult[];

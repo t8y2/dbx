@@ -1766,6 +1766,8 @@ function markGridScrolling() {
 
 function onScrollerScroll(e: Event) {
   syncHeaderScroll(e);
+  const target = e.target;
+  recordScrollPosition(target instanceof HTMLElement ? { top: target.scrollTop, left: target.scrollLeft } : undefined);
   markGridScrolling();
 }
 
@@ -2125,6 +2127,7 @@ const {
   exitTransaction,
   startEdit,
   commitEdit,
+  commitEditFromBlur,
   applyCellValue,
   cancelEdit,
   onEditKeydown,
@@ -2147,6 +2150,7 @@ const {
   getResetScrollAfterResult,
   clearResetScrollAfterResult,
   cleanupFrames,
+  recordScrollPosition,
 } = editor;
 
 const saveActionMode = computed(() =>
@@ -3415,6 +3419,7 @@ function onCanvasScroll(event: Event) {
   const gutter = scrollbarGutterWidth(scroller);
   if (gridScrollbarGutter.value !== gutter) gridScrollbarGutter.value = gutter;
   if (headerRef.value && headerRef.value.scrollLeft !== scrollLeft) headerRef.value.scrollLeft = scrollLeft;
+  recordScrollPosition({ top: scrollTop, left: scrollLeft });
   markGridScrolling();
   scheduleCanvasDraw();
 }
@@ -4011,6 +4016,8 @@ function pasteTextIntoSelection(text: string): boolean {
 
 function onGridPaste(event: ClipboardEvent) {
   if (!props.editable || (!selectedRange.value && !hasColumnSelection.value)) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest("input, textarea, [contenteditable='true'], [role='textbox']")) return;
   const text = event.clipboardData?.getData("text/plain");
   if (text === undefined) return;
   event.preventDefault();
@@ -4606,6 +4613,8 @@ function updateTransposeViewport() {
 
 function onTransposeScroll() {
   updateTransposeViewport();
+  const el = transposeScrollElement();
+  recordScrollPosition(el ? { top: el.scrollTop, left: el.scrollLeft } : undefined);
   markGridScrolling();
 }
 
@@ -6312,7 +6321,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           autocorrect="off"
                           spellcheck="false"
                           class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-1.5 py-0 text-xs leading-[26px] outline-none z-10"
-                          @blur="commitEdit"
+                          @blur="commitEditFromBlur"
                           @click.stop
                           @keydown.stop="onEditKeydown"
                           @paste.stop
@@ -6948,7 +6957,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         autocorrect="off"
                         spellcheck="false"
                         class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 text-xs leading-[22px] outline-none z-10"
-                        @blur="commitEdit"
+                        @blur="commitEditFromBlur"
                         @click.stop
                         @keydown.stop="onEditKeydown"
                         @paste.stop
@@ -7123,7 +7132,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           autocorrect="off"
                           spellcheck="false"
                           class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-2.5 py-0 text-xs leading-[22px] outline-none z-10"
-                          @blur="commitEdit"
+                          @blur="commitEditFromBlur"
                           @click.stop
                           @keydown.stop="onEditKeydown"
                           @paste.stop
@@ -7475,6 +7484,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
                 <div
+                  data-native-clipboard
                   class="flex-1 min-h-0 overflow-auto p-3 text-xs"
                   :class="
                     cellDetailPanelIsBottom ? 'grid grid-cols-[minmax(0,1fr)_minmax(220px,30%)] gap-3' : 'space-y-3'

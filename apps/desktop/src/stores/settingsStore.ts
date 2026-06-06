@@ -179,7 +179,8 @@ export type EditorTheme =
   | "material"
   | "duotone-light"
   | "duotone-dark"
-  | "xcode";
+  | "xcode"
+  | "custom";
 
 const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
@@ -190,11 +191,52 @@ export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DISCONNECT_TAB_HANDLING_MODES = ["close-tabs", "keep-tabs-clear-results", "keep-tabs-keep-results"] as const;
 export type DisconnectTabHandlingMode = (typeof DISCONNECT_TAB_HANDLING_MODES)[number];
 
+export interface CustomThemeColors {
+  keyword: string;
+  field: string;
+  function: string;
+  string: string;
+  number: string;
+  comment: string;
+  table: string;
+  operator: string;
+  type: string;
+  builtin: string;
+  background?: string;
+  foreground?: string;
+}
+
+export const DEFAULT_CUSTOM_THEME_COLORS: CustomThemeColors = {
+  keyword: "#cba6f7",
+  field: "#f9e2af",
+  function: "#89dceb",
+  string: "#a6e3a1",
+  number: "#fab387",
+  comment: "#6c7086",
+  table: "#a6e3a1",
+  operator: "#89b4fa",
+  type: "#89b4fa",
+  builtin: "#f38ba8",
+};
+
+export interface CustomTheme {
+  id: string;
+  name: string;
+  colors: CustomThemeColors;
+}
+
+export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [
+  { id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS } },
+];
+
 export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
   uiScale: number;
   theme: EditorTheme;
+  customThemeColors: CustomThemeColors;
+  customThemes: CustomTheme[];
+  activeCustomThemeId: string;
   executeMode: "all" | "current";
   wordWrap: boolean;
   confirmDangerousSqlExecution: boolean;
@@ -236,6 +278,7 @@ export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }
   { value: "duotone-light", label: "Duotone Light", dark: false },
   { value: "duotone-dark", label: "Duotone Dark", dark: true },
   { value: "xcode", label: "Xcode", dark: false },
+  { value: "custom", label: "Custom", dark: true },
 ];
 
 const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => theme.value));
@@ -255,6 +298,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontSize: 13,
   uiScale: 1,
   theme: "app",
+  customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
+  customThemes: [...DEFAULT_CUSTOM_THEMES],
+  activeCustomThemeId: "default",
   executeMode: "all",
   wordWrap: false,
   confirmDangerousSqlExecution: true,
@@ -385,6 +431,28 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
     uiScale: normalizeUiScale(settings.uiScale),
     theme: settings.theme && EDITOR_THEME_VALUES.has(settings.theme) ? settings.theme : DEFAULT_EDITOR_SETTINGS.theme,
+    customThemeColors: {
+      ...DEFAULT_CUSTOM_THEME_COLORS,
+      ...settings.customThemeColors,
+    },
+    customThemes: (() => {
+      if (Array.isArray(settings.customThemes) && settings.customThemes.length > 0) {
+        return settings.customThemes.map((theme) => (theme.name === "默认" ? { ...theme, name: "Custom" } : theme));
+      }
+      return [
+        ...(settings.customThemeColors
+          ? [
+              {
+                id: "migrated",
+                name: "Migrated",
+                colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...settings.customThemeColors },
+              },
+            ]
+          : []),
+        ...DEFAULT_CUSTOM_THEMES,
+      ];
+    })(),
+    activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: settings.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     confirmDangerousSqlExecution:
@@ -543,6 +611,28 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
     if (partial.theme !== undefined) editorSettings.value.theme = partial.theme;
+    if (partial.customThemeColors !== undefined) {
+      editorSettings.value.customThemeColors = {
+        ...editorSettings.value.customThemeColors,
+        ...partial.customThemeColors,
+      };
+    }
+    if (partial.customThemes !== undefined) {
+      editorSettings.value.customThemes = Array.isArray(partial.customThemes)
+        ? partial.customThemes
+        : editorSettings.value.customThemes;
+    }
+    if (partial.activeCustomThemeId !== undefined) {
+      editorSettings.value.activeCustomThemeId = partial.activeCustomThemeId;
+    }
+    if (partial.customThemes !== undefined || partial.activeCustomThemeId !== undefined) {
+      const themes = editorSettings.value.customThemes;
+      const activeId = editorSettings.value.activeCustomThemeId;
+      const activeTheme = themes.find((t) => t.id === activeId) || themes[0];
+      if (activeTheme) {
+        editorSettings.value.customThemeColors = { ...activeTheme.colors };
+      }
+    }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.confirmDangerousSqlExecution !== undefined)

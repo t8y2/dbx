@@ -1,6 +1,8 @@
 import type { Extension } from "@codemirror/state";
-import type { EditorTheme } from "@/stores/settingsStore";
+import type { EditorTheme, CustomThemeColors } from "@/stores/settingsStore";
 import type { AppThemeAppearance } from "@/lib/appTheme";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
 type LucideIconNode = Array<[string, Record<string, string>]>;
@@ -14,6 +16,179 @@ const SUPPORTS_COLOR_MIX =
   CSS.supports("color", "color-mix(in oklch, black 50%, white)");
 const SUPPORTS_OKLCH =
   typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "oklch(0.62 0.19 255)");
+
+// ==================== 自定义主题配置 ====================
+// 在这里修改你喜欢的颜色！
+
+const customThemeColors = {
+  lineNumber: "#6c7086", // 行号颜色
+  lineNumberActive: "#cdd6f4", // 当前行号颜色
+  selection: "#313244", // 选中文本背景
+  cursor: "#f5e0dc", // 光标颜色
+
+  // 语法高亮颜色
+  keyword: "#cba6f7", // 关键字 (SELECT, FROM, WHERE 等)
+  string: "#a6e3a1", // 字符串
+  number: "#fab387", // 数字
+  comment: "#6c7086", // 注释
+  type: "#89b4fa", // 类型 (INTEGER, TEXT 等)
+  variable: "#f38ba8", // 变量
+  function: "#89dceb", // 函数
+  operator: "#89b4fa", // 运算符
+  punctuation: "#9399b2", // 标点符号
+  property: "#f9e2af", // 属性/字段名
+  tag: "#cba6f7", // XML/HTML 标签
+  attribute: "#fab387", // 属性名
+  className: "#f9e2af", // 类名
+
+  // UI 元素
+  gutterBackground: "#181825", // 侧边栏背景
+  activeLine: "#313244", // 当前行高亮
+  matchingBracket: "#45475a", // 匹配括号背景
+
+  // 特殊
+  builtin: "#89dceb", // 内置函数
+  meta: "#cdd6f4", // 元信息
+  invalid: "#f38ba8", // 无效字符
+};
+
+/** 创建自定义 CodeMirror 主题 */
+function createCustomTheme(
+  EditorView: typeof import("@codemirror/view").EditorView,
+  colors?: CustomThemeColors,
+  isDark: boolean = true,
+): Extension {
+  // 根据系统主题设置默认背景色和前景色
+  const defaultColors = isDark
+    ? { background: "#1e1e2e", foreground: "#cdd6f4" }
+    : { background: "#fafafa", foreground: "#242424" };
+
+  const c = { ...defaultColors, ...customThemeColors, ...(colors || {}) };
+
+  // 映射用户自定义属性名到 CodeMirror 内部属性名
+  if (colors) {
+    if (colors.field) {
+      c.variable = colors.field;
+      c.property = colors.field;
+    }
+    if (colors.table) {
+      // 表名通常被识别为 propertyName，如果单独设置了表名颜色则覆盖
+      c.property = colors.table;
+    }
+  }
+
+  const theme = EditorView.theme(
+    {
+      "&": {
+        backgroundColor: c.background,
+        color: c.foreground,
+      },
+      ".cm-content": {
+        caretColor: c.cursor,
+      },
+      ".cm-cursor": {
+        borderLeftColor: c.cursor,
+      },
+      "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
+        {
+          backgroundColor: c.selection,
+        },
+      ".cm-activeLine": {
+        backgroundColor: c.activeLine,
+      },
+      ".cm-gutters": {
+        backgroundColor: c.gutterBackground,
+        color: c.lineNumber,
+        borderRight: "1px solid #313244",
+      },
+      ".cm-activeLineGutter": {
+        backgroundColor: c.activeLine,
+        color: c.lineNumberActive,
+      },
+      ".cm-matchingBracket": {
+        backgroundColor: c.matchingBracket,
+        outline: "none",
+      },
+    },
+    { dark: isDark },
+  );
+
+  const highlightStyle = HighlightStyle.define([
+    { tag: tags.keyword, color: c.keyword },
+    { tag: tags.controlKeyword, color: c.keyword },
+    { tag: tags.definitionKeyword, color: c.keyword },
+    { tag: tags.moduleKeyword, color: c.keyword },
+    { tag: tags.operatorKeyword, color: c.keyword },
+    { tag: tags.string, color: c.string },
+    { tag: tags.special(tags.string), color: c.string },
+    { tag: tags.number, color: c.number },
+    { tag: tags.integer, color: c.number },
+    { tag: tags.float, color: c.number },
+    { tag: tags.comment, color: c.comment, fontStyle: "italic" },
+    { tag: tags.lineComment, color: c.comment, fontStyle: "italic" },
+    { tag: tags.blockComment, color: c.comment, fontStyle: "italic" },
+    { tag: tags.typeName, color: c.type },
+    { tag: tags.typeOperator, color: c.type },
+    { tag: tags.name, color: c.variable }, // ← 添加：普通标识符（字段名、表名等）
+    { tag: tags.variableName, color: c.variable },
+    { tag: tags.definition(tags.variableName), color: c.variable },
+    { tag: tags.function(tags.variableName), color: c.function },
+    { tag: tags.function(tags.propertyName), color: c.function },
+    { tag: tags.standard(tags.variableName), color: c.builtin },
+    { tag: tags.propertyName, color: c.property },
+    { tag: tags.operator, color: c.operator },
+    { tag: tags.compareOperator, color: c.operator },
+    { tag: tags.logicOperator, color: c.operator },
+    { tag: tags.arithmeticOperator, color: c.operator },
+    { tag: tags.punctuation, color: c.punctuation },
+    { tag: tags.paren, color: c.punctuation },
+    { tag: tags.brace, color: c.punctuation },
+    { tag: tags.bracket, color: c.punctuation },
+    { tag: tags.tagName, color: c.tag },
+    { tag: tags.attributeName, color: c.attribute },
+    { tag: tags.attributeValue, color: c.string },
+    { tag: tags.className, color: c.className },
+    { tag: tags.bool, color: c.keyword },
+    { tag: tags.null, color: c.keyword },
+    { tag: tags.meta, color: c.meta },
+    { tag: tags.invalid, color: c.invalid },
+    { tag: tags.heading, color: c.keyword, fontWeight: "bold" },
+    { tag: tags.heading1, color: c.keyword, fontWeight: "bold" },
+    { tag: tags.heading2, color: c.keyword, fontWeight: "bold" },
+    { tag: tags.heading3, color: c.keyword, fontWeight: "bold" },
+    { tag: tags.strong, color: c.foreground, fontWeight: "bold" },
+    { tag: tags.emphasis, color: c.foreground, fontStyle: "italic" },
+    { tag: tags.link, color: c.type, textDecoration: "underline" },
+    { tag: tags.url, color: c.type, textDecoration: "underline" },
+    { tag: tags.labelName, color: c.property },
+    { tag: tags.namespace, color: c.className },
+    { tag: tags.macroName, color: c.function },
+    { tag: tags.literal, color: c.string },
+    { tag: tags.special(tags.string), color: c.string },
+    { tag: tags.regexp, color: c.string },
+    { tag: tags.escape, color: c.string },
+    { tag: tags.processingInstruction, color: c.keyword },
+    { tag: tags.inserted, color: c.string },
+    { tag: tags.deleted, color: c.invalid },
+    { tag: tags.changed, color: c.property },
+    { tag: tags.self, color: c.keyword },
+    { tag: tags.derefOperator, color: c.operator },
+    { tag: tags.unit, color: c.type },
+    { tag: tags.angleBracket, color: c.punctuation },
+    { tag: tags.annotation, color: c.property },
+    { tag: tags.modifier, color: c.keyword },
+    { tag: tags.list, color: c.foreground },
+    { tag: tags.quote, color: c.string, fontStyle: "italic" },
+    { tag: tags.monospace, color: c.foreground },
+    { tag: tags.strikethrough, color: c.invalid, textDecoration: "line-through" },
+    { tag: tags.contentSeparator, color: c.operator },
+    { tag: tags.special(tags.name), color: c.builtin },
+  ]);
+
+  return [theme, syntaxHighlighting(highlightStyle)];
+}
+
+// ======================================================
 
 const TABLE_ICON: LucideIconNode = [
   ["path", { d: "M12 3v18" }],
@@ -88,6 +263,7 @@ export function resolveEditorTheme(theme: EditorTheme, appAppearance: AppThemeAp
 export async function loadEditorTheme(
   theme: EditorTheme,
   appAppearance: AppThemeAppearance = "dark",
+  customColors?: CustomThemeColors,
 ): Promise<Extension> {
   const resolvedTheme = resolveEditorTheme(theme, appAppearance);
   switch (resolvedTheme) {
@@ -109,6 +285,8 @@ export async function loadEditorTheme(
       return (await import("@uiw/codemirror-theme-duotone")).duotoneDark;
     case "xcode":
       return (await import("@uiw/codemirror-theme-xcode")).xcodeLight;
+    case "custom":
+      return createCustomTheme((await import("@codemirror/view")).EditorView, customColors, appAppearance === "dark");
     default:
       return (await import("@codemirror/theme-one-dark")).oneDark;
   }

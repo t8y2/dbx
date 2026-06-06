@@ -32,6 +32,14 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
+import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
+import {
+  buildTabResultSnapshot,
+  deleteTabResultSnapshot,
+  readTabResultSnapshot,
+  tabResultCacheKey,
+  writeTabResultSnapshot,
+} from "@/lib/tabResultCache";
 import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -118,6 +126,9 @@ export const useQueryStore = defineStore("query", () => {
   const restored = loadSavedTabs();
   const tabs = ref<QueryTab[]>(restored.tabs);
   const activeTabId = ref<string | null>(restored.activeTabId);
+  for (const tab of restored.tabs) {
+    if (tab.mode === "data") void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
+  }
   const tableStructureRefreshVersions = ref<Record<string, number>>({});
 
   function tableStructureKey(
@@ -176,7 +187,11 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function touchResult(tab: QueryTab | undefined, accessedAt = Date.now()) {
-    if (tab?.result || tab?.results) tab.resultAccessedAt = accessedAt;
+    if (tab?.result || tab?.results) {
+      tab.resultAccessedAt = accessedAt;
+      tab.resultCacheState = "memory";
+      tab.resultEvicted = undefined;
+    }
   }
 
   function clearResultPayload(tab: QueryTab, options: { evicted?: boolean } = {}) {
@@ -190,10 +205,19 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryEditabilityReason = undefined;
     if (tab.mode === "query") tab.tableMeta = undefined;
     tab.resultEvicted = options.evicted ? true : undefined;
+    tab.resultCacheState = options.evicted ? tab.resultCacheState : undefined;
+    if (!options.evicted) {
+      if (tab.resultCacheKey) void deleteTabResultSnapshot(tab.resultCacheKey);
+      tab.resultCacheKey = undefined;
+    }
   }
 
   async function evictCachedResult(tab: QueryTab) {
     await closeResultSession(tab);
+    const cacheKey = tabResultCacheKey(tab.id);
+    const cached = await writeTabResultSnapshot(cacheKey, buildTabResultSnapshot(tab));
+    tab.resultCacheKey = cached ? cacheKey : undefined;
+    tab.resultCacheState = cached ? "disk" : "missing";
     clearResultPayload(tab, { evicted: true });
   }
 
@@ -222,6 +246,8 @@ export const useQueryStore = defineStore("query", () => {
       objectBrowser: t.objectBrowser,
       objectSource: t.objectSource,
       tableMeta: t.tableMeta,
+      resultEvicted: t.resultEvicted,
+      resultCacheKey: t.resultCacheKey,
     })),
   );
 
@@ -366,6 +392,7 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string) {
     const idx = tabs.value.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    clearDataGridPendingSnapshotsForTab(id);
     if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
     if (tabs.value[idx].isExplaining) void cancelTabExplain(id);
     void closeResultSession(tabs.value[idx]);
@@ -381,6 +408,7 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value
       .filter((tab) => tab.id !== id)
       .forEach((tab) => {
+        clearDataGridPendingSnapshotsForTab(tab.id);
         if (tab.isExecuting) void cancelTabExecution(tab.id);
         if (tab.isExplaining) void cancelTabExplain(tab.id);
         void closeResultSession(tab);
@@ -394,6 +422,7 @@ export const useQueryStore = defineStore("query", () => {
 
   function closeAllTabs() {
     tabs.value.forEach((tab) => {
+      clearDataGridPendingSnapshotsForTab(tab.id);
       if (tab.isExecuting) void cancelTabExecution(tab.id);
       if (tab.isExplaining) void cancelTabExplain(tab.id);
       void closeResultSession(tab);
@@ -412,6 +441,7 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value
       .filter((tab) => closingIds.has(tab.id))
       .forEach((tab) => {
+        clearDataGridPendingSnapshotsForTab(tab.id);
         if (tab.isExecuting) void cancelTabExecution(tab.id);
         if (tab.isExplaining) void cancelTabExplain(tab.id);
         void closeResultSession(tab);
@@ -1381,10 +1411,44 @@ export const useQueryStore = defineStore("query", () => {
     touchResult(tabs.value.find((tab) => tab.id === id));
   });
 
+  function restoreCachedResultPayload(tab: QueryTab, snapshot: Awaited<ReturnType<typeof readTabResultSnapshot>>) {
+    if (!snapshot) return false;
+    const results = snapshot.results ? markQueryResultsRowsRaw(snapshot.results) : undefined;
+    const activeIndex = snapshot.activeResultIndex ?? 0;
+    tab.results = results;
+    tab.activeResultIndex = snapshot.activeResultIndex;
+    tab.result = snapshot.result
+      ? markQueryResultRowsRaw(snapshot.result)
+      : results?.[activeIndex]
+        ? markQueryResultRowsRaw(results[activeIndex])
+        : undefined;
+    if (!tab.result && !tab.results) return false;
+
+    tab.queryAnalysis = snapshot.queryAnalysis;
+    tab.querySourceColumns = snapshot.querySourceColumns;
+    tab.queryEditabilityReason = snapshot.queryEditabilityReason;
+    tab.tableMeta = snapshot.tableMeta;
+    tab.resultPageSql = snapshot.resultPageSql;
+    tab.resultPageLimit = snapshot.resultPageLimit;
+    tab.resultPageOffset = snapshot.resultPageOffset;
+    tab.resultCountSql = snapshot.resultCountSql;
+    tab.resultTotalRowCount = snapshot.resultTotalRowCount;
+    tab.resultTotalRowCountLoading = false;
+    tab.resultSessionId = undefined;
+    tab.resultEvicted = undefined;
+    tab.resultCacheState = "memory";
+    touchResult(tab);
+    return true;
+  }
+
   async function reloadEvictedTab(id: string) {
     const tab = tabs.value.find((t) => t.id === id);
-    const shouldReloadMissingDataTab = tab?.mode === "data" && !tab.result && !tab.isExecuting;
-    if (!tab || (!tab.resultEvicted && !shouldReloadMissingDataTab)) return;
+    if (!tab || !tab.resultEvicted) return;
+    if (tab.resultCacheKey) {
+      const restored = restoreCachedResultPayload(tab, await readTabResultSnapshot(tab.resultCacheKey));
+      if (restored) return;
+      tab.resultCacheState = "missing";
+    }
     tab.resultEvicted = false;
     const sql = tab.lastExecutedSql ?? tab.sql;
     if (!sql?.trim()) return;

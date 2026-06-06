@@ -25,6 +25,8 @@ export interface SavedOpenTab {
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   tableMeta?: QueryTab["tableMeta"];
+  resultEvicted?: boolean;
+  resultCacheKey?: string;
 }
 
 export interface RestoredOpenTabs {
@@ -58,6 +60,10 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     tableMeta: tab.tableMeta,
+    ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
+    ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined
+      ? { resultCacheKey: tab.resultCacheKey }
+      : {}),
   }));
 }
 
@@ -86,13 +92,19 @@ export function restoreOpenTabsState(
 
     const saved = parsed.filter(isSavedOpenTab);
     const filtered = options.queryOnly ? saved.filter((tab) => (tab.mode ?? "query") === "query") : saved;
-    const tabs: QueryTab[] = filtered.map((tab) => ({
-      ...tab,
-      mode: tab.mode ?? "query",
-      isExecuting: false,
-      isCancelling: false,
-      isExplaining: false,
-    }));
+    const tabs: QueryTab[] = filtered.map((tab) => {
+      const mode = tab.mode ?? "query";
+      return {
+        ...tab,
+        mode,
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+        resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
+        resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,
+        resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,
+      };
+    });
     const activeTabId = rawActiveTabId || null;
 
     return {

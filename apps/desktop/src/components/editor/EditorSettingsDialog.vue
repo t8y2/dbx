@@ -44,8 +44,11 @@ import {
   type EditorTheme,
   type DesktopIconTheme,
   type DisconnectTabHandlingMode,
+  type CustomThemeColors,
+  type CustomTheme,
 } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
+import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -103,6 +106,9 @@ const editFontFamily = ref(settingsStore.editorSettings.fontFamily);
 const editFontSize = ref(settingsStore.editorSettings.fontSize);
 const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
+const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
+const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
+const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
@@ -256,6 +262,8 @@ watch(
       editFontSize.value = settingsStore.editorSettings.fontSize;
       editUiScale.value = settingsStore.editorSettings.uiScale;
       editTheme.value = settingsStore.editorSettings.theme;
+      editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
+      editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
       editExecuteMode.value = settingsStore.editorSettings.executeMode;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
       editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
@@ -300,6 +308,8 @@ function hasChanges(): boolean {
     editFontSize.value !== settingsStore.editorSettings.fontSize ||
     editUiScale.value !== settingsStore.editorSettings.uiScale ||
     editTheme.value !== settingsStore.editorSettings.theme ||
+    JSON.stringify(editCustomThemes.value) !== JSON.stringify(settingsStore.editorSettings.customThemes) ||
+    editActiveCustomThemeId.value !== settingsStore.editorSettings.activeCustomThemeId ||
     editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
     editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
@@ -333,6 +343,8 @@ async function persistSettings() {
     fontSize: editFontSize.value,
     uiScale: editUiScale.value,
     theme: editTheme.value,
+    customThemes: editCustomThemes.value,
+    activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     wordWrap: editWordWrap.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
@@ -375,6 +387,8 @@ function resetDefaults() {
   editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
   editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
   editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
+  editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
+  editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
@@ -405,8 +419,43 @@ function onFontFamilyChange(v: any) {
   if (typeof v === "string") editFontFamily.value = v;
 }
 
+const themeSelectValue = computed(() => {
+  if (editTheme.value === "custom") {
+    return `custom:${editActiveCustomThemeId.value}`;
+  }
+  return editTheme.value;
+});
+
+const themeSelectOptions = computed(() => [
+  ...EDITOR_THEMES.filter((theme) => theme.value !== "custom").map((theme) => ({
+    value: theme.value,
+    label: theme.value === "app" ? t("settings.followAppTheme") : theme.label,
+    dark: theme.dark,
+    isCustom: false,
+  })),
+  ...editCustomThemes.value.map((theme) => ({
+    value: `custom:${theme.id}`,
+    label: theme.name,
+    dark: true,
+    isCustom: true,
+  })),
+]);
+
 function onThemeChange(v: any) {
-  if (typeof v === "string") editTheme.value = v as typeof DEFAULT_EDITOR_SETTINGS.theme;
+  if (typeof v !== "string") return;
+  if (v.startsWith("custom:")) {
+    editTheme.value = "custom";
+    editActiveCustomThemeId.value = v.slice(7);
+  } else {
+    editTheme.value = v as typeof DEFAULT_EDITOR_SETTINGS.theme;
+  }
+}
+
+function handleThemeSave(updatedThemes: CustomTheme[], activeId: string) {
+  editCustomThemes.value = updatedThemes;
+  editActiveCustomThemeId.value = activeId;
+  editTheme.value = "custom";
+  showThemeCustomizer.value = false;
 }
 
 function onDisconnectTabHandlingModeChange(v: any) {
@@ -1036,16 +1085,24 @@ async function aiTestConn() {
 const previewRef = ref<HTMLDivElement>();
 const previewView = shallowRef<EditorViewType | null>(null);
 
+function getPreviewCustomThemeColors(): CustomThemeColors | undefined {
+  if (editTheme.value !== "custom") return undefined;
+  const activeTheme = editCustomThemes.value.find((t) => t.id === editActiveCustomThemeId.value);
+  return activeTheme?.colors;
+}
+
 const previewSettings = computed<{
   fontFamily: string;
   fontSize: number;
   theme: EditorTheme;
   appAppearance: AppThemeAppearance;
+  customColors?: CustomThemeColors;
 }>(() => ({
   fontFamily: editFontFamily.value,
   fontSize: editFontSize.value,
   theme: editTheme.value,
   appAppearance: isDark.value ? "dark" : "light",
+  customColors: getPreviewCustomThemeColors(),
 }));
 
 const previewSql = `SELECT u.id, u.name
@@ -1057,11 +1114,11 @@ let themeComp: import("@codemirror/state").Compartment | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 
 watch(
-  previewSettings,
-  async (ss) => {
+  [previewSettings, editCustomThemes, editActiveCustomThemeId],
+  async ([ss]) => {
     if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
 
-    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance);
+    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
     previewView.value.dispatch({
       effects: [
         themeComp.reconfigure(themeExt),
@@ -1102,7 +1159,7 @@ watch(previewRef, async (el) => {
   themeComp = new Compartment();
 
   const ss = previewSettings.value;
-  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance);
+  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
 
   const state = EditorState.create({
     doc: previewSql,
@@ -1160,9 +1217,9 @@ watch(
         <div class="min-w-0 flex-1 overflow-hidden px-1 flex flex-col">
           <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pr-2">
             <section v-if="activeSettingsTab === 'editor'" class="flex flex-col gap-5 py-2">
-              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
+              <div class="grid gap-4 md:grid-cols-[1fr_auto]">
                 <!-- Font Family -->
-                <div class="space-y-2">
+                <div class="space-y-2 min-w-0">
                   <Label>{{ t("settings.fontFamily") }}</Label>
                   <SearchableSelect
                     :model-value="editFontFamily"
@@ -1196,29 +1253,40 @@ watch(
                   </SearchableSelect>
                 </div>
 
-                <!-- Theme -->
-                <div class="space-y-2">
-                  <Label>{{ t("settings.theme") }}</Label>
-                  <Select :model-value="editTheme" @update:model-value="onThemeChange">
-                    <SelectTrigger>
-                      <SelectValue :placeholder="t('settings.selectTheme')" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="theme in EDITOR_THEMES" :key="theme.value" :value="theme.value">
-                        <div class="flex items-center gap-2">
-                          <span
-                            class="h-3 w-3 rounded-full border"
-                            :class="
-                              theme.dark
-                                ? 'bg-foreground border-foreground/20'
-                                : 'bg-muted-foreground/30 border-muted-foreground/40'
-                            "
-                          />
-                          {{ theme.value === "app" ? t("settings.followAppTheme") : theme.label }}
-                        </div>
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
+                <!-- Theme + Custom Theme Button -->
+                <div class="flex gap-2 items-end">
+                  <div class="space-y-2">
+                    <Label>{{ t("settings.theme") }}</Label>
+                    <Select :model-value="themeSelectValue" @update:model-value="onThemeChange">
+                      <SelectTrigger class="min-w-[80px] max-w-[200px]">
+                        <SelectValue :placeholder="t('settings.selectTheme')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="theme in themeSelectOptions" :key="theme.value" :value="theme.value">
+                          <div class="flex items-center gap-2">
+                            <span
+                              class="h-3 w-3 rounded-full border"
+                              :class="
+                                theme.dark
+                                  ? 'bg-foreground border-foreground/20'
+                                  : 'bg-muted-foreground/30 border-muted-foreground/40'
+                              "
+                            />
+                            {{ theme.label }}
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    v-if="editTheme === 'custom'"
+                    variant="outline"
+                    class="h-9 w-auto px-4"
+                    @click="showThemeCustomizer = true"
+                  >
+                    <Settings class="mr-2 h-4 w-4" />
+                    {{ t("settings.customThemeConfigure") }}
+                  </Button>
                 </div>
               </div>
 
@@ -2547,6 +2615,14 @@ watch(
         </div>
       </div>
     </DialogContent>
+
+    <!-- Theme Customizer Dialog -->
+    <ThemeCustomizerDialog
+      v-model:open="showThemeCustomizer"
+      :themes="editCustomThemes"
+      :active-theme-id="editActiveCustomThemeId"
+      @save="handleThemeSave"
+    />
 
     <!-- Snippet Add/Edit Dialog -->
     <Dialog :open="snippetDialogOpen" @update:open="snippetDialogOpen = $event">

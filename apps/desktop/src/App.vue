@@ -279,7 +279,10 @@ function isGlobalUiZoomTarget(target: EventTarget | null): target is Element {
 
 watch(
   () => queryStore.activeTabId,
-  (id) => {
+  (id, previousId) => {
+    if (previousId && previousId !== id && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("dbx:before-tab-switch", { detail: { tabId: id, fromTabId: previousId } }));
+    }
     if (id) newQueryContextSource.value = "tab";
     selectedSql.value = "";
     activeOutputView.value = "result";
@@ -862,11 +865,6 @@ async function reconnectRestoredTabs() {
       await connectionStore.ensureConnected(activeConnectionId);
     } catch {}
   }
-
-  const tab = activeTab.value;
-  if (tab?.mode === "data" && tab.tableMeta && tab.sql) {
-    queryStore.executeTabSql(tab.id, tab.sql).catch(() => {});
-  }
 }
 
 function handleContextMenu(e: MouseEvent) {
@@ -1058,7 +1056,7 @@ onUnmounted(() => {
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"
                 />
-                <KeepAlive :max="8">
+                <KeepAlive :max="4">
                   <ContentArea
                     ref="contentAreaRef"
                     :key="activeTab.id"

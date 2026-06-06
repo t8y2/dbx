@@ -831,7 +831,7 @@ test("data tab execution preserves pagination offset metadata", async () => {
   }
 });
 
-test("reloading an empty data tab fetches table results again", async () => {
+test("activating an empty data tab waits for explicit execution", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -863,10 +863,8 @@ test("reloading an empty data tab fetches table results again", async () => {
   try {
     await store.reloadEvictedTab(tabId);
 
-    assert.equal(executeBody.sql, 'SELECT * FROM "public"."users" LIMIT 50 OFFSET 50;');
-    assert.equal(executeBody.maxRows, 50);
-    assert.equal(executeBody.fetchSize, 50);
-    assert.deepEqual(tab.result?.rows, [[51]]);
+    assert.equal(executeBody, undefined);
+    assert.equal(tab.result, undefined);
     assert.equal(tab.resultPageLimit, 50);
     assert.equal(tab.resultPageOffset, 50);
   } finally {

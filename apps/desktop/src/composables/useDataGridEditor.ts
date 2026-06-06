@@ -1,4 +1,16 @@
-import { ref, computed, nextTick, watch, onBeforeUnmount, type ComputedRef, type Ref } from "vue";
+import {
+  ref,
+  computed,
+  nextTick,
+  watch,
+  getCurrentInstance,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  type ComputedRef,
+  type Ref,
+} from "vue";
 import * as api from "@/lib/api";
 import { normalizeDataGridSaveError } from "@/lib/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/gridRowStatus";
@@ -86,10 +98,41 @@ interface PendingChangesSnapshot {
   newRows: CellValue[][];
   dirtyRows: Map<number, Map<number, CellValue>>;
   deletedRows: Set<number>;
+  editingCell?: { rowId: number; col: number } | null;
+  editValue?: string;
+  transactionActive?: boolean;
+  scroll?: { top: number; left: number };
   columnCount: number;
+  rowCount: number;
 }
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
+const closingPendingSnapshotTabs = new Set<string>();
+const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
+
+function cacheKeyBelongsToTab(cacheKey: string, tabId: string) {
+  return cacheKey === tabId || cacheKey.startsWith(`${tabId}-`);
+}
+
+function closedTabIdForCacheKey(cacheKey: string): string | undefined {
+  for (const tabId of closingPendingSnapshotTabs) {
+    if (cacheKeyBelongsToTab(cacheKey, tabId)) return tabId;
+  }
+  return undefined;
+}
+
+export function clearDataGridPendingSnapshotsForTab(tabId: string) {
+  closingPendingSnapshotTabs.add(tabId);
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => closingPendingSnapshotTabs.delete(tabId), 5000);
+  } else {
+    setTimeout(() => closingPendingSnapshotTabs.delete(tabId), 5000);
+  }
+  pendingChangesCache.delete(tabId);
+  for (const key of pendingChangesCache.keys()) {
+    if (cacheKeyBelongsToTab(key, tabId)) pendingChangesCache.delete(key);
+  }
+}
 
 export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const connectionStore = useConnectionStore();
@@ -123,15 +166,26 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const dirtyRows = ref<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
   const deletedRows = ref<Set<number>>(new Set());
+  let restoredEditingCell = false;
+  let restoredTransactionActive = false;
+  let suppressNextBlurCommit = false;
+  let pendingScrollRestore: PendingChangesSnapshot["scroll"] | undefined;
+  let saveScrollSnapshotTimer = 0;
+  let componentActive = true;
 
   // Restore cached pending changes from a previous instance (e.g. after result eviction + reload)
   const key = cacheKey?.value;
   if (key) {
     const cached = pendingChangesCache.get(key);
-    if (cached && cached.columnCount === result.value.columns.length) {
+    if (cached && cached.columnCount === result.value.columns.length && cached.rowCount === result.value.rows.length) {
       newRows.value = cached.newRows;
       dirtyRows.value = cached.dirtyRows;
       deletedRows.value = cached.deletedRows;
+      editingCell.value = cached.editingCell ?? null;
+      editValue.value = cached.editValue ?? "";
+      restoredEditingCell = !!cached.editingCell;
+      restoredTransactionActive = cached.transactionActive === true;
+      pendingScrollRestore = cached.scroll;
       pendingChangesCache.delete(key);
     } else {
       pendingChangesCache.delete(key);
@@ -158,6 +212,34 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   if (hasPendingChanges.value && useTransaction.value) {
     transactionActive.value = true;
+  }
+  if (restoredTransactionActive && useTransaction.value) transactionActive.value = true;
+  if (restoredEditingCell) {
+    focusEditInput();
+  }
+
+  function focusEditInput(select = true) {
+    const focusInput = () => {
+      if (typeof document === "undefined") return;
+      const root = getScrollerElement()?.closest("[data-grid-root]");
+      const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | null;
+      input?.focus();
+      if (select && input) {
+        input.select();
+        input.setSelectionRange?.(0, input.value.length);
+      }
+    };
+    nextTick(() => {
+      focusInput();
+      if (typeof requestAnimationFrame === "undefined") return;
+      let attempts = 0;
+      const focusNextFrame = () => {
+        focusInput();
+        attempts += 1;
+        if (attempts < 3) requestAnimationFrame(focusNextFrame);
+      };
+      requestAnimationFrame(focusNextFrame);
+    });
   }
 
   function enterTransaction() {
@@ -218,6 +300,42 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     };
   }
 
+  function readScrollPosition(): PendingChangesSnapshot["scroll"] | undefined {
+    const el = getScrollerElement();
+    if (!el) return undefined;
+    const top = Math.max(0, el.scrollTop);
+    const left = Math.max(0, el.scrollLeft);
+    if (top === 0 && left === 0) return undefined;
+    return { top, left };
+  }
+
+  function applyScrollPosition(scroll: PendingChangesSnapshot["scroll"] | undefined) {
+    if (!scroll) return;
+    const restoreScroll = () => {
+      const scroller = scrollerRef.value;
+      if (scroller && !(scroller instanceof HTMLElement)) {
+        scroller.scrollToPosition?.(scroll.top);
+      }
+      const el = getScrollerElement();
+      if (!el) return;
+      el.scrollTo?.({ top: scroll.top, left: scroll.left });
+      el.scrollTop = scroll.top;
+      el.scrollLeft = scroll.left;
+    };
+    restoreScrollAcrossFrames(restoreScroll);
+  }
+
+  function recordScrollPosition(scroll = readScrollPosition()) {
+    pendingScrollRestore = scroll;
+    const k = cacheKey?.value;
+    if (!k || typeof window === "undefined") return;
+    if (saveScrollSnapshotTimer) window.clearTimeout(saveScrollSnapshotTimer);
+    saveScrollSnapshotTimer = window.setTimeout(() => {
+      saveScrollSnapshotTimer = 0;
+      savePendingSnapshot(true, true);
+    }, 120);
+  }
+
   function focusScrollerWithoutScrolling() {
     const el = getScrollerElement();
     if (!el) return;
@@ -230,14 +348,18 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreScroll();
     nextTick(() => {
       restoreScroll();
-      cancelScrollRestoreFrame = requestAnimationFrame(() => {
+      let attempts = 0;
+      const restoreNextFrame = () => {
         restoreScroll();
-        cancelScrollRestoreFrame = requestAnimationFrame(() => {
-          restoreScroll();
+        attempts += 1;
+        if (attempts >= 8) {
           cancelScrollRestoreFrame = 0;
           isCancelling = false;
-        });
-      });
+          return;
+        }
+        cancelScrollRestoreFrame = requestAnimationFrame(restoreNextFrame);
+      };
+      cancelScrollRestoreFrame = requestAnimationFrame(restoreNextFrame);
     });
   }
 
@@ -252,6 +374,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function cleanupFrames() {
     if (resetScrollFrame) cancelAnimationFrame(resetScrollFrame);
     if (cancelScrollRestoreFrame) cancelAnimationFrame(cancelScrollRestoreFrame);
+    if (saveScrollSnapshotTimer) window.clearTimeout(saveScrollSnapshotTimer);
   }
 
   // --- Cell value coercion ---
@@ -311,14 +434,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!item || item.isDeleted) return;
     if (!item.isNew && !canEditExistingRows.value) return;
     isCancelling = false;
+    suppressNextBlurCommit = false;
     editingCell.value = { rowId, col: colIdx };
     const val = item?.data[colIdx] ?? null;
     editValue.value = val === null ? "" : typeof val === "object" ? JSON.stringify(val) : String(val);
-    nextTick(() => {
-      const input = document.querySelector(".cell-edit-input") as HTMLInputElement;
-      input?.focus();
-      input?.select();
-    });
+    focusEditInput();
   }
 
   function commitEdit() {
@@ -364,6 +484,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
     }
     editingCell.value = null;
+  }
+
+  function commitEditFromBlur() {
+    if (suppressNextBlurCommit) {
+      suppressNextBlurCommit = false;
+      return;
+    }
+    commitEdit();
   }
 
   function applyCellValue(rowId: number, col: number, value: string | null) {
@@ -772,24 +900,78 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   watch(
     () => result.value.rows,
     () => {
+      pendingScrollRestore = undefined;
       discardChanges();
     },
   );
 
-  // Save pending changes before the component is destroyed so they can be
-  // restored if a new DataGrid instance is created for the same tab
-  // (e.g. after result eviction + reload).
-  onBeforeUnmount(() => {
+  function savePendingSnapshot(includeEditing = false, includeScroll = false) {
     const k = cacheKey?.value;
-    if (k && hasPendingChanges.value) {
-      pendingChangesCache.set(k, {
-        newRows: newRows.value.map((r) => [...r]),
-        dirtyRows: new Map([...dirtyRows.value].map(([i, m]) => [i, new Map(m)])),
-        deletedRows: new Set(deletedRows.value),
-        columnCount: result.value.columns.length,
-      });
+    if (!k) return;
+    if (closedTabIdForCacheKey(k)) {
+      pendingChangesCache.delete(k);
+      return;
     }
-  });
+    const scroll = includeScroll ? (readScrollPosition() ?? pendingScrollRestore) : undefined;
+    if (includeScroll) pendingScrollRestore = scroll;
+    if (!hasPendingChanges.value && !(includeEditing && editingCell.value) && !scroll) {
+      pendingChangesCache.delete(k);
+      return;
+    }
+    pendingChangesCache.set(k, {
+      newRows: newRows.value.map((r) => [...r]),
+      dirtyRows: new Map([...dirtyRows.value].map(([i, m]) => [i, new Map(m)])),
+      deletedRows: new Set(deletedRows.value),
+      editingCell: includeEditing && editingCell.value ? { ...editingCell.value } : null,
+      editValue: editValue.value,
+      transactionActive: transactionActive.value,
+      scroll,
+      columnCount: result.value.columns.length,
+      rowCount: result.value.rows.length,
+    });
+  }
+
+  function restorePendingSnapshotFocus() {
+    suppressNextBlurCommit = false;
+    if (editingCell.value) focusEditInput(true);
+    applyScrollPosition(pendingScrollRestore);
+  }
+
+  function onBeforeTabSwitch() {
+    if (!componentActive) return;
+    savePendingSnapshot(true, true);
+    if (editingCell.value) suppressNextBlurCommit = true;
+  }
+
+  const componentInstance = getCurrentInstance();
+  if (componentInstance && typeof window !== "undefined") {
+    window.addEventListener(BEFORE_TAB_SWITCH_EVENT, onBeforeTabSwitch);
+  }
+
+  if (componentInstance) {
+    onMounted(() => {
+      componentActive = true;
+      applyScrollPosition(pendingScrollRestore);
+    });
+    onActivated(() => {
+      componentActive = true;
+      restorePendingSnapshotFocus();
+    });
+    onDeactivated(() => {
+      savePendingSnapshot(true, true);
+      componentActive = false;
+    });
+
+    // Save pending changes before the component is destroyed so they can be
+    // restored if a new DataGrid instance is created for the same tab
+    // (e.g. after result eviction + reload).
+    onBeforeUnmount(() => {
+      savePendingSnapshot(true, true);
+      if (typeof window !== "undefined") {
+        window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, onBeforeTabSwitch);
+      }
+    });
+  }
 
   return {
     editingCell,
@@ -811,6 +993,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     exitTransaction,
     startEdit,
     commitEdit,
+    commitEditFromBlur,
     applyCellValue,
     cancelEdit,
     onEditKeydown,
@@ -836,6 +1019,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     getResetScrollAfterResult,
     clearResetScrollAfterResult,
     cleanupFrames,
+    recordScrollPosition,
     syncHeaderScroll: (headerRef: Ref<HTMLDivElement | undefined>) => (e: Event) => {
       if (headerRef.value) {
         headerRef.value.scrollLeft = (e.target as HTMLElement).scrollLeft;

@@ -789,11 +789,16 @@ async function exportStructure(row: ObjectBrowserRow) {
 async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
   try {
     const schema = row.schema || selectedSchema.value;
+    const tableColumns =
+      format === "sql"
+        ? await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)
+        : undefined;
     const queryColumns =
       props.connection.db_type === "neo4j"
-        ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map(
-            (column) => column.name,
-          )
+        ? (
+            tableColumns ??
+            (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name))
+          ).map((column) => column.name)
         : undefined;
     const result = await fetchTableDataForExport({
       databaseType: effectiveDatabaseType.value,
@@ -824,6 +829,7 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
       schema,
       tableName: row.name,
       columns: result.columns,
+      columnTypes: tableColumns ? columnTypesForResultColumns(result.columns, tableColumns) : undefined,
       rows: result.rows,
     });
     await saveFileContent(content, `${row.name}.sql`, "SQL", "sql");
@@ -831,6 +837,14 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function columnTypesForResultColumns(
+  columns: string[],
+  tableColumns: Array<{ name: string; data_type: string }>,
+): Array<string | undefined> {
+  const typesByName = new Map(tableColumns.map((column) => [column.name.toLocaleLowerCase(), column.data_type]));
+  return columns.map((column) => typesByName.get(column.toLocaleLowerCase()));
 }
 
 async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql") {

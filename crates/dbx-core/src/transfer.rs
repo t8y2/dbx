@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::connection::{AppState, PoolKind};
 use crate::db;
+use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{agent_execute_query_params, QueryExecutionOptions};
@@ -68,9 +69,11 @@ pub enum TransferStatus {
 
 pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     match db_type {
-        DatabaseType::Mysql | DatabaseType::ClickHouse | DatabaseType::Doris | DatabaseType::StarRocks => {
-            format!("`{}`", name.replace('`', "``"))
-        }
+        DatabaseType::Mysql
+        | DatabaseType::ClickHouse
+        | DatabaseType::Doris
+        | DatabaseType::StarRocks
+        | DatabaseType::Hive => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
@@ -78,7 +81,7 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
 
 pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType) -> String {
     let qt = quote_identifier(table, db_type);
-    if schema.is_empty() || matches!(db_type, DatabaseType::Mysql) {
+    if schema.is_empty() || matches!(db_type, DatabaseType::Mysql | DatabaseType::MongoDb) {
         qt
     } else {
         format!("{}.{}", quote_identifier(schema, db_type), qt)
@@ -654,6 +657,33 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
     let t = source_type.to_lowercase();
     let base = t.split('(').next().unwrap_or(&t).trim();
 
+    if matches!(target_db, DatabaseType::Hive) {
+        return match base {
+            "tinyint" => "TINYINT".into(),
+            "smallint" | "int2" => "SMALLINT".into(),
+            "int" | "integer" | "int4" | "mediumint" | "serial" | "smallserial" => "INT".into(),
+            "bigint" | "int8" | "bigserial" => "BIGINT".into(),
+            "float" | "float4" | "real" => "FLOAT".into(),
+            "double" | "double precision" | "float8" => "DOUBLE".into(),
+            "decimal" | "numeric" | "number" => {
+                if let Some(index) = t.find('(') {
+                    format!("DECIMAL{}", &t[index..])
+                } else {
+                    "DECIMAL".into()
+                }
+            }
+            "bool" | "boolean" | "bit" => "BOOLEAN".into(),
+            "date" => "DATE".into(),
+            "datetime" | "timestamp" | "timestamptz" | "timestamp with time zone" | "timestamp without time zone" => {
+                "TIMESTAMP".into()
+            }
+            "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "bytea" | "image" => {
+                "BINARY".into()
+            }
+            _ => "STRING".into(),
+        };
+    }
+
     match base {
         "int" | "integer" | "int4" | "mediumint" => match target_db {
             DatabaseType::Postgres => "INTEGER".into(),
@@ -821,7 +851,7 @@ pub fn generate_create_table_ddl(
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable {
+            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive) {
                 line.push_str(" NOT NULL");
             }
             if is_mysql_family {
@@ -837,17 +867,19 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    for c in columns {
-        if c.is_primary_key {
-            let qname = quote_identifier(&c.name, target_db);
-            if is_mysql_family {
-                let mapped = map_column_type(&c.data_type, source_db, target_db);
-                if mysql_type_needs_key_prefix(&mapped) {
-                    pks.push(format!("{qname}(255)"));
-                    continue;
+    if !matches!(target_db, DatabaseType::Hive) {
+        for c in columns {
+            if c.is_primary_key {
+                let qname = quote_identifier(&c.name, target_db);
+                if is_mysql_family {
+                    let mapped = map_column_type(&c.data_type, source_db, target_db);
+                    if mysql_type_needs_key_prefix(&mapped) {
+                        pks.push(format!("{qname}(255)"));
+                        continue;
+                    }
                 }
+                pks.push(qname);
             }
-            pks.push(qname);
         }
     }
 
@@ -1145,6 +1177,7 @@ pub fn generate_upsert_typed(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
+        (DatabaseType::Hive, _) => 500,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -1399,6 +1432,143 @@ fn value_to_sql_literal(value: &serde_json::Value, _db_type: &DatabaseType) -> S
         serde_json::Value::String(s) => quote_string_literal(s),
         _ => quote_string_literal(&value.to_string()),
     }
+}
+
+fn is_mongodb_transfer_type(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::MongoDb)
+}
+
+fn mongo_transfer_document_fields(documents: &[serde_json::Value]) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut seen = HashSet::new();
+    for document in documents {
+        let Some(object) = document.as_object() else {
+            continue;
+        };
+        for key in object.keys() {
+            if seen.insert(key.clone()) {
+                fields.push(key.clone());
+            }
+        }
+    }
+    fields
+}
+
+fn mongo_documents_to_rows(documents: &[serde_json::Value], columns: &[String]) -> Vec<Vec<serde_json::Value>> {
+    documents
+        .iter()
+        .map(|document| {
+            let object = document.as_object();
+            columns
+                .iter()
+                .map(|column| object.and_then(|values| values.get(column)).cloned().unwrap_or(serde_json::Value::Null))
+                .collect()
+        })
+        .collect()
+}
+
+fn sql_rows_to_mongo_documents(columns: &[String], rows: &[Vec<serde_json::Value>]) -> Vec<serde_json::Value> {
+    rows.iter()
+        .map(|row| {
+            let mut document = serde_json::Map::new();
+            for (index, column) in columns.iter().enumerate() {
+                document.insert(column.clone(), row.get(index).cloned().unwrap_or(serde_json::Value::Null));
+            }
+            serde_json::Value::Object(document)
+        })
+        .collect()
+}
+
+async fn find_mongo_documents_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    offset: u64,
+    batch_size: usize,
+) -> Result<MongoDocumentResult, String> {
+    crate::mongo_ops::mongo_find_documents_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        offset,
+        batch_size as i64,
+        None,
+        Some(r#"{"_id":1}"#),
+    )
+    .await
+}
+
+async fn insert_mongo_documents_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    documents: &[serde_json::Value],
+) -> Result<u64, String> {
+    if documents.is_empty() {
+        return Ok(0);
+    }
+    let docs_json = serde_json::to_string(documents).map_err(|e| format!("Failed to encode MongoDB documents: {e}"))?;
+    match crate::mongo_ops::mongo_insert_documents_core(state, connection_id, database, collection, &docs_json).await {
+        Ok(count) => Ok(count),
+        Err(error) if error.to_ascii_lowercase().contains("legacy agent") => {
+            let mut inserted = 0;
+            for document in documents {
+                let doc_json =
+                    serde_json::to_string(document).map_err(|e| format!("Failed to encode MongoDB document: {e}"))?;
+                crate::mongo_ops::mongo_insert_document_core(state, connection_id, database, collection, &doc_json)
+                    .await?;
+                inserted += 1;
+            }
+            Ok(inserted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn overwrite_mongo_collection_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<(), String> {
+    crate::mongo_ops::mongo_delete_documents_core(state, connection_id, database, collection, "{}", true)
+        .await
+        .map(|_| ())
+}
+
+fn mongo_value_column_type(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::Bool(_)) => "boolean".to_string(),
+        Some(serde_json::Value::Number(number)) if number.is_i64() || number.is_u64() => "bigint".to_string(),
+        Some(serde_json::Value::Number(_)) => "double".to_string(),
+        Some(serde_json::Value::Array(_) | serde_json::Value::Object(_)) => "json".to_string(),
+        _ => "text".to_string(),
+    }
+}
+
+fn mongo_columns_from_documents(documents: &[serde_json::Value]) -> Vec<db::ColumnInfo> {
+    mongo_transfer_document_fields(documents)
+        .into_iter()
+        .map(|name| {
+            let sample =
+                documents.iter().filter_map(|document| document.as_object()?.get(&name)).find(|value| !value.is_null());
+            db::ColumnInfo {
+                name,
+                data_type: mongo_value_column_type(sample),
+                is_nullable: true,
+                column_default: None,
+                is_primary_key: false,
+                extra: None,
+                comment: None,
+                numeric_precision: None,
+                numeric_scale: None,
+                character_maximum_length: None,
+            }
+        })
+        .collect()
 }
 
 pub async fn execute_on_pool(state: &AppState, pool_key: &str, sql: &str) -> Result<db::QueryResult, String> {
@@ -2054,6 +2224,225 @@ pub async fn clear_cancelled(transfer_id: &str) {
     CANCELLED.write().await.remove(transfer_id);
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn transfer_mongodb_table<F>(
+    state: &AppState,
+    request: &TransferRequest,
+    table: &str,
+    table_index: usize,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    mut progress_callback: F,
+) -> Result<u64, String>
+where
+    F: FnMut(TransferProgress),
+{
+    let total_tables = request.tables.len();
+    let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
+    let mut offset: u64 = 0;
+    let mut total_transferred: u64 = 0;
+    let mut total_rows = None;
+
+    if request.mode == TransferMode::Upsert {
+        log::warn!("[transfer] MongoDB upsert is not supported yet, falling back to append");
+    }
+
+    if is_mongodb_transfer_type(target_db_type) && request.mode == TransferMode::Overwrite {
+        overwrite_mongo_collection_for_transfer(state, &request.target_connection_id, &request.target_database, table)
+            .await
+            .map_err(|e| format!("Failed to clear MongoDB collection '{table}': {e}"))?;
+    }
+
+    let mut sql_target_column_names: Vec<String> = Vec::new();
+    let mut sql_target_column_types: Vec<Option<String>> = Vec::new();
+    let mut sql_target_prepared = false;
+
+    loop {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+
+        let documents = if is_mongodb_transfer_type(source_db_type) {
+            let result = find_mongo_documents_for_transfer(
+                state,
+                &request.source_connection_id,
+                &request.source_database,
+                table,
+                offset,
+                batch_size,
+            )
+            .await?;
+            total_rows = Some(result.total);
+            result.documents
+        } else {
+            let columns = get_columns_for_transfer(
+                state,
+                source_pool_key,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                table,
+            )
+            .await?;
+            let col_names = columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
+            let primary_key_columns = columns
+                .iter()
+                .filter(|column| column.is_primary_key)
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let sql = pagination_sql_with_order(
+                &col_names,
+                table,
+                &request.source_schema,
+                source_db_type,
+                offset,
+                batch_size,
+                &primary_key_columns,
+            );
+            let result = execute_on_pool(state, source_pool_key, &sql).await?;
+            sql_rows_to_mongo_documents(&col_names, &result.rows)
+        };
+
+        let row_count = documents.len();
+        if row_count == 0 {
+            break;
+        }
+
+        if is_mongodb_transfer_type(target_db_type) {
+            insert_mongo_documents_for_transfer(
+                state,
+                &request.target_connection_id,
+                &request.target_database,
+                table,
+                &documents,
+            )
+            .await
+            .map_err(|e| format!("Insert failed for MongoDB collection '{table}' at offset {offset}: {e}"))?;
+        } else {
+            if !sql_target_prepared {
+                let mut sql_target_columns = mongo_columns_from_documents(&documents);
+                if sql_target_columns.is_empty() {
+                    sql_target_columns.push(db::ColumnInfo {
+                        name: "document".to_string(),
+                        data_type: "json".to_string(),
+                        is_nullable: true,
+                        column_default: None,
+                        is_primary_key: false,
+                        extra: None,
+                        comment: None,
+                        numeric_precision: None,
+                        numeric_scale: None,
+                        character_maximum_length: None,
+                    });
+                }
+                sql_target_column_names = sql_target_columns.iter().map(|column| column.name.clone()).collect();
+                sql_target_column_types =
+                    sql_target_columns.iter().map(|column| Some(column.data_type.clone())).collect();
+
+                if request.create_table {
+                    let ddl = generate_create_table_ddl(
+                        &sql_target_columns,
+                        table,
+                        &request.source_schema,
+                        &request.target_schema,
+                        target_db_type,
+                        source_db_type,
+                        None,
+                    );
+                    let table_exists = match execute_on_pool(state, target_pool_key, &ddl).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            let err_lower = e.to_lowercase();
+                            if err_lower.contains("already exists") || err_lower.contains("there is already") {
+                                true
+                            } else {
+                                return Err(format!("Failed to create table from MongoDB collection '{table}': {e}"));
+                            }
+                        }
+                    };
+                    if table_exists {
+                        for stmt in generate_comment_ddl(
+                            &sql_target_columns,
+                            table,
+                            &request.target_schema,
+                            target_db_type,
+                            None,
+                        ) {
+                            if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
+                                log::warn!(
+                                    "[transfer] failed to set MongoDB transfer column comment for {}: {}",
+                                    table,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if request.mode == TransferMode::Overwrite {
+                    let full_table = qualified_table(table, &request.target_schema, target_db_type);
+                    let truncate_sql = match target_db_type {
+                        DatabaseType::Sqlite | DatabaseType::DuckDb => format!("DELETE FROM {full_table}"),
+                        _ => format!("TRUNCATE TABLE {full_table}"),
+                    };
+                    execute_on_pool(state, target_pool_key, &truncate_sql)
+                        .await
+                        .map_err(|e| format!("Failed to truncate MongoDB transfer target table: {e}"))?;
+                }
+
+                sql_target_prepared = true;
+            }
+
+            let rows = if sql_target_column_names.len() == 1 && sql_target_column_names[0] == "document" {
+                documents.iter().map(|document| vec![document.clone()]).collect::<Vec<_>>()
+            } else {
+                mongo_documents_to_rows(&documents, &sql_target_column_names)
+            };
+            let write_statements = generate_transfer_write_sql_batches(
+                &TransferMode::Append,
+                &sql_target_column_names,
+                &sql_target_column_types,
+                &rows,
+                table,
+                &request.target_schema,
+                target_db_type,
+                &[],
+            );
+            for (statement_index, batch_sql) in write_statements.iter().enumerate() {
+                execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
+                    format!(
+                        "Insert failed for MongoDB collection '{table}' at offset {offset}, chunk {} of {}: {e}",
+                        statement_index + 1,
+                        write_statements.len()
+                    )
+                })?;
+            }
+        }
+
+        total_transferred += row_count as u64;
+        offset += row_count as u64;
+
+        progress_callback(TransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            table: table.to_string(),
+            table_index,
+            total_tables,
+            rows_transferred: total_transferred,
+            total_rows,
+            status: TransferStatus::Running,
+            error: None,
+        });
+
+        if row_count < batch_size {
+            break;
+        }
+    }
+
+    Ok(total_transferred)
+}
+
 /// Transfer a single table. Returns rows transferred.
 /// `progress_callback` is invoked for progress updates.
 #[allow(clippy::too_many_arguments)]
@@ -2071,6 +2460,21 @@ pub async fn transfer_table<F>(
 where
     F: FnMut(TransferProgress),
 {
+    if is_mongodb_transfer_type(source_db_type) || is_mongodb_transfer_type(target_db_type) {
+        return transfer_mongodb_table(
+            state,
+            request,
+            table,
+            table_index,
+            source_db_type,
+            target_db_type,
+            source_pool_key,
+            target_pool_key,
+            progress_callback,
+        )
+        .await;
+    }
+
     let total_tables = request.tables.len();
     let pg_compat_transfer = is_postgres_compat_transfer(source_db_type, target_db_type);
 
@@ -2207,8 +2611,8 @@ where
 
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(target_db_type, DatabaseType::ClickHouse) {
-            log::warn!("[transfer] upsert not supported for ClickHouse, falling back to append");
+        if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive) {
+            log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
             let target_columns = get_columns_for_transfer(
@@ -2884,6 +3288,70 @@ mod tests {
         // PostgreSQL target should NOT have inline COMMENT
         let ddl = generate_create_table_ddl(&cols, "t", "", "", &DatabaseType::Postgres, &DatabaseType::Postgres, None);
         assert!(!ddl.contains("COMMENT"));
+    }
+
+    #[test]
+    fn hive_create_table_uses_hive_friendly_columns() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "bigint") },
+            db::ColumnInfo { is_nullable: false, ..test_column("payload", "json") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "public",
+            "warehouse",
+            &DatabaseType::Hive,
+            &DatabaseType::Postgres,
+            None,
+        );
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS `warehouse`.`events`"));
+        assert!(ddl.contains("`id` BIGINT"));
+        assert!(ddl.contains("`payload` STRING"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(!ddl.contains("NOT NULL"));
+    }
+
+    #[test]
+    fn hive_transfer_uses_backticks_and_hive_type_mapping() {
+        assert_eq!(quote_identifier("user`events", &DatabaseType::Hive), "`user``events`");
+        assert_eq!(map_column_type("jsonb", &DatabaseType::Postgres, &DatabaseType::Hive), "STRING");
+        assert_eq!(
+            map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Hive),
+            "TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn mongo_transfer_document_fields_preserve_first_seen_order() {
+        let documents = vec![json!({"b": 1}), json!({"a": 2, "c": 3}), json!({"b": 4, "d": 5})];
+
+        assert_eq!(mongo_transfer_document_fields(&documents), vec!["b", "a", "c", "d"]);
+    }
+
+    #[test]
+    fn mongo_transfer_rows_fill_missing_fields_with_null() {
+        let rows = mongo_documents_to_rows(
+            &[json!({"id": 1, "name": "Ada"}), json!({"id": 2})],
+            &[String::from("id"), String::from("name")],
+        );
+
+        assert_eq!(rows, vec![vec![json!(1), json!("Ada")], vec![json!(2), serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn sql_rows_to_mongo_documents_maps_columns_to_fields() {
+        let documents = sql_rows_to_mongo_documents(
+            &[String::from("id"), String::from("name"), String::from("active")],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace"), json!(true)]],
+        );
+
+        assert_eq!(
+            documents,
+            vec![json!({"id": 1, "name": "Ada", "active": null}), json!({"id": 2, "name": "Grace", "active": true})]
+        );
     }
 
     #[test]

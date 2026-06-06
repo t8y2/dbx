@@ -28,6 +28,8 @@ pub struct TableExportRequest {
     #[serde(default)]
     pub columns: Option<Vec<String>>,
     #[serde(default)]
+    pub column_types: Option<Vec<Option<String>>>,
+    #[serde(default)]
     pub primary_keys: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
@@ -164,9 +166,10 @@ pub async fn export_table_data_core(
     // 3. Resolve columns. Data grid exports can provide columns/primary keys
     // directly, which avoids expensive metadata round-trips on JDBC drivers.
     let requested_columns = request.columns.as_ref().filter(|columns| !columns.is_empty());
-    let (col_names, primary_keys) = if let Some(requested_columns) = requested_columns {
+    let (col_names, column_types, primary_keys) = if let Some(requested_columns) = requested_columns {
         let primary_keys = request.primary_keys.clone().unwrap_or_default();
-        (requested_columns.clone(), primary_keys)
+        let column_types = request.column_types.clone().unwrap_or_default();
+        (requested_columns.clone(), column_types, primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
             state,
@@ -177,8 +180,9 @@ pub async fn export_table_data_core(
         )
         .await?;
         let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let column_types: Vec<Option<String>> = columns.iter().map(|c| Some(c.data_type.clone())).collect();
         let primary_keys: Vec<String> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
-        (col_names, primary_keys)
+        (col_names, column_types, primary_keys)
     };
 
     if col_names.is_empty() {
@@ -567,6 +571,7 @@ pub async fn export_table_data_core(
                     table_name: Some(request.table_name.clone()),
                     qualified_table_name: None,
                     columns: col_names.clone(),
+                    column_types: column_types.clone(),
                     rows: result.rows.clone(),
                     batch_size: Some(100),
                 })?;

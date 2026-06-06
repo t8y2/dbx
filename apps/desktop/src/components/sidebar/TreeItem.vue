@@ -2102,9 +2102,11 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
 
   try {
     await connectionStore.ensureConnected(connectionId);
+    const tableColumns =
+      format === "sql" ? await api.getColumns(connectionId, database, node.schema || database, node.label) : undefined;
     const queryColumns =
       config.db_type === "neo4j"
-        ? (await api.getColumns(connectionId, database, node.schema || database, node.label)).map(
+        ? (tableColumns ?? (await api.getColumns(connectionId, database, node.schema || database, node.label))).map(
             (column) => column.name,
           )
         : undefined;
@@ -2154,6 +2156,7 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
       schema: node.schema,
       tableName: node.label,
       columns: result.columns,
+      columnTypes: tableColumns ? columnTypesForResultColumns(result.columns, tableColumns) : undefined,
       rows: result.rows,
     });
     await saveFileContent(content, `${node.label}.sql`, "SQL", "sql");
@@ -2161,6 +2164,11 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function columnTypesForResultColumns(columns: string[], tableColumns: ColumnInfo[]): Array<string | undefined> {
+  const typesByName = new Map(tableColumns.map((column) => [column.name.toLocaleLowerCase(), column.data_type]));
+  return columns.map((column) => typesByName.get(column.toLocaleLowerCase()));
 }
 
 async function exportData(format: "csv" | "json" | "sql") {

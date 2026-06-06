@@ -230,7 +230,8 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsFieldLineage("kwdb"), true);
   assert.equal(supportsFieldLineage("trino"), false);
   assert.equal(supportsTransfer("duckdb"), true);
-  assert.equal(supportsTransfer("hive"), false);
+  assert.equal(supportsTransfer("hive"), true);
+  assert.equal(supportsTransfer("mongodb"), true);
   assert.equal(supportsDriverManagement("oracle"), true);
   assert.equal(supportsDriverManagement("mysql"), false);
   assert.equal(supportsDriverManagement("kwdb"), false);
@@ -242,6 +243,11 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableTruncate("mysql"), true);
   assert.equal(supportsTableTruncate("duckdb"), false);
   assert.equal(supportsTableTruncate("rqlite"), false);
+});
+
+test("exposes Hive and MongoDB in data transfer", () => {
+  assert.equal(supportsTransfer("hive"), true);
+  assert.equal(supportsTransfer("mongodb"), true);
 });
 
 test("object browser entry follows database tree shape", () => {

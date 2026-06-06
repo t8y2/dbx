@@ -276,6 +276,8 @@ export const TRANSFER_SQL_TYPES = new Set<DatabaseType>([
   "oracle",
   "clickhouse",
   "duckdb",
+  "hive",
+  "mongodb",
   "dameng",
   "gaussdb",
   "kwdb",

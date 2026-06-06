@@ -1566,6 +1566,7 @@ export interface TableExportRequest {
   filePath: string;
   format: "csv" | "xlsx" | "json" | "markdown" | "sql";
   columns?: string[];
+  columnTypes?: Array<string | null | undefined>;
   primaryKeys?: string[];
   whereInput?: string;
   orderBy?: string;

@@ -14,7 +14,11 @@ import { useToast } from "@/composables/useToast";
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/actionActivation";
 import { copyToClipboard } from "@/lib/clipboard";
-import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements } from "@/lib/dataGridSql";
+import {
+  buildDataGridCopyInsertStatement,
+  buildDataGridCopyUpdateStatements,
+  type DataGridTableMeta,
+} from "@/lib/dataGridSql";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { uuid } from "@/lib/utils";
 import type { DatabaseType, QueryResult } from "@/types/database";
@@ -34,12 +38,13 @@ export interface UseDataGridExportOptions {
   columns: ComputedRef<string[]>;
   displayItems: ComputedRef<RowItem[]>;
   sql: ComputedRef<string | undefined>;
-  tableMeta: ComputedRef<{ schema?: string; tableName: string; primaryKeys: string[] } | undefined>;
+  tableMeta: ComputedRef<DataGridTableMeta | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   connectionId: ComputedRef<string | undefined>;
   database: ComputedRef<string | undefined>;
   context: ComputedRef<"results" | "table-data" | undefined>;
   sourceColumns: ComputedRef<Array<string | undefined> | undefined>;
+  columnTypes: ComputedRef<Array<string | undefined> | undefined>;
   whereInput: ComputedRef<string | undefined>;
   orderBy: ComputedRef<string | undefined>;
   exportBatchSize: ComputedRef<number>;
@@ -107,6 +112,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     context,
     whereInput,
     orderBy,
+    columnTypes,
     exportBatchSize,
     hasCellSelection,
     selectedCells,
@@ -692,6 +698,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         filePath: outputPath,
         format,
         columns: columns.value,
+        columnTypes: columnTypes.value,
         primaryKeys: meta.primaryKeys,
         whereInput: whereInput.value,
         orderBy: orderBy.value,
@@ -727,6 +734,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           schema: tableMeta.value?.schema,
           tableName: tableMeta.value?.tableName || "table_name",
           columns: exportData.columns,
+          columnTypes: exportData.columnTypes,
           rows: exportData.rows,
         });
         await saveTextFile(content, `${tableMeta.value?.tableName || "export"}.sql`, "SQL", "sql");
@@ -744,6 +752,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   function sqlInsertExportData(result: { columns: string[]; rows: CellValue[][] }): {
     columns: string[];
+    columnTypes?: Array<string | undefined>;
     rows: CellValue[][];
   } {
     const exportColumns = tableMeta.value ? effectiveColumns(sourceColumns.value, result.columns) : result.columns;
@@ -752,6 +761,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       .filter((item): item is { column: string; index: number } => !!item.column);
     return {
       columns: columnIndexes.map((item) => item.column),
+      columnTypes: tableMeta.value ? columnIndexes.map((item) => columnTypes.value?.[item.index]) : undefined,
       rows: result.rows.map((row) => columnIndexes.map((item) => row[item.index] ?? null)),
     };
   }

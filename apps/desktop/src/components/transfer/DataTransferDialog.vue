@@ -69,6 +69,14 @@ const allSelected = computed(
   () => filteredTables.value.length > 0 && filteredTables.value.every((t) => selectedTables.value.has(t)),
 );
 
+function connectionType(id: string): DatabaseType | undefined {
+  return store.connections.find((c) => c.id === id)?.db_type;
+}
+
+function isMongoConnection(id: string): boolean {
+  return connectionType(id) === "mongodb";
+}
+
 const canStart = computed(
   () =>
     sourceConnectionId.value &&
@@ -99,8 +107,9 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const dbs = await api.listDatabases(connectionId);
-    const names = dbs.map((d) => d.name);
+    const names = isMongoConnection(connectionId)
+      ? await api.mongoListDatabases(connectionId)
+      : (await api.listDatabases(connectionId)).map((d) => d.name);
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -116,6 +125,16 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
 
 async function loadSchemas(connectionId: string, database: string, side: "source" | "target", preferredSchema = "") {
   if (!connectionId || !database) return;
+  if (isMongoConnection(connectionId)) {
+    if (side === "source") {
+      sourceSchemas.value = [];
+      sourceSchema.value = database;
+    } else {
+      targetSchemas.value = [];
+      targetSchema.value = database;
+    }
+    return;
+  }
   try {
     const schemas = await api.listSchemas(connectionId, database);
     const selected =
@@ -149,6 +168,11 @@ async function loadTables() {
   }
   loadingTables.value = true;
   try {
+    if (isMongoConnection(sourceConnectionId.value)) {
+      sourceTables.value = await api.mongoListCollections(sourceConnectionId.value, sourceDatabase.value);
+      selectedTables.value = new Set(sourceTables.value);
+      return;
+    }
     const config = store.getConfig(sourceConnectionId.value);
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;

@@ -16,6 +16,7 @@ export interface FormatSqlInsertOptions {
   tableName?: string;
   qualifiedTableName?: string;
   columns: string[];
+  columnTypes?: Array<string | null | undefined>;
   rows: ExportCellValue[][];
 }
 

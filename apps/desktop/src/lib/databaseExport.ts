@@ -15,6 +15,7 @@ export interface ExportedTableSql {
   qualifiedTableName?: string;
   ddl?: string;
   columns: string[];
+  columnTypes?: Array<string | null | undefined>;
   rows: QueryResult["rows"];
   truncated?: boolean;
 }
@@ -33,6 +34,7 @@ export interface BuildExportInsertStatementsOptions {
   tableName?: string;
   qualifiedTableName?: string;
   columns: string[];
+  columnTypes?: Array<string | null | undefined>;
   rows: QueryResult["rows"];
   batchSize?: number;
 }

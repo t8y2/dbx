@@ -42,6 +42,7 @@ const DATA_GRID_LIGHT_ROW_NUMBER_EDITED_BG = "rgb(253, 241, 219)";
 const DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG = "rgb(255, 244, 244)";
 const CANVAS_SAFE_COLOR_RE = /^(#|rgb\(|rgba\(|hsl\(|hsla\()/i;
 const ADVANCED_COLOR_RE = /^(oklch\(|oklab\(|lab\(|lch\(|color\(|color-mix\()/i;
+let browserColorProbe: HTMLElement | null = null;
 
 interface RgbaColor {
   r: number;
@@ -157,15 +158,36 @@ function parseColorMix(value: string): string | null {
   return formatRgb(mixRgb(firstColor, first.percent, secondColor, secondPercent));
 }
 
+function normalizeCssColorWithBrowser(value: string): string | null {
+  if (typeof document === "undefined") return null;
+  try {
+    browserColorProbe ??= document.createElement("span");
+    const probe = browserColorProbe;
+    probe.style.color = "";
+    probe.style.color = value;
+    if (!probe.style.color) return null;
+    if (!probe.isConnected) {
+      probe.style.position = "absolute";
+      probe.style.left = "-9999px";
+      probe.style.top = "-9999px";
+      probe.style.visibility = "hidden";
+      document.body?.appendChild(probe);
+    }
+    const computed = getComputedStyle(probe).color.trim();
+    return computed || null;
+  } catch {
+    return null;
+  }
+}
+
 function toCanvasSafeColor(value: string, fallback: string): string {
   const trimmed = value.trim();
   if (!trimmed) return fallback;
-  const mixed = parseColorMix(trimmed);
-  if (mixed) return mixed;
   const rgb = parseRgbColor(trimmed);
   if (rgb) return formatRgb(rgb);
   if (CANVAS_SAFE_COLOR_RE.test(trimmed)) return trimmed;
-  if (ADVANCED_COLOR_RE.test(trimmed)) return fallback;
+  if (ADVANCED_COLOR_RE.test(trimmed))
+    return normalizeCssColorWithBrowser(trimmed) ?? parseColorMix(trimmed) ?? fallback;
   return `hsl(${trimmed})`;
 }
 

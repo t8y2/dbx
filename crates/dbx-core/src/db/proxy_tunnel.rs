@@ -31,6 +31,10 @@ impl ProxyTunnelManager {
         remote_host: &str,
         remote_port: u16,
     ) -> Result<u16, String> {
+        if let Some(local_port) = self.local_port(connection_id).await {
+            return Ok(local_port);
+        }
+
         let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
         let listener = TcpListener::bind(("127.0.0.1", local_port))
             .await
@@ -45,7 +49,14 @@ impl ProxyTunnelManager {
         };
         let remote = RemoteEndpoint { host: remote_host.to_string(), port: remote_port };
         let handle = tokio::spawn(proxy_forward_loop(listener, proxy, remote));
-        self.tunnels.lock().await.insert(connection_id.to_string(), (handle, local_port));
+
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some((_, existing_port)) = tunnels.get(connection_id) {
+            handle.abort();
+            return Ok(*existing_port);
+        }
+
+        tunnels.insert(connection_id.to_string(), (handle, local_port));
         Ok(local_port)
     }
 
@@ -209,5 +220,30 @@ async fn socks5_authenticate(stream: &mut TcpStream, proxy: &ProxyEndpoint) -> R
         Ok(())
     } else {
         Err("SOCKS proxy authentication failed".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyTunnelManager;
+    use crate::models::connection::ProxyType;
+
+    #[tokio::test]
+    async fn start_tunnel_reuses_existing_local_port() {
+        let manager = ProxyTunnelManager::new();
+
+        let first_port = manager
+            .start_tunnel("connection", ProxyType::Http, "127.0.0.1", 8080, "", "", "db.internal", 5432)
+            .await
+            .expect("first proxy tunnel should start");
+        let second_port = manager
+            .start_tunnel("connection", ProxyType::Http, "127.0.0.1", 8081, "", "", "other-db.internal", 5433)
+            .await
+            .expect("existing proxy tunnel should be reused");
+
+        assert_eq!(second_port, first_port);
+        assert_eq!(manager.local_port("connection").await, Some(first_port));
+
+        manager.stop_tunnel("connection").await;
     }
 }

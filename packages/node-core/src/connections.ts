@@ -15,14 +15,7 @@ export interface ConnectionConfig {
   password: string;
   database?: string;
   url_params?: string;
-  ssh_enabled: boolean;
-  ssh_tunnels?: SshTunnelConfig[];
-  proxy_enabled?: boolean;
-  proxy_type?: "socks5" | "http";
-  proxy_host?: string;
-  proxy_port?: number;
-  proxy_username?: string;
-  proxy_password?: string;
+  transport_layers?: TransportLayerConfig[];
   ssl: boolean;
   ca_cert_path?: string;
   oracle_connection_type?: "service_name" | "sid";
@@ -33,6 +26,8 @@ export interface ConnectionConfig {
   redis_sentinel_password?: string;
   redis_sentinel_tls?: boolean;
 }
+
+export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig);
 
 export interface SshTunnelConfig {
   id: string;
@@ -46,6 +41,17 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+}
+
+export interface ProxyTunnelConfig {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  proxy_type?: "socks5" | "http";
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
 }
 
 export interface ConnectionStoreOptions {
@@ -103,6 +109,96 @@ function getSecret(db: Database.Database, connectionId: string, key: string): st
   return row?.secret ?? "";
 }
 
+function transportLayerSecretSegment(index: number, layer: TransportLayerConfig): string {
+  return layer.id?.trim() || String(index);
+}
+
+function transportLayerSshPasswordKey(index: number, layer: TransportLayerConfig): string {
+  return `transport_layers.${transportLayerSecretSegment(index, layer)}.ssh_password`;
+}
+
+function transportLayerSshKeyPassphraseKey(index: number, layer: TransportLayerConfig): string {
+  return `transport_layers.${transportLayerSecretSegment(index, layer)}.ssh_key_passphrase`;
+}
+
+function transportLayerProxyPasswordKey(index: number, layer: TransportLayerConfig): string {
+  return `transport_layers.${transportLayerSecretSegment(index, layer)}.proxy_password`;
+}
+
+type LegacyConnectionConfig = ConnectionConfig & {
+  ssh_enabled?: boolean;
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_password?: string;
+  ssh_key_path?: string;
+  ssh_key_passphrase?: string;
+  ssh_expose_lan?: boolean;
+  ssh_connect_timeout_secs?: number;
+  ssh_tunnels?: SshTunnelConfig[];
+  proxy_enabled?: boolean;
+  proxy_type?: "socks5" | "http";
+  proxy_host?: string;
+  proxy_port?: number;
+  proxy_username?: string;
+  proxy_password?: string;
+};
+
+function normalizeTransportLayers(config: LegacyConnectionConfig): TransportLayerConfig[] {
+  if (Array.isArray(config.transport_layers) && config.transport_layers.length > 0) return config.transport_layers;
+  const layers: TransportLayerConfig[] = [];
+  if (config.ssh_enabled && Array.isArray(config.ssh_tunnels) && config.ssh_tunnels.length > 0) {
+    layers.push(...config.ssh_tunnels.map((hop) => ({ type: "ssh" as const, ...hop })));
+  } else if (config.ssh_enabled && config.ssh_host) {
+    layers.push({
+      type: "ssh",
+      id: "legacy",
+      enabled: true,
+      host: config.ssh_host,
+      port: config.ssh_port || 22,
+      user: config.ssh_user || "",
+      password: config.ssh_password || "",
+      key_path: config.ssh_key_path || "",
+      key_passphrase: config.ssh_key_passphrase || "",
+      connect_timeout_secs: config.ssh_connect_timeout_secs || 5,
+      expose_lan: !!config.ssh_expose_lan,
+    });
+  }
+  if (config.proxy_enabled && config.proxy_host) {
+    layers.push({
+      type: "proxy",
+      id: "legacy-proxy",
+      enabled: true,
+      proxy_type: config.proxy_type || "socks5",
+      host: config.proxy_host,
+      port: config.proxy_port || 1080,
+      username: config.proxy_username || "",
+      password: config.proxy_password || "",
+    });
+  }
+  return layers;
+}
+
+function hydrateTransportLayerSecrets(db: Database.Database, config: ConnectionConfig, connectionId: string) {
+  config.transport_layers = normalizeTransportLayers(config as LegacyConnectionConfig);
+  config.transport_layers.forEach((layer, index) => {
+    if (layer.type === "ssh") {
+      layer.password ||=
+        getSecret(db, connectionId, transportLayerSshPasswordKey(index, layer)) ||
+        (layer.id === "legacy" ? getSecret(db, connectionId, "ssh_password") : getSecret(db, connectionId, `ssh_tunnels.${layer.id || index}.password`));
+      layer.key_passphrase ||=
+        getSecret(db, connectionId, transportLayerSshKeyPassphraseKey(index, layer)) ||
+        (layer.id === "legacy"
+          ? getSecret(db, connectionId, "ssh_key_passphrase")
+          : getSecret(db, connectionId, `ssh_tunnels.${layer.id || index}.key_passphrase`));
+    } else {
+      layer.password ||=
+        getSecret(db, connectionId, transportLayerProxyPasswordKey(index, layer)) ||
+        (layer.id === "legacy-proxy" ? getSecret(db, connectionId, "proxy_password") : "");
+    }
+  });
+}
+
 export async function loadConnections(options: ConnectionStoreOptions = {}): Promise<ConnectionConfig[]> {
   const path = options.path ?? defaultDbPath();
   if (!existsSync(path)) return [];
@@ -117,7 +213,7 @@ export async function loadConnections(options: ConnectionStoreOptions = {}): Pro
       const config: ConnectionConfig = canonicalizeConnection(JSON.parse(row.config_json));
       config.id = row.id;
       if (!config.password) config.password = getSecret(db, row.id, "password");
-      if (!config.proxy_password) config.proxy_password = getSecret(db, row.id, "proxy_password");
+      hydrateTransportLayerSecrets(db, config, row.id);
       if (!config.redis_sentinel_password) {
         config.redis_sentinel_password = getSecret(db, row.id, "redis_sentinel_password");
       }
@@ -204,21 +300,10 @@ export async function addConnection(config: Omit<ConnectionConfig, "id">): Promi
     password: "",
     database: normalized.database ?? null,
     color: null,
-    ssh_enabled: normalized.ssh_enabled ?? false,
-    ssh_host: "",
-    ssh_port: 22,
-    ssh_user: "",
-    ssh_password: "",
-    ssh_key_path: "",
-    ssh_key_passphrase: "",
-    ssh_expose_lan: false,
-    ssh_tunnels: normalized.ssh_tunnels ?? [],
-    proxy_enabled: normalized.proxy_enabled ?? false,
-    proxy_type: normalized.proxy_type ?? "socks5",
-    proxy_host: normalized.proxy_host ?? "",
-    proxy_port: normalized.proxy_port ?? 1080,
-    proxy_username: normalized.proxy_username ?? "",
-    proxy_password: "",
+    transport_layers: normalizeTransportLayers(normalized as LegacyConnectionConfig).map((layer) => {
+      if (layer.type === "ssh") return { ...layer, password: "", key_passphrase: "" };
+      return { ...layer, password: "" };
+    }),
     ssl: normalized.ssl ?? false,
     sysdba: false,
     oracle_connection_type: normalized.oracle_connection_type ?? null,
@@ -241,13 +326,30 @@ export async function addConnection(config: Omit<ConnectionConfig, "id">): Promi
         normalized.password,
       );
     }
-    if (normalized.proxy_password) {
-      db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
-        id,
-        "proxy_password",
-        normalized.proxy_password,
-      );
-    }
+    normalizeTransportLayers(normalized as LegacyConnectionConfig).forEach((layer, index) => {
+      if (layer.type === "ssh") {
+        if (layer.password) {
+          db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
+            id,
+            transportLayerSshPasswordKey(index, layer),
+            layer.password,
+          );
+        }
+        if (layer.key_passphrase) {
+          db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
+            id,
+            transportLayerSshKeyPassphraseKey(index, layer),
+            layer.key_passphrase,
+          );
+        }
+      } else if (layer.password) {
+        db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
+          id,
+          transportLayerProxyPasswordKey(index, layer),
+          layer.password,
+        );
+      }
+    });
     if (normalized.redis_sentinel_password) {
       db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
         id,

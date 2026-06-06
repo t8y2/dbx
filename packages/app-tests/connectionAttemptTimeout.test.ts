@@ -20,9 +20,7 @@ test("honors slower SSH tunnel connection timeouts", () => {
   assert.equal(
     connectionAttemptTimeoutMs({
       connect_timeout_secs: 5,
-      ssh_enabled: true,
-      ssh_connect_timeout_secs: 12,
-      ssh_tunnels: [{ id: "hop-1", host: "bastion", port: 22, user: "dbx", connect_timeout_secs: 20 }],
+      transport_layers: [{ type: "ssh", id: "hop-1", host: "bastion", port: 22, user: "dbx", connect_timeout_secs: 20 }],
     }),
     20_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS,
   );

@@ -1,4 +1,4 @@
-import type { ConnectionConfig } from "./connections.js";
+import type { ConnectionConfig, ProxyTunnelConfig } from "./connections.js";
 import { createServer, connect as netConnect, type Server, type Socket } from "node:net";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -147,8 +147,15 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
   return pool;
 }
 
+type ProxyLayer = { type: "proxy" } & ProxyTunnelConfig;
+
+function firstProxyLayer(config: ConnectionConfig): ProxyLayer | undefined {
+  return config.transport_layers?.find((layer): layer is ProxyLayer => layer.type === "proxy" && layer.enabled !== false && !!layer.host);
+}
+
 async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: string; port: number }> {
-  if (!config.proxy_enabled || !config.proxy_host) return { host: config.host, port: config.port };
+  const proxy = firstProxyLayer(config);
+  if (!proxy) return { host: config.host, port: config.port };
   const existing = proxyTunnels.get(config.id);
   if (existing) return { host: "127.0.0.1", port: existing.port };
 
@@ -156,7 +163,7 @@ async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: str
   const server = createServer((inbound) => {
     sockets.add(inbound);
     inbound.once("close", () => sockets.delete(inbound));
-    connectViaProxy(config)
+    connectViaProxy(config, proxy)
       .then((outbound) => {
         sockets.add(outbound);
         outbound.once("close", () => sockets.delete(outbound));
@@ -187,25 +194,25 @@ function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; 
   return `postgres://${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@${endpoint.host}:${endpoint.port}/${db}${suffix}`;
 }
 
-function connectViaProxy(config: ConnectionConfig): Promise<Socket> {
+function connectViaProxy(config: ConnectionConfig, proxy: ProxyLayer): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const socket = netConnect(config.proxy_port || 1080, config.proxy_host || "127.0.0.1");
+    const socket = netConnect(proxy.port || 1080, proxy.host || "127.0.0.1");
     socket.once("error", reject);
     socket.once("connect", () => {
-      if ((config.proxy_type || "socks5") === "http") {
-        httpConnect(socket, config, resolve, reject);
+      if ((proxy.proxy_type || "socks5") === "http") {
+        httpConnect(socket, config, proxy, resolve, reject);
       } else {
-        socks5Connect(socket, config, resolve, reject);
+        socks5Connect(socket, config, proxy, resolve, reject);
       }
     });
   });
 }
 
-function httpConnect(socket: Socket, config: ConnectionConfig, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
+function httpConnect(socket: Socket, config: ConnectionConfig, proxy: ProxyLayer, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
   const target = `${config.host}:${config.port}`;
   const lines = [`CONNECT ${target} HTTP/1.1`, `Host: ${target}`];
-  if (config.proxy_username || config.proxy_password) {
-    const token = Buffer.from(`${config.proxy_username || ""}:${config.proxy_password || ""}`).toString("base64");
+  if (proxy.username || proxy.password) {
+    const token = Buffer.from(`${proxy.username || ""}:${proxy.password || ""}`).toString("base64");
     lines.push(`Proxy-Authorization: Basic ${token}`);
   }
   socket.write(`${lines.join("\r\n")}\r\n\r\n`);
@@ -227,8 +234,8 @@ function httpConnect(socket: Socket, config: ConnectionConfig, resolve: (socket:
   });
 }
 
-function socks5Connect(socket: Socket, config: ConnectionConfig, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
-  const wantsAuth = !!(config.proxy_username || config.proxy_password);
+function socks5Connect(socket: Socket, config: ConnectionConfig, proxy: ProxyLayer, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
+  const wantsAuth = !!(proxy.username || proxy.password);
   socket.write(Buffer.from(wantsAuth ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00]));
   socket.once("data", (method) => {
     if (method.length < 2 || method[0] !== 0x05) {
@@ -237,8 +244,8 @@ function socks5Connect(socket: Socket, config: ConnectionConfig, resolve: (socke
       return;
     }
     if (method[1] === 0x02) {
-      const user = Buffer.from(config.proxy_username || "");
-      const pass = Buffer.from(config.proxy_password || "");
+      const user = Buffer.from(proxy.username || "");
+      const pass = Buffer.from(proxy.password || "");
       socket.write(Buffer.concat([Buffer.from([0x01, user.length]), user, Buffer.from([pass.length]), pass]));
       socket.once("data", (auth) => {
         if (auth.length < 2 || auth[1] !== 0x00) {

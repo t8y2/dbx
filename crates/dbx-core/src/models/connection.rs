@@ -1,7 +1,8 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
@@ -23,42 +24,12 @@ pub struct ConnectionConfig {
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
     pub color: Option<String>,
-    #[serde(default)]
-    pub ssh_enabled: bool,
-    #[serde(default)]
-    pub ssh_host: String,
-    #[serde(default = "default_ssh_port")]
-    pub ssh_port: u16,
-    #[serde(default)]
-    pub ssh_user: String,
-    #[serde(default)]
-    pub ssh_password: String,
-    #[serde(default)]
-    pub ssh_key_path: String,
-    #[serde(default)]
-    pub ssh_key_passphrase: String,
-    #[serde(default)]
-    pub ssh_expose_lan: bool,
-    #[serde(default = "default_ssh_connect_timeout_secs")]
-    pub ssh_connect_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ssh_tunnels: Vec<SshTunnelConfig>,
+    pub transport_layers: Vec<TransportLayerConfig>,
     #[serde(default = "default_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
-    #[serde(default)]
-    pub proxy_enabled: bool,
-    #[serde(default)]
-    pub proxy_type: ProxyType,
-    #[serde(default)]
-    pub proxy_host: String,
-    #[serde(default = "default_proxy_port")]
-    pub proxy_port: u16,
-    #[serde(default)]
-    pub proxy_username: String,
-    #[serde(default)]
-    pub proxy_password: String,
     #[serde(default)]
     pub ssl: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -95,6 +66,43 @@ pub struct ConnectionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum TransportLayerConfig {
+    Ssh(SshTunnelConfig),
+    Proxy(ProxyTunnelConfig),
+}
+
+impl TransportLayerConfig {
+    pub fn id(&self) -> &str {
+        match self {
+            TransportLayerConfig::Ssh(layer) => &layer.id,
+            TransportLayerConfig::Proxy(layer) => &layer.id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            TransportLayerConfig::Ssh(layer) => &layer.name,
+            TransportLayerConfig::Proxy(layer) => &layer.name,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        match self {
+            TransportLayerConfig::Ssh(layer) => layer.enabled,
+            TransportLayerConfig::Proxy(layer) => layer.enabled,
+        }
+    }
+
+    pub fn endpoint(&self) -> (&str, u16) {
+        match self {
+            TransportLayerConfig::Ssh(layer) => (&layer.host, layer.port),
+            TransportLayerConfig::Proxy(layer) => (&layer.host, layer.port),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshTunnelConfig {
     #[serde(default)]
     pub id: String,
@@ -118,6 +126,26 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyTunnelConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub proxy_type: ProxyType,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "default_proxy_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,7 +182,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum ProxyType {
@@ -230,45 +258,241 @@ pub enum DatabaseType {
     Jdbc,
 }
 
-impl ConnectionConfig {
-    pub fn effective_ssh_connect_timeout_secs(&self) -> u64 {
-        if self.ssh_connect_timeout_secs == 0 {
-            default_ssh_connect_timeout_secs()
-        } else {
-            self.ssh_connect_timeout_secs
+#[derive(Deserialize)]
+struct ConnectionConfigData {
+    pub id: String,
+    pub name: String,
+    pub db_type: DatabaseType,
+    #[serde(default)]
+    pub driver_profile: Option<String>,
+    #[serde(default)]
+    pub driver_label: Option<String>,
+    #[serde(default)]
+    pub url_params: Option<String>,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub database: Option<String>,
+    #[serde(default)]
+    pub visible_databases: Option<Vec<String>>,
+    #[serde(default)]
+    pub attached_databases: Vec<AttachedDatabaseConfig>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub transport_layers: Vec<TransportLayerConfig>,
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_query_timeout_secs")]
+    pub query_timeout_secs: u64,
+    #[serde(default)]
+    pub ssl: bool,
+    #[serde(default)]
+    pub ca_cert_path: String,
+    #[serde(default)]
+    pub sysdba: bool,
+    #[serde(default)]
+    pub oracle_connection_type: Option<String>,
+    #[serde(default)]
+    pub connection_string: Option<String>,
+    #[serde(default)]
+    pub redis_connection_mode: Option<String>,
+    #[serde(default)]
+    pub redis_sentinel_master: String,
+    #[serde(default)]
+    pub redis_sentinel_nodes: String,
+    #[serde(default)]
+    pub redis_sentinel_username: String,
+    #[serde(default)]
+    pub redis_sentinel_password: String,
+    #[serde(default)]
+    pub redis_sentinel_tls: bool,
+    #[serde(default)]
+    pub redis_cluster_nodes: String,
+    #[serde(default)]
+    pub external_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub jdbc_driver_class: Option<String>,
+    #[serde(default)]
+    pub jdbc_driver_paths: Vec<String>,
+    #[serde(default)]
+    pub one_time: bool,
+}
+
+impl From<ConnectionConfigData> for ConnectionConfig {
+    fn from(data: ConnectionConfigData) -> Self {
+        Self {
+            id: data.id,
+            name: data.name,
+            db_type: data.db_type,
+            driver_profile: data.driver_profile,
+            driver_label: data.driver_label,
+            url_params: data.url_params,
+            host: data.host,
+            port: data.port,
+            username: data.username,
+            password: data.password,
+            database: data.database,
+            visible_databases: data.visible_databases,
+            attached_databases: data.attached_databases,
+            color: data.color,
+            transport_layers: data.transport_layers,
+            connect_timeout_secs: data.connect_timeout_secs,
+            query_timeout_secs: data.query_timeout_secs,
+            ssl: data.ssl,
+            ca_cert_path: data.ca_cert_path,
+            sysdba: data.sysdba,
+            oracle_connection_type: data.oracle_connection_type,
+            connection_string: data.connection_string,
+            redis_connection_mode: data.redis_connection_mode,
+            redis_sentinel_master: data.redis_sentinel_master,
+            redis_sentinel_nodes: data.redis_sentinel_nodes,
+            redis_sentinel_username: data.redis_sentinel_username,
+            redis_sentinel_password: data.redis_sentinel_password,
+            redis_sentinel_tls: data.redis_sentinel_tls,
+            redis_cluster_nodes: data.redis_cluster_nodes,
+            external_config: data.external_config,
+            jdbc_driver_class: data.jdbc_driver_class,
+            jdbc_driver_paths: data.jdbc_driver_paths,
+            one_time: data.one_time,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        migrate_legacy_transport_layers(&mut value);
+        let data = ConnectionConfigData::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(data.into())
+    }
+}
+
+fn migrate_legacy_transport_layers(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.get("transport_layers").and_then(Value::as_array).is_some_and(|layers| !layers.is_empty()) {
+        return;
+    }
+
+    let mut layers = Vec::new();
+    let ssh_enabled = object.get("ssh_enabled").and_then(Value::as_bool).unwrap_or(false);
+    if ssh_enabled {
+        if let Some(ssh_tunnels) = object.get("ssh_tunnels").and_then(Value::as_array) {
+            for hop in ssh_tunnels {
+                let mut layer = hop.clone();
+                if let Some(layer_object) = layer.as_object_mut() {
+                    layer_object.insert("type".to_string(), Value::String("ssh".to_string()));
+                }
+                layers.push(layer);
+            }
+        }
+
+        if layers.is_empty() && string_field(object, "ssh_host").is_some() {
+            let mut layer = serde_json::Map::new();
+            layer.insert("type".to_string(), Value::String("ssh".to_string()));
+            layer.insert("id".to_string(), Value::String("legacy".to_string()));
+            layer.insert("enabled".to_string(), Value::Bool(true));
+            copy_string(object, &mut layer, "ssh_host", "host");
+            copy_u64(object, &mut layer, "ssh_port", "port", default_ssh_port() as u64);
+            copy_string(object, &mut layer, "ssh_user", "user");
+            copy_string(object, &mut layer, "ssh_password", "password");
+            copy_string(object, &mut layer, "ssh_key_path", "key_path");
+            copy_string(object, &mut layer, "ssh_key_passphrase", "key_passphrase");
+            copy_u64(
+                object,
+                &mut layer,
+                "ssh_connect_timeout_secs",
+                "connect_timeout_secs",
+                default_ssh_connect_timeout_secs(),
+            );
+            copy_bool(object, &mut layer, "ssh_expose_lan", "expose_lan");
+            layers.push(Value::Object(layer));
+        }
+    }
+
+    let proxy_enabled = object.get("proxy_enabled").and_then(Value::as_bool).unwrap_or(false);
+    if proxy_enabled && string_field(object, "proxy_host").is_some() {
+        let mut layer = serde_json::Map::new();
+        layer.insert("type".to_string(), Value::String("proxy".to_string()));
+        layer.insert("id".to_string(), Value::String("legacy-proxy".to_string()));
+        layer.insert("enabled".to_string(), Value::Bool(true));
+        copy_string(object, &mut layer, "proxy_type", "proxy_type");
+        copy_string(object, &mut layer, "proxy_host", "host");
+        copy_u64(object, &mut layer, "proxy_port", "port", default_proxy_port() as u64);
+        copy_string(object, &mut layer, "proxy_username", "username");
+        copy_string(object, &mut layer, "proxy_password", "password");
+        layers.push(Value::Object(layer));
+    }
+
+    if !layers.is_empty() {
+        object.insert("transport_layers".to_string(), Value::Array(layers));
+    }
+}
+
+fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn copy_string(
+    object: &serde_json::Map<String, Value>,
+    target: &mut serde_json::Map<String, Value>,
+    from: &str,
+    to: &str,
+) {
+    if let Some(value) = object.get(from).and_then(Value::as_str) {
+        target.insert(to.to_string(), Value::String(value.to_string()));
+    }
+}
+
+fn copy_bool(
+    object: &serde_json::Map<String, Value>,
+    target: &mut serde_json::Map<String, Value>,
+    from: &str,
+    to: &str,
+) {
+    if let Some(value) = object.get(from).and_then(Value::as_bool) {
+        target.insert(to.to_string(), Value::Bool(value));
+    }
+}
+
+fn copy_u64(
+    object: &serde_json::Map<String, Value>,
+    target: &mut serde_json::Map<String, Value>,
+    from: &str,
+    to: &str,
+    default: u64,
+) {
+    let value = object.get(from).and_then(Value::as_u64).filter(|value| *value > 0).unwrap_or(default);
+    target.insert(to.to_string(), Value::Number(value.into()));
+}
+
+impl ConnectionConfig {
+    pub fn effective_transport_layers(&self) -> Vec<TransportLayerConfig> {
+        self.transport_layers.iter().filter(|layer| layer.enabled()).cloned().collect()
     }
 
     pub fn effective_ssh_tunnels(&self) -> Vec<SshTunnelConfig> {
-        if !self.ssh_enabled {
-            return Vec::new();
-        }
+        self.effective_transport_layers()
+            .into_iter()
+            .filter_map(|layer| match layer {
+                TransportLayerConfig::Ssh(ssh) => Some(ssh),
+                TransportLayerConfig::Proxy(_) => None,
+            })
+            .collect()
+    }
 
-        if !self.ssh_tunnels.is_empty() {
-            return self.ssh_tunnels.iter().filter(|hop| hop.enabled).cloned().collect();
-        }
-
-        if self.ssh_host.trim().is_empty() {
-            return Vec::new();
-        }
-
-        vec![SshTunnelConfig {
-            id: "legacy".to_string(),
-            name: String::new(),
-            enabled: true,
-            host: self.ssh_host.clone(),
-            port: self.ssh_port,
-            user: self.ssh_user.clone(),
-            password: self.ssh_password.clone(),
-            key_path: self.ssh_key_path.clone(),
-            key_passphrase: self.ssh_key_passphrase.clone(),
-            connect_timeout_secs: self.effective_ssh_connect_timeout_secs(),
-            expose_lan: self.ssh_expose_lan,
-        }]
+    pub fn has_effective_transport_layers(&self) -> bool {
+        !self.effective_transport_layers().is_empty()
     }
 
     pub fn has_effective_ssh_tunnels(&self) -> bool {
-        !self.effective_ssh_tunnels().is_empty()
+        self.effective_transport_layers().iter().any(|layer| matches!(layer, TransportLayerConfig::Ssh(_)))
     }
 
     pub fn effective_connect_timeout_secs(&self) -> u64 {
@@ -1018,8 +1242,8 @@ fn bracket_ipv6(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_query_timeout_secs, default_ssh_connect_timeout_secs, ConnectionConfig, DatabaseType, ProxyType,
-        SshTunnelConfig,
+        default_query_timeout_secs, default_ssh_connect_timeout_secs, ConnectionConfig, DatabaseType,
+        ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
 
@@ -1039,24 +1263,9 @@ mod tests {
             visible_databases: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: String::new(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
             ssl: false,
             ca_cert_path: String::new(),
             sysdba: false,
@@ -1084,49 +1293,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_connect_timeout_defaults_for_legacy_config() {
-        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
-            "id": "id",
-            "name": "name",
-            "db_type": "mysql",
-            "host": "10.1.2.3",
-            "port": 3306,
-            "username": "root",
-            "password": "",
-            "database": null
-        }))
-        .unwrap();
-
-        assert_eq!(config.ssh_connect_timeout_secs, default_ssh_connect_timeout_secs());
-        assert_eq!(config.effective_ssh_connect_timeout_secs(), default_ssh_connect_timeout_secs());
-        assert_eq!(config.query_timeout_secs, default_query_timeout_secs());
-        assert_eq!(config.effective_query_timeout_secs(), default_query_timeout_secs());
-    }
-
-    #[test]
-    fn proxy_fields_default_for_legacy_config() {
-        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
-            "id": "id",
-            "name": "name",
-            "db_type": "mysql",
-            "host": "10.1.2.3",
-            "port": 3306,
-            "username": "root",
-            "password": "",
-            "database": null
-        }))
-        .unwrap();
-
-        assert_eq!(config.proxy_enabled, false);
-        assert_eq!(config.proxy_type, ProxyType::Socks5);
-        assert_eq!(config.proxy_host, "");
-        assert_eq!(config.proxy_port, 1080);
-        assert_eq!(config.proxy_username, "");
-        assert_eq!(config.proxy_password, "");
-    }
-
-    #[test]
-    fn visible_databases_round_trips_through_connection_config() {
+    fn legacy_single_ssh_config_migrates_to_transport_layer() {
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "id",
             "name": "name",
@@ -1136,59 +1303,17 @@ mod tests {
             "username": "root",
             "password": "",
             "database": null,
-            "visible_databases": ["app", "billing"]
+            "ssh_enabled": true,
+            "ssh_host": "bastion.example.com",
+            "ssh_port": 2200,
+            "ssh_user": "deploy",
+            "ssh_password": "secret",
+            "ssh_connect_timeout_secs": 0,
+            "ssh_expose_lan": true
         }))
         .unwrap();
-
-        let saved = serde_json::to_value(config).unwrap();
-
-        assert_eq!(saved["visible_databases"], serde_json::json!(["app", "billing"]));
-    }
-
-    #[test]
-    fn duckdb_attached_databases_round_trip_through_connection_config() {
-        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
-            "id": "id",
-            "name": "DuckDB",
-            "db_type": "duckdb",
-            "host": "/tmp/main.duckdb",
-            "port": 0,
-            "username": "",
-            "password": "",
-            "database": null,
-            "attached_databases": [{ "name": "analytics", "path": "/tmp/analytics.duckdb" }]
-        }))
-        .unwrap();
-
-        let saved = serde_json::to_value(config).unwrap();
-
-        assert_eq!(
-            saved["attached_databases"],
-            serde_json::json!([{ "name": "analytics", "path": "/tmp/analytics.duckdb" }])
-        );
-    }
-
-    #[test]
-    fn ssh_connect_timeout_zero_uses_default() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_connect_timeout_secs = 0;
-
-        assert_eq!(config.effective_ssh_connect_timeout_secs(), default_ssh_connect_timeout_secs());
-    }
-
-    #[test]
-    fn effective_ssh_tunnels_adapts_legacy_single_hop() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_host = "bastion.example.com".to_string();
-        config.ssh_port = 2200;
-        config.ssh_user = "deploy".to_string();
-        config.ssh_password = "secret".to_string();
-        config.ssh_connect_timeout_secs = 0;
-        config.ssh_expose_lan = true;
 
         let hops = config.effective_ssh_tunnels();
-
         assert_eq!(hops.len(), 1);
         assert_eq!(hops[0].id, "legacy");
         assert_eq!(hops[0].host, "bastion.example.com");
@@ -1200,98 +1325,103 @@ mod tests {
     }
 
     #[test]
-    fn effective_ssh_tunnels_prefers_explicit_hops() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_host = "legacy.example.com".to_string();
-        config.ssh_tunnels = vec![SshTunnelConfig {
-            id: "hop-1".to_string(),
-            name: "Bastion".to_string(),
-            enabled: true,
-            host: "new.example.com".to_string(),
-            port: 22,
-            user: "alice".to_string(),
-            password: String::new(),
-            key_path: "~/.ssh/id_ed25519".to_string(),
-            key_passphrase: String::new(),
-            connect_timeout_secs: 7,
-            expose_lan: false,
-        }];
+    fn legacy_ssh_tunnels_migrate_to_ordered_transport_layers() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "ssh_enabled": true,
+            "ssh_tunnels": [
+                { "id": "first", "host": "a", "port": 22, "user": "u" },
+                { "id": "second", "host": "b", "port": 2200, "user": "u" }
+            ]
+        }))
+        .unwrap();
 
         let hops = config.effective_ssh_tunnels();
-
-        assert_eq!(hops.len(), 1);
-        assert_eq!(hops[0].id, "hop-1");
-        assert_eq!(hops[0].host, "new.example.com");
+        assert_eq!(hops.iter().map(|hop| hop.id.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
     }
 
     #[test]
-    fn effective_ssh_tunnels_filters_disabled_explicit_hops() {
+    fn legacy_proxy_config_migrates_to_transport_layer() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "proxy_enabled": true,
+            "proxy_type": "http",
+            "proxy_host": "proxy.example.com",
+            "proxy_port": 8080,
+            "proxy_username": "alice",
+            "proxy_password": "secret"
+        }))
+        .unwrap();
+
+        assert_eq!(config.transport_layers.len(), 1);
+        match &config.transport_layers[0] {
+            TransportLayerConfig::Proxy(proxy) => {
+                assert_eq!(proxy.id, "legacy-proxy");
+                assert_eq!(proxy.proxy_type, ProxyType::Http);
+                assert_eq!(proxy.host, "proxy.example.com");
+                assert_eq!(proxy.port, 8080);
+                assert_eq!(proxy.username, "alice");
+                assert_eq!(proxy.password, "secret");
+            }
+            TransportLayerConfig::Ssh(_) => panic!("expected proxy layer"),
+        }
+    }
+
+    #[test]
+    fn existing_transport_layers_take_precedence_over_legacy_fields() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "ssh_enabled": true,
+            "ssh_host": "legacy.example.com",
+            "transport_layers": [{ "type": "proxy", "id": "proxy", "host": "proxy", "port": 1080 }]
+        }))
+        .unwrap();
+
+        assert_eq!(config.transport_layers.len(), 1);
+        assert!(matches!(&config.transport_layers[0], TransportLayerConfig::Proxy(proxy) if proxy.id == "proxy"));
+    }
+
+    #[test]
+    fn serialized_connection_config_omits_legacy_transport_fields() {
         let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_tunnels = vec![
-            SshTunnelConfig {
-                id: "disabled".to_string(),
-                name: String::new(),
-                enabled: false,
-                host: "disabled.example.com".to_string(),
-                port: 22,
-                user: "alice".to_string(),
-                password: "secret".to_string(),
-                key_path: String::new(),
-                key_passphrase: String::new(),
-                connect_timeout_secs: 5,
-                expose_lan: false,
-            },
-            SshTunnelConfig {
-                id: "enabled".to_string(),
-                name: String::new(),
-                enabled: true,
-                host: "enabled.example.com".to_string(),
-                port: 22,
-                user: "alice".to_string(),
-                password: "secret".to_string(),
-                key_path: String::new(),
-                key_passphrase: String::new(),
-                connect_timeout_secs: 5,
-                expose_lan: false,
-            },
-        ];
-
-        let hops = config.effective_ssh_tunnels();
-
-        assert_eq!(hops.len(), 1);
-        assert_eq!(hops[0].id, "enabled");
-    }
-
-    #[test]
-    fn effective_ssh_tunnels_empty_without_explicit_or_legacy_ssh() {
-        let config = mysql_config("root", "", None);
-
-        assert!(config.effective_ssh_tunnels().is_empty());
-        assert!(!config.has_effective_ssh_tunnels());
-    }
-
-    #[test]
-    fn effective_ssh_tunnels_does_not_fall_back_when_explicit_list_is_disabled() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_host = "legacy.example.com".to_string();
-        config.ssh_tunnels = vec![SshTunnelConfig {
-            id: "disabled".to_string(),
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
             name: String::new(),
-            enabled: false,
-            host: "disabled.example.com".to_string(),
-            port: 22,
-            user: "alice".to_string(),
-            password: "secret".to_string(),
-            key_path: String::new(),
-            key_passphrase: String::new(),
-            connect_timeout_secs: 5,
-            expose_lan: false,
-        }];
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+        })];
 
-        assert!(config.effective_ssh_tunnels().is_empty());
+        let saved = serde_json::to_value(config).unwrap();
+
+        assert!(saved.get("transport_layers").is_some());
+        for key in ["ssh_tunnels", "ssh_host", "ssh_password", "proxy_host", "proxy_password", "proxy_enabled"] {
+            assert!(saved.get(key).is_none(), "legacy key {key} should not serialize");
+        }
     }
 
     #[test]

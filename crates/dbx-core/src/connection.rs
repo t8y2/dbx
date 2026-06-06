@@ -565,72 +565,21 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
-        let ssh_hops = config.effective_ssh_tunnels();
-        if ssh_hops.is_empty() {
-            if config.proxy_enabled && !config.proxy_host.is_empty() {
-                if let Some(local_port) = self.proxy_tunnels.local_port(connection_id).await {
-                    return Ok(("127.0.0.1".to_string(), local_port));
-                }
-
-                let (remote_host, remote_port) = if config.db_type == DatabaseType::MongoDb {
-                    config
-                        .connection_string
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .and_then(parse_mongo_first_host)
-                        .unwrap_or_else(|| (config.host.clone(), config.port))
-                } else if config.db_type == DatabaseType::Jdbc {
-                    config
-                        .connection_string
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .and_then(parse_jdbc_host_port)
-                        .unwrap_or_else(|| (config.host.clone(), config.port))
-                } else {
-                    (config.host.clone(), config.port)
-                };
-
-                let local_port = self
-                    .proxy_tunnels
-                    .start_tunnel(
-                        connection_id,
-                        config.proxy_type,
-                        &config.proxy_host,
-                        config.proxy_port,
-                        &config.proxy_username,
-                        &config.proxy_password,
-                        &remote_host,
-                        remote_port,
-                    )
-                    .await?;
-                return Ok(("127.0.0.1".to_string(), local_port));
-            }
+        let transport_layers = config.effective_transport_layers();
+        if transport_layers.is_empty() {
             return Ok((config.host.clone(), config.port));
         }
 
-        if let Some(local_port) = self.tunnels.local_port(connection_id).await {
-            return Ok(("127.0.0.1".to_string(), local_port));
-        }
-
-        let (remote_host, remote_port) = if config.db_type == DatabaseType::MongoDb {
-            config
-                .connection_string
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .and_then(parse_mongo_first_host)
-                .unwrap_or_else(|| (config.host.clone(), config.port))
-        } else if config.db_type == DatabaseType::Jdbc {
-            config
-                .connection_string
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .and_then(parse_jdbc_host_port)
-                .unwrap_or_else(|| (config.host.clone(), config.port))
-        } else {
-            (config.host.clone(), config.port)
-        };
-
-        let local_port = self.tunnels.start_chain(connection_id, &ssh_hops, &remote_host, remote_port).await?;
+        let (remote_host, remote_port) = connection_remote_endpoint(config);
+        let local_port = db::transport_layer_tunnel::start_transport_layers(
+            connection_id,
+            &transport_layers,
+            &remote_host,
+            remote_port,
+            &self.tunnels,
+            &self.proxy_tunnels,
+        )
+        .await?;
 
         Ok(("127.0.0.1".to_string(), local_port))
     }
@@ -778,6 +727,30 @@ impl AppState {
     }
 
     pub async fn reset_connection_transport(&self, connection_id: &str) {
+        let layer_count = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).map(|config| config.effective_transport_layers().len()).unwrap_or(0)
+        };
+        self.reset_connection_transport_layers(connection_id, layer_count).await;
+    }
+
+    pub async fn reset_connection_transport_for_config(&self, connection_id: &str, config: &ConnectionConfig) {
+        let existing_layer_count = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).map(|config| config.effective_transport_layers().len()).unwrap_or(0)
+        };
+        let layer_count = existing_layer_count.max(config.effective_transport_layers().len());
+        self.reset_connection_transport_layers(connection_id, layer_count).await;
+    }
+
+    async fn reset_connection_transport_layers(&self, connection_id: &str, layer_count: usize) {
+        db::transport_layer_tunnel::stop_transport_layers(
+            connection_id,
+            layer_count,
+            &self.tunnels,
+            &self.proxy_tunnels,
+        )
+        .await;
         self.tunnels.stop_tunnel(connection_id).await;
         self.proxy_tunnels.stop_tunnel(connection_id).await;
     }
@@ -837,24 +810,11 @@ impl AppState {
         // Re-establish SSH tunnels that have died
         let tunnel_connection_ids: Vec<String> = {
             let configs = self.configs.read().await;
-            configs.iter().filter(|(_, c)| c.has_effective_ssh_tunnels()).map(|(id, _)| id.clone()).collect()
+            configs.iter().filter(|(_, c)| c.has_effective_transport_layers()).map(|(id, _)| id.clone()).collect()
         };
         for connection_id in tunnel_connection_ids {
-            self.tunnels.stop_tunnel(&connection_id).await;
+            self.reset_connection_transport(&connection_id).await;
             // Tunnels will be re-created on next pool access via connection_host_port
-        }
-
-        // Re-establish proxy tunnels
-        let proxy_connection_ids: Vec<String> = {
-            let configs = self.configs.read().await;
-            configs
-                .iter()
-                .filter(|(_, c)| c.proxy_enabled && !c.proxy_host.is_empty())
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for connection_id in proxy_connection_ids {
-            self.proxy_tunnels.stop_tunnel(&connection_id).await;
         }
     }
 
@@ -879,9 +839,27 @@ impl AppState {
 
     async fn uses_forwarded_transport(&self, connection_id: &str) -> bool {
         let configs = self.configs.read().await;
-        configs.get(connection_id).is_some_and(|config| {
-            config.has_effective_ssh_tunnels() || (config.proxy_enabled && !config.proxy_host.is_empty())
-        })
+        configs.get(connection_id).is_some_and(|config| config.has_effective_transport_layers())
+    }
+}
+
+fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
+    if config.db_type == DatabaseType::MongoDb {
+        config
+            .connection_string
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(parse_mongo_first_host)
+            .unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::Jdbc {
+        config
+            .connection_string
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(parse_jdbc_host_port)
+            .unwrap_or_else(|| (config.host.clone(), config.port))
+    } else {
+        (config.host.clone(), config.port)
     }
 }
 
@@ -1126,7 +1104,10 @@ mod tests {
     };
     use crate::agent_manager::{AgentState, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
     use crate::db;
-    use crate::models::connection::{default_connect_timeout_secs, ConnectionConfig, DatabaseType, ProxyType};
+    use crate::models::connection::{
+        default_connect_timeout_secs, ConnectionConfig, DatabaseType, ProxyTunnelConfig, ProxyType,
+        TransportLayerConfig,
+    };
     use crate::query;
     use crate::schema;
     use crate::storage::Storage;
@@ -1147,24 +1128,9 @@ mod tests {
             visible_databases: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: String::new(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: crate::models::connection::default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
             ssl: false,
             ca_cert_path: String::new(),
             sysdba: false,
@@ -1914,15 +1880,22 @@ mod tests {
     async fn proxy_connection_uses_local_forward_endpoint() {
         let (state, dir) = test_app_state().await;
         let mut config = mysql_config(Some("app"));
-        config.proxy_enabled = true;
-        config.proxy_host = "127.0.0.1".to_string();
-        config.proxy_port = 65000;
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+        })];
 
         let (host, port) = state.connection_host_port("proxied", &config).await.unwrap();
 
         assert_eq!(host, "127.0.0.1");
         assert_ne!(port, config.port);
-        state.proxy_tunnels.stop_tunnel("proxied").await;
+        state.proxy_tunnels.stop_tunnel("proxied:transport:0").await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

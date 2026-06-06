@@ -202,9 +202,7 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::connection::{
-        default_connect_timeout_secs, default_query_timeout_secs, default_ssh_connect_timeout_secs, ProxyType,
-    };
+    use crate::models::connection::{default_connect_timeout_secs, default_query_timeout_secs};
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
@@ -222,24 +220,9 @@ mod tests {
             visible_databases: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: String::new(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
             ssl: false,
             ca_cert_path: String::new(),
             sysdba: false,

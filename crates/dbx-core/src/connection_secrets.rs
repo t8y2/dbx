@@ -1,4 +1,4 @@
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, TransportLayerConfig};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -7,6 +7,7 @@ pub const MAIN_PASSWORD_KEY: &str = "password";
 pub const SSH_PASSWORD_KEY: &str = "ssh_password";
 pub const SSH_KEY_PASSPHRASE_KEY: &str = "ssh_key_passphrase";
 pub const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
+pub const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 pub const PROXY_PASSWORD_KEY: &str = "proxy_password";
 pub const REDIS_SENTINEL_PASSWORD_KEY: &str = "redis_sentinel_password";
 pub const CONNECTION_STRING_KEY: &str = "connection_string";
@@ -72,16 +73,19 @@ pub fn save_connections_to_file(
     delete_removed_connection_secrets(path, configs, store)?;
     for config in configs {
         persist_secret(store, &config.id, MAIN_PASSWORD_KEY, &config.password)?;
-        persist_secret(store, &config.id, SSH_PASSWORD_KEY, &config.ssh_password)?;
-        persist_secret(store, &config.id, SSH_KEY_PASSPHRASE_KEY, &config.ssh_key_passphrase)?;
-        delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
-        for (index, hop) in config.ssh_tunnels.iter().enumerate() {
-            persist_secret(store, &config.id, &ssh_tunnel_password_key(index, hop), &hop.password)?;
-            persist_secret(store, &config.id, &ssh_tunnel_key_passphrase_key(index, hop), &hop.key_passphrase)?;
+        delete_secret_prefix(store, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
+        for (index, layer) in config.transport_layers.iter().enumerate() {
+            persist_transport_layer_secrets(store, &config.id, index, layer)?;
         }
-        persist_secret(store, &config.id, PROXY_PASSWORD_KEY, &config.proxy_password)?;
         persist_secret(store, &config.id, REDIS_SENTINEL_PASSWORD_KEY, &config.redis_sentinel_password)?;
         persist_optional_secret(store, &config.id, CONNECTION_STRING_KEY, config.connection_string.as_deref())?;
+
+        // New configs persist transport-layer secrets only. Remove legacy transport secret slots after the
+        // migrated layer values have been written so old configs do not keep two sources of truth.
+        store.delete_secret(&config.id, SSH_PASSWORD_KEY)?;
+        store.delete_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)?;
+        store.delete_secret(&config.id, PROXY_PASSWORD_KEY)?;
+        delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
     }
 
     write_sanitized_connections(path, configs)
@@ -107,51 +111,7 @@ pub fn load_connections_from_file(
             needs_rewrite = true;
         }
 
-        if config.ssh_password.is_empty() {
-            if let Some(secret) = store.get_secret(&config.id, SSH_PASSWORD_KEY)? {
-                config.ssh_password = secret;
-            }
-        } else {
-            store.set_secret(&config.id, SSH_PASSWORD_KEY, &config.ssh_password)?;
-            needs_rewrite = true;
-        }
-
-        if config.ssh_key_passphrase.is_empty() {
-            if let Some(secret) = store.get_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)? {
-                config.ssh_key_passphrase = secret;
-            }
-        } else {
-            store.set_secret(&config.id, SSH_KEY_PASSPHRASE_KEY, &config.ssh_key_passphrase)?;
-            needs_rewrite = true;
-        }
-
-        for (index, hop) in config.ssh_tunnels.iter_mut().enumerate() {
-            if hop.password.is_empty() {
-                if let Some(secret) = store.get_secret(&config.id, &ssh_tunnel_password_key(index, hop))? {
-                    hop.password = secret;
-                }
-            } else {
-                store.set_secret(&config.id, &ssh_tunnel_password_key(index, hop), &hop.password)?;
-                needs_rewrite = true;
-            }
-            if hop.key_passphrase.is_empty() {
-                if let Some(secret) = store.get_secret(&config.id, &ssh_tunnel_key_passphrase_key(index, hop))? {
-                    hop.key_passphrase = secret;
-                }
-            } else {
-                store.set_secret(&config.id, &ssh_tunnel_key_passphrase_key(index, hop), &hop.key_passphrase)?;
-                needs_rewrite = true;
-            }
-        }
-
-        if config.proxy_password.is_empty() {
-            if let Some(secret) = store.get_secret(&config.id, PROXY_PASSWORD_KEY)? {
-                config.proxy_password = secret;
-            }
-        } else {
-            store.set_secret(&config.id, PROXY_PASSWORD_KEY, &config.proxy_password)?;
-            needs_rewrite = true;
-        }
+        hydrate_transport_layer_secrets(store, config, &mut needs_rewrite)?;
 
         if config.redis_sentinel_password.is_empty() {
             if let Some(secret) = store.get_secret(&config.id, REDIS_SENTINEL_PASSWORD_KEY)? {
@@ -182,6 +142,134 @@ pub fn load_connections_from_file(
     Ok(configs)
 }
 
+fn persist_transport_layer_secrets(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    index: usize,
+    layer: &TransportLayerConfig,
+) -> Result<(), String> {
+    match layer {
+        TransportLayerConfig::Ssh(ssh) => {
+            persist_secret(store, connection_id, &transport_layer_ssh_password_key(index, layer), &ssh.password)?;
+            persist_secret(
+                store,
+                connection_id,
+                &transport_layer_ssh_key_passphrase_key(index, layer),
+                &ssh.key_passphrase,
+            )?;
+        }
+        TransportLayerConfig::Proxy(proxy) => {
+            persist_secret(store, connection_id, &transport_layer_proxy_password_key(index, layer), &proxy.password)?;
+        }
+    }
+    Ok(())
+}
+
+fn hydrate_transport_layer_secrets(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    for index in 0..config.transport_layers.len() {
+        let layer_for_key = config.transport_layers[index].clone();
+        match &mut config.transport_layers[index] {
+            TransportLayerConfig::Ssh(ssh) => {
+                let password_key = transport_layer_ssh_password_key(index, &layer_for_key);
+                if ssh.password.is_empty() {
+                    if let Some(secret) = store.get_secret(&config.id, &password_key)?.or(legacy_ssh_password_secret(
+                        store,
+                        &config.id,
+                        index,
+                        &layer_for_key,
+                    )?) {
+                        ssh.password = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &password_key, &ssh.password)?;
+                    *needs_rewrite = true;
+                }
+
+                let passphrase_key = transport_layer_ssh_key_passphrase_key(index, &layer_for_key);
+                if ssh.key_passphrase.is_empty() {
+                    if let Some(secret) = store
+                        .get_secret(&config.id, &passphrase_key)?
+                        .or(legacy_ssh_key_passphrase_secret(store, &config.id, index, &layer_for_key)?)
+                    {
+                        ssh.key_passphrase = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &passphrase_key, &ssh.key_passphrase)?;
+                    *needs_rewrite = true;
+                }
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                let password_key = transport_layer_proxy_password_key(index, &layer_for_key);
+                if proxy.password.is_empty() {
+                    if let Some(secret) = store.get_secret(&config.id, &password_key)?.or(legacy_proxy_password_secret(
+                        store,
+                        &config.id,
+                        &layer_for_key,
+                    )?) {
+                        proxy.password = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &password_key, &proxy.password)?;
+                    *needs_rewrite = true;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn legacy_ssh_password_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    index: usize,
+    layer: &TransportLayerConfig,
+) -> Result<Option<String>, String> {
+    if let TransportLayerConfig::Ssh(ssh) = layer {
+        if ssh.id == "legacy" {
+            if let Some(secret) = store.get_secret(connection_id, SSH_PASSWORD_KEY)? {
+                return Ok(Some(secret));
+            }
+        }
+        store.get_secret(connection_id, &ssh_tunnel_password_key(index, ssh))
+    } else {
+        Ok(None)
+    }
+}
+
+fn legacy_ssh_key_passphrase_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    index: usize,
+    layer: &TransportLayerConfig,
+) -> Result<Option<String>, String> {
+    if let TransportLayerConfig::Ssh(ssh) = layer {
+        if ssh.id == "legacy" {
+            if let Some(secret) = store.get_secret(connection_id, SSH_KEY_PASSPHRASE_KEY)? {
+                return Ok(Some(secret));
+            }
+        }
+        store.get_secret(connection_id, &ssh_tunnel_key_passphrase_key(index, ssh))
+    } else {
+        Ok(None)
+    }
+}
+
+fn legacy_proxy_password_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    layer: &TransportLayerConfig,
+) -> Result<Option<String>, String> {
+    if matches!(layer, TransportLayerConfig::Proxy(proxy) if proxy.id == "legacy-proxy") {
+        store.get_secret(connection_id, PROXY_PASSWORD_KEY)
+    } else {
+        Ok(None)
+    }
+}
+
 fn delete_removed_connection_secrets(
     path: &Path,
     configs: &[ConnectionConfig],
@@ -204,6 +292,7 @@ fn delete_removed_connection_secrets(
         store.delete_secret(&config.id, SSH_PASSWORD_KEY)?;
         store.delete_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)?;
         delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
+        delete_secret_prefix(store, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
         store.delete_secret(&config.id, CONNECTION_STRING_KEY)?;
     }
     Ok(())
@@ -258,6 +347,27 @@ fn ssh_tunnel_key_passphrase_key(index: usize, hop: &crate::models::connection::
     format!("{}{}.key_passphrase", SSH_TUNNEL_SECRET_PREFIX, ssh_tunnel_secret_segment(index, hop))
 }
 
+fn transport_layer_secret_segment(index: usize, layer: &TransportLayerConfig) -> String {
+    let id = layer.id().trim();
+    if id.is_empty() {
+        index.to_string()
+    } else {
+        id.to_string()
+    }
+}
+
+fn transport_layer_ssh_password_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn read_connections(path: &Path) -> Result<Vec<ConnectionConfig>, String> {
     let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&json).map_err(|e| e.to_string())
@@ -275,13 +385,17 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
         .cloned()
         .map(|mut config| {
             config.password.clear();
-            config.ssh_password.clear();
-            config.ssh_key_passphrase.clear();
-            for hop in &mut config.ssh_tunnels {
-                hop.password.clear();
-                hop.key_passphrase.clear();
+            for layer in &mut config.transport_layers {
+                match layer {
+                    TransportLayerConfig::Ssh(ssh) => {
+                        ssh.password.clear();
+                        ssh.key_passphrase.clear();
+                    }
+                    TransportLayerConfig::Proxy(proxy) => {
+                        proxy.password.clear();
+                    }
+                }
             }
-            config.proxy_password.clear();
             config.redis_sentinel_password.clear();
             config.connection_string = None;
             config
@@ -299,7 +413,7 @@ mod tests {
         load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CONNECTION_STRING_KEY,
         MAIN_PASSWORD_KEY, REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, ProxyType, SshTunnelConfig};
+    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::Path;
@@ -358,7 +472,7 @@ mod tests {
         dir.join("connections.json")
     }
 
-    fn connection(id: &str, password: &str, ssh_password: &str) -> ConnectionConfig {
+    fn connection(id: &str, password: &str, _ssh_password: &str) -> ConnectionConfig {
         ConnectionConfig {
             id: id.to_string(),
             name: format!("{id} connection"),
@@ -374,24 +488,9 @@ mod tests {
             visible_databases: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: !ssh_password.is_empty(),
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: ssh_password.to_string(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: crate::models::connection::default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
             ssl: false,
             ca_cert_path: String::new(),
             sysdba: false,
@@ -437,22 +536,25 @@ mod tests {
         let path = temp_connections_file("save-redacts");
         let store = MemorySecretStore::default();
         let mut config = connection("main", "db-secret", "ssh-secret");
-        config.ssh_tunnels = vec![ssh_hop("hop-1", "hop-secret", "hop-key")];
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_hop("hop-1", "hop-secret", "hop-key"))];
         config.redis_sentinel_password = "sentinel-secret".to_string();
         let configs = vec![config];
 
         save_connections_to_file(&path, &configs, &store).unwrap();
 
         assert_eq!(store.get_existing("main", MAIN_PASSWORD_KEY).as_deref(), Some("db-secret"));
-        assert_eq!(store.get_existing("main", SSH_PASSWORD_KEY).as_deref(), Some("ssh-secret"));
-        assert_eq!(store.get_existing("main", "ssh_tunnels.hop-1.password").as_deref(), Some("hop-secret"));
-        assert_eq!(store.get_existing("main", "ssh_tunnels.hop-1.key_passphrase").as_deref(), Some("hop-key"));
+        assert_eq!(store.get_existing("main", "transport_layers.hop-1.ssh_password").as_deref(), Some("hop-secret"));
+        assert_eq!(store.get_existing("main", "transport_layers.hop-1.ssh_key_passphrase").as_deref(), Some("hop-key"));
         assert_eq!(store.get_existing("main", REDIS_SENTINEL_PASSWORD_KEY).as_deref(), Some("sentinel-secret"));
         let persisted = read_configs(&path);
         assert_eq!(persisted[0].password, "");
-        assert_eq!(persisted[0].ssh_password, "");
-        assert_eq!(persisted[0].ssh_tunnels[0].password, "");
-        assert_eq!(persisted[0].ssh_tunnels[0].key_passphrase, "");
+        match &persisted[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => {
+                assert_eq!(ssh.password, "");
+                assert_eq!(ssh.key_passphrase, "");
+            }
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
         assert_eq!(persisted[0].redis_sentinel_password, "");
     }
 
@@ -466,16 +568,20 @@ mod tests {
         store.set_existing("main", "ssh_tunnels.hop-1.key_passphrase", "hop-key");
         store.set_existing("main", REDIS_SENTINEL_PASSWORD_KEY, "sentinel-secret");
         let mut sanitized_config = connection("main", "", "");
-        sanitized_config.ssh_tunnels = vec![ssh_hop("hop-1", "", "")];
+        sanitized_config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_hop("hop-1", "", ""))];
         let sanitized = vec![sanitized_config];
         std::fs::write(&path, serde_json::to_string_pretty(&sanitized).unwrap()).unwrap();
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
 
         assert_eq!(loaded[0].password, "db-secret");
-        assert_eq!(loaded[0].ssh_password, "ssh-secret");
-        assert_eq!(loaded[0].ssh_tunnels[0].password, "hop-secret");
-        assert_eq!(loaded[0].ssh_tunnels[0].key_passphrase, "hop-key");
+        match &loaded[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => {
+                assert_eq!(ssh.password, "hop-secret");
+                assert_eq!(ssh.key_passphrase, "hop-key");
+            }
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
         assert_eq!(loaded[0].redis_sentinel_password, "sentinel-secret");
     }
 
@@ -483,18 +589,38 @@ mod tests {
     fn load_connections_migrates_plaintext_passwords_and_rewrites_sanitized_file() {
         let path = temp_connections_file("migrates-plaintext");
         let store = MemorySecretStore::default();
-        let legacy = vec![connection("legacy", "plain-db", "plain-ssh")];
+        let legacy = serde_json::json!([{
+            "id": "legacy",
+            "name": "legacy connection",
+            "db_type": "postgres",
+            "host": "localhost",
+            "port": 5432,
+            "username": "postgres",
+            "password": "plain-db",
+            "database": "postgres",
+            "ssh_enabled": true,
+            "ssh_host": "bastion",
+            "ssh_port": 22,
+            "ssh_user": "user",
+            "ssh_password": "plain-ssh"
+        }]);
         std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
 
         assert_eq!(loaded[0].password, "plain-db");
-        assert_eq!(loaded[0].ssh_password, "plain-ssh");
+        match &loaded[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, "plain-ssh"),
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
         assert_eq!(store.get_existing("legacy", MAIN_PASSWORD_KEY).as_deref(), Some("plain-db"));
-        assert_eq!(store.get_existing("legacy", SSH_PASSWORD_KEY).as_deref(), Some("plain-ssh"));
+        assert_eq!(store.get_existing("legacy", "transport_layers.legacy.ssh_password").as_deref(), Some("plain-ssh"));
         let persisted = read_configs(&path);
         assert_eq!(persisted[0].password, "");
-        assert_eq!(persisted[0].ssh_password, "");
+        match &persisted[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, ""),
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
     }
 
     #[test]

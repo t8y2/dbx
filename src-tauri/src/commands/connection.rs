@@ -170,24 +170,9 @@ mod tests {
             visible_databases: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: String::new(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: dbx_core::models::connection::default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
             ssl: false,
             ca_cert_path: String::new(),
             sysdba: false,
@@ -252,8 +237,8 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
 #[tauri::command]
 pub async fn test_connection(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
     let tunnel_id = format!("{}:test", config.id);
-    let connection_id =
-        if config.ssh_enabled && !config.ssh_host.is_empty() { tunnel_id.as_str() } else { config.id.as_str() };
+    let has_transport_layers = config.has_effective_transport_layers();
+    let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
     let (host, port) = state.connection_host_port(connection_id, &config).await?;
     let probe_result = probe_connection_endpoint(&config, &host, port).await;
     let url = connection_url_for_endpoint(&config, &host, port);
@@ -426,11 +411,8 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
         },
     };
 
-    if config.ssh_enabled && !config.ssh_host.is_empty() {
-        state.tunnels.stop_tunnel(&tunnel_id).await;
-    }
-    if config.proxy_enabled && !config.proxy_host.is_empty() {
-        state.proxy_tunnels.stop_tunnel(&tunnel_id).await;
+    if has_transport_layers {
+        state.reset_connection_transport_for_config(&tunnel_id, &config).await;
     }
 
     result
@@ -443,7 +425,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     let db_config = metadata_connection_config(&config);
 
     state.remove_connection_pools(&id).await;
-    state.reset_connection_transport(&id).await;
+    state.reset_connection_transport_for_config(&id, &db_config).await;
 
     let (host, port) = state.connection_host_port(&id, &db_config).await?;
     probe_connection_endpoint(&db_config, &host, port).await?;

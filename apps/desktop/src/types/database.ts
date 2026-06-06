@@ -69,24 +69,9 @@ export interface ConnectionConfig {
   visible_databases?: string[];
   attached_databases?: AttachedDatabaseConfig[];
   color?: string;
-  ssh_enabled?: boolean;
-  ssh_host?: string;
-  ssh_port?: number;
-  ssh_user?: string;
-  ssh_password?: string;
-  ssh_key_path?: string;
-  ssh_key_passphrase?: string;
-  ssh_expose_lan?: boolean;
-  ssh_connect_timeout_secs?: number;
-  ssh_tunnels?: SshTunnelConfig[];
+  transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
-  proxy_enabled?: boolean;
-  proxy_type?: "socks5" | "http";
-  proxy_host?: string;
-  proxy_port?: number;
-  proxy_username?: string;
-  proxy_password?: string;
   ssl?: boolean;
   ca_cert_path?: string;
   sysdba?: boolean;
@@ -104,6 +89,10 @@ export interface ConnectionConfig {
   one_time?: boolean;
 }
 
+export type TransportLayerConfig =
+  | ({ type: "ssh" } & SshTunnelConfig)
+  | ({ type: "proxy" } & ProxyTunnelConfig);
+
 export interface SshTunnelConfig {
   id: string;
   name?: string;
@@ -116,6 +105,17 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+}
+
+export interface ProxyTunnelConfig {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  proxy_type?: "socks5" | "http";
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
 }
 
 export interface AttachedDatabaseConfig {

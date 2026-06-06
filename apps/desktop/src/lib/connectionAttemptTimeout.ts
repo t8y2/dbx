@@ -9,7 +9,8 @@ function positiveSeconds(value: unknown, fallback: number): number {
 }
 
 export function connectionAttemptTimeoutMs(
-  config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> & Partial<Pick<ConnectionConfig, "db_type">>,
+  config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> &
+    Partial<Pick<ConnectionConfig, "db_type">>,
 ): number {
   const timeouts = [positiveSeconds(config.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS)];
   for (const layer of config.transport_layers ?? []) {
@@ -20,7 +21,6 @@ export function connectionAttemptTimeoutMs(
   const fallbackBuffer = config.db_type === "mongodb" ? MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS : 0;
   return Math.ceil(Math.max(...timeouts) * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + fallbackBuffer);
 }
-
 
 export function connectionAttemptTimeoutMessage(timeoutMs: number): string {
   return `Connection attempt timed out after ${Math.ceil(timeoutMs / 1000)}s. Please check the network or VPN and try again.`;

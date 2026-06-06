@@ -89,9 +89,7 @@ export interface ConnectionConfig {
   one_time?: boolean;
 }
 
-export type TransportLayerConfig =
-  | ({ type: "ssh" } & SshTunnelConfig)
-  | ({ type: "proxy" } & ProxyTunnelConfig);
+export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig);
 
 export interface SshTunnelConfig {
   id: string;

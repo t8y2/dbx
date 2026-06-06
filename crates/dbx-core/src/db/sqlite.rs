@@ -161,6 +161,7 @@ pub fn is_memory_database_path(path: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

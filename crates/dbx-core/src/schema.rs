@@ -1145,7 +1145,7 @@ fn merge_optional_string(target: &mut Option<String>, candidate: Option<String>)
         }
         return;
     }
-    if target.as_ref().map_or(true, |value| value.trim().is_empty()) {
+    if target.as_ref().is_none_or(|value| value.trim().is_empty()) {
         *target = Some(candidate);
     }
 }

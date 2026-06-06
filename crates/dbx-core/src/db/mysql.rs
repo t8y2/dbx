@@ -1350,7 +1350,7 @@ fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
 
 fn is_admin_show_query(sql: &str) -> bool {
     let tokens = leading_sql_word_tokens(sql, 2);
-    tokens.get(0).is_some_and(|token| token == "admin") && tokens.get(1).is_some_and(|token| token == "show")
+    tokens.first().is_some_and(|token| token == "admin") && tokens.get(1).is_some_and(|token| token == "show")
 }
 
 fn leading_sql_word_tokens(sql: &str, limit: usize) -> Vec<String> {

@@ -633,7 +633,7 @@ mod tests {
         let result =
             analyze_editable_query_editability("select u.id, o.total from users u join orders o on o.user_id = u.id");
 
-        assert_eq!(result.editable, false);
+        assert!(!result.editable);
         assert_eq!(result.reason, Some(QueryEditabilityReason::ComplexSource));
     }
 
@@ -641,7 +641,7 @@ mod tests {
     fn reports_external_file_scan_as_external_source() {
         let result = analyze_editable_query_editability("SELECT * FROM '/tmp/duckdb_excel_extension_test.xlsx'");
 
-        assert_eq!(result.editable, false);
+        assert!(!result.editable);
         assert_eq!(result.reason, Some(QueryEditabilityReason::ExternalSource));
     }
 
@@ -649,7 +649,7 @@ mod tests {
     fn reports_grouped_query_as_aggregation() {
         let result = analyze_editable_query_editability("select id, count(*) as total from users group by id");
 
-        assert_eq!(result.editable, false);
+        assert!(!result.editable);
         assert_eq!(result.reason, Some(QueryEditabilityReason::Aggregation));
     }
 

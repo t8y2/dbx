@@ -854,7 +854,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            vec![
+            [
                 "-- DBX database export".to_string(),
                 "-- Database: app".to_string(),
                 "-- Exported at: 2026-05-02T00:00:00.000Z".to_string(),

@@ -99,6 +99,7 @@ pub async fn execute_sql_file_content(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sql_file_progress(
     execution_id: &str,
     status: SqlFileStatus,
@@ -134,6 +135,7 @@ async fn sql_file_import_target(state: &AppState, connection_id: &str) -> Option
         .map(|config| SqlFileImportTarget { db_type: config.db_type, driver_profile: config.driver_profile.clone() })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_statement_with_progress(
     state: &AppState,
     request: &SqlFileRequest,
@@ -268,6 +270,7 @@ async fn execute_statement_with_progress(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_merged_statement_fallback_with_progress(
     state: &AppState,
     request: &SqlFileRequest,
@@ -363,6 +366,7 @@ async fn execute_merged_statement_fallback_with_progress(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn statement_error_decision(
     execution_id: &str,
     token: &CancellationToken,

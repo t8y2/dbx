@@ -111,6 +111,7 @@ fn format_markdown_rows(rows: &[Vec<Value>]) -> String {
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn table_page_sql(
     request: &TableExportRequest,
     db_type: &crate::models::connection::DatabaseType,

@@ -143,8 +143,7 @@ async fn cleanup_sql_file_execution(state: &WebState, execution_id: &str) {
 }
 
 fn safe_uploaded_sql_path(tmp_dir: &Path, file_name: &str) -> Result<PathBuf, AppError> {
-    let base_name =
-        file_name.rsplit(|ch| ch == '/' || ch == '\\').find(|part| !part.is_empty()).unwrap_or("upload.sql").trim();
+    let base_name = file_name.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or("upload.sql").trim();
     if base_name.is_empty() || base_name == "." || base_name == ".." {
         return Err(AppError("Invalid SQL file name".to_string()));
     }

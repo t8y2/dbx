@@ -11,7 +11,7 @@ use crate::state::WebState;
 
 pub async fn list_jdbc_drivers(State(state): State<Arc<WebState>>) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
     let root = state.app.plugins.root_dir();
-    Ok(Json(jdbc::list_jdbc_drivers(&root).map_err(AppError::internal)?))
+    Ok(Json(jdbc::list_jdbc_drivers(root).map_err(AppError::internal)?))
 }
 
 pub async fn import_jdbc_drivers(
@@ -34,7 +34,7 @@ pub async fn import_jdbc_drivers(
         imported.push(target);
     }
 
-    jdbc::list_jdbc_drivers(&root).map(Json).map_err(|e| AppError::internal(e))
+    jdbc::list_jdbc_drivers(root).map(Json).map_err(AppError::internal)
 }
 
 pub async fn delete_jdbc_driver(
@@ -47,19 +47,19 @@ pub async fn delete_jdbc_driver(
     let root = state.app.plugins.root_dir();
     let driver_path = root.join("jdbc").join("drivers").join(&name);
     let path_str = driver_path.to_string_lossy().to_string();
-    Ok(Json(jdbc::delete_jdbc_driver(&root, &path_str).map_err(AppError::internal)?))
+    Ok(Json(jdbc::delete_jdbc_driver(root, &path_str).map_err(AppError::internal)?))
 }
 
 // ---- JDBC Plugin ----
 
 pub async fn get_jdbc_plugin_status(State(state): State<Arc<WebState>>) -> Result<Json<JdbcPluginStatus>, AppError> {
     let root = state.app.plugins.root_dir();
-    Ok(Json(jdbc::get_jdbc_plugin_status(&root).await.map_err(AppError::internal)?))
+    Ok(Json(jdbc::get_jdbc_plugin_status(root).await.map_err(AppError::internal)?))
 }
 
 pub async fn install_jdbc_plugin(State(state): State<Arc<WebState>>) -> Result<Json<JdbcPluginStatus>, AppError> {
     let root = state.app.plugins.root_dir();
-    Ok(Json(jdbc::install_jdbc_plugin(&root).await.map_err(AppError::internal)?))
+    Ok(Json(jdbc::install_jdbc_plugin(root).await.map_err(AppError::internal)?))
 }
 
 pub async fn install_jdbc_plugin_local(
@@ -78,9 +78,8 @@ pub async fn install_jdbc_plugin_local(
         let data = field.bytes().await.map_err(|e| AppError::internal(e.to_string()))?;
         let tmp_path = temp_dir.join(&file_name);
         std::fs::write(&tmp_path, &data).map_err(|e| AppError::internal(e.to_string()))?;
-        let result = jdbc::install_jdbc_plugin_from_file(&root, &tmp_path.to_string_lossy())
-            .await
-            .map_err(AppError::internal)?;
+        let result =
+            jdbc::install_jdbc_plugin_from_file(root, &tmp_path.to_string_lossy()).await.map_err(AppError::internal)?;
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Ok(Json(result));
     }
@@ -90,7 +89,7 @@ pub async fn install_jdbc_plugin_local(
 
 pub async fn uninstall_jdbc_plugin(State(state): State<Arc<WebState>>) -> Result<Json<JdbcPluginStatus>, AppError> {
     let root = state.app.plugins.root_dir();
-    Ok(Json(jdbc::uninstall_jdbc_plugin(&root).map_err(AppError::internal)?))
+    Ok(Json(jdbc::uninstall_jdbc_plugin(root).map_err(AppError::internal)?))
 }
 
 // ---- System Fonts ----

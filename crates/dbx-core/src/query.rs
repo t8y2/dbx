@@ -479,6 +479,7 @@ fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn do_execute(
     state: &AppState,
     pool_key: &str,

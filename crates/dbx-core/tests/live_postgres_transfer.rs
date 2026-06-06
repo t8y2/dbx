@@ -66,7 +66,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
     let source_schema = format!("dbx_src_{}", &suffix[..8]);
     let target_schema = format!("dbx_dst_{}", &suffix[..8]);
 
-    let cleanup_sql = vec![
+    let cleanup_sql = [
         format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", source_schema),
         format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", target_schema),
     ];

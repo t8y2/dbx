@@ -627,7 +627,7 @@ mod tests {
             offset: 200,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT id, name FROM users LIMIT 100 OFFSET 200;");
     }
 
@@ -640,7 +640,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT TOP (100) id FROM users ORDER BY id DESC");
     }
 
@@ -653,7 +653,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT TOP (100) COUNT(*) FROM TicketInfo");
     }
 
@@ -666,7 +666,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(
             result.sql.unwrap(),
             "SELECT DISTINCT TOP (100) ProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data"
@@ -682,7 +682,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT ALL TOP (100) ProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data");
     }
 
@@ -695,7 +695,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT TOP (100) AllProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data");
     }
 
@@ -708,7 +708,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT TOP 1000 * FROM TicketInfo");
     }
 
@@ -737,7 +737,7 @@ mod tests {
             database_type: Some(DatabaseType::SqlServer),
         });
 
-        assert_eq!(result.ok, false);
+        assert!(!result.ok);
         assert!(result.sql.is_none());
     }
 
@@ -750,7 +750,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.ok, true);
+        assert!(result.ok);
         assert_eq!(result.sql.unwrap(), "SELECT TOP (100) @@version");
     }
 

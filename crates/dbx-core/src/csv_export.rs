@@ -114,7 +114,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
         .await?;
 
         if !wrote_header {
-            write_csv_row(&mut writer, result.columns.into_iter())?;
+            write_csv_row(&mut writer, result.columns)?;
             wrote_header = true;
         }
 

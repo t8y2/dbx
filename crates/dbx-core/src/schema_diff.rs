@@ -825,8 +825,10 @@ pub fn generate_schema_sync_sql(diffs: &[TableDiff], db_type: DatabaseType, sche
 
         if let Some(foreign_keys) = &diff.foreign_keys {
             for fk in foreign_keys {
-                if (fk.diff_type == "added" || fk.diff_type == "modified") && fk.source.is_some() {
-                    lines.push(add_foreign_key_sql(&diff.name, fk.source.as_ref().unwrap(), db_type, schema));
+                if fk.diff_type == "added" || fk.diff_type == "modified" {
+                    if let Some(source) = fk.source.as_ref() {
+                        lines.push(add_foreign_key_sql(&diff.name, source, db_type, schema));
+                    }
                 }
             }
         }

@@ -8,6 +8,7 @@ use dbx_core::models::connection::DatabaseType;
 use dbx_core::sql::split_sql_statements;
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -47,6 +48,7 @@ pub async fn execute_query(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_multi(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

@@ -149,10 +149,10 @@ pub async fn table_export_download(
 
     let filename = format!("table_export_{export_id}.{file_ext}");
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
         .body(Body::from(data))
-        .map_err(|e| AppError(e.to_string()))?)
+        .map_err(|e| AppError(e.to_string()))
 }

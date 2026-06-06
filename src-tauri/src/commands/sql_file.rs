@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tauri::{AppHandle, Emitter, State};
@@ -12,8 +12,11 @@ use dbx_core::sql_file_import::{execute_sql_file_content, sql_file_error_progres
 
 pub use dbx_core::sql::{decode_sql_file_bytes, SqlFilePreview, SqlFileRequest, SqlFileStatus};
 
-static SQL_FILE_EXECUTIONS: std::sync::LazyLock<RwLock<HashMap<String, CancellationToken>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static SQL_FILE_EXECUTIONS: OnceLock<RwLock<HashMap<String, CancellationToken>>> = OnceLock::new();
+
+fn sql_file_executions() -> &'static RwLock<HashMap<String, CancellationToken>> {
+    SQL_FILE_EXECUTIONS.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +50,7 @@ pub async fn execute_sql_file(
 ) -> Result<(), String> {
     let token = CancellationToken::new();
     {
-        let mut executions = SQL_FILE_EXECUTIONS.write().await;
+        let mut executions = sql_file_executions().write().await;
         register_sql_file_execution(&mut executions, request.execution_id.clone(), token.clone())?;
     }
 
@@ -56,7 +59,7 @@ pub async fn execute_sql_file(
 
     let result = execute_sql_file_inner(&app, &state, &request, token, started_at).await;
     {
-        let mut executions = SQL_FILE_EXECUTIONS.write().await;
+        let mut executions = sql_file_executions().write().await;
         remove_sql_file_execution(&mut executions, &request.execution_id);
     }
     result
@@ -64,7 +67,7 @@ pub async fn execute_sql_file(
 
 #[tauri::command]
 pub async fn cancel_sql_file_execution(execution_id: String) -> Result<bool, String> {
-    let executions = SQL_FILE_EXECUTIONS.read().await;
+    let executions = sql_file_executions().read().await;
     if let Some(token) = executions.get(&execution_id) {
         token.cancel();
         Ok(true)
@@ -119,6 +122,7 @@ fn remove_sql_file_execution(executions: &mut HashMap<String, CancellationToken>
     executions.remove(execution_id);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_progress(
     app: &AppHandle,
     execution_id: &str,

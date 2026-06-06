@@ -419,6 +419,7 @@ async fn install_agent_driver_from_registry(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_with_progress(
     am: &AgentManager,
     progress: &impl Fn(AgentProgressEvent),

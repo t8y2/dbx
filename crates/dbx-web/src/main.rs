@@ -62,7 +62,7 @@ async fn main() {
     };
 
     // Password hash: env var takes priority, then database
-    let password_hash = if let Some(pw) = std::env::var("DBX_PASSWORD").ok() {
+    let password_hash = if let Ok(pw) = std::env::var("DBX_PASSWORD") {
         let salt = SaltString::generate(&mut OsRng);
         Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
     } else {

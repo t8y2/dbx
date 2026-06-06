@@ -501,6 +501,9 @@ enum SourceDiff {
     Modified(DataCompareModifiedRow),
 }
 
+type CompareRowValues = HashMap<String, Value>;
+type CompareRowMap = HashMap<String, CompareRowValues>;
+
 fn parallel_compare_rows(columns: &[String], key_columns: &[String], rows: &[Vec<Value>]) -> Vec<CompareRow> {
     rows.par_iter()
         .map(|row| {
@@ -511,10 +514,7 @@ fn parallel_compare_rows(columns: &[String], key_columns: &[String], rows: &[Vec
         .collect()
 }
 
-fn collect_compare_rows(
-    rows: Vec<CompareRow>,
-    label: &str,
-) -> Result<(HashMap<String, HashMap<String, Value>>, Vec<String>), String> {
+fn collect_compare_rows(rows: Vec<CompareRow>, label: &str) -> Result<(CompareRowMap, Vec<String>), String> {
     let mut items = HashMap::with_capacity(rows.len());
     let mut order = Vec::with_capacity(rows.len());
 

@@ -16,7 +16,7 @@ pub fn load_snapshot_to_duckdb(con: &duckdb::Connection, snapshot: &ExternalTabl
             format!(
                 "\"{}\" {}{}",
                 c.name.replace('"', "\"\""),
-                &c.duckdb_type,
+                c.duckdb_type,
                 if c.is_nullable { "" } else { " NOT NULL" }
             )
         })

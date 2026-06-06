@@ -152,7 +152,7 @@ async fn connect_agent_pool(
 #[cfg(test)]
 mod tests {
     use super::mongo_legacy_connect_params;
-    use dbx_core::models::connection::{ConnectionConfig, DatabaseType, ProxyType};
+    use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {

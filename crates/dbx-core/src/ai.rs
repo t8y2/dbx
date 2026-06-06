@@ -1063,9 +1063,9 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(config.proxy_enabled, false);
+        assert!(!config.proxy_enabled);
         assert_eq!(config.proxy_url, "");
-        assert_eq!(config.enable_thinking, true);
+        assert!(config.enable_thinking);
     }
 
     #[test]

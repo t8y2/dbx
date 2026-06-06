@@ -1841,7 +1841,7 @@ mod tests {
         let escaped = pg_quote_ident(malicious);
         // Double quotes should be doubled, not breaking out
         assert_eq!(escaped, r#""public""; DROP TABLE users; --""#);
-        assert!(escaped.matches('"').count() % 2 == 0, "quote count should be even");
+        assert!(escaped.matches('"').count().is_multiple_of(2), "quote count should be even");
     }
 
     // --- query_result_row_limit ---
@@ -2131,14 +2131,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_batch_whitespace_only_is_filtered() {
-        let statements = vec!["  ".to_string(), "\t\n".to_string(), "".to_string()];
+        let statements = ["  ".to_string(), "\t\n".to_string(), "".to_string()];
         let combined = statements.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";\n");
         assert!(combined.is_empty());
     }
 
     #[test]
     fn execute_batch_joins_with_semicolons() {
-        let statements = vec!["SELECT 1".to_string(), "SELECT 2".to_string()];
+        let statements = ["SELECT 1".to_string(), "SELECT 2".to_string()];
         let combined = statements.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";\n");
         assert_eq!(combined, "SELECT 1;\nSELECT 2");
     }

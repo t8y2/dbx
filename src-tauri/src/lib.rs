@@ -166,6 +166,7 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup};
 

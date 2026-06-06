@@ -1183,6 +1183,7 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql(
     mode: &TransferMode,
     columns: &[String],
@@ -1199,6 +1200,7 @@ fn generate_transfer_write_sql(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -1307,6 +1309,7 @@ pub fn pagination_sql_with_order(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pagination_sql_with_filter_order(
     columns: &[String],
     table: &str,

@@ -838,6 +838,21 @@ test("key columns get priority boost in column suggestions", () => {
   assert.ok(idItem.boost > nameItem.boost, "id column should have higher boost than name");
 });
 
+test("referenced-table columns rank above keywords (#801)", () => {
+  const items = buildSqlCompletionItems("select  from public.users u", "select ".length, {
+    tables,
+    columnsByTable,
+  });
+  const column = items.find((item) => item.type === "column");
+  assert.ok(column, "should suggest columns when a table is referenced");
+  assert.ok(column.boost >= 2000, "referenced-table columns should be boosted above plain keywords");
+  const columnIdx = items.findIndex((item) => item.type === "column");
+  const keywordIdx = items.findIndex((item) => item.type === "keyword");
+  if (keywordIdx >= 0) {
+    assert.ok(columnIdx < keywordIdx, "columns should appear before keywords in a referenced-table context");
+  }
+});
+
 // --- Schema name completion ---
 
 test("suggests schema names alongside tables in FROM context", () => {

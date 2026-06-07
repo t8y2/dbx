@@ -488,6 +488,20 @@ fn format_pg_timestamptz(value: DateTime<Local>) -> String {
     value.to_rfc3339()
 }
 
+/// Render PostgreSQL's internal `"char"` type (OID 18) as the character it
+/// stores, matching psql's `charout`. The driver decodes this single-byte type
+/// as i8; emitting the numeric value would leak the raw ASCII code (issue #669).
+/// A zero byte maps to an empty string; any other byte is interpreted as a
+/// Latin-1 code point so the result is always valid UTF-8 and never panics.
+fn pg_char_to_json(byte: i8) -> serde_json::Value {
+    let b = byte as u8;
+    if b == 0 {
+        serde_json::Value::String(String::new())
+    } else {
+        serde_json::Value::String(char::from(b).to_string())
+    }
+}
+
 fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
     let upper = type_name.to_uppercase();
 
@@ -539,6 +553,14 @@ fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value
 
     if matches!(upper.as_str(), "OID" | "XID" | "CID") {
         return pg_system_u32_to_json(row, idx).unwrap_or(serde_json::Value::Null);
+    }
+
+    // PostgreSQL's internal "char" type (OID 18, e.g. pg_depend.deptype) is a
+    // single byte the driver decodes as i8. Without this branch it falls through
+    // to the i8 arm below and surfaces the raw ASCII code (110 for 'n') instead
+    // of the character. SQL CHAR(n) is a different type ("bpchar"), unaffected.
+    if upper == "CHAR" {
+        return row.try_get::<_, i8>(idx).map(pg_char_to_json).unwrap_or(serde_json::Value::Null);
     }
 
     if upper.starts_with('_') {
@@ -1738,6 +1760,25 @@ mod tests {
         assert!(PgSystemU32::accepts(&Type::CID));
         assert!(!PgSystemU32::accepts(&Type::OID));
         assert!(!PgSystemU32::accepts(&Type::INT4));
+    }
+
+    #[test]
+    fn pg_char_type_renders_byte_as_character() {
+        // The internal "char" type (OID 18, e.g. pg_depend.deptype) is decoded
+        // as i8; we must surface the character, not the ASCII code (issue #669).
+        assert_eq!(Type::CHAR.name(), "char");
+        assert!(i8::accepts(&Type::CHAR));
+        // SQL CHAR(n)/character(n) is a different type ("bpchar") and must not
+        // be routed through the "char" branch.
+        assert_eq!(Type::BPCHAR.name(), "bpchar");
+
+        assert_eq!(pg_char_to_json(b'n' as i8), serde_json::Value::String("n".into()));
+        assert_eq!(pg_char_to_json(b'a' as i8), serde_json::Value::String("a".into()));
+        assert_eq!(pg_char_to_json(b'i' as i8), serde_json::Value::String("i".into()));
+        // A zero byte renders as an empty string (matches psql's charout).
+        assert_eq!(pg_char_to_json(0), serde_json::Value::String(String::new()));
+        // High bytes stay valid UTF-8 (Latin-1) and never panic.
+        assert_eq!(pg_char_to_json(-1), serde_json::Value::String("\u{00ff}".into()));
     }
 
     #[test]

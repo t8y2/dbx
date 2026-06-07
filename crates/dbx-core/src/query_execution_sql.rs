@@ -74,6 +74,14 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
     matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Dameng))
 }
 
+pub fn is_safe_dameng_autotrace_sql(sql: &str) -> bool {
+    let source = strip_trailing_semicolons(sql.trim());
+    if source.is_empty() || has_extra_statement_after_semicolon(&source) {
+        return false;
+    }
+    is_safe_explain_source(&source) && !contains_dangerous_sql_keyword(&source)
+}
+
 fn explain_err(reason: &str) -> ExplainSqlBuildResult {
     ExplainSqlBuildResult { ok: false, sql: None, reason: Some(reason.to_string()) }
 }
@@ -87,6 +95,42 @@ fn is_safe_explain_source(sql: &str) -> bool {
     ["select", "with", "table", "values"].iter().any(|keyword| {
         source == *keyword || source.starts_with(&format!("{keyword} ")) || source.starts_with(&format!("{keyword}\n"))
     })
+}
+
+fn contains_dangerous_sql_keyword(sql: &str) -> bool {
+    let source = strip_sql_comments_and_literals(sql).to_lowercase();
+    ["drop", "delete", "truncate", "alter", "update", "merge", "replace", "insert", "create"]
+        .iter()
+        .any(|keyword| contains_word(&source, keyword))
+}
+
+fn contains_word(source: &str, word: &str) -> bool {
+    let bytes = source.as_bytes();
+    let word_bytes = word.as_bytes();
+    if word_bytes.is_empty() || bytes.len() < word_bytes.len() {
+        return false;
+    }
+
+    for idx in 0..=bytes.len() - word_bytes.len() {
+        if &bytes[idx..idx + word_bytes.len()] != word_bytes {
+            continue;
+        }
+        let before = idx.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+        let after = bytes.get(idx + word_bytes.len()).copied();
+        if !is_identifier_byte(before) && !is_identifier_byte(after) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_identifier_byte(byte: Option<u8>) -> bool {
+    byte.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn has_extra_statement_after_semicolon(sql: &str) -> bool {
+    let stripped = strip_sql_comments_and_literals(sql);
+    stripped.split(';').skip(1).any(|part| !part.trim().is_empty())
 }
 
 fn strip_sql_comments(sql: &str) -> String {
@@ -134,6 +178,87 @@ fn strip_sql_comments(sql: &str) -> String {
     output
 }
 
+fn strip_sql_comments_and_literals(sql: &str) -> String {
+    let mut output = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                output.push(' ');
+            }
+            continue;
+        }
+
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+                output.push(' ');
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            output.push(' ');
+            continue;
+        }
+
+        if in_double_quote {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            output.push(' ');
+            continue;
+        }
+
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '#' {
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
+            continue;
+        }
+        if ch == '\'' {
+            in_single_quote = true;
+            output.push(' ');
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            output.push(' ');
+            continue;
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +295,16 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn validates_dameng_autotrace_sql_safety() {
+        assert!(is_safe_dameng_autotrace_sql("SELECT * FROM t WHERE name = 'delete';"));
+        assert!(is_safe_dameng_autotrace_sql("/* comment */ WITH q AS (SELECT 1) SELECT * FROM q"));
+        assert!(!is_safe_dameng_autotrace_sql("SELECT * FROM t; DELETE FROM t"));
+        assert!(!is_safe_dameng_autotrace_sql("UPDATE t SET name = 'x'"));
+        assert!(!is_safe_dameng_autotrace_sql("SELECT * FROM t; /* hidden */ DROP TABLE t"));
+        assert!(!is_safe_dameng_autotrace_sql(""));
     }
 
     #[test]

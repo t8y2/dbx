@@ -500,6 +500,10 @@ pub async fn get_explain_info(
 
     let mut client = client.lock().await;
     let mode = req.mode.unwrap_or_else(|| "explain".to_string());
+    if mode.eq_ignore_ascii_case("autotrace") && !dbx_core::query_execution_sql::is_safe_dameng_autotrace_sql(&req.sql)
+    {
+        return Err(AppError("unsafe".to_string()));
+    }
     let params = serde_json::json!({
         "sql": req.sql,
         "database": req.database.unwrap_or_default(),

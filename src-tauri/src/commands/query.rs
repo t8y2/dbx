@@ -479,6 +479,9 @@ pub async fn get_explain_info(
 
     let mut client = client.lock().await;
     let mode = mode.unwrap_or_else(|| "explain".to_string());
+    if mode.eq_ignore_ascii_case("autotrace") && !dbx_core::query_execution_sql::is_safe_dameng_autotrace_sql(&sql) {
+        return Err("unsafe".to_string());
+    }
     let params = serde_json::json!({
         "sql": sql,
         "database": database.unwrap_or_default(),

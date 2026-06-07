@@ -145,7 +145,12 @@ pub fn build_duckdb_attach_database_sql(options: DuckDbAttachDatabaseSqlOptions)
 }
 
 pub fn build_create_user_sql(username: &str, password: &str, tablespace: &str) -> String {
-    format!("CREATE USER \"{}\" IDENTIFIED BY \"{}\" DEFAULT TABLESPACE \"{}\";", username, password, tablespace)
+    format!(
+        "CREATE USER {} IDENTIFIED BY {} DEFAULT TABLESPACE {};",
+        quote_table_identifier(Some(DatabaseType::Dameng), username),
+        quote_sql_string(password),
+        quote_table_identifier(Some(DatabaseType::Dameng), tablespace)
+    )
 }
 
 pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
@@ -493,6 +498,14 @@ mod tests {
                 name: "report db".to_string(),
             }),
             "ATTACH '/Users/me/O''Reilly analytics.duckdb' AS \"report db\";"
+        );
+    }
+
+    #[test]
+    fn builds_dameng_create_user_sql_with_escaped_values() {
+        assert_eq!(
+            build_create_user_sql("app\"user", "pa'ss", "main\"space"),
+            "CREATE USER \"app\"\"user\" IDENTIFIED BY 'pa''ss' DEFAULT TABLESPACE \"main\"\"space\";"
         );
     }
 

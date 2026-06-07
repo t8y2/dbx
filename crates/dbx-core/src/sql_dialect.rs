@@ -217,8 +217,10 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
 
 pub fn normalize_where_input(where_input: Option<&str>) -> String {
     let trimmed = where_input.unwrap_or("").trim().trim_end_matches(';').trim();
-    if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("where") {
-        trimmed[5..].trim().to_string()
+    let mut chars = trimmed.chars();
+    let prefix = chars.by_ref().take(5).collect::<String>();
+    if prefix.eq_ignore_ascii_case("where") {
+        chars.as_str().trim().to_string()
     } else {
         trimmed.to_string()
     }
@@ -705,5 +707,11 @@ mod tests {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` ORDER BY n.`id` ASC LIMIT 100;"
         );
+    }
+
+    #[test]
+    fn normalizes_where_input_with_multibyte_identifier_prefix() {
+        assert_eq!(normalize_where_input(Some("`客户名称` = '示例客户'")), "`客户名称` = '示例客户'");
+        assert_eq!(normalize_where_input(Some("WHERE `客户名称` = '示例客户';")), "`客户名称` = '示例客户'");
     }
 }

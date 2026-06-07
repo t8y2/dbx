@@ -1195,7 +1195,17 @@ export const useQueryStore = defineStore("query", () => {
     // DM uses native getExplainInfo via JDBC
     // Default mode="explain" (direct plan, no execution).
     // Pass mode="autotrace" for actual execution with real stats.
+    // Safety: autotrace executes the SQL — reject dangerous statements (DROP/DELETE etc.)
     if (databaseType === "dameng") {
+      if (explainMode === "autotrace") {
+        const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
+        const cleaned = sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--.*$/gm, " ").replace(/#.*$/gm, " ");
+        if (cleaned.split(";").some((stmt) => DANGER_RE.test(stmt))) {
+          tab.isExplaining = false;
+          tab.explainExecutionId = undefined;
+          return { ok: false as const, reason: "unsafe" as const };
+        }
+      }
       try {
         const mode = explainMode === "autotrace" ? "autotrace" : "explain";
         const planText = (await api.getExplainInfo(tab.connectionId, tab.database, tab.schema, sql, mode)) as string | undefined;

@@ -430,6 +430,7 @@ const rowDetailDialogRowId = ref<number | null>(null);
 const columnDetailDialogOpen = ref(false);
 const columnDetailDialogColumnIndex = ref<number | null>(null);
 const cellDetailJsonView = ref(false);
+const sideDetailJsonView = ref(false);
 const rowDetailSearch = ref("");
 const columnDetailSearch = ref("");
 const isResizingDetail = ref(false);
@@ -2853,6 +2854,7 @@ async function prefetchDetailSqlCondition() {
 
 watch(activeCellDetail, (detail) => {
   void prefetchDetailSqlCondition();
+  sideDetailJsonView.value = false;
   if (activeCellDetailTab.value !== "valueEditor") return;
   if (!detail?.isEditable) {
     resetDetailEdit();
@@ -4419,6 +4421,14 @@ function copyDetailFormattedJson() {
   copyText(detail.formattedJson);
 }
 
+function copyDetailCurrentValue() {
+  if (sideDetailJsonView.value && activeCellDetail.value?.formattedJson) {
+    copyDetailFormattedJson();
+  } else {
+    copyDetailValue();
+  }
+}
+
 function copyDetailColumnName() {
   if (!activeCellDetail.value) return;
   copyText(activeCellDetail.value.column);
@@ -5018,7 +5028,7 @@ const ddlDrawerStyle = computed(() => ({
 
 const detailPanelStyle = computed(() =>
   cellDetailPanelIsBottom.value
-    ? { maxHeight: `min(42vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px)` }
+    ? { height: `${detailPanelHeight.value}px`, maxHeight: `min(70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px)` }
     : { width: `${detailPanelHeight.value}px` },
 );
 
@@ -5255,16 +5265,18 @@ function onDdlResizeEnd() {
 
 function onDetailResizeStart(event: MouseEvent) {
   isResizingDetail.value = true;
-  detailResizeStartY = event.clientX;
+  // 底部布局拖顶部边缘(垂直/clientY),右侧布局拖左边缘(水平/clientX)
+  detailResizeStartY = cellDetailPanelIsBottom.value ? event.clientY : event.clientX;
   detailResizeStartHeight = detailPanelHeight.value;
-  document.body.classList.add("select-none", "cursor-col-resize");
+  document.body.classList.add("select-none", cellDetailPanelIsBottom.value ? "cursor-row-resize" : "cursor-col-resize");
   window.addEventListener("mousemove", onDetailResizeMove);
   window.addEventListener("mouseup", onDetailResizeEnd);
 }
 
 function onDetailResizeMove(event: MouseEvent) {
   if (!isResizingDetail.value) return;
-  const nextSize = detailResizeStartHeight + detailResizeStartY - event.clientX;
+  const pos = cellDetailPanelIsBottom.value ? event.clientY : event.clientX;
+  const nextSize = detailResizeStartHeight + detailResizeStartY - pos;
   detailPanelHeight.value = clampCellDetailPanelSize(nextSize);
 }
 
@@ -7447,6 +7459,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30"
               @mousedown.prevent="onDetailResizeStart"
             />
+            <div
+              v-else
+              class="absolute left-0 right-0 top-0 z-20 h-1.5 -translate-y-1/2 cursor-row-resize hover:bg-primary/30"
+              @mousedown.prevent="onDetailResizeStart"
+            />
             <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
               <Info class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t("grid.cellDetails") }}</span>
@@ -7510,16 +7527,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
-                <div
-                  data-native-clipboard
-                  class="flex-1 min-h-0 overflow-auto p-3 text-xs"
-                  :class="
-                    cellDetailPanelIsBottom ? 'grid grid-cols-[minmax(0,1fr)_minmax(220px,30%)] gap-3' : 'space-y-3'
-                  "
-                >
+                <div data-native-clipboard class="flex-1 min-h-0 overflow-auto p-3 text-xs space-y-3">
                   <div
                     v-if="cellDetailPanelIsBottom"
-                    class="col-span-2 grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2"
+                    class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2"
                   >
                     <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
@@ -7597,6 +7608,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
                         <Button
+                          v-if="activeCellDetail.formattedJson"
+                          :variant="sideDetailJsonView ? 'secondary' : 'ghost'"
+                          size="sm"
+                          class="h-6 gap-1 px-2 text-xs"
+                          :title="t('grid.formattedJson')"
+                          @click="sideDetailJsonView = !sideDetailJsonView"
+                        >
+                          <Code2 class="h-3 w-3" />
+                          {{ t("grid.formattedJson") }}
+                        </Button>
+                        <Button
                           v-if="activeCellDetail.isEditable"
                           variant="ghost"
                           size="icon"
@@ -7611,7 +7633,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           size="icon"
                           class="h-6 w-6"
                           :title="t('grid.copyValue')"
-                          @click="copyDetailValue"
+                          @click="copyDetailCurrentValue"
                         >
                           <Copy class="h-3 w-3" />
                         </Button>
@@ -7704,56 +7726,25 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </template>
                     <pre
                       v-else
-                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre cursor-pointer hover:border-primary/50"
-                      :class="[
-                        { 'cursor-text': activeCellDetail.isEditable },
-                        cellDetailPanelIsBottom ? 'max-h-36' : 'max-h-56',
-                      ]"
+                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
+                      :class="{ 'cursor-text': activeCellDetail.isEditable }"
                       @dblclick="startDetailEdit"
-                      >{{ activeCellDetail.displayValuePreview }}</pre
+                      >{{
+                        sideDetailJsonView && activeCellDetail.formattedJson
+                          ? activeCellDetail.formattedJson
+                          : activeCellDetail.rawValuePreview
+                      }}</pre
                     >
-                    <div v-if="activeCellDetail.isValuePreviewTruncated" class="text-[11px] text-muted-foreground">
+                    <div
+                      v-if="activeCellDetail.isValuePreviewTruncated && !sideDetailJsonView"
+                      class="text-[11px] text-muted-foreground"
+                    >
                       {{
                         t("grid.largeValuePreviewHint", {
-                          count: activeCellDetail.displayValuePreview.length,
+                          count: activeCellDetail.rawValuePreview.length,
                         })
                       }}
                     </div>
-                  </div>
-                  <div
-                    v-if="activeCellDetail.displayValuePreview !== activeCellDetail.rawValuePreview"
-                    class="space-y-1"
-                    :class="cellDetailPanelIsBottom ? 'min-h-0' : ''"
-                  >
-                    <div class="text-muted-foreground">{{ t("grid.rawValue") }}</div>
-                    <pre
-                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                      :class="cellDetailPanelIsBottom ? 'max-h-36' : 'max-h-40'"
-                      >{{ activeCellDetail.rawValuePreview }}</pre
-                    >
-                  </div>
-                  <div
-                    v-if="activeCellDetail.formattedJson"
-                    class="mt-2 space-y-1"
-                    :class="cellDetailPanelIsBottom ? 'min-h-0' : ''"
-                  >
-                    <div class="flex items-center justify-between gap-2">
-                      <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-6 px-2 text-xs"
-                        :title="t('grid.copyValue')"
-                        @click="copyDetailFormattedJson"
-                      >
-                        <Copy class="h-3 w-3" />
-                      </Button>
-                    </div>
-                    <pre
-                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                      :class="cellDetailPanelIsBottom ? 'max-h-36' : 'max-h-72'"
-                      >{{ activeCellDetail.formattedJson }}</pre
-                    >
                   </div>
                 </div>
 
@@ -8129,17 +8120,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             >
               {{ t("grid.largeValuePreviewHint", { count: dialogCellDetail.rawValuePreview.length }) }}
             </div>
-          </div>
-
-          <div
-            v-if="dialogCellDetail.displayValuePreview !== dialogCellDetail.rawValuePreview && !cellDetailJsonView"
-            class="space-y-1"
-          >
-            <div class="text-muted-foreground">{{ t("grid.formattedValue") }}</div>
-            <pre
-              class="max-h-40 overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words"
-              >{{ dialogCellDetail.displayValuePreview }}</pre
-            >
           </div>
         </div>
 

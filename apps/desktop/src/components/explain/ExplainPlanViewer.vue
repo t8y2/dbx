@@ -52,7 +52,8 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
       >
       <span
         v-if="plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')"
-        class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size:10px"
+        class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300"
+        style="font-size: 10px"
         >A-TRACE</span
       >
       <span class="flex-1" />

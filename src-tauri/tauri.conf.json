@@ -1,0 +1,85 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DBX",
+  "version": "0.5.29",
+  "identifier": "com.dbx.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "DBX",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 18
+        },
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "fileAssociations": [
+      {
+        "ext": ["sql"],
+        "name": "SQL Script",
+        "description": "SQL script",
+        "role": "Editor",
+        "mimeType": "application/sql"
+      },
+      {
+        "ext": ["db", "sqlite", "sqlite3", "duckdb"],
+        "name": "Database File",
+        "description": "Database file",
+        "role": "Editor"
+      }
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "template": "windows/nsis/installer.nsi"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["dbx"]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkxNEYyMzE3QkJCNkM3REYKUldUZng3YTdGeU5Qa1NnTUZCRVhJVkxsOWZKQWFPVCtacUgySlNlcjRDU2RmZElCQnphd25pYUMK",
+      "endpoints": [
+        "https://dl.dbxio.com/releases/latest/latest.json",
+        "https://github.com/t8y2/dbx/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

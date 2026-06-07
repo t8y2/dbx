@@ -1,0 +1,24 @@
+name: DBX
+tags:
+  - 工具
+title: 轻量级数据库管理工具
+description: 轻量级数据库管理工具，支持 25+ 种数据库
+additionalProperties:
+  key: dbx
+  name: DBX
+  tags:
+    - Tool
+  shortDescZh: 轻量级数据库管理工具，支持 25+ 种数据库
+  shortDescEn: Lightweight database manager supporting 25+ databases
+  description:
+    en: Lightweight database manager supporting 25+ databases
+    zh: 轻量级数据库管理工具，支持 25+ 种数据库
+  type: tool
+  crossVersionUpdate: true
+  limit: 0
+  recommend: 0
+  website: https://github.com/t8y2/dbx
+  github: https://github.com/t8y2/dbx
+  document: https://github.com/t8y2/dbx#readme
+  architectures:
+    - amd64

@@ -1,0 +1,301 @@
+---
+title: JDBC 插件
+description: 安装 DBX JDBC 插件、导入数据库厂商驱动 JAR，并创建 JDBC 连接。
+---
+
+DBX 默认使用 Rust 原生数据库驱动。JDBC 是可选能力：当你需要连接 DBX 暂未内置支持的数据库，或希望使用数据库厂商提供的 JDBC 驱动时，可以安装 JDBC 插件。
+
+<Callout type="info">
+JDBC 插件不会打包进 DBX 主应用，也不包含任何数据库厂商的 JDBC 驱动。你需要先安装 DBX JDBC 插件，再导入对应数据库的 JDBC driver JAR。
+</Callout>
+
+## 什么时候需要 JDBC
+
+优先使用 DBX 内置数据库类型，例如 MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、DM、GaussDB 等。
+
+以下情况再使用 JDBC：
+
+- 目标数据库不在 DBX 内置类型中
+- 内置驱动无法满足某个厂商特性
+- 你的公司统一要求使用厂商 JDBC driver
+- 你想用 JDBC 连接达梦、H2、DB2、Snowflake、SQLite JDBC 等数据库
+
+## 需要准备什么
+
+| 项目 | 是否必需 | 说明 |
+|---|---:|---|
+| DBX JDBC 插件 | 必需 | 在 DBX 设置中一键安装，用来让 DBX 调用 JDBC |
+| Java Runtime | 必需 | 本机需要能运行 `java`；建议 Java 17 或更高版本 |
+| 数据库厂商 JDBC driver JAR | 必需 | 例如 PostgreSQL、MySQL、达梦、Oracle、H2、SQLite 等驱动 JAR |
+| JDBC URL | 必需 | JDBC URL 通常已经包含主机、端口、数据库名和参数 |
+| 用户名/密码 | 视数据库而定 | 文件型数据库或部分认证方式可能不需要 |
+| 驱动类 | 通常可选 | 多数现代 JDBC 驱动可以自动注册；自动识别失败时再填写 |
+
+## 第一步：安装 Java
+
+JDBC 插件是 Java 程序，需要本机有 Java runtime。安装后在终端确认：
+
+```bash
+java -version
+```
+
+如果系统提示找不到 `java`，需要先安装 Java。DBX 会优先使用 `JAVA_HOME`，其次尝试常见系统路径和 `PATH` 中的 `java`。
+
+<Tabs groupId="java-install" items={['macOS', 'Windows', 'Linux']}>
+  <Tab value="macOS">
+    使用 Homebrew 安装：
+
+    ```bash
+    brew install openjdk
+    ```
+
+    如果 `java -version` 仍不可用，可以按 Homebrew 输出提示配置 `PATH` 或 `JAVA_HOME`。
+  </Tab>
+  <Tab value="Windows">
+    安装 Temurin、Oracle JDK 或 Microsoft Build of OpenJDK。安装后重新打开 DBX，并确认命令行中可以运行：
+
+    ```powershell
+    java -version
+    ```
+  </Tab>
+  <Tab value="Linux">
+    Debian / Ubuntu：
+
+    ```bash
+    sudo apt install openjdk-17-jre
+    ```
+
+    Fedora：
+
+    ```bash
+    sudo dnf install java-17-openjdk
+    ```
+  </Tab>
+</Tabs>
+
+## 第二步：安装 DBX JDBC 插件
+
+在 DBX 桌面版中打开：
+
+1. **设置**
+2. **JDBC 驱动**
+3. 点击 **安装 JDBC 插件**
+
+安装成功后会显示类似：
+
+```text
+已安装：v0.1.0
+```
+
+DBX JDBC 插件有自己的版本号，不会强制跟 DBX 主应用版本一致。主应用更新后不会自动安装 JDBC 插件；如果你手动卸载过，后续更新也不会自动装回来。
+
+## 第三步：下载数据库厂商 JDBC 驱动
+
+DBX 不会自动下载数据库厂商驱动。你需要从数据库官网或 Maven 仓库下载对应的 `.jar` 文件。
+
+常见驱动示例：
+
+| 数据库 | 常见 Maven Artifact | 驱动类 | JDBC URL 示例 |
+|---|---|---|---|
+| PostgreSQL | `org.postgresql:postgresql` | `org.postgresql.Driver` | `jdbc:postgresql://localhost:5432/postgres` |
+| MySQL | `com.mysql:mysql-connector-j` | `com.mysql.cj.jdbc.Driver` | `jdbc:mysql://localhost:3306/test` |
+| MariaDB | `org.mariadb.jdbc:mariadb-java-client` | `org.mariadb.jdbc.Driver` | `jdbc:mariadb://localhost:3306/test` |
+| 达梦 DM | `com.dameng:DmJdbcDriver8` | `dm.jdbc.driver.DmDriver` | `jdbc:dm://localhost:5236` |
+| SQL Server | `com.microsoft.sqlserver:mssql-jdbc` | `com.microsoft.sqlserver.jdbc.SQLServerDriver` | `jdbc:sqlserver://localhost:1433;databaseName=master` |
+| Oracle | `com.oracle.database.jdbc:ojdbc11` | `oracle.jdbc.OracleDriver` | `jdbc:oracle:thin:@//localhost:1521/ORCLPDB1` |
+| H2 | `com.h2database:h2` | `org.h2.Driver` | `jdbc:h2:/tmp/dbx-h2-test` |
+| SQLite | `org.xerial:sqlite-jdbc` | `org.sqlite.JDBC` | `jdbc:sqlite:/Users/me/test.db` |
+| ClickHouse | `com.clickhouse:clickhouse-jdbc` | `com.clickhouse.jdbc.ClickHouseDriver` | `jdbc:clickhouse://localhost:8123/default` |
+| DB2 | `com.ibm.db2:jcc` | `com.ibm.db2.jcc.DB2Driver` | `jdbc:db2://localhost:50000/SAMPLE` |
+| Snowflake | `net.snowflake:snowflake-jdbc` | `net.snowflake.client.jdbc.SnowflakeDriver` | `jdbc:snowflake://account.region.snowflakecomputing.com/?db=DEMO` |
+
+<Callout type="warn">
+不同数据库和驱动版本的 URL 参数可能不同。以厂商官方文档为准。如果驱动依赖多个 JAR，请把需要的 JAR 路径都导入或填写进去。
+</Callout>
+
+## 第四步：导入 JDBC 驱动 JAR
+
+在 DBX 中打开：
+
+1. **设置**
+2. **JDBC 驱动**
+3. 在 **JDBC 驱动 JAR** 区域点击导入按钮，选择下载好的 `.jar`
+
+也可以直接粘贴本机 JAR 路径，然后点击导入。导入后，JAR 会复制到 DBX 的应用数据目录中，之后新建 JDBC 连接时可以从下拉框选择它。
+
+导入驱动只复制文件，不会修改系统 Java、不安装数据库客户端，也不会把驱动上传到远端。
+
+## 第五步：创建 JDBC 连接
+
+创建连接时选择 **JDBC** 类型。
+
+| 字段 | 怎么填 |
+|---|---|
+| 名称 | 连接显示名，例如 `H2 Test`、`DM Dev`、`Oracle Dev` |
+| JDBC URL | 完整 JDBC URL，例如 `jdbc:postgresql://localhost:5432/postgres` |
+| 用户名 | 数据库用户名；不需要认证时可以留空 |
+| 密码 | 数据库密码；不需要认证时可以留空 |
+| 驱动类（可选） | 自动识别失败时填写，例如 `org.postgresql.Driver` |
+| 驱动 JAR | 从已导入驱动下拉框选择，或填写本机 JAR 路径 |
+
+JDBC URL 通常已经包含主机、端口和数据库名，因此 JDBC 表单不会再单独显示主机和端口。
+
+填写完成后点击 **测试**。测试成功后点击 **保存**，连接会出现在侧边栏中。
+
+## 示例：连接达梦 DM
+
+DBX 已经内置 DM ODBC 连接类型。如果你更想使用达梦官方 JDBC 驱动，可以走 JDBC 插件。
+
+1. 安装 DBX JDBC 插件
+2. 安装 Java
+3. 从达梦安装目录或 Maven 仓库获取达梦 JDBC driver JAR，例如 `DmJdbcDriver8.jar` 或 `DmJdbcDriver11.jar`
+4. 在 **设置 → JDBC 驱动** 中导入该 JAR
+5. 新建连接，选择 **JDBC**
+6. 填写：
+
+| 字段 | 值 |
+|---|---|
+| JDBC URL | `jdbc:dm://127.0.0.1:5236` |
+| 用户名 | `SYSDBA` |
+| 密码 | 你的达梦密码 |
+| 驱动类（可选） | `dm.jdbc.driver.DmDriver` |
+| 驱动 JAR | 选择已导入的达梦 JDBC JAR |
+
+达梦这里建议直接填写驱动类 `dm.jdbc.driver.DmDriver`，这样不依赖驱动 JAR 的自动发现配置。
+
+## 示例：连接 H2 本地文件数据库
+
+H2 很适合验证 JDBC 流程。
+
+1. 安装 DBX JDBC 插件
+2. 下载 H2 JDBC driver JAR
+3. 在设置中导入 `h2-*.jar`
+4. 新建连接，选择 **JDBC**
+5. 填写：
+
+| 字段 | 值 |
+|---|---|
+| JDBC URL | `jdbc:h2:/tmp/dbx-h2-demo` |
+| 用户名 | `sa` |
+| 密码 | 留空 |
+| 驱动类（可选） | `org.h2.Driver` |
+| 驱动 JAR | 选择已导入的 H2 JAR |
+
+保存后可以执行：
+
+```sql
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name VARCHAR(100)
+);
+
+INSERT INTO users VALUES (1, 'Alice');
+
+SELECT * FROM users;
+```
+
+## 示例：连接 PostgreSQL
+
+1. 下载 PostgreSQL JDBC driver JAR
+2. 在设置中导入该 JAR
+3. 新建 JDBC 连接
+4. 填写：
+
+| 字段 | 值 |
+|---|---|
+| JDBC URL | `jdbc:postgresql://localhost:5432/postgres` |
+| 用户名 | `postgres` |
+| 密码 | 你的 PostgreSQL 密码 |
+| 驱动类（可选） | `org.postgresql.Driver` |
+| 驱动 JAR | 选择已导入的 PostgreSQL JAR |
+
+如果数据库要求 SSL，可以在 JDBC URL 后添加参数：
+
+```text
+jdbc:postgresql://localhost:5432/postgres?sslmode=require
+```
+
+## 常见问题
+
+### 安装 JDBC 插件失败
+
+检查网络是否能访问 DBX 的 GitHub Release。DBX 会尝试代理地址和 GitHub 原始地址，但代理站也可能不稳定。如果公司网络限制 GitHub，请换网络后重试。
+
+### 提示找不到 Java
+
+确认终端里可以运行：
+
+```bash
+java -version
+```
+
+如果终端可用但 DBX 不可用，重启 DBX。macOS 上如果 Java 只安装在 Homebrew 路径，也可以配置 `JAVA_HOME`。
+
+### 提示 `No JDBC driver was discovered`
+
+说明驱动 JAR 没有被自动识别。请在 **驱动类（可选）** 中填写对应驱动类，例如：
+
+```text
+org.postgresql.Driver
+com.mysql.cj.jdbc.Driver
+dm.jdbc.driver.DmDriver
+oracle.jdbc.OracleDriver
+```
+
+### 提示 `No suitable driver`
+
+通常是 JDBC URL 和驱动不匹配。检查：
+
+- 是否选择了正确数据库的 driver JAR
+- JDBC URL 前缀是否正确，例如 `jdbc:postgresql:`、`jdbc:mysql:`、`jdbc:dm:`、`jdbc:oracle:`
+- 是否需要填写驱动类
+
+### 能连接但看不到表
+
+JDBC 元数据依赖数据库驱动和账号权限。检查：
+
+- 当前账号是否有读取 metadata 的权限
+- JDBC URL 是否连接到了正确的数据库或 schema
+- 表是否在不同 schema 下
+- 数据库驱动是否完整支持 `DatabaseMetaData`
+
+### 一个驱动需要多个 JAR 怎么办
+
+在连接表单的 **驱动 JAR** 文本框中每行填写一个 JAR 路径，或在设置里分别导入多个 JAR 后选择/补充路径。
+
+## 卸载插件
+
+在 **设置 → JDBC 驱动** 中点击 **卸载**。卸载会移除 DBX JDBC 插件本体，但会保留你已经导入的数据库厂商 driver JAR，避免下次重新安装插件时还要重新导入。
+
+## 给开发者：插件协议
+
+DBX 会启动插件可执行文件，并通过 stdin/stdout 发送 JSON Lines 请求与响应。连接建立后，DBX 会复用同一个插件进程处理该连接上的查询和元数据请求。
+
+插件目录需要包含 `manifest.json`：
+
+```json
+{
+  "id": "jdbc",
+  "name": "DBX JDBC Plugin",
+  "version": "0.1.0",
+  "protocol_version": 1,
+  "description": "Adds JDBC driver support.",
+  "executable": "bin/dbx-jdbc-plugin",
+  "drivers": [
+    {
+      "id": "jdbc",
+      "label": "JDBC",
+      "kind": "external",
+      "database_type": "jdbc"
+    }
+  ]
+}
+```
+
+当前 DBX 主应用支持插件协议版本 `1`。如果插件 manifest 声明了不同协议版本，DBX 会拒绝加载；每次插件请求也有 30 秒超时，避免驱动进程卡住后无限阻塞应用。
+
+第一版协议支持 `testConnection`、`connect`、`executeQuery`、`listDatabases`、`listSchemas`、`listTables` 和 `getColumns`。
+
+<Callout type="info">
+JDBC 连接配置会保存 `jdbc_driver_class` 和 `jdbc_driver_paths`。如果一个驱动需要多个 JAR，请把所有路径都绑定到连接上，这样元数据和查询调用会使用同一套 classpath。
+</Callout>

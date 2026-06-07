@@ -1,0 +1,174 @@
+---
+title: AI Assistant
+description: Configure an AI provider to generate SQL, explain queries, suggest optimizations, and help fix errors in DBX.
+---
+
+The AI assistant helps with SQL work. It uses metadata from the active connection to understand tables and columns, then helps generate SQL, explain queries, suggest optimizations, or diagnose errors.
+
+<Callout type="warn">
+AI-generated SQL is not executed automatically. Review table names, columns, filters, and affected rows before running it, especially on production connections.
+</Callout>
+
+## Configuration
+
+<Steps>
+  <Step>
+    ### Open Settings
+
+    Open DBX settings and find the AI configuration section.
+  </Step>
+  <Step>
+    ### Choose a Provider
+
+    Select Anthropic, OpenAI, or a custom endpoint compatible with the OpenAI API.
+  </Step>
+  <Step>
+    ### Enter Credentials
+
+    Enter your API key. For custom endpoints, also enter the endpoint URL and model name.
+  </Step>
+  <Step>
+    ### Save and Test
+
+    Save the configuration, return to the editor, and try generating a simple query from natural language.
+  </Step>
+</Steps>
+
+<Callout type="info">
+When no API key is configured, AI features should prompt the user to complete setup instead of failing silently.
+</Callout>
+
+## Ask Mode And Agent Mode
+
+| Mode | Behavior | Execution |
+|---|---|---|
+| Ask | Generates SQL, explanations, fixes, optimizations, dialect conversions, or sample data | Does not imply anything has run |
+| Agent | Prioritizes one executable SQL statement when the user clearly asks DBX to query data | DBX evaluates the generated SQL before attempting execution |
+
+## Thinking Mode
+
+For providers and models that support extended reasoning (such as Claude with thinking enabled), DBX exposes a **Thinking** toggle in AI settings. When enabled:
+
+- The model spends more time reasoning before generating SQL
+- Complex queries, multi-table joins, and optimization suggestions benefit most
+- Response time increases, but output quality improves for non-trivial tasks
+
+Toggle Thinking on or off per task. Leave it off for simple queries and explanations; enable it for complex schema reasoning, optimization, or debugging.
+
+## Table Mentions
+
+Use `@table` or `@schema.table` mentions in your prompt to tell the AI which tables matter most:
+
+- `@users` — includes the `users` table schema in context
+- `@public.orders` — includes a specific schema-qualified table
+- Multiple mentions: `@users @orders @products` includes all three tables
+
+Table mentions are the most reliable way to control schema context. They work even when the full schema is too large to include entirely.
+
+## Schema Context
+
+AI prompts can include the current database type, connection name, database, current SQL, recent error, result preview, and schema context. Schema context contains tables, columns, indexes, and foreign keys.
+
+When a schema is large, DBX truncates context. Use table mentions to prioritize the tables you want AI to reason about.
+
+## SQL Safety Policy
+
+| SQL Category | DBX Behavior |
+|---|---|
+| Read-only statements such as `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN` | Can be auto-executed in Agent mode when the user clearly asks to query |
+| Scoped low-risk writes such as `INSERT` or keyed `UPDATE` | Auto-execute only in clearly non-production environments; otherwise confirm |
+| Multiple statements, `DELETE`, `MERGE`, `REPLACE`, `CREATE`, or unknown SQL | Confirm before execution |
+| Dangerous statements such as `DROP`, `TRUNCATE`, `ALTER`, `RENAME`, or broad `UPDATE` | Blocked by the AI execution policy |
+
+Production-like connection names, hosts, or database names make DBX more conservative. Generated SQL is still text from an AI model; review it like code before trusting it.
+
+## Common Uses
+
+### Generate SQL
+
+Describe the result you want, and the assistant generates SQL using metadata from the current connection:
+
+> Show the top 10 customers by order amount in the last 30 days
+
+Example output:
+
+```sql
+SELECT c.name, SUM(o.amount) AS total_amount
+FROM customers c
+JOIN orders o ON c.id = o.customer_id
+WHERE o.created_at >= NOW() - INTERVAL 30 DAY
+GROUP BY c.id, c.name
+ORDER BY total_amount DESC
+LIMIT 10;
+```
+
+Before running generated SQL, check:
+
+- Whether the tables and columns are correct
+- Whether the time range matches your intent
+- Whether aggregation and ordering are correct
+- Whether the result should be limited
+
+### Explain SQL
+
+Select SQL and ask the assistant to explain its structure:
+
+- What each subquery does
+- How `JOIN` conditions connect tables
+- What the `WHERE` clause filters
+- How aggregation, grouping, and sorting work
+
+This is useful for reading legacy queries, reports, or complex views.
+
+### Optimize SQL
+
+The assistant can suggest optimization directions, such as:
+
+- Possible full table scans
+- Missing indexes
+- Subqueries that may be rewritten as `JOIN`
+- Sorting, deduplication, or aggregation that could be reduced
+
+<Callout type="info">
+AI optimization suggestions are advisory. Confirm performance with the database execution plan, data volume, and index design.
+</Callout>
+
+### Fix Errors
+
+When SQL fails, send the error and query to the assistant for diagnosis. Common fixes include:
+
+- Syntax errors
+- Misspelled table or column names
+- Missing `GROUP BY` columns
+- Type mismatches
+- Dialect differences between database engines
+
+## Supported Providers
+
+<Tabs groupId="ai-provider" items={['Anthropic', 'OpenAI', 'Custom Endpoint']}>
+  <Tab value="Anthropic">
+    Use this for Claude models. Enter your API key, then choose or type the model you want to use.
+  </Tab>
+  <Tab value="OpenAI">
+    Use this for OpenAI models. Enter your API key, then choose or type the model you want to use.
+  </Tab>
+  <Tab value="Custom Endpoint">
+    Use this for services compatible with the OpenAI Chat Completions API, such as local model servers, enterprise gateways, or third-party model platforms.
+
+    Configure:
+
+    - Endpoint URL
+    - API key
+    - Model
+  </Tab>
+</Tabs>
+
+## Privacy and Security
+
+AI requests may include your prompt, SQL, error messages, and the schema context needed to answer. Before using an external provider, confirm:
+
+- Whether sending this information is allowed
+- Whether it includes sensitive field names, business logic, or sample data
+- Whether your team has compliance rules for third-party model calls
+
+If you want AI agents to query databases through tools, continue with [MCP Integration](/en/docs/mcp).

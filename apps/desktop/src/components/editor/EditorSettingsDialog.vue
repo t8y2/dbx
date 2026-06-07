@@ -1,0 +1,2595 @@
+<script setup lang="ts">
+import { ref, watch, shallowRef, computed, onMounted } from "vue";
+import type { EditorView as EditorViewType } from "@codemirror/view";
+import { useI18n } from "vue-i18n";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleHelp,
+  Cloud,
+  Copy,
+  Download,
+  ExternalLink,
+  Loader2,
+  PackageSearch,
+  Pencil,
+  RefreshCw,
+  Settings,
+  Terminal,
+  Trash2,
+  Upload,
+  X,
+} from "@lucide/vue";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  useSettingsStore,
+  AI_PROVIDER_PRESETS,
+  EDITOR_THEMES,
+  FONT_FAMILIES,
+  DEFAULT_EDITOR_SETTINGS,
+  DEFAULT_DESKTOP_SETTINGS,
+  type AiProvider,
+  type AiApiStyle,
+  type EditorTheme,
+  type DesktopIconTheme,
+  type DisconnectTabHandlingMode,
+} from "@/stores/settingsStore";
+import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { useTheme } from "@/composables/useTheme";
+import { copyToClipboard } from "@/lib/clipboard";
+import {
+  aiListModels,
+  aiTestConnection,
+  checkMcpServerStatus,
+  forgetWebdavSavedPassword,
+  listSystemFonts,
+  saveWebdavSavedPassword,
+  webdavPasswordStatus,
+  webdavSyncDownload,
+  webdavSyncTest,
+  webdavSyncUpload,
+  type AiModelInfo,
+  type McpServerStatus,
+  type WebDavConfig,
+} from "@/lib/api";
+import { eventToShortcut } from "@/lib/keyboardShortcuts";
+import {
+  SHORTCUT_DEFINITIONS,
+  findShortcutConflict,
+  formatShortcut,
+  normalizeShortcutSettings,
+  type ShortcutActionId,
+} from "@/lib/shortcutRegistry";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
+import type { SqlSnippet } from "@/types/database";
+import { uuid } from "@/lib/utils";
+import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
+import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
+import AppLogo from "@/components/icons/AppLogo.vue";
+import type { AppThemeAppearance } from "@/lib/appTheme";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { currentLocale, setLocale, type Locale } from "@/i18n";
+import { LOCALE_OPTIONS } from "@/lib/localeOptions";
+
+const { t } = useI18n();
+const settingsStore = useSettingsStore();
+const connectionStore = useConnectionStore();
+const { isDark } = useTheme();
+
+const props = defineProps<{
+  open: boolean;
+  initialTab?: string;
+  appVersion?: string;
+}>();
+
+const emit = defineEmits<{
+  "update:open": [value: boolean];
+}>();
+
+// Local edit state
+const editFontFamily = ref(settingsStore.editorSettings.fontFamily);
+const editFontSize = ref(settingsStore.editorSettings.fontSize);
+const editUiScale = ref(settingsStore.editorSettings.uiScale);
+const editTheme = ref(settingsStore.editorSettings.theme);
+const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
+const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
+const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
+const editAppLayout = ref(settingsStore.editorSettings.appLayout);
+const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
+const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
+const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
+const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
+const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
+const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
+const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
+const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
+const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
+const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(
+  settingsStore.editorSettings.disconnectTabHandlingMode,
+);
+const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
+const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
+const editSidebarHideTableComments = ref(settingsStore.editorSettings.sidebarHideTableComments);
+const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
+const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
+const redisScanPageSizeOptions = [200, 1000, 5000, 10000];
+const systemFonts = ref<string[]>([]);
+const systemFontsLoading = ref(false);
+const systemFontsLoaded = ref(false);
+const uiScaleOptions = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const disconnectTabHandlingModeDescriptionKey = computed(() => {
+  switch (editDisconnectTabHandlingMode.value) {
+    case "close-tabs":
+      return "disconnectTabHandlingModeCloseTabsDescription";
+    case "keep-tabs-clear-results":
+      return "disconnectTabHandlingModeKeepTabsClearResultsDescription";
+    case "keep-tabs-keep-results":
+      return "disconnectTabHandlingModeKeepTabsKeepResultsDescription";
+  }
+});
+
+// --- Snippet state ---
+const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map((s) => ({ ...s })));
+
+const snippetDialogOpen = ref(false);
+const snippetEditingId = ref<string | null>(null);
+const snippetForm = ref({ label: "", prefix: "", body: "" });
+const snippetFormPrefixError = ref("");
+
+function openAddSnippetDialog() {
+  snippetEditingId.value = null;
+  snippetForm.value = { label: "", prefix: "", body: "" };
+  snippetFormPrefixError.value = "";
+  snippetDialogOpen.value = true;
+}
+
+function openEditSnippetDialog(snippet: SqlSnippet) {
+  snippetEditingId.value = snippet.id;
+  snippetForm.value = { label: snippet.label, prefix: snippet.prefix, body: snippet.body };
+  snippetFormPrefixError.value = "";
+  snippetDialogOpen.value = true;
+}
+
+function saveSnippet() {
+  const prefix = snippetForm.value.prefix.trim();
+  if (!prefix) {
+    snippetFormPrefixError.value = "Prefix is required.";
+    return;
+  }
+  const duplicate = editSnippets.value.find((s) => s.prefix === prefix && s.id !== snippetEditingId.value);
+  if (duplicate) {
+    snippetFormPrefixError.value = "Prefix must be unique.";
+    return;
+  }
+  if (snippetEditingId.value) {
+    const idx = editSnippets.value.findIndex((s) => s.id === snippetEditingId.value);
+    if (idx !== -1) {
+      editSnippets.value[idx] = {
+        id: snippetEditingId.value,
+        label: snippetForm.value.label.trim() || prefix,
+        prefix,
+        body: snippetForm.value.body,
+      };
+    }
+  } else {
+    editSnippets.value.push({
+      id: uuid(),
+      label: snippetForm.value.label.trim() || prefix,
+      prefix,
+      body: snippetForm.value.body,
+    });
+  }
+  snippetDialogOpen.value = false;
+}
+
+function deleteSnippet(id: string) {
+  editSnippets.value = editSnippets.value.filter((s) => s.id !== id);
+}
+
+function confirmDeleteSnippet(snippet: SqlSnippet) {
+  if (window.confirm(`Delete snippet "${snippet.label}"?`)) {
+    deleteSnippet(snippet.id);
+  }
+}
+
+const presetFontLabels = new Map(FONT_FAMILIES.map((font) => [font.value, font.label]));
+
+function cssFontFamilyForName(name: string): string {
+  return `'${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}', monospace`;
+}
+
+function readableFontFamily(value: string): string {
+  const first = value.split(",")[0]?.trim() ?? value;
+  return first.replace(/^['"]|['"]$/g, "").replace(/\\'/g, "'");
+}
+
+function normalizeCustomFontFamilyInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes(",") || trimmed.includes("'") || trimmed.includes('"')) return trimmed;
+  return cssFontFamilyForName(trimmed);
+}
+
+const systemFontOptions = computed(() => {
+  const options = new Set(FONT_FAMILIES.map((font) => font.value));
+  for (const font of systemFonts.value) options.add(cssFontFamilyForName(font));
+  if (editFontFamily.value) options.add(editFontFamily.value);
+  return [...options];
+});
+
+function displayFontFamily(value: string): string {
+  return presetFontLabels.get(value) ?? readableFontFamily(value);
+}
+
+async function loadSystemFontOptions() {
+  if (systemFontsLoaded.value || systemFontsLoading.value) return;
+  systemFontsLoading.value = true;
+  try {
+    systemFonts.value = await listSystemFonts();
+    systemFontsLoaded.value = true;
+  } catch {
+    systemFonts.value = [];
+  } finally {
+    systemFontsLoading.value = false;
+  }
+}
+
+// Sync from store when dialog opens
+watch(
+  () => props.open,
+  (open) => {
+    if (open) {
+      editFontFamily.value = settingsStore.editorSettings.fontFamily;
+      editFontSize.value = settingsStore.editorSettings.fontSize;
+      editUiScale.value = settingsStore.editorSettings.uiScale;
+      editTheme.value = settingsStore.editorSettings.theme;
+      editExecuteMode.value = settingsStore.editorSettings.executeMode;
+      editWordWrap.value = settingsStore.editorSettings.wordWrap;
+      editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
+      editAppLayout.value = settingsStore.editorSettings.appLayout;
+      editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editIconTheme.value = settingsStore.desktopSettings.icon_theme;
+      editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
+      editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
+      editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
+      editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+      editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+      editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+      editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+      editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
+      editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
+      editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
+      editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
+      editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
+      editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
+      editSnippets.value = settingsStore.editorSettings.snippets.map((s) => ({ ...s }));
+      void loadSystemFontOptions();
+    }
+  },
+  { immediate: true },
+);
+
+const shortcutConflicts = computed(() =>
+  SHORTCUT_DEFINITIONS.flatMap((definition) => {
+    const conflict = findShortcutConflict(definition.id, editShortcuts.value[definition.id], editShortcuts.value);
+    return conflict ? [definition.id] : [];
+  }),
+);
+const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
+const shortcutsChanged = computed(
+  () => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts),
+);
+const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
+
+function hasChanges(): boolean {
+  return (
+    editFontFamily.value !== settingsStore.editorSettings.fontFamily ||
+    editFontSize.value !== settingsStore.editorSettings.fontSize ||
+    editUiScale.value !== settingsStore.editorSettings.uiScale ||
+    editTheme.value !== settingsStore.editorSettings.theme ||
+    editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
+    editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
+    editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
+    editAppLayout.value !== settingsStore.editorSettings.appLayout ||
+    editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
+    editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
+    editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
+    editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
+    editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
+    JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
+    editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
+    editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
+    editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
+    editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
+    editReuseDataTab.value !== settingsStore.editorSettings.reuseDataTab ||
+    editSidebarHideTableComments.value !== settingsStore.editorSettings.sidebarHideTableComments ||
+    editSidebarAllowHorizontalScroll.value !== settingsStore.editorSettings.sidebarAllowHorizontalScroll ||
+    editExportBatchSize.value !== settingsStore.editorSettings.exportBatchSize ||
+    JSON.stringify(normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value)) !==
+      JSON.stringify(settingsStore.editorSettings.sidebarHiddenTablePrefixes) ||
+    JSON.stringify(editSnippets.value) !== JSON.stringify(settingsStore.editorSettings.snippets)
+  );
+}
+
+async function persistSettings() {
+  if (hasBlockingShortcutConflicts.value) return;
+  const sidebarObjectDisplayChanged =
+    editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay;
+  settingsStore.updateEditorSettings({
+    fontFamily: editFontFamily.value,
+    fontSize: editFontSize.value,
+    uiScale: editUiScale.value,
+    theme: editTheme.value,
+    executeMode: editExecuteMode.value,
+    wordWrap: editWordWrap.value,
+    confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
+    appLayout: editAppLayout.value,
+    showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
+    compactColumnHeaderActions: editCompactColumnHeaderActions.value,
+    redisScanPageSize: editRedisScanPageSize.value,
+    shortcuts: editShortcuts.value,
+    sidebarActivation: editSidebarActivation.value,
+    sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
+    reuseDataTab: editReuseDataTab.value,
+    sidebarHideTableComments: editSidebarHideTableComments.value,
+    sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
+    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
+    exportBatchSize: editExportBatchSize.value,
+    snippets: editSnippets.value,
+  });
+  await settingsStore.updateDesktopSettings({
+    show_tray_icon: editShowTrayIcon.value,
+    icon_theme: editIconTheme.value,
+  });
+  if (sidebarObjectDisplayChanged) {
+    await connectionStore.refreshAllTree();
+  }
+}
+
+async function applySettings() {
+  await persistSettings();
+}
+
+async function applySettingsAndClose() {
+  await persistSettings();
+  emit("update:open", false);
+}
+
+function resetDefaults() {
+  editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
+  editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
+  editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
+  editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
+  editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+  editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+  editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+  editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
+  editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
+  editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
+  editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
+  editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
+  editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
+  editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
+  editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+  editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+  editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
+  editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
+  editSidebarHideTableComments.value = DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments;
+  editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
+  editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
+  editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
+  editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
+}
+
+function onExecuteModeChange(v: any) {
+  if (v === "all" || v === "current") editExecuteMode.value = v;
+}
+
+function onFontFamilyChange(v: any) {
+  if (typeof v === "string") editFontFamily.value = v;
+}
+
+function onThemeChange(v: any) {
+  if (typeof v === "string") editTheme.value = v as typeof DEFAULT_EDITOR_SETTINGS.theme;
+}
+
+function onDisconnectTabHandlingModeChange(v: any) {
+  if (v === "close-tabs" || v === "keep-tabs-clear-results" || v === "keep-tabs-keep-results") {
+    editDisconnectTabHandlingMode.value = v;
+  }
+}
+
+function onLocaleChange(v: any) {
+  if (typeof v === "string") void setLocale(v as Locale);
+}
+
+function onRedisScanPageSizeChange(v: any) {
+  const value = Number(v);
+  if (redisScanPageSizeOptions.includes(value)) editRedisScanPageSize.value = value;
+}
+
+function setSidebarObjectDisplay(value: "grouped" | "simple") {
+  editSidebarObjectDisplay.value = value;
+}
+
+function setIconTheme(value: DesktopIconTheme) {
+  editIconTheme.value = value;
+}
+
+function onShortcutChange(actionId: ShortcutActionId, value: any) {
+  if (typeof value !== "string") return;
+  const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
+  if (!definition) return;
+  editShortcuts.value = { ...editShortcuts.value, [actionId]: value };
+}
+
+function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  const shortcut = eventToShortcut(event);
+  if (!shortcut) return;
+  onShortcutChange(actionId, shortcut);
+}
+
+function resetShortcut(actionId: ShortcutActionId) {
+  const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
+  if (!definition) return;
+  editShortcuts.value = { ...editShortcuts.value, [actionId]: definition.defaultShortcut };
+}
+
+function setAppLayout(value: "separated" | "classic") {
+  editAppLayout.value = value;
+}
+
+function setSidebarActivation(value: "single" | "double") {
+  editSidebarActivation.value = value;
+}
+
+const activeSettingsTab = ref("editor");
+const isWeb = !isTauriRuntime();
+const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
+type SettingsCategory =
+  | "editor"
+  | "appearance"
+  | "navigation"
+  | "data"
+  | "redis"
+  | "shortcuts"
+  | "snippets"
+  | "sync"
+  | "ai"
+  | "mcp"
+  | "security"
+  | "about";
+const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
+  { value: "editor", label: t("settings.editorTab") },
+  { value: "appearance", label: t("settings.appearanceTab") },
+  { value: "navigation", label: t("settings.navigationTab") },
+  { value: "data", label: t("settings.dataTab") },
+  { value: "redis", label: t("settings.redisTab") },
+  { value: "shortcuts", label: t("settings.shortcutsTab") },
+  { value: "snippets", label: t("settings.snippetsTab") },
+  ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
+  { value: "ai", label: t("settings.aiTab") },
+  ...(isWeb ? [] : [{ value: "mcp" as const, label: t("settings.mcpTab") }]),
+  ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
+  { value: "about", label: t("settings.aboutTab") },
+]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>([
+  "editor",
+  "appearance",
+  "navigation",
+  "data",
+  "redis",
+  "shortcuts",
+  "snippets",
+]);
+
+function hasSettingsApplyFooter(value: SettingsCategory): boolean {
+  return settingsTabsWithApplyFooter.has(value);
+}
+
+function settingsCategoryButton(value: SettingsCategory): string {
+  return [
+    "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+    value === activeSettingsTab.value
+      ? "bg-primary text-primary-foreground shadow-sm"
+      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+  ].join(" ");
+}
+
+function openExternalUrl(url: string) {
+  if (isTauriRuntime()) {
+    import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+// ---------- MCP Server ----------
+const mcpStatus = ref<McpServerStatus | null>(null);
+const mcpStatusLoading = ref(false);
+const mcpStatusError = ref("");
+const mcpCopied = ref<"" | "install" | "claude-config" | "codex-config">("");
+const mcpConfigTab = ref<"claude" | "codex">("claude");
+const mcpReadonlyMode = ref(false);
+const mcpAllowDangerous = ref(false);
+
+const mcpEnvEntries = computed(() => {
+  const entries: Array<[string, string]> = [];
+  if (mcpReadonlyMode.value) {
+    entries.push(["DBX_MCP_ALLOW_WRITES", "0"]);
+  }
+  if (!mcpReadonlyMode.value && mcpAllowDangerous.value) {
+    entries.push(["DBX_MCP_ALLOW_DANGEROUS_SQL", "1"]);
+  }
+  return entries;
+});
+
+const mcpClaudeRecommendedConfig = computed(() => {
+  const config: Record<string, unknown> = {
+    mcpServers: {
+      dbx: {
+        command: "dbx-mcp-server",
+      } as Record<string, unknown>,
+    },
+  };
+  if (mcpEnvEntries.value.length > 0) {
+    const env = Object.fromEntries(mcpEnvEntries.value);
+    ((config.mcpServers as Record<string, any>).dbx as Record<string, unknown>).env = env;
+  }
+  return JSON.stringify(config, null, 2);
+});
+
+const mcpCodexRecommendedConfig = computed(() => {
+  const lines = ["[mcp_servers.dbx]", 'command = "dbx-mcp-server"'];
+  if (mcpEnvEntries.value.length > 0) {
+    lines.push("");
+    lines.push("[mcp_servers.dbx.env]");
+    for (const [key, value] of mcpEnvEntries.value) {
+      lines.push(`${key} = "${value}"`);
+    }
+  }
+  return lines.join("\n");
+});
+
+const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
+  if (!mcpStatus.value) return "muted";
+  if (!mcpStatus.value.installed || mcpStatus.value.update_available || mcpStatus.value.error) return "warning";
+  return "ok";
+});
+
+const mcpStatusLabel = computed(() => {
+  if (mcpStatusLoading.value) return t("settings.mcpChecking");
+  if (mcpStatusError.value) return t("settings.mcpStatusError");
+  if (!mcpStatus.value) return t("settings.mcpStatusUnknown");
+  if (!mcpStatus.value.installed) return t("settings.mcpNotInstalled");
+  if (mcpStatus.value.update_available) return t("settings.mcpUpdateAvailable");
+  return t("settings.mcpReady");
+});
+
+const mcpCommand = computed(() => {
+  if (!mcpStatus.value) return "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org";
+  return mcpStatus.value.installed ? mcpStatus.value.update_command : mcpStatus.value.install_command;
+});
+
+watch(mcpReadonlyMode, (value) => {
+  if (value) mcpAllowDangerous.value = false;
+});
+
+async function refreshMcpStatus() {
+  if (mcpStatusLoading.value) return;
+  mcpStatusLoading.value = true;
+  mcpStatusError.value = "";
+  try {
+    mcpStatus.value = await checkMcpServerStatus();
+  } catch (e: any) {
+    mcpStatusError.value = e?.message || String(e);
+  } finally {
+    mcpStatusLoading.value = false;
+  }
+}
+
+async function copyMcpText(kind: "install" | "claude-config" | "codex-config", value: string) {
+  mcpCopied.value = kind;
+  try {
+    await copyToClipboard(value);
+  } catch {
+    mcpCopied.value = "";
+    return;
+  }
+  window.setTimeout(() => {
+    if (mcpCopied.value === kind) mcpCopied.value = "";
+  }, 1500);
+}
+
+// ---------- WebDAV Sync ----------
+const webdavEndpoint = ref(localStorage.getItem("dbx-webdav-endpoint") || "");
+const webdavUsername = ref(localStorage.getItem("dbx-webdav-username") || "");
+const webdavPassword = ref("");
+const webdavRememberPassword = ref(localStorage.getItem("dbx-webdav-remember-password") === "true");
+const webdavHasSavedPassword = ref(false);
+const webdavRemotePath = ref(localStorage.getItem("dbx-webdav-remote-path") || "DBX/sync/snapshot.json");
+const webdavSyncSecrets = ref(false);
+const webdavSecretsPassphrase = ref("");
+const webdavBusy = ref<"" | "test" | "upload" | "download">("");
+const webdavMessage = ref("");
+const webdavError = ref(false);
+
+const webdavReady = computed(
+  () =>
+    !!webdavEndpoint.value.trim() &&
+    !webdavBusy.value &&
+    (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim()),
+);
+
+function currentWebDavConfig(): WebDavConfig {
+  return {
+    endpoint: webdavEndpoint.value.trim(),
+    username: webdavUsername.value.trim() || undefined,
+    password: webdavPassword.value || undefined,
+    remotePath: webdavRemotePath.value.trim() || "DBX/sync/snapshot.json",
+  };
+}
+
+function currentWebDavAccountConfig(): WebDavConfig {
+  const config = currentWebDavConfig();
+  return { ...config, password: undefined };
+}
+
+function rememberWebDavFields() {
+  localStorage.setItem("dbx-webdav-endpoint", webdavEndpoint.value.trim());
+  localStorage.setItem("dbx-webdav-username", webdavUsername.value.trim());
+  localStorage.setItem("dbx-webdav-remote-path", webdavRemotePath.value.trim() || "DBX/sync/snapshot.json");
+}
+
+function setWebDavResult(message: string, error = false) {
+  webdavMessage.value = message;
+  webdavError.value = error;
+}
+
+async function runWebDavAction(kind: "test" | "upload" | "download", action: () => Promise<string>) {
+  webdavBusy.value = kind;
+  webdavMessage.value = "";
+  webdavError.value = false;
+  try {
+    rememberWebDavFields();
+    await applyWebDavPasswordPreference();
+    setWebDavResult(await action());
+  } catch (e: any) {
+    setWebDavResult(e?.message || String(e), true);
+  } finally {
+    webdavBusy.value = "";
+  }
+}
+
+async function refreshWebDavPasswordStatus() {
+  if (!webdavEndpoint.value.trim()) {
+    webdavHasSavedPassword.value = false;
+    webdavRememberPassword.value = false;
+    return;
+  }
+  try {
+    const status = await webdavPasswordStatus(currentWebDavAccountConfig());
+    webdavHasSavedPassword.value = status.hasSavedPassword;
+    if (status.hasSavedPassword) webdavRememberPassword.value = true;
+  } catch {
+    webdavHasSavedPassword.value = false;
+  }
+}
+
+async function applyWebDavPasswordPreference() {
+  const password = webdavPassword.value;
+  if (webdavRememberPassword.value && password) {
+    await saveWebdavSavedPassword(currentWebDavAccountConfig(), password);
+    webdavHasSavedPassword.value = true;
+    return;
+  }
+  if (!webdavRememberPassword.value && webdavHasSavedPassword.value) {
+    await forgetWebdavSavedPassword(currentWebDavAccountConfig());
+    webdavHasSavedPassword.value = false;
+  }
+}
+
+async function testWebDav() {
+  await runWebDavAction("test", async () => {
+    await webdavSyncTest(currentWebDavConfig());
+    return t("settings.syncTestSuccess");
+  });
+}
+
+async function uploadWebDavSnapshot() {
+  await runWebDavAction("upload", async () => {
+    const summary = await webdavSyncUpload(
+      currentWebDavConfig(),
+      settingsStore.editorSettings,
+      webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined,
+    );
+    return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
+  });
+}
+
+async function downloadWebDavSnapshot() {
+  if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
+  await runWebDavAction("download", async () => {
+    const result = await webdavSyncDownload(
+      currentWebDavConfig(),
+      webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined,
+    );
+    if (result.editorSettings && typeof result.editorSettings === "object") {
+      settingsStore.updateEditorSettings(result.editorSettings as any);
+    }
+    await settingsStore.updateDesktopSettings(result.desktopSettings);
+    await connectionStore.initFromDisk();
+    const message = t("settings.syncDownloadSuccess", {
+      bytes: result.summary.bytes,
+      path: result.summary.remotePath,
+    });
+    if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) {
+      return `${message} ${t("settings.syncSecretsSkipped")}`;
+    }
+    if (result.applySummary.secretsApplied) {
+      return `${message} ${t("settings.syncSecretsApplied")}`;
+    }
+    return message;
+  });
+}
+
+watch(
+  () => props.open,
+  async (open) => {
+    if (open) {
+      activeSettingsTab.value = props.initialTab || "editor";
+      passwordMessage.value = "";
+      oldPassword.value = "";
+      newPassword.value = "";
+      confirmNewPassword.value = "";
+      await settingsStore.initAiConfig();
+      await settingsStore.initDesktopSettings();
+      editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editIconTheme.value = settingsStore.desktopSettings.icon_theme;
+      webdavPassword.value = "";
+      await refreshWebDavPasswordStatus();
+      syncAiEditState();
+      if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
+    }
+  },
+  { immediate: true },
+);
+
+watch([webdavEndpoint, webdavUsername], () => {
+  void refreshWebDavPasswordStatus();
+});
+watch(webdavRememberPassword, (val) => {
+  localStorage.setItem("dbx-webdav-remember-password", String(val));
+});
+
+watch(activeSettingsTab, (tab) => {
+  if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+});
+
+onMounted(() => {
+  void refreshWebDavPasswordStatus();
+});
+
+const oldPassword = ref("");
+const newPassword = ref("");
+const confirmNewPassword = ref("");
+const passwordMessage = ref("");
+const passwordError = ref(false);
+const changingPassword = ref(false);
+
+async function changePassword() {
+  if (newPassword.value !== confirmNewPassword.value) {
+    passwordMessage.value = t("auth.passwordMismatch");
+    passwordError.value = true;
+    return;
+  }
+  changingPassword.value = true;
+  passwordMessage.value = "";
+  try {
+    const res = await fetch("/api/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_password: oldPassword.value, new_password: newPassword.value }),
+    });
+    if (res.ok) {
+      passwordMessage.value = t("auth.passwordChanged");
+      passwordError.value = false;
+      oldPassword.value = "";
+      newPassword.value = "";
+      confirmNewPassword.value = "";
+    } else if (res.status === 401) {
+      passwordMessage.value = t("auth.oldPasswordWrong");
+      passwordError.value = true;
+    } else {
+      passwordMessage.value = t("auth.changePasswordFailed");
+      passwordError.value = true;
+    }
+  } catch {
+    passwordMessage.value = t("auth.connectFailed");
+    passwordError.value = true;
+  } finally {
+    changingPassword.value = false;
+  }
+}
+
+// ---------- AI Settings ----------
+const aiProviderOptions = Object.values(AI_PROVIDER_PRESETS);
+const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
+
+const aiEditProvider = ref<AiProvider>(settingsStore.aiConfig.provider);
+const aiEditApiKey = ref(settingsStore.aiConfig.apiKey);
+const aiEditEndpoint = ref(settingsStore.aiConfig.endpoint);
+const aiEditModel = ref(settingsStore.aiConfig.model);
+const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "completions");
+const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
+const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
+const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
+
+const aiModelOptions = ref<AiModelInfo[]>([]);
+const aiModelLoading = ref(false);
+const aiModelError = ref("");
+const aiModelLoadedSignature = ref("");
+let aiModelRequestToken = 0;
+
+const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
+
+const aiTesting = ref(false);
+const aiTestResult = ref<"" | "success" | "error">("");
+const aiTestError = ref("");
+const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
+const aiSupportsApiStyle = computed(
+  () =>
+    aiEditProvider.value === "openai" ||
+    aiEditProvider.value === "openai-compatible" ||
+    aiEditProvider.value === "custom",
+);
+const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
+const aiCanListModels = computed(
+  () =>
+    aiModelListSupported.value &&
+    !!aiEditEndpoint.value.trim() &&
+    (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()),
+);
+const aiModelOptionIds = computed(() => aiModelOptions.value.map((model) => model.id));
+const aiModelEmptyText = computed(() => {
+  if (aiModelError.value) return aiModelError.value;
+  if (!aiModelListSupported.value) return t("ai.modelListUnsupported");
+  return t("ai.noModels");
+});
+
+function clearAiModelOptions() {
+  aiModelRequestToken += 1;
+  aiModelOptions.value = [];
+  aiModelError.value = "";
+  aiModelLoadedSignature.value = "";
+  aiModelLoading.value = false;
+}
+
+function aiModelConfigSignature() {
+  return JSON.stringify({
+    provider: aiEditProvider.value,
+    endpoint: aiEditEndpoint.value.trim(),
+    apiKey: aiEditApiKey.value.trim(),
+    proxyEnabled: aiEditProxyEnabled.value,
+    proxyUrl: aiEditProxyUrl.value.trim(),
+  });
+}
+
+function currentAiEditConfig() {
+  return {
+    provider: aiEditProvider.value,
+    apiKey: aiEditApiKey.value,
+    endpoint: aiEditEndpoint.value,
+    model: aiEditModel.value,
+    apiStyle: aiEditApiStyle.value,
+    proxyEnabled: aiEditProxyEnabled.value,
+    proxyUrl: aiEditProxyUrl.value,
+    enableThinking: aiEditEnableThinking.value,
+  };
+}
+
+function normalizeAiModelOptions(models: AiModelInfo[]): AiModelInfo[] {
+  const seen = new Set<string>();
+  const normalized: AiModelInfo[] = [];
+  for (const model of models) {
+    const id = model.id?.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push({ id, displayName: model.displayName?.trim() || undefined });
+  }
+  return normalized;
+}
+
+function displayAiModelName(modelId: string): string {
+  return aiModelOptions.value.find((model) => model.id === modelId)?.displayName || modelId;
+}
+
+async function aiRefreshModels() {
+  if (aiModelLoading.value) return;
+  if (!aiModelListSupported.value) {
+    aiModelError.value = t("ai.modelListUnsupported");
+    return;
+  }
+  if (!aiEditEndpoint.value.trim()) {
+    aiModelError.value = t("ai.modelListEndpointRequired");
+    return;
+  }
+  if (aiRequiresApiKey.value && !aiEditApiKey.value.trim()) {
+    aiModelError.value = t("ai.modelListApiKeyRequired");
+    return;
+  }
+
+  const token = ++aiModelRequestToken;
+  const signature = aiModelConfigSignature();
+  aiModelLoading.value = true;
+  aiModelError.value = "";
+  try {
+    const models = normalizeAiModelOptions(await aiListModels(currentAiEditConfig()));
+    if (token !== aiModelRequestToken) return;
+    aiModelOptions.value = models;
+    aiModelLoadedSignature.value = signature;
+    if (!aiEditModel.value.trim() && models[0]) aiEditModel.value = models[0].id;
+  } catch (e: any) {
+    if (token !== aiModelRequestToken) return;
+    aiModelOptions.value = [];
+    aiModelError.value = e?.message || String(e);
+  } finally {
+    if (token === aiModelRequestToken) aiModelLoading.value = false;
+  }
+}
+
+function onAiModelListOpen(open: boolean) {
+  if (
+    open &&
+    aiCanListModels.value &&
+    !aiModelLoading.value &&
+    (!aiModelOptions.value.length || aiModelLoadedSignature.value !== aiModelConfigSignature())
+  ) {
+    void aiRefreshModels();
+  }
+}
+
+function aiSelectModel(modelId: string) {
+  aiEditModel.value = modelId;
+}
+
+function syncAiEditState() {
+  aiEditProvider.value = settingsStore.aiConfig.provider;
+  aiEditApiKey.value = settingsStore.aiConfig.apiKey;
+  aiEditEndpoint.value = settingsStore.aiConfig.endpoint;
+  aiEditModel.value = settingsStore.aiConfig.model;
+  aiEditApiStyle.value = settingsStore.aiConfig.apiStyle || "completions";
+  aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
+  aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
+  aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
+  aiTestResult.value = "";
+  aiTestError.value = "";
+  clearAiModelOptions();
+}
+
+function aiSelectProvider(provider: AiProvider) {
+  aiEditProvider.value = provider;
+  aiEditEndpoint.value = AI_PROVIDER_PRESETS[provider].endpoint;
+  aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;
+  aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
+  if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
+  clearAiModelOptions();
+}
+
+function aiHasChanges(): boolean {
+  return (
+    aiEditProvider.value !== settingsStore.aiConfig.provider ||
+    aiEditApiKey.value !== settingsStore.aiConfig.apiKey ||
+    aiEditEndpoint.value !== settingsStore.aiConfig.endpoint ||
+    aiEditModel.value !== settingsStore.aiConfig.model ||
+    aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
+    aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
+    aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
+    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true)
+  );
+}
+
+function aiApplySettings() {
+  settingsStore.updateAiConfig(currentAiEditConfig());
+}
+
+async function aiTestConn() {
+  if (
+    (aiRequiresApiKey.value && !aiEditApiKey.value.trim()) ||
+    !aiEditEndpoint.value.trim() ||
+    !aiEditModel.value.trim()
+  )
+    return;
+  aiTesting.value = true;
+  aiTestResult.value = "";
+  aiTestError.value = "";
+  try {
+    await aiTestConnection(currentAiEditConfig());
+    aiTestResult.value = "success";
+  } catch (e: any) {
+    aiTestResult.value = "error";
+    aiTestError.value = e?.message || String(e);
+  } finally {
+    aiTesting.value = false;
+  }
+}
+
+// ---------- CodeMirror preview ----------
+const previewRef = ref<HTMLDivElement>();
+const previewView = shallowRef<EditorViewType | null>(null);
+
+const previewSettings = computed<{
+  fontFamily: string;
+  fontSize: number;
+  theme: EditorTheme;
+  appAppearance: AppThemeAppearance;
+}>(() => ({
+  fontFamily: editFontFamily.value,
+  fontSize: editFontSize.value,
+  theme: editTheme.value,
+  appAppearance: isDark.value ? "dark" : "light",
+}));
+
+const previewSql = `SELECT u.id, u.name
+FROM users u
+ORDER BY u.id LIMIT 5;`;
+
+let fontThemeComp: import("@codemirror/state").Compartment | null = null;
+let themeComp: import("@codemirror/state").Compartment | null = null;
+let editorViewModule: typeof import("@codemirror/view") | null = null;
+
+watch(
+  previewSettings,
+  async (ss) => {
+    if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
+
+    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance);
+    previewView.value.dispatch({
+      effects: [
+        themeComp.reconfigure(themeExt),
+        fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily)),
+      ],
+    });
+  },
+  { deep: true },
+);
+
+let previewInitialized = false;
+
+watch(activeSettingsTab, (tab) => {
+  if (tab !== "editor" && previewView.value) {
+    previewView.value.destroy();
+    previewView.value = null;
+    previewInitialized = false;
+    fontThemeComp = null;
+    themeComp = null;
+    editorViewModule = null;
+  }
+});
+
+watch(previewRef, async (el) => {
+  if (!el || previewInitialized) return;
+  previewInitialized = true;
+  if (previewView.value) return;
+
+  const [{ EditorView }, { EditorState, Compartment }, { sql, MySQL }, { basicSetup }] = await Promise.all([
+    import("@codemirror/view"),
+    import("@codemirror/state"),
+    import("@codemirror/lang-sql"),
+    import("codemirror"),
+  ]);
+
+  editorViewModule = { EditorView } as typeof import("@codemirror/view");
+  fontThemeComp = new Compartment();
+  themeComp = new Compartment();
+
+  const ss = previewSettings.value;
+  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance);
+
+  const state = EditorState.create({
+    doc: previewSql,
+    extensions: [
+      basicSetup,
+      sql({ dialect: MySQL }),
+      themeComp.of(themeExt),
+      fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
+    ],
+  });
+
+  previewView.value = new EditorView({ state, parent: previewRef.value });
+});
+
+watch(
+  () => props.open,
+  (open) => {
+    if (!open && previewView.value) {
+      previewView.value.destroy();
+      previewView.value = null;
+      previewInitialized = false;
+      fontThemeComp = null;
+      themeComp = null;
+      editorViewModule = null;
+    }
+  },
+);
+</script>
+
+<template>
+  <Dialog :open="open" @update:open="(v: boolean) => emit('update:open', v)">
+    <DialogContent class="sm:max-w-[860px] h-[min(660px,calc(100vh-80px))] flex flex-col overflow-hidden">
+      <DialogHeader>
+        <DialogTitle class="flex items-center gap-2">
+          <Settings class="h-4 w-4" />
+          {{ t("settings.title") }}
+        </DialogTitle>
+      </DialogHeader>
+
+      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
+        <nav
+          class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 sm:w-40 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3"
+        >
+          <button
+            v-for="category in settingsCategoryNav"
+            :key="category.value"
+            type="button"
+            :class="settingsCategoryButton(category.value)"
+            @click="activeSettingsTab = category.value"
+          >
+            {{ category.label }}
+          </button>
+        </nav>
+
+        <div class="min-w-0 flex-1 overflow-hidden px-1 flex flex-col">
+          <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pr-2">
+            <section v-if="activeSettingsTab === 'editor'" class="flex flex-col gap-5 py-2">
+              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
+                <!-- Font Family -->
+                <div class="space-y-2">
+                  <Label>{{ t("settings.fontFamily") }}</Label>
+                  <SearchableSelect
+                    :model-value="editFontFamily"
+                    :options="systemFontOptions"
+                    :placeholder="t('settings.selectFont')"
+                    :search-placeholder="t('settings.searchFont')"
+                    :empty-text="t('settings.noFontsFound')"
+                    :loading-text="t('settings.loadingFonts')"
+                    :loading="systemFontsLoading"
+                    allow-custom
+                    :display-name="displayFontFamily"
+                    :normalize-custom="normalizeCustomFontFamilyInput"
+                    trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
+                    content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
+                    @update:model-value="onFontFamilyChange"
+                    @update:open="(open: boolean) => open && loadSystemFontOptions()"
+                  >
+                    <template #trigger-label="{ label, loading }">
+                      <span class="truncate" :style="{ fontFamily: editFontFamily }">
+                        {{ loading ? t("settings.loadingFonts") : label }}
+                      </span>
+                    </template>
+                    <template #option-label="{ option, label }">
+                      <span class="truncate" :style="{ fontFamily: option }">{{ label }}</span>
+                    </template>
+                    <template #custom-option-label="{ value }">
+                      <span class="truncate" :style="{ fontFamily: value }">
+                        {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                      </span>
+                    </template>
+                  </SearchableSelect>
+                </div>
+
+                <!-- Theme -->
+                <div class="space-y-2">
+                  <Label>{{ t("settings.theme") }}</Label>
+                  <Select :model-value="editTheme" @update:model-value="onThemeChange">
+                    <SelectTrigger>
+                      <SelectValue :placeholder="t('settings.selectTheme')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="theme in EDITOR_THEMES" :key="theme.value" :value="theme.value">
+                        <div class="flex items-center gap-2">
+                          <span
+                            class="h-3 w-3 rounded-full border"
+                            :class="
+                              theme.dark
+                                ? 'bg-foreground border-foreground/20'
+                                : 'bg-muted-foreground/30 border-muted-foreground/40'
+                            "
+                          />
+                          {{ theme.value === "app" ? t("settings.followAppTheme") : theme.label }}
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <!-- Font Size -->
+              <div class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <Label>{{ t("settings.fontSize") }}</Label>
+                  <span class="text-xs text-muted-foreground tabular-nums">{{ editFontSize }}px</span>
+                </div>
+                <input
+                  type="range"
+                  min="10"
+                  max="24"
+                  step="1"
+                  :value="editFontSize"
+                  @input="editFontSize = Number(($event.target as HTMLInputElement).value)"
+                  class="w-full accent-primary"
+                />
+                <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>10px</span>
+                  <span class="flex-1 border-b border-dashed border-muted-foreground/30" />
+                  <span>24px</span>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <div class="space-y-2">
+                  <Label>{{ t("settings.executeMode") }}</Label>
+                  <Select :model-value="editExecuteMode" @update:model-value="onExecuteModeChange">
+                    <SelectTrigger>
+                      <SelectValue :placeholder="t('settings.executeMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{{ t("settings.executeModeAll") }}</SelectItem>
+                      <SelectItem value="current">{{ t("settings.executeModeCurrent") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="flex items-center justify-between gap-4 self-end rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-word-wrap">{{ t("settings.wordWrap") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.wordWrapDescription") }}</p>
+                  </div>
+                  <Switch id="editor-word-wrap" v-model="editWordWrap" class="mt-0.5" />
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.confirmDangerousSqlExecutionDescription") }}
+                  </p>
+                </div>
+                <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+              </div>
+
+              <Separator />
+
+              <!-- Live Preview -->
+              <div class="space-y-2">
+                <Label>{{ t("settings.preview") }}</Label>
+                <div
+                  class="rounded-md border overflow-auto max-w-full"
+                  :class="
+                    editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode'
+                      ? 'border-border'
+                      : 'border-border/50'
+                  "
+                >
+                  <div ref="previewRef" style="min-width: 100%" />
+                </div>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-2">
+                <Label>{{ t("settings.languageTitle") }}</Label>
+                <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
+                  <SelectTrigger class="min-w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
+                      <div class="flex items-center gap-2">
+                        <span
+                          class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none"
+                        >
+                          {{ locale.flag }}
+                        </span>
+                        <span>{{ locale.label }}</span>
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <Separator />
+
+              <div class="space-y-2">
+                <Label>{{ t("settings.uiScale") }}</Label>
+                <Select
+                  :model-value="String(editUiScale)"
+                  @update:model-value="
+                    (value: any) => {
+                      const next = Number(value);
+                      if (Number.isFinite(next)) editUiScale = next;
+                    }
+                  "
+                >
+                  <SelectTrigger class="w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)">
+                      {{ Math.round(scale * 100) }}%
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">{{ t("settings.uiScaleDescription") }}</p>
+              </div>
+
+              <Separator />
+
+              <div class="space-y-2">
+                <Label>{{ t("settings.appLayout") }}</Label>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setAppLayout('separated')"
+                  >
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
+                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutSeparatedDescription") }}</div>
+                    </div>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setAppLayout('classic')"
+                  >
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
+                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutClassicDescription") }}</div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+
+              <div v-if="!isWeb" class="space-y-2">
+                <Label>{{ t("settings.iconTheme") }}</Label>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setIconTheme('default')"
+                  >
+                    <div class="flex items-center gap-3 text-left">
+                      <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
+                      <div>
+                        <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
+                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeDefaultDescription") }}</div>
+                      </div>
+                    </div>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setIconTheme('black')"
+                  >
+                    <div class="flex items-center gap-3 text-left">
+                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert" />
+                      <div>
+                        <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
+                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeBlackDescription") }}</div>
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+
+              <div
+                v-if="!isWeb"
+                class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2"
+              >
+                <div class="space-y-1">
+                  <Label for="show-tray-icon">{{ t("settings.showTrayIcon") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.showTrayIconDescription") }}</p>
+                </div>
+                <Switch id="show-tray-icon" v-model="editShowTrayIcon" />
+              </div>
+
+              <Separator />
+
+              <div class="space-y-3">
+                <Label>{{ t("settings.dataGridDisplay") }}</Label>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-column-comments-in-header">
+                      {{ t("settings.showColumnCommentsInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showColumnCommentsInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="compact-column-header-actions">
+                      {{ t("settings.compactColumnHeaderActions") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.compactColumnHeaderActionsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
+                </div>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'navigation'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-2">
+                <Label>{{ t("settings.sidebarActivation") }}</Label>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setSidebarActivation('single')"
+                  >
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.sidebarActivationSingle") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.sidebarActivationSingleDescription") }}
+                      </div>
+                    </div>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setSidebarActivation('double')"
+                  >
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.sidebarActivationDouble") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.sidebarActivationDoubleDescription") }}
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="reuse-data-tab">{{ t("settings.reuseDataTab") }}</Label>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                      {{ t("settings.reuseDataTabDescription") }}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                <Switch id="reuse-data-tab" v-model="editReuseDataTab" />
+              </div>
+              <div class="space-y-2">
+                <Label>{{ t("settings.sidebarObjectDisplay") }}</Label>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setSidebarObjectDisplay('grouped')"
+                  >
+                    <div class="text-left">
+                      <div class="flex items-center gap-2">
+                        <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplayGrouped") }}</div>
+                        <Tooltip :open="sidebarObjectDisplayHelp === 'grouped'">
+                          <TooltipTrigger as-child>
+                            <span
+                              class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground"
+                              @click.stop
+                              @pointerdown.stop
+                              @mouseenter="sidebarObjectDisplayHelp = 'grouped'"
+                              @mouseleave="sidebarObjectDisplayHelp = null"
+                            >
+                              <CircleHelp class="h-3.5 w-3.5" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent
+                            class="max-w-[320px] text-xs leading-relaxed"
+                            side="top"
+                            align="center"
+                            :side-offset="8"
+                          >
+                            {{ t("settings.sidebarObjectDisplayGroupedDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </div>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto justify-start border p-3"
+                    :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
+                    @click="setSidebarObjectDisplay('simple')"
+                  >
+                    <div class="text-left">
+                      <div class="flex items-center gap-2">
+                        <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplaySimple") }}</div>
+                        <Tooltip :open="sidebarObjectDisplayHelp === 'simple'">
+                          <TooltipTrigger as-child>
+                            <span
+                              class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground"
+                              @click.stop
+                              @pointerdown.stop
+                              @mouseenter="sidebarObjectDisplayHelp = 'simple'"
+                              @mouseleave="sidebarObjectDisplayHelp = null"
+                            >
+                              <CircleHelp class="h-3.5 w-3.5" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent
+                            class="max-w-[320px] text-xs leading-relaxed"
+                            side="top"
+                            align="center"
+                            :side-offset="8"
+                          >
+                            {{ t("settings.sidebarObjectDisplaySimpleDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                      {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
+              </div>
+              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="disconnect-tab-handling-mode">{{ t("settings.disconnectTabHandlingMode") }}</Label>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                      {{ t("settings.disconnectTabHandlingModeDescription") }}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                <Select
+                  :model-value="editDisconnectTabHandlingMode"
+                  @update:model-value="onDisconnectTabHandlingModeChange"
+                >
+                  <SelectTrigger id="disconnect-tab-handling-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="close-tabs">{{ t("settings.disconnectTabHandlingModeCloseTabs") }}</SelectItem>
+                    <SelectItem value="keep-tabs-clear-results">
+                      {{ t("settings.disconnectTabHandlingModeKeepTabsClearResults") }}
+                    </SelectItem>
+                    <SelectItem value="keep-tabs-keep-results">
+                      {{ t("settings.disconnectTabHandlingModeKeepTabsKeepResults") }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t(`settings.${disconnectTabHandlingModeDescriptionKey}`) }}
+                </p>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-hide-table-comments">{{ t("settings.sidebarHideTableComments") }}</Label>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                      {{ t("settings.sidebarHideTableCommentsDescription") }}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                <Switch id="sidebar-hide-table-comments" v-model="editSidebarHideTableComments" />
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-allow-horizontal-scroll">
+                    {{ t("settings.sidebarAllowHorizontalScroll") }}
+                  </Label>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                      {{ t("settings.sidebarAllowHorizontalScrollDescription") }}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                <Switch id="sidebar-allow-horizontal-scroll" v-model="editSidebarAllowHorizontalScroll" />
+              </div>
+              <div class="space-y-2">
+                <Label for="sidebar-hidden-table-prefixes">{{ t("settings.sidebarHiddenTablePrefixes") }}</Label>
+                <textarea
+                  id="sidebar-hidden-table-prefixes"
+                  v-model="editSidebarHiddenTablePrefixes"
+                  class="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  :placeholder="t('settings.sidebarHiddenTablePrefixesPlaceholder')"
+                />
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.sidebarHiddenTablePrefixesDescription") }}
+                </p>
+              </div>
+            </section>
+
+            <!-- Data Tab -->
+            <section v-else-if="activeSettingsTab === 'data'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-3">
+                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.exportSection") }}</div>
+                <div class="space-y-2">
+                  <Label>{{ t("settings.exportBatchSize") }}</Label>
+                  <div class="flex items-center gap-3">
+                    <Input
+                      type="number"
+                      list="export-batch-sizes"
+                      min="100"
+                      max="100000"
+                      step="100"
+                      v-model.number="editExportBatchSize"
+                      class="h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <datalist id="export-batch-sizes">
+                      <option value="500" />
+                      <option value="1000" />
+                      <option value="2000" />
+                      <option value="5000" />
+                      <option value="10000" />
+                    </datalist>
+                    <span class="text-xs text-muted-foreground">{{ t("settings.exportBatchSizeDescription") }}</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'redis'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-2">
+                <Label>{{ t("settings.redisScanPageSize") }}</Label>
+                <Select :model-value="String(editRedisScanPageSize)" @update:model-value="onRedisScanPageSizeChange">
+                  <SelectTrigger>
+                    <SelectValue :placeholder="t('settings.redisScanPageSize')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="size in redisScanPageSizeOptions" :key="size" :value="String(size)">
+                      {{ t("settings.redisScanPageSizeOption", { count: size }) }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'shortcuts'" class="flex flex-col gap-2 py-2">
+              <div class="overflow-hidden rounded-md border bg-background">
+                <div
+                  v-for="definition in SHORTCUT_DEFINITIONS"
+                  :key="definition.id"
+                  class="-mt-px grid gap-2 border-t border-border px-3 py-2 sm:first:mt-0 sm:first:border-t-0 sm:grid-cols-[minmax(0,1fr)_208px] sm:items-center"
+                >
+                  <div class="min-w-0">
+                    <div class="flex min-w-0 items-center gap-2">
+                      <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
+                      <Badge variant="outline" class="h-5 shrink-0 rounded-md px-1.5 text-[11px] text-muted-foreground">
+                        {{
+                          t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`)
+                        }}
+                      </Badge>
+                    </div>
+                  </div>
+                  <div class="space-y-1">
+                    <div class="flex gap-2">
+                      <Input
+                        :model-value="formatShortcut(editShortcuts[definition.id])"
+                        readonly
+                        :aria-invalid="shortcutConflicts.includes(definition.id)"
+                        :placeholder="t('settings.shortcutPressShortcut')"
+                        class="h-9 font-mono"
+                        @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-9 shrink-0 px-3"
+                        @click="resetShortcut(definition.id)"
+                      >
+                        {{ t("settings.reset") }}
+                      </Button>
+                    </div>
+                    <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
+                      {{ t("settings.shortcutConflict") }}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- Snippets Tab -->
+            <section v-else-if="activeSettingsTab === 'snippets'" class="flex flex-col gap-4 py-2">
+              <div class="flex items-center justify-between">
+                <p class="text-sm text-muted-foreground">{{ t("settings.snippetsDescription") }}</p>
+                <Button variant="outline" size="sm" @click="openAddSnippetDialog">
+                  {{ t("settings.snippetsAdd") }}
+                </Button>
+              </div>
+
+              <div class="rounded-md border">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b bg-muted/50">
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsLabel") }}
+                      </th>
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsPrefix") }}
+                      </th>
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsBody") }}
+                      </th>
+                      <th class="px-3 py-2 w-20"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="snippet in editSnippets"
+                      :key="snippet.id"
+                      class="border-b last:border-b-0 hover:bg-muted/30"
+                    >
+                      <td class="px-3 py-2">{{ snippet.label }}</td>
+                      <td class="px-3 py-2">
+                        <Badge
+                          variant="outline"
+                          class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground"
+                        >
+                          {{ snippet.prefix }}
+                        </Badge>
+                      </td>
+                      <td class="px-3 py-2 font-mono text-xs text-muted-foreground max-w-[300px] truncate">
+                        {{ snippet.body }}
+                      </td>
+                      <td class="px-3 py-2">
+                        <div class="flex items-center gap-1">
+                          <Button variant="ghost" size="icon-xs" @click="openEditSnippetDialog(snippet)">
+                            <Pencil class="size-3.5" />
+                          </Button>
+                          <Button variant="ghost" size="icon-xs" @click="confirmDeleteSnippet(snippet)">
+                            <Trash2 class="size-3.5" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'sync'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-1">
+                <div class="flex items-center gap-2 text-sm font-medium">
+                  <Cloud class="h-4 w-4 text-muted-foreground" />
+                  {{ t("settings.syncWebDavTitle") }}
+                </div>
+                <p class="text-xs text-muted-foreground">{{ t("settings.syncWebDavDescription") }}</p>
+              </div>
+
+              <div class="grid gap-4 md:grid-cols-2">
+                <div class="space-y-2 md:col-span-2">
+                  <Label for="webdav-endpoint">{{ t("settings.syncEndpoint") }}</Label>
+                  <Input
+                    id="webdav-endpoint"
+                    v-model="webdavEndpoint"
+                    autocomplete="off"
+                    placeholder="https://example.com/remote.php/dav/files/user/"
+                  />
+                </div>
+                <div class="space-y-2">
+                  <Label for="webdav-username">{{ t("settings.syncUsername") }}</Label>
+                  <Input id="webdav-username" v-model="webdavUsername" autocomplete="username" />
+                </div>
+                <div class="space-y-2">
+                  <Label for="webdav-password">{{ t("settings.syncPassword") }}</Label>
+                  <div class="relative">
+                    <Input
+                      id="webdav-password"
+                      v-model="webdavPassword"
+                      type="password"
+                      :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')"
+                      :disabled="webdavHasSavedPassword"
+                      autocomplete="current-password"
+                    />
+                    <Button
+                      v-if="webdavHasSavedPassword"
+                      variant="ghost"
+                      size="icon-xs"
+                      class="absolute right-1 top-1/2 -translate-y-1/2"
+                      :title="t('settings.syncClearSavedPassword')"
+                      @click="
+                        webdavRememberPassword = false;
+                        forgetWebdavSavedPassword(currentWebDavAccountConfig());
+                        webdavHasSavedPassword = false;
+                        webdavPassword = '';
+                      "
+                    >
+                      <X class="size-3.5" />
+                    </Button>
+                  </div>
+                  <label class="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input v-model="webdavRememberPassword" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                    <span>
+                      {{ t("settings.syncRememberWebDavPassword") }}
+                      <span v-if="webdavHasSavedPassword">{{ t("settings.syncSavedPassword") }}</span>
+                    </span>
+                    <Tooltip>
+                      <TooltipTrigger as-child>
+                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                        {{ t("settings.syncRememberWebDavPasswordDescription") }}
+                      </TooltipContent>
+                    </Tooltip>
+                  </label>
+                </div>
+                <div class="space-y-2 md:col-span-2">
+                  <Label for="webdav-remote-path">{{ t("settings.syncRemotePath") }}</Label>
+                  <Input id="webdav-remote-path" v-model="webdavRemotePath" autocomplete="off" />
+                  <p class="text-xs text-muted-foreground">{{ t("settings.syncRemotePathDescription") }}</p>
+                </div>
+              </div>
+
+              <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                {{ t("settings.syncSecretNotice") }}
+              </div>
+
+              <div class="space-y-3 rounded-md border bg-muted/20 px-3 py-3">
+                <div class="flex items-center justify-between gap-4">
+                  <div class="space-y-1">
+                    <Label for="webdav-sync-secrets">{{ t("settings.syncSecrets") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsDescription") }}</p>
+                  </div>
+                  <Switch id="webdav-sync-secrets" v-model="webdavSyncSecrets" />
+                </div>
+                <div v-if="webdavSyncSecrets" class="space-y-2">
+                  <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
+                  <Input
+                    id="webdav-secrets-passphrase"
+                    v-model="webdavSecretsPassphrase"
+                    type="password"
+                    autocomplete="new-password"
+                  />
+                  <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
+                </div>
+              </div>
+            </section>
+
+            <!-- AI Settings Tab -->
+            <section v-else-if="activeSettingsTab === 'ai'" class="flex flex-col gap-5 py-2">
+              <p class="text-xs text-muted-foreground">{{ t("ai.settingsHint") }}</p>
+
+              <div class="space-y-3">
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
+                  <Select :model-value="aiEditProvider" @update:model-value="(v: any) => aiSelectProvider(v)">
+                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                      <SelectValue>
+                        <span class="flex items-center gap-2">
+                          <AiProviderLogo
+                            :provider="selectedAiProviderPreset.provider"
+                            :label="selectedAiProviderPreset.label"
+                            :icon-slug="selectedAiProviderPreset.iconSlug"
+                          />
+                          <span>{{ selectedAiProviderPreset.label }}</span>
+                        </span>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="provider in aiProviderOptions"
+                        :key="provider.provider"
+                        :value="provider.provider"
+                      >
+                        <span class="flex items-center gap-2">
+                          <AiProviderLogo
+                            :provider="provider.provider"
+                            :label="provider.label"
+                            :icon-slug="provider.iconSlug"
+                          />
+                          <span>{{ provider.label }}</span>
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">API Key</Label>
+                  <Input
+                    v-model="aiEditApiKey"
+                    type="password"
+                    autocomplete="off"
+                    class="col-span-2 h-8 text-xs"
+                    :placeholder="aiRequiresApiKey ? '' : 'Optional'"
+                  />
+                </div>
+
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">Endpoint</Label>
+                  <Input
+                    v-model="aiEditEndpoint"
+                    placeholder="https://api.openai.com/v1"
+                    autocomplete="off"
+                    class="col-span-2 h-8 text-xs"
+                  />
+                </div>
+
+                <div class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.model") }}</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <div class="flex min-w-0 items-center gap-2">
+                      <Input v-model="aiEditModel" autocomplete="off" class="h-8 min-w-0 flex-1 text-xs" />
+                      <SearchableSelect
+                        :model-value="aiEditModel"
+                        :options="aiModelOptionIds"
+                        :placeholder="t('ai.browseModels')"
+                        :search-placeholder="t('ai.searchModels')"
+                        :empty-text="aiModelEmptyText"
+                        :loading-text="t('ai.loadingModels')"
+                        :loading="aiModelLoading"
+                        :display-name="displayAiModelName"
+                        trigger-class="h-8 min-w-[104px] max-w-[150px] shrink-0 border border-border bg-background px-2 text-xs shadow-none hover:bg-muted/50"
+                        content-class="w-72"
+                        @update:model-value="aiSelectModel"
+                        @update:open="onAiModelListOpen"
+                      >
+                        <template #trigger-label="{ loading }">
+                          <span class="truncate">{{ loading ? t("ai.loadingModels") : t("ai.browseModels") }}</span>
+                        </template>
+                        <template #option-label="{ option, label }">
+                          <span class="flex min-w-0 flex-col">
+                            <span class="truncate">{{ label }}</span>
+                            <span v-if="label !== option" class="truncate text-[11px] text-muted-foreground">{{
+                              option
+                            }}</span>
+                          </span>
+                        </template>
+                      </SearchableSelect>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        class="shrink-0"
+                        :disabled="aiModelLoading || !aiModelListSupported"
+                        :title="t('ai.refreshModels')"
+                        :aria-label="t('ai.refreshModels')"
+                        @click="aiRefreshModels"
+                      >
+                        <Loader2 v-if="aiModelLoading" class="h-3.5 w-3.5 animate-spin" />
+                        <RefreshCw v-else class="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <p v-if="aiModelError" class="text-xs text-destructive">{{ aiModelError }}</p>
+                    <p v-else-if="!aiModelOptionIds.length" class="text-xs text-muted-foreground">
+                      {{ aiModelListSupported ? t("ai.modelListHint") : t("ai.modelListUnsupported") }}
+                    </p>
+                  </div>
+                </div>
+
+                <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">API</Label>
+                  <div class="col-span-2 flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      class="h-8 flex-1 text-xs"
+                      :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }"
+                      @click="aiEditApiStyle = 'completions'"
+                      >/chat/completions</Button
+                    >
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      class="h-8 flex-1 text-xs"
+                      :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }"
+                      @click="aiEditApiStyle = 'responses'"
+                      >/responses</Button
+                    >
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
+                  <div class="col-span-2 flex items-center gap-2">
+                    <label class="flex items-center gap-2 text-xs text-muted-foreground">
+                      <input
+                        v-model="aiEditEnableThinking"
+                        type="checkbox"
+                        class="h-4 w-4 shrink-0 accent-primary"
+                        :disabled="!aiCompletionsMode || aiEditProvider === 'gemini'"
+                      />
+                      {{ aiEditEnableThinking ? t("ai.enableThinkingOn") : t("ai.enableThinkingOff") }}
+                    </label>
+                    <Popover>
+                      <PopoverTrigger as-child>
+                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                      </PopoverTrigger>
+                      <PopoverContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                        {{ t("ai.enableThinkingHint") }}
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
+                  <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
+                    <input v-model="aiEditProxyEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                    {{ t("ai.proxyEnable") }}
+                  </label>
+                </div>
+
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
+                  <Input
+                    v-model="aiEditProxyUrl"
+                    autocomplete="off"
+                    class="col-span-2 h-8 text-xs"
+                    placeholder="socks5://127.0.0.1:7890"
+                    :disabled="!aiEditProxyEnabled"
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="flex flex-col gap-5 py-2">
+              <div class="rounded-md border bg-muted/20 p-4">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0 space-y-2">
+                    <div class="flex items-center gap-2">
+                      <PackageSearch class="h-4 w-4 text-muted-foreground" />
+                      <Label class="text-base">{{ t("settings.mcpTitle") }}</Label>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
+                          {{ t("settings.mcpDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    class="shrink-0 rounded-md"
+                    :class="
+                      mcpStatusTone === 'ok'
+                        ? 'border-green-500/40 text-green-600 dark:text-green-400'
+                        : mcpStatusTone === 'warning'
+                          ? 'border-amber-500/40 text-amber-600 dark:text-amber-400'
+                          : 'text-muted-foreground'
+                    "
+                  >
+                    <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
+                    <CheckCircle2 v-else-if="mcpStatusTone === 'ok'" class="mr-1 h-3 w-3" />
+                    <AlertTriangle v-else-if="mcpStatusTone === 'warning'" class="mr-1 h-3 w-3" />
+                    {{ mcpStatusLabel }}
+                  </Badge>
+                </div>
+              </div>
+
+              <div class="grid gap-3 sm:grid-cols-2">
+                <div class="rounded-md border p-3">
+                  <div class="text-xs font-medium uppercase text-muted-foreground">{{ t("settings.mcpCurrent") }}</div>
+                  <div class="mt-2 font-mono text-sm">
+                    {{ mcpStatus?.current_version ? `v${mcpStatus.current_version}` : t("settings.mcpVersionMissing") }}
+                  </div>
+                </div>
+                <div class="rounded-md border p-3">
+                  <div class="text-xs font-medium uppercase text-muted-foreground">{{ t("settings.mcpLatest") }}</div>
+                  <div class="mt-2 font-mono text-sm">
+                    {{ mcpStatus?.latest_version ? `v${mcpStatus.latest_version}` : t("settings.mcpVersionUnknown") }}
+                  </div>
+                </div>
+                <div class="rounded-md border p-3">
+                  <div class="text-xs font-medium uppercase text-muted-foreground">Node.js</div>
+                  <div class="mt-2 font-mono text-sm">
+                    {{ mcpStatus?.node_version || t("settings.mcpVersionUnknown") }}
+                  </div>
+                </div>
+                <div class="rounded-md border p-3">
+                  <div class="text-xs font-medium uppercase text-muted-foreground">npm</div>
+                  <div class="mt-2 font-mono text-sm">
+                    {{ mcpStatus?.npm_available ? t("settings.mcpAvailable") : t("settings.mcpUnavailable") }}
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="mcpStatus?.bin_path" class="space-y-2">
+                <Label>{{ t("settings.mcpBinPath") }}</Label>
+                <div class="rounded-md border bg-muted/20 px-3 py-2 font-mono text-xs text-muted-foreground">
+                  {{ mcpStatus.bin_path }}
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <Label>{{
+                  mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand")
+                }}</Label>
+                <div class="flex min-w-0 items-center gap-2">
+                  <div
+                    class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap"
+                  >
+                    {{ mcpCommand }}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    :title="t('common.copy')"
+                    @click="copyMcpText('install', mcpCommand)"
+                  >
+                    <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
+                    <Copy v-else class="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="mcp-readonly-mode">{{ t("settings.mcpReadonlyMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.mcpReadonlyModeDescription") }}</p>
+                  </div>
+                  <Switch id="mcp-readonly-mode" v-model="mcpReadonlyMode" />
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="mcp-allow-dangerous">{{ t("settings.mcpAllowDangerous") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.mcpAllowDangerousDescription") }}</p>
+                  </div>
+                  <Switch id="mcp-allow-dangerous" v-model="mcpAllowDangerous" :disabled="mcpReadonlyMode" />
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <Label>{{ t("settings.mcpConfig") }}</Label>
+                <Tabs v-model="mcpConfigTab" class="space-y-3">
+                  <TabsList>
+                    <TabsTrigger value="claude">Claude Code</TabsTrigger>
+                    <TabsTrigger value="codex">Codex</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="claude" class="m-0">
+                    <div class="relative rounded-md border bg-background p-3">
+                      <pre
+                        class="overflow-x-auto whitespace-pre text-xs leading-relaxed"
+                      ><code>{{ mcpClaudeRecommendedConfig }}</code></pre>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        class="absolute right-2 top-2 h-7 w-7"
+                        :title="t('common.copy')"
+                        @click="copyMcpText('claude-config', mcpClaudeRecommendedConfig)"
+                      >
+                        <CheckCircle2 v-if="mcpCopied === 'claude-config'" class="h-3.5 w-3.5 text-green-500" />
+                        <Copy v-else class="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="codex" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpCodexConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre
+                          class="overflow-x-auto whitespace-pre text-xs leading-relaxed"
+                        ><code>{{ mcpCodexRecommendedConfig }}</code></pre>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          class="absolute right-2 top-2 h-7 w-7"
+                          :title="t('common.copy')"
+                          @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)"
+                        >
+                          <CheckCircle2 v-if="mcpCopied === 'codex-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+                </Tabs>
+              </div>
+
+              <div
+                v-if="mcpStatus?.error || mcpStatusError"
+                class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+              >
+                {{ mcpStatusError || mcpStatus?.error }}
+              </div>
+
+              <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                <Terminal class="h-3.5 w-3.5" />
+                <span>{{ t("settings.mcpDetectionTiming") }} {{ t("settings.mcpNpmBoundary") }}</span>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'security' && isWeb" class="flex flex-col gap-5 py-2">
+              <div class="space-y-3">
+                <Label class="text-base">{{ t("auth.changePassword") }}</Label>
+                <p class="text-sm text-muted-foreground">{{ t("auth.changePasswordDescription") }}</p>
+                <Input
+                  v-model="oldPassword"
+                  type="password"
+                  :placeholder="t('auth.oldPassword')"
+                  class="h-9"
+                  autocomplete="off"
+                />
+                <Input
+                  v-model="newPassword"
+                  type="password"
+                  :placeholder="t('auth.newPassword')"
+                  class="h-9"
+                  autocomplete="off"
+                />
+                <Input
+                  v-model="confirmNewPassword"
+                  type="password"
+                  :placeholder="t('auth.confirmPassword')"
+                  class="h-9"
+                  autocomplete="off"
+                />
+                <p
+                  v-if="passwordMessage"
+                  class="text-xs"
+                  :class="passwordError ? 'text-destructive' : 'text-green-500'"
+                >
+                  {{ passwordMessage }}
+                </p>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'about'" class="flex flex-col gap-5 py-2">
+              <div class="rounded-lg border bg-muted/20 p-4">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0 space-y-1">
+                    <div class="text-lg font-semibold">DBX</div>
+                    <p class="text-sm text-muted-foreground">{{ t("settings.aboutDescription") }}</p>
+                  </div>
+                  <div
+                    v-if="displayedAppVersion"
+                    class="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground"
+                  >
+                    {{ displayedAppVersion }}
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')"
+                >
+                  <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    {{ t("settings.community") }}
+                  </div>
+                  <div class="mt-3 flex items-center gap-2 text-sm font-medium">
+                    <img
+                      src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGhlaWdodD0iODYiIHdpZHRoPSI4NiIgdmlld0JveD0iMCAwIDEyMCAxNDUiPjxwYXRoIGZpbGw9IiNmYWFiMDciIGQ9Ik02MC41MDMgMTQyLjIzN2MtMTIuNTMzIDAtMjQuMDM4LTQuMTk1LTMxLjQ0NS0xMC40Ni0zLjc2MiAxLjEyNC04LjU3NCAyLjkzMi0xMS42MSA1LjE3NS0yLjYgMS45MTgtMi4yNzUgMy44NzQtMS44MDcgNC42NjMgMi4wNTYgMy40NyAzNS4yNzMgMi4yMTYgNDQuODYyIDEuMTM2em0wIDBjMTIuNTM1IDAgMjQuMDM5LTQuMTk1IDMxLjQ0Ny0xMC40NiAzLjc2IDEuMTI0IDguNTczIDIuOTMyIDExLjYxIDUuMTc1IDIuNTk4IDEuOTE4IDIuMjc0IDMuODc0IDEuODA1IDQuNjYzLTIuMDU2IDMuNDctMzUuMjcyIDIuMjE2LTQ0Ljg2MiAxLjEzNnptMCAwIi8+PHBhdGggZD0iTTYwLjU3NiA2Ny4xMTljMjAuNjk4LS4xNCAzNy4yODYtNC4xNDcgNDIuOTA3LTUuNjgzIDEuMzQtLjM2NyAyLjA1Ni0xLjAyNCAyLjA1Ni0xLjAyNC4wMDUtLjE4OS4wODUtMy4zNy4wODUtNS4wMUMxMDUuNjI0IDI3Ljc2OCA5Mi41OC4wMDEgNjAuNSAwIDI4LjQyLjAwMSAxNS4zNzUgMjcuNzY5IDE1LjM3NSA1NS40MDFjMCAxLjY0Mi4wOCA0LjgyMi4wODYgNS4wMSAwIDAgLjU4My42MTUgMS42NS45MTMgNS4xOSAxLjQ0NCAyMi4wOSA1LjY1IDQzLjMxMiA1Ljc5NXptNTYuMjQ1IDIzLjAyYy0xLjI4My00LjEyOS0zLjAzNC04Ljk0NC00LjgwOC0xMy41NjggMCAwLTEuMDItLjEyNi0xLjUzNy4wMjMtMTUuOTEzIDQuNjIzLTM1LjIwMiA3LjU3LTQ5LjkgNy4zOTJoLS4xNTNjLTE0LjYxNi4xNzUtMzMuNzc0LTIuNzM3LTQ5LjYzNC03LjMxNS0uNjA2LS4xNzUtMS44MDItLjEtMS44MDItLjEtMS43NzQgNC42MjQtMy41MjUgOS40NC00LjgwOCAxMy41NjgtNi4xMTkgMTkuNjktNC4xMzYgMjcuODM4LTIuNjI3IDI4LjAyIDMuMjM5LjM5MiAxMi42MDYtMTQuODIxIDEyLjYwNi0xNC44MjEgMCAxNS40NTkgMTMuOTU3IDM5LjE5NSA0NS45MTggMzkuNDEzaC44NDhjMzEuOTYtLjIxOCA0NS45MTctMjMuOTU0IDQ1LjkxNy0zOS40MTMgMCAwIDkuMzY4IDE1LjIxMyAxMi42MDcgMTQuODIyIDEuNTA4LS4xODMgMy40OTEtOC4zMzItMi42MjctMjguMDIxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQ5LjA4NSA0MC44MjRjLTQuMzUyLjE5Ny04LjA3LTQuNzYtOC4zMDQtMTEuMDYzLS4yMzYtNi4zMDUgMy4wOTgtMTEuNTc2IDcuNDUtMTEuNzczIDQuMzQ3LS4xOTUgOC4wNjQgNC43NiA4LjMgMTEuMDY1LjIzOCA2LjMwNi0zLjA5NyAxMS41NzctNy40NDYgMTEuNzcxbTMxLjEzMy0xMS4wNjNjLS4yMzMgNi4zMDItMy45NTEgMTEuMjYtOC4zMDMgMTEuMDYzLTQuMzUtLjE5NS03LjY4NC01LjQ2NS03LjQ0Ni0xMS43Ny4yMzYtNi4zMDUgMy45NTItMTEuMjYgOC4zLTExLjA2NiA0LjM1Mi4xOTcgNy42ODYgNS40NjggNy40NDkgMTEuNzczIi8+PHBhdGggZmlsbD0iI2ZhYWIwNyIgZD0iTTg3Ljk1MiA0OS43MjVDODYuNzkgNDcuMTUgNzUuMDc3IDQ0LjI4IDYwLjU3OCA0NC4yOGgtLjE1NmMtMTQuNSAwLTI2LjIxMiAyLjg3LTI3LjM3NSA1LjQ0NmEuODYzLjg2MyAwIDAwLS4wODUuMzY3Ljg4Ljg4IDAgMDAuMTYuNDk2Yy45OCAxLjQyNyAxMy45ODUgOC40ODcgMjcuMyA4LjQ4N2guMTU2YzEzLjMxNCAwIDI2LjMxOS03LjA1OCAyNy4yOTktOC40ODdhLjg3My44NzMgMCAwMC4xNi0uNDk4Ljg1Ni44NTYgMCAwMC0uMDg1LS4zNjUiLz48cGF0aCBkPSJNNTQuNDM0IDI5Ljg1NGMuMTk5IDIuNDktMS4xNjcgNC43MDItMy4wNDYgNC45NDMtMS44ODMuMjQyLTMuNTY4LTEuNTgtMy43NjgtNC4wNy0uMTk3LTIuNDkyIDEuMTY3LTQuNzA0IDMuMDQzLTQuOTQ0IDEuODg2LS4yNDQgMy41NzQgMS41OCAzLjc3MSA0LjA3bTExLjk1Ni44MzNjLjM4NS0uNjg5IDMuMDA0LTQuMzEyIDguNDI3LTIuOTkzIDEuNDI1LjM0NyAyLjA4NC44NTcgMi4yMjMgMS4wNTcuMjA1LjI5Ni4yNjIuNzE4LjA1MyAxLjI4Ni0uNDEyIDEuMTI2LTEuMjYzIDEuMDk1LTEuNzM0Ljg3NS0uMzA1LS4xNDItNC4wODItMi42Ni03LjU2MiAxLjA5Ny0uMjQuMjU3LS42NjguMzQ2LTEuMDczLjA0LS40MDctLjMwOC0uNTc0LS45My0uMzM0LTEuMzYyIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTYwLjU3NiA4My4wOGgtLjE1M2MtOS45OTYuMTItMjIuMTE2LTEuMjA0LTMzLjg1NC0zLjUxOC0xLjAwNCA1LjgxOC0xLjYxIDEzLjEzMi0xLjA5IDIxLjg1MyAxLjMxNiAyMi4wNDMgMTQuNDA3IDM1LjkgMzQuNjE0IDM2LjFoLjgyYzIwLjIwOC0uMiAzMy4yOTgtMTQuMDU3IDM0LjYxNi0zNi4xLjUyLTguNzIzLS4wODctMTYuMDM1LTEuMDkyLTIxLjg1NC0xMS43MzkgMi4zMTUtMjMuODYyIDMuNjQtMzMuODYgMy41MTgiLz48cGF0aCBmaWxsPSIjZWIxOTIzIiBkPSJNMzIuMTAyIDgxLjIzNXYyMS42OTNzOS45MzcgMi4wMDQgMTkuODkzLjYxNlY4My41MzVjLTYuMzA3LS4zNTctMTMuMTA5LTEuMTUyLTE5Ljg5My0yLjMiLz48cGF0aCBmaWxsPSIjZWIxOTIzIiBkPSJNMTA1LjUzOSA2MC40MTJzLTE5LjMzIDYuMTAyLTQ0Ljk2MyA2LjI3NWgtLjE1M2MtMjUuNTkxLS4xNzItNDQuODk2LTYuMjU1LTQ0Ljk2Mi02LjI3NUw4Ljk4NyA3Ni41N2MxNi4xOTMgNC44ODIgMzYuMjYxIDguMDI4IDUxLjQzNiA3Ljg0NWguMTUzYzE1LjE3NS4xODMgMzUuMjQyLTIuOTYzIDUxLjQzNy03Ljg0NXptMCAwIi8+PC9zdmc+"
+                      alt="QQ"
+                      class="h-7 w-7 rounded-md bg-white p-1"
+                    />
+                    {{ t("settings.qqGroup") }}
+                    <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                  <div class="mt-1 font-mono text-base">1087880322</div>
+                </button>
+                <button
+                  type="button"
+                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openExternalUrl('https://discord.gg/W7NyVDRt6a')"
+                >
+                  <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    {{ t("settings.community") }}
+                  </div>
+                  <div class="mt-3 flex items-center gap-2 text-sm font-medium">
+                    <img
+                      src="https://cdn.simpleicons.org/discord/5865F2"
+                      alt="Discord"
+                      class="h-7 w-7 rounded-md bg-white p-1"
+                    />
+                    Discord
+                    <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                  <div class="mt-1 text-sm text-primary">discord.gg/W7NyVDRt6a</div>
+                </button>
+                <button
+                  type="button"
+                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openExternalUrl('https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz')"
+                >
+                  <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    {{ t("settings.community") }}
+                  </div>
+                  <div class="mt-3 flex items-center gap-2 text-sm font-medium">
+                    <span class="flex h-7 w-7 items-center justify-center rounded-md bg-[#07C160] text-white">
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path
+                          d="M9.5 4C5.36 4 2 6.69 2 10c0 1.89 1.08 3.56 2.78 4.66l-.7 2.1 2.46-1.23c.87.27 1.8.42 2.78.42.24 0 .48-.01.71-.03A5.93 5.93 0 0 1 10 14c0-3.31 3.13-6 7-6 .34 0 .67.03 1 .07C17.27 5.56 13.72 4 9.5 4Zm-3 4.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm5 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2ZM22 14c0-2.76-2.69-5-6-5s-6 2.24-6 5 2.69 5 6 5c.73 0 1.43-.11 2.09-.3l1.72.86-.49-1.46C20.94 17.07 22 15.64 22 14Zm-7.5-.5a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Zm4 0a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Z"
+                        />
+                      </svg>
+                    </span>
+                    {{ t("settings.wechatGroup") }}
+                    <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                  <div class="mt-1 text-sm text-primary">{{ t("settings.wechatGroupInvite") }}</div>
+                </button>
+                <button
+                  type="button"
+                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openExternalUrl('https://github.com/t8y2/dbx')"
+                >
+                  <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    {{ t("settings.project") }}
+                  </div>
+                  <div class="mt-3 flex items-center gap-2 text-sm font-medium">
+                    <img
+                      src="https://cdn.simpleicons.org/github/181717"
+                      alt="GitHub"
+                      class="h-7 w-7 rounded-md bg-white p-1"
+                    />
+                    {{ t("settings.openSource") }}
+                    <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                  <div class="mt-1 text-sm text-primary">github.com/t8y2/dbx</div>
+                </button>
+                <button
+                  type="button"
+                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openExternalUrl('https://dbxio.com')"
+                >
+                  <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    {{ t("settings.project") }}
+                  </div>
+                  <div class="mt-3 flex items-center gap-2 text-sm font-medium">
+                    <AppLogo class="h-7 w-7" />
+                    {{ t("settings.officialDocs") }}
+                    <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                  <div class="mt-1 text-sm text-primary">dbxio.com</div>
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <DialogFooter
+            v-if="hasSettingsApplyFooter(activeSettingsTab as SettingsCategory)"
+            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
+          >
+            <Button variant="outline" @click="resetDefaults">
+              {{ t("settings.resetDefaults") }}
+            </Button>
+            <div class="flex-1" />
+            <Button variant="outline" @click="emit('update:open', false)">
+              {{ t("common.close") }}
+            </Button>
+            <Button :disabled="!hasChanges() || hasBlockingShortcutConflicts" @click="applySettings">
+              {{ t("settings.apply") }}
+            </Button>
+            <Button :disabled="!hasChanges() || hasBlockingShortcutConflicts" @click="applySettingsAndClose">
+              {{ t("settings.applyAndClose") }}
+            </Button>
+          </DialogFooter>
+
+          <DialogFooter
+            v-else-if="activeSettingsTab === 'ai'"
+            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
+          >
+            <div class="flex flex-1 items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="
+                  aiTesting ||
+                  (aiRequiresApiKey && !aiEditApiKey?.trim()) ||
+                  !aiEditEndpoint?.trim() ||
+                  !aiEditModel?.trim()
+                "
+                @click="aiTestConn"
+              >
+                <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
+                {{ t("connection.test") }}
+              </Button>
+              <span v-if="aiTestResult === 'success'" class="text-xs text-green-500">
+                {{ t("connection.testSuccess") }}
+              </span>
+              <span
+                v-else-if="aiTestResult === 'error'"
+                class="text-xs text-destructive truncate max-w-[200px]"
+                :title="aiTestError"
+              >
+                {{ aiTestError }}
+              </span>
+            </div>
+            <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>
+            <Button :disabled="!aiHasChanges()" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
+          </DialogFooter>
+
+          <DialogFooter
+            v-else-if="activeSettingsTab === 'sync'"
+            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
+          >
+            <Button variant="outline" @click="emit('update:open', false)">
+              {{ t("common.close") }}
+            </Button>
+            <p
+              v-if="webdavMessage"
+              class="text-xs self-center truncate max-w-[280px]"
+              :class="webdavError ? 'text-destructive' : 'text-green-500'"
+            >
+              {{ webdavMessage }}
+            </p>
+            <div class="flex-1" />
+            <Button variant="outline" :disabled="!webdavReady" @click="testWebDav">
+              <Loader2 v-if="webdavBusy === 'test'" class="mr-1 h-3 w-3 animate-spin" />
+              {{ t("settings.syncTest") }}
+            </Button>
+            <Button variant="outline" :disabled="!webdavReady" @click="downloadWebDavSnapshot">
+              <Loader2 v-if="webdavBusy === 'download'" class="mr-1 h-3 w-3 animate-spin" />
+              <Download v-else class="mr-1 h-3 w-3" />
+              {{ t("settings.syncDownload") }}
+            </Button>
+            <Button :disabled="!webdavReady" @click="uploadWebDavSnapshot">
+              <Loader2 v-if="webdavBusy === 'upload'" class="mr-1 h-3 w-3 animate-spin" />
+              <Upload v-else class="mr-1 h-3 w-3" />
+              {{ t("settings.syncUpload") }}
+            </Button>
+          </DialogFooter>
+
+          <DialogFooter
+            v-else-if="activeSettingsTab === 'mcp' && !isWeb"
+            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
+          >
+            <Button variant="outline" @click="emit('update:open', false)">
+              {{ t("common.close") }}
+            </Button>
+            <div class="flex-1" />
+            <Button variant="outline" :disabled="mcpStatusLoading" @click="refreshMcpStatus">
+              <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
+              <RefreshCw v-else class="mr-1 h-3 w-3" />
+              {{ t("settings.mcpRefresh") }}
+            </Button>
+            <Button variant="outline" @click="openExternalUrl('https://dbxio.com/cn/docs/mcp')">
+              <ExternalLink class="mr-1 h-3 w-3" />
+              {{ t("settings.mcpGuide") }}
+            </Button>
+          </DialogFooter>
+
+          <DialogFooter
+            v-else-if="activeSettingsTab === 'security' && isWeb"
+            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
+          >
+            <Button variant="outline" @click="emit('update:open', false)">
+              {{ t("common.close") }}
+            </Button>
+            <Button
+              :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword"
+              @click="changePassword"
+            >
+              {{ t("auth.changePassword") }}
+            </Button>
+          </DialogFooter>
+
+          <DialogFooter
+            v-else-if="activeSettingsTab === 'about'"
+            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
+          >
+            <Button variant="outline" @click="emit('update:open', false)">
+              {{ t("common.close") }}
+            </Button>
+          </DialogFooter>
+        </div>
+      </div>
+    </DialogContent>
+
+    <!-- Snippet Add/Edit Dialog -->
+    <Dialog :open="snippetDialogOpen" @update:open="snippetDialogOpen = $event">
+      <DialogContent class="sm:max-w-[500px]">
+        <DialogHeader>
+          <DialogTitle>
+            {{ snippetEditingId ? t("settings.snippetsEditTitle") : t("settings.snippetsAddTitle") }}
+          </DialogTitle>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="snippet-label">{{ t("settings.snippetsLabel") }}</Label>
+            <Input
+              id="snippet-label"
+              v-model="snippetForm.label"
+              :placeholder="t('settings.snippetsLabelPlaceholder')"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="snippet-prefix">{{ t("settings.snippetsPrefix") }}</Label>
+            <Input
+              id="snippet-prefix"
+              v-model="snippetForm.prefix"
+              :placeholder="t('settings.snippetsPrefixPlaceholder')"
+            />
+            <p v-if="snippetFormPrefixError" class="text-xs text-destructive">{{ snippetFormPrefixError }}</p>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="snippet-body">{{ t("settings.snippetsBody") }}</Label>
+            <textarea
+              id="snippet-body"
+              v-model="snippetForm.body"
+              :placeholder="t('settings.snippetsBodyPlaceholder')"
+              rows="6"
+              class="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="snippetDialogOpen = false">{{ t("settings.cancel") }}</Button>
+          <Button @click="saveSnippet">{{ t("settings.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </Dialog>
+</template>

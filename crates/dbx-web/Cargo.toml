@@ -1,0 +1,27 @@
+[package]
+name = "dbx-web"
+version = "0.5.29"
+edition = "2021"
+
+[[bin]]
+name = "dbx-web"
+path = "src/main.rs"
+
+[dependencies]
+dbx-core = { path = "../dbx-core" }
+axum = { version = "0.8", features = ["multipart"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "trace"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4"] }
+argon2 = "0.5"
+log = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+async-stream = "0.3"
+futures = "0.3"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+chrono = "0.4"

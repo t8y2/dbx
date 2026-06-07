@@ -1,0 +1,106 @@
+---
+title: Schema Browser
+description: Browse connections, databases, schemas, tables, columns, and Redis keyspaces from the sidebar.
+---
+
+The schema browser is the left-side workspace in DBX. Use it to understand what exists in a connection and to open data, inspect structure, or run context-specific actions.
+
+## Object Hierarchy
+
+The sidebar organizes objects by database hierarchy:
+
+```text
+Connection
+  └── Database
+        └── Schema
+              └── Tables / Views
+                    └── Columns (type, constraints, defaults)
+```
+
+Expand or collapse nodes to drill down. Click a table to open its data. Column entries show type, constraints, defaults, and related attributes when available.
+
+## Database-Specific Trees
+
+| Connection Type | Browser Model |
+|---|---|
+| Relational databases | Connection, database, schema, tables/views, columns, indexes, foreign keys, triggers, and routines where metadata is available |
+| Redis | Redis databases and keys, with value editors for String, Hash, List, Set, Sorted Set, and Stream |
+| MongoDB | Databases, collections, and paginated document browsing |
+| Object browser | Views, procedures, and functions when the database exposes source metadata |
+| Saved SQL | Folders and reusable SQL files in the sidebar library |
+
+## Search
+
+Sidebar search helps locate objects when a connection contains many tables:
+
+- Table names
+- View names
+- Column names
+- Parts of database object paths
+
+<Callout type="info">
+For large schemas, search works best with visible objects and cached metadata. Objects that were just refreshed or not yet expanded may need metadata loading before they are fully matched.
+</Callout>
+
+## Pinning
+
+Pin frequently used connections, databases, or tables to reduce repeated navigation through deep trees. Pinning is useful for:
+
+- High-frequency query tables
+- Objects related to the current iteration
+- Production connections that should stand out
+- Tables repeatedly checked during debugging
+
+## Context Menus
+
+Different node types expose different actions:
+
+| Node | Common Actions |
+|---|---|
+| Connection | Refresh metadata, duplicate connection, disconnect, edit connection |
+| Database | Create database, drop database, export database |
+| Schema | Create schema, drop schema |
+| Table | Open data, open structure, import data, copy table name, drop table |
+| Column | Copy column name, inspect column details |
+
+<Callout type="warn">
+Dropping databases, schemas, or tables may be irreversible. Confirm the active connection and back up data when needed.
+</Callout>
+
+## Column Comments
+
+When the database supports column comments, DBX displays them next to columns. This is especially helpful when you are reading an unfamiliar schema or legacy database.
+
+## Connection Colors
+
+Connection colors help separate environments:
+
+| Environment | Suggested Color |
+|---|---|
+| Local | Gray or green |
+| Test | Blue or purple |
+| Staging | Yellow |
+| Production | Red |
+
+Colors appear beside connection names in the sidebar and in tabs, reducing the chance of operating on the wrong environment.
+
+## Redis Browser
+
+Redis connections use a browser designed for key-value data:
+
+- Keys are displayed in a table for easier scanning
+- Pagination avoids loading large keyspaces at once
+- Values can be viewed and edited directly
+- String, Hash, List, Set, Sorted Set, and Stream are supported
+
+For large Redis keyspaces, use search and pagination together instead of expanding too much data at once.
+
+## Feature Boundaries
+
+| Feature | Supported Types |
+|---|---|
+| Schema-aware tree | PostgreSQL, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, JDBC, H2, Snowflake, Trino, DB2, TDengine |
+| ER diagram | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, DB2 |
+| Database search | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DuckDB, ClickHouse, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, TDengine |
+
+If an action is missing from a node menu, the active database type may not expose the required metadata or safe SQL generation path.

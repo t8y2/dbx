@@ -1,0 +1,78 @@
+---
+title: Database Export
+description: Export database structure and data as SQL for backup, migration, or test datasets.
+---
+
+Database Export writes table structure and table data into a SQL file. Use it before high-risk operations, for small database migrations, or to create reproducible development and test datasets.
+
+## What Gets Exported
+
+| Content | Details |
+|---|---|
+| Structure | `CREATE TABLE`, columns, primary keys, indexes, constraints, and other DDL |
+| Data | Rows exported as `INSERT` statements |
+| Batched inserts | Multiple rows grouped into one `INSERT` to reduce file size and import overhead |
+| Objects | Views, procedures, and functions where the database exposes source definitions |
+
+Example:
+
+```sql
+INSERT INTO users (id, name, email) VALUES
+  (1, 'Alice', 'alice@example.com'),
+  (2, 'Bob', 'bob@example.com'),
+  (3, 'Carol', 'carol@example.com');
+```
+
+## Workflow
+
+<Steps>
+  <Step>
+    ### Select Connection and Database
+
+    Choose the database to export and verify the environment.
+  </Step>
+  <Step>
+    ### Configure Export Options
+
+    Choose whether to include structure, data, and database objects. You can export all tables or a selected table subset.
+  </Step>
+  <Step>
+    ### Choose Output Location
+
+    Select where the `.sql` file should be saved.
+  </Step>
+  <Step>
+    ### Start Export
+
+    DBX generates a SQL file and reports the current object, progress, row counts, errors, and cancellation state.
+  </Step>
+</Steps>
+
+## Batching And Selection
+
+DBX reads table data in batches and writes generated `INSERT` statements into the output file. If batch size is not set, the export uses a default batch size of 1000 rows.
+
+Selected-table export filters the table list before generating DDL and data. Routine objects such as procedures and functions are included only when object export is enabled and the export is not limited to a table subset.
+
+<Callout type="info">
+For MySQL exports, DBX temporarily writes `SET FOREIGN_KEY_CHECKS = 0` before table content and re-enables it at the end of the file.
+</Callout>
+
+## Cancellation And Errors
+
+You can cancel an export between objects or row batches. If a specific table or object cannot be exported, DBX writes a SQL comment with the error and continues with the remaining export where possible.
+
+## Importing the Export
+
+The generated `.sql` file can be imported with [SQL File Execution](/en/docs/sql-file).
+
+<Callout type="warn">
+Export files may contain sensitive data, account information, business identifiers, or user privacy data. Mask data before sharing when needed.
+</Callout>
+
+## Recommendations
+
+- Export a backup before high-risk schema operations
+- Test imports in a non-production database before migration
+- Use native database backup tools for large production databases or complete backups
+- Keep exported SQL files out of public repositories

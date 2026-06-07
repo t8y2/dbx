@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.t8y2/dbx",
+  "description": "Query and manage databases from AI agents using connections configured in DBX.",
+  "repository": {
+    "url": "https://github.com/t8y2/dbx",
+    "source": "github"
+  },
+  "version": "0.4.6",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@dbx-app/mcp-server",
+      "version": "0.4.6",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,232 @@
+name: Node Packages Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish, for example 0.4.4"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  prepare:
+    name: Prepare package release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Check npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is required to publish DBX Node packages."
+            exit 1
+          fi
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set package versions
+        id: version
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          const version = process.env.VERSION.trim();
+          if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
+            throw new Error(`Invalid semver version: ${version}`);
+          }
+
+          const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
+          const writeJson = (path, data) => fs.writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
+
+          for (const path of [
+            "packages/node-core/package.json",
+            "packages/cli/package.json",
+            "packages/mcp-server/package.json",
+          ]) {
+            const pkg = readJson(path);
+            pkg.version = version;
+            writeJson(path, pkg);
+          }
+
+          const serverPath = "packages/mcp-server/server.json";
+          const server = readJson(serverPath);
+          server.version = version;
+          for (const packageInfo of server.packages ?? []) {
+            if (packageInfo.registryType === "npm" && packageInfo.identifier === "@dbx-app/mcp-server") {
+              packageInfo.version = version;
+            }
+          }
+          writeJson(serverPath, server);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=packages-v${version}\n`);
+          NODE
+
+      - name: Run package tests
+        run: pnpm test:packages
+
+      - name: Build and pack packages
+        run: pnpm publish:dry-run
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit package release version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git add packages/node-core/package.json packages/cli/package.json packages/mcp-server/package.json packages/mcp-server/server.json
+          if git diff --cached --quiet; then
+            echo "Package versions already committed for ${VERSION}."
+          else
+            git commit -m "chore(packages): release ${VERSION} [skip node-packages-release]"
+          fi
+
+      - name: Create package release tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists."
+          else
+            git tag "${TAG}"
+          fi
+
+      - name: Push package release commit and tag
+        env:
+          RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if [ -n "${RELEASE_TOKEN}" ]; then
+            git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
+          git push origin HEAD:main
+          git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
+
+  publish-node-core:
+    name: Publish node-core
+    runs-on: ubuntu-latest
+    needs: prepare
+    outputs:
+      published-or-existing: ${{ steps.publish.outputs.published_or_existing }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Publish Node core
+        id: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if npm view "@dbx-app/node-core@${VERSION}" version >/dev/null 2>&1; then
+            echo "@dbx-app/node-core@${VERSION} already exists on npm; skipping."
+            echo "published_or_existing=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pnpm --filter @dbx-app/node-core publish --access public --provenance --no-git-checks
+          echo "published_or_existing=true" >> "$GITHUB_OUTPUT"
+
+  publish-leaf-packages:
+    name: Publish ${{ matrix.package-name }}
+    runs-on: ubuntu-latest
+    needs: [prepare, publish-node-core]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package-name: "@dbx-app/cli"
+            filter: "@dbx-app/cli"
+          - package-name: "@dbx-app/mcp-server"
+            filter: "@dbx-app/mcp-server"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: pnpm --filter @dbx-app/node-core build
+
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PACKAGE_NAME: ${{ matrix.package-name }}
+          PACKAGE_FILTER: ${{ matrix.filter }}
+        run: |
+          if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} already exists on npm; skipping."
+            exit 0
+          fi
+          pnpm --filter "${PACKAGE_FILTER}" publish --access public --provenance --no-git-checks

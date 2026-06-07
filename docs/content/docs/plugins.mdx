@@ -1,0 +1,301 @@
+---
+title: JDBC Plugin
+description: Install the DBX JDBC plugin, import vendor JDBC driver JARs, and create JDBC connections.
+---
+
+DBX uses native Rust database drivers by default. JDBC is optional: install the JDBC plugin when you need to connect to a database that DBX does not support natively, or when you specifically need a vendor JDBC driver.
+
+<Callout type="info">
+The JDBC plugin is not bundled with the main DBX app, and it does not include vendor JDBC drivers. Install the DBX JDBC plugin first, then import the database vendor's JDBC driver JAR.
+</Callout>
+
+## When to Use JDBC
+
+Prefer built-in DBX database types first, such as MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, DM, and GaussDB.
+
+Use JDBC when:
+
+- The target database is not built into DBX
+- The native driver does not cover a vendor-specific behavior
+- Your organization standardizes on a vendor JDBC driver
+- You want to connect to databases such as Dameng DM, H2, DB2, Snowflake, or SQLite through JDBC
+
+## Requirements
+
+| Item | Required | Notes |
+|---|---:|---|
+| DBX JDBC plugin | Yes | Installed from DBX settings; lets DBX call JDBC |
+| Java Runtime | Yes | The local machine must be able to run `java`; Java 17 or newer is recommended |
+| Vendor JDBC driver JAR | Yes | For example PostgreSQL, MySQL, Dameng DM, Oracle, H2, SQLite, or another vendor driver |
+| JDBC URL | Yes | The URL usually contains host, port, database name, and parameters |
+| Username/password | Depends | File databases or some auth modes may not need them |
+| Driver class | Usually optional | Most modern JDBC drivers auto-register; enter it only when auto-discovery fails |
+
+## Step 1: Install Java
+
+The JDBC plugin is a Java program, so your machine needs a Java runtime. After installation, verify it in a terminal:
+
+```bash
+java -version
+```
+
+If the command is missing, install Java first. DBX checks `JAVA_HOME` first, then common system locations and `java` from `PATH`.
+
+<Tabs groupId="java-install" items={['macOS', 'Windows', 'Linux']}>
+  <Tab value="macOS">
+    Install with Homebrew:
+
+    ```bash
+    brew install openjdk
+    ```
+
+    If `java -version` still does not work, follow the Homebrew output to configure `PATH` or `JAVA_HOME`.
+  </Tab>
+  <Tab value="Windows">
+    Install Temurin, Oracle JDK, or Microsoft Build of OpenJDK. Restart DBX after installation and verify:
+
+    ```powershell
+    java -version
+    ```
+  </Tab>
+  <Tab value="Linux">
+    Debian / Ubuntu:
+
+    ```bash
+    sudo apt install openjdk-17-jre
+    ```
+
+    Fedora:
+
+    ```bash
+    sudo dnf install java-17-openjdk
+    ```
+  </Tab>
+</Tabs>
+
+## Step 2: Install the DBX JDBC Plugin
+
+In DBX Desktop:
+
+1. Open **Settings**
+2. Go to **JDBC Drivers**
+3. Click **Install JDBC Plugin**
+
+After installation, DBX shows a status like:
+
+```text
+Installed: v0.1.0
+```
+
+The DBX JDBC plugin has its own version. It does not have to match the DBX app version. Updating DBX does not automatically install the JDBC plugin, and if you uninstall it manually, DBX will not reinstall it behind your back.
+
+## Step 3: Download the Vendor JDBC Driver
+
+DBX does not download vendor JDBC drivers automatically. Download the `.jar` file from the database vendor website or a Maven repository.
+
+Common examples:
+
+| Database | Common Maven Artifact | Driver Class | JDBC URL Example |
+|---|---|---|---|
+| PostgreSQL | `org.postgresql:postgresql` | `org.postgresql.Driver` | `jdbc:postgresql://localhost:5432/postgres` |
+| MySQL | `com.mysql:mysql-connector-j` | `com.mysql.cj.jdbc.Driver` | `jdbc:mysql://localhost:3306/test` |
+| MariaDB | `org.mariadb.jdbc:mariadb-java-client` | `org.mariadb.jdbc.Driver` | `jdbc:mariadb://localhost:3306/test` |
+| Dameng DM | `com.dameng:DmJdbcDriver8` | `dm.jdbc.driver.DmDriver` | `jdbc:dm://localhost:5236` |
+| SQL Server | `com.microsoft.sqlserver:mssql-jdbc` | `com.microsoft.sqlserver.jdbc.SQLServerDriver` | `jdbc:sqlserver://localhost:1433;databaseName=master` |
+| Oracle | `com.oracle.database.jdbc:ojdbc11` | `oracle.jdbc.OracleDriver` | `jdbc:oracle:thin:@//localhost:1521/ORCLPDB1` |
+| H2 | `com.h2database:h2` | `org.h2.Driver` | `jdbc:h2:/tmp/dbx-h2-test` |
+| SQLite | `org.xerial:sqlite-jdbc` | `org.sqlite.JDBC` | `jdbc:sqlite:/Users/me/test.db` |
+| ClickHouse | `com.clickhouse:clickhouse-jdbc` | `com.clickhouse.jdbc.ClickHouseDriver` | `jdbc:clickhouse://localhost:8123/default` |
+| DB2 | `com.ibm.db2:jcc` | `com.ibm.db2.jcc.DB2Driver` | `jdbc:db2://localhost:50000/SAMPLE` |
+| Snowflake | `net.snowflake:snowflake-jdbc` | `net.snowflake.client.jdbc.SnowflakeDriver` | `jdbc:snowflake://account.region.snowflakecomputing.com/?db=DEMO` |
+
+<Callout type="warn">
+JDBC URL parameters vary by database and driver version. Follow the vendor documentation. If a driver depends on multiple JARs, import or list all required JAR paths.
+</Callout>
+
+## Step 4: Import JDBC Driver JARs
+
+In DBX:
+
+1. Open **Settings**
+2. Go to **JDBC Drivers**
+3. In the **JDBC driver JARs** section, choose the downloaded `.jar`
+
+You can also paste a local JAR path and import it. DBX copies imported JARs into the app data directory, and new JDBC connections can select them from the driver dropdown.
+
+Importing a driver only copies local files. It does not change your system Java installation, install database clients, or upload the driver anywhere.
+
+## Step 5: Create a JDBC Connection
+
+Create a new connection and choose **JDBC**.
+
+| Field | What to enter |
+|---|---|
+| Name | Display name, such as `H2 Test`, `DM Dev`, or `Oracle Dev` |
+| JDBC URL | Full JDBC URL, such as `jdbc:postgresql://localhost:5432/postgres` |
+| Username | Database username; leave empty if not needed |
+| Password | Database password; leave empty if not needed |
+| Driver Class (optional) | Enter it only if auto-discovery fails, such as `org.postgresql.Driver` |
+| Driver JARs | Choose an imported driver from the dropdown, or enter local JAR paths |
+
+JDBC URLs usually already include host, port, and database name, so the JDBC form does not show separate host and port fields.
+
+Click **Test** after filling the form. If the test succeeds, click **Save** and the connection appears in the sidebar.
+
+## Example: Dameng DM
+
+DBX already has a built-in DM ODBC connection type. If you prefer the official Dameng JDBC driver, use the JDBC plugin.
+
+1. Install the DBX JDBC plugin
+2. Install Java
+3. Get the Dameng JDBC driver JAR from your DM installation directory or Maven repository, such as `DmJdbcDriver8.jar` or `DmJdbcDriver11.jar`
+4. Import the JAR in **Settings → JDBC Drivers**
+5. Create a new connection and choose **JDBC**
+6. Fill in:
+
+| Field | Value |
+|---|---|
+| JDBC URL | `jdbc:dm://127.0.0.1:5236` |
+| Username | `SYSDBA` |
+| Password | Your DM password |
+| Driver Class (optional) | `dm.jdbc.driver.DmDriver` |
+| Driver JARs | Choose the imported DM JDBC JAR |
+
+For DM, entering `dm.jdbc.driver.DmDriver` is recommended so the connection does not depend on automatic driver discovery metadata.
+
+## Example: H2 Local File Database
+
+H2 is a good way to verify the JDBC workflow.
+
+1. Install the DBX JDBC plugin
+2. Download the H2 JDBC driver JAR
+3. Import `h2-*.jar` in settings
+4. Create a new connection and choose **JDBC**
+5. Fill in:
+
+| Field | Value |
+|---|---|
+| JDBC URL | `jdbc:h2:/tmp/dbx-h2-demo` |
+| Username | `sa` |
+| Password | Leave empty |
+| Driver Class (optional) | `org.h2.Driver` |
+| Driver JARs | Choose the imported H2 JAR |
+
+After saving, try:
+
+```sql
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name VARCHAR(100)
+);
+
+INSERT INTO users VALUES (1, 'Alice');
+
+SELECT * FROM users;
+```
+
+## Example: PostgreSQL
+
+1. Download the PostgreSQL JDBC driver JAR
+2. Import it in settings
+3. Create a new JDBC connection
+4. Fill in:
+
+| Field | Value |
+|---|---|
+| JDBC URL | `jdbc:postgresql://localhost:5432/postgres` |
+| Username | `postgres` |
+| Password | Your PostgreSQL password |
+| Driver Class (optional) | `org.postgresql.Driver` |
+| Driver JARs | Choose the imported PostgreSQL JAR |
+
+If SSL is required, add parameters to the JDBC URL:
+
+```text
+jdbc:postgresql://localhost:5432/postgres?sslmode=require
+```
+
+## Troubleshooting
+
+### JDBC plugin installation fails
+
+Check whether your network can access DBX GitHub Releases. DBX tries proxy URLs and the original GitHub URL, but public proxies can still be unavailable. Try another network if GitHub is blocked.
+
+### Java cannot be found
+
+Verify in a terminal:
+
+```bash
+java -version
+```
+
+If the terminal works but DBX does not, restart DBX. On macOS, if Java is only installed under a Homebrew path, configure `JAVA_HOME`.
+
+### `No JDBC driver was discovered`
+
+The driver JAR was not auto-discovered. Enter the driver class manually, for example:
+
+```text
+org.postgresql.Driver
+com.mysql.cj.jdbc.Driver
+dm.jdbc.driver.DmDriver
+oracle.jdbc.OracleDriver
+```
+
+### `No suitable driver`
+
+The JDBC URL and driver probably do not match. Check:
+
+- The selected driver JAR belongs to the target database
+- The JDBC URL prefix is correct, such as `jdbc:postgresql:`, `jdbc:mysql:`, `jdbc:dm:`, or `jdbc:oracle:`
+- The driver class may need to be entered manually
+
+### The connection works but tables are missing
+
+JDBC metadata depends on the database driver and account permissions. Check:
+
+- The account can read metadata
+- The JDBC URL points to the expected database or schema
+- Tables may live under a different schema
+- The driver supports `DatabaseMetaData` for the objects you expect
+
+### A driver requires multiple JARs
+
+Enter one JAR path per line in the **Driver JARs** field, or import each required JAR in settings and add the remaining paths manually.
+
+## Uninstalling
+
+Click **Uninstall** in **Settings → JDBC Drivers**. DBX removes the JDBC plugin itself but keeps your imported vendor driver JARs, so you do not have to import them again if you reinstall the plugin later.
+
+## For Developers: Plugin Protocol
+
+DBX starts the plugin executable and exchanges JSON Lines requests and responses over stdin/stdout. After a connection is established, DBX reuses the same plugin process for queries and metadata requests on that connection.
+
+The plugin directory must include `manifest.json`:
+
+```json
+{
+  "id": "jdbc",
+  "name": "DBX JDBC Plugin",
+  "version": "0.1.0",
+  "protocol_version": 1,
+  "description": "Adds JDBC driver support.",
+  "executable": "bin/dbx-jdbc-plugin",
+  "drivers": [
+    {
+      "id": "jdbc",
+      "label": "JDBC",
+      "kind": "external",
+      "database_type": "jdbc"
+    }
+  ]
+}
+```
+
+The current DBX app supports plugin protocol version `1`. DBX rejects a plugin whose manifest declares a different protocol version, and each plugin request has a 30 second timeout so a hung driver process does not block the app indefinitely.
+
+The initial protocol supports `testConnection`, `connect`, `executeQuery`, `listDatabases`, `listSchemas`, `listTables`, and `getColumns`.
+
+<Callout type="info">
+JDBC connection configs store `jdbc_driver_class` and `jdbc_driver_paths`. If a driver needs several JARs, keep all paths attached to the connection so metadata and query calls use the same classpath.
+</Callout>

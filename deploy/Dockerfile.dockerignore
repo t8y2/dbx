@@ -1,0 +1,12 @@
+target/
+node_modules/
+dist/
+src-tauri/target/
+.git/
+.github/
+.claude/
+*.log
+.DS_Store
+.env
+.env.*
+tmp/

@@ -1,0 +1,106 @@
+---
+title: 结构浏览
+description: 使用侧边栏浏览连接、数据库、Schema、表、字段和 Redis 键空间。
+---
+
+结构浏览器是 DBX 的左侧工作区，用于理解当前连接里有哪些数据库对象，并快速打开表数据、表结构或上下文操作。
+
+## 层级结构
+
+侧边栏按数据库对象层级组织：
+
+```text
+连接
+ └── 数据库
+      └── Schema
+           └── 表 / 视图
+                └── 字段（类型、约束、默认值）
+```
+
+点击节点可以展开或折叠；点击表名可以打开数据浏览；字段节点会展示类型、约束和默认值等信息。
+
+## 不同数据库的树结构
+
+| 连接类型 | 浏览模型 |
+|---|---|
+| 关系型数据库 | 连接、数据库、Schema、表/视图、字段、索引、外键、触发器，以及可获取元数据的例程 |
+| Redis | Redis 数据库和键，并为 String、Hash、List、Set、Sorted Set、Stream 提供值编辑 |
+| MongoDB | 数据库、集合和分页文档浏览 |
+| 对象浏览器 | 在数据库支持时查看视图、存储过程和函数源码 |
+| 保存的 SQL | 侧边栏中的 SQL 文件夹和可复用 SQL 文件 |
+
+## 搜索
+
+侧边栏搜索用于在对象数量较多时快速定位：
+
+- 表名
+- 视图名
+- 字段名
+- 部分数据库对象路径
+
+<Callout type="info">
+当连接中有大量表时，搜索会优先面向可见对象和缓存的元数据工作。刚刷新或首次展开的对象，可能需要等待元数据加载完成后才能完整匹配。
+</Callout>
+
+## 置顶
+
+把常用连接、数据库或表置顶后，可以减少在深层树结构中反复展开的操作。置顶适合这些对象：
+
+- 高频查询表
+- 当前迭代相关表
+- 生产环境中需要重点区分的连接
+- 排查问题时反复查看的对象
+
+## 右键菜单
+
+不同节点会显示不同的上下文操作：
+
+| 节点 | 常用操作 |
+|---|---|
+| 连接 | 刷新元数据、复制连接、断开连接、编辑连接 |
+| 数据库 | 创建数据库、删除数据库、导出数据库 |
+| Schema | 创建 Schema、删除 Schema |
+| 表 | 打开数据、查看结构、导入数据、复制表名、删除表 |
+| 字段 | 复制字段名、查看字段信息 |
+
+<Callout type="warn">
+删除数据库、删除 Schema、删除表等操作可能不可恢复。执行前请确认当前连接环境，必要时先备份。
+</Callout>
+
+## 字段注释
+
+如果数据库支持字段注释，DBX 会在字段旁展示注释内容。对于接手陌生库或阅读历史表结构，这通常比只看字段名更有帮助。
+
+## 连接颜色
+
+可以给连接设置颜色，用于区分环境。例如：
+
+| 环境 | 建议颜色 |
+|---|---|
+| 本地 | 灰色或绿色 |
+| 测试 | 蓝色或紫色 |
+| 预发 | 黄色 |
+| 生产 | 红色 |
+
+颜色会出现在侧边栏连接名称和标签页中，帮助减少误操作。
+
+## Redis 浏览器
+
+Redis 连接会使用更适合键值数据的浏览方式：
+
+- 键以表格方式展示，便于扫描
+- 支持分页浏览，避免一次性加载大量键
+- 可直接查看和编辑键值
+- 支持 String、Hash、List、Set、Sorted Set 和 Stream
+
+Redis 键空间较大时，建议配合搜索和分页使用，避免一次性展开过多数据。
+
+## 功能边界
+
+| 功能 | 支持类型 |
+|---|---|
+| Schema 感知树 | PostgreSQL、SQL Server、Oracle、Redshift、DM、GaussDB、KingBase、HighGo、Vastbase、JDBC、H2、Snowflake、Trino、DB2、TDengine |
+| ER 图 | MySQL、PostgreSQL、SQLite、SQL Server、Oracle、Redshift、DM、GaussDB、KingBase、HighGo、Vastbase、GoldenDB、Access、H2、DB2 |
+| 数据库搜索 | MySQL、PostgreSQL、SQLite、SQL Server、Oracle、Redshift、DuckDB、ClickHouse、DM、GaussDB、KingBase、HighGo、Vastbase、GoldenDB、Access、H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、TDengine |
+
+如果某个节点菜单里没有对应操作，通常说明当前数据库类型没有暴露所需元数据，或 DBX 没有足够把握生成安全 SQL。

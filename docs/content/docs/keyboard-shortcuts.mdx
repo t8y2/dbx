@@ -1,0 +1,68 @@
+---
+title: Keyboard Shortcuts
+description: Configure and use keyboard shortcuts to navigate DBX, execute queries, and edit data efficiently.
+---
+
+DBX provides configurable keyboard shortcuts for common actions. Use the default shortcuts or customize them to match your workflow.
+
+## Default Shortcuts
+
+### Query Editor
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Enter` / `Cmd+Enter` | Execute current query |
+| `Ctrl+Shift+Enter` / `Cmd+Shift+Enter` | Execute all queries |
+| `Ctrl+/` / `Cmd+/` | Toggle line comment |
+| `Ctrl+F` / `Cmd+F` | Search in editor |
+| `Ctrl+S` / `Cmd+S` | Save current tab |
+| `Tab` | Indent selected lines |
+| `Shift+Tab` | Outdent selected lines |
+
+### Data Grid
+
+| Shortcut | Action |
+|---|---|
+| `F5` | Refresh current data |
+| `Ctrl+C` / `Cmd+C` | Copy selected cells |
+| `Ctrl+Shift+C` / `Cmd+Shift+C` | Copy selected rows as INSERT |
+| `Delete` | Delete selected rows (mark for deletion) |
+
+### Navigation
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+N` / `Cmd+N` | New query tab |
+| `Ctrl+Shift+F` / `Cmd+Shift+F` | Focus sidebar search |
+| `Ctrl+W` / `Cmd+W` | Close current tab |
+| `Middle Click` (on tab) | Close tab |
+
+## Configuring Shortcuts
+
+Open **Settings → Shortcuts** to customize key bindings:
+
+1. Find the action you want to change in the list
+2. Click the current shortcut to enter recording mode
+3. Press the new key combination
+4. The new shortcut is saved automatically
+
+<Callout type="info">
+Shortcuts use the Electron-style modifier key notation: `Ctrl` (Control on Windows/Linux), `Cmd` (Command on macOS), `Shift`, and `Alt` (Option on macOS).
+</Callout>
+
+## Copy Shortcuts
+
+Two configurable copy shortcuts control row-level copy behavior:
+
+- **Copy Current Row**: Copies the current row as tab-separated values
+- **Delete Current Row**: Marks the current row for deletion
+
+Set these in **Settings → Shortcuts** to match your preferred workflow.
+
+## Conflict Resolution
+
+If a custom shortcut conflicts with an existing one:
+
+- DBX warns you before saving
+- You can choose to keep the conflict or choose a different combination
+- System shortcuts (like `Cmd+Q` on macOS) cannot be overridden

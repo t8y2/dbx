@@ -1,0 +1,77 @@
+---
+title: SQL Snippets
+description: Create customizable SQL snippet templates with custom trigger keys for faster query writing.
+---
+
+SQL Snippets let you define reusable SQL templates that expand automatically when you type a trigger key. This is useful for frequently written query patterns, standard clauses, or team-specific SQL conventions.
+
+## How Snippets Work
+
+1. You define a snippet with a **trigger key** and a **template**
+2. In the SQL editor, type the trigger key
+3. DBX auto-completes the trigger to the full template
+4. Placeholders in the template let you tab through editable positions
+
+## Creating A Snippet
+
+<Steps>
+  <Step>
+    ### Open Snippet Settings
+    Go to **Settings → SQL Snippets**.
+  </Step>
+  <Step>
+    ### Add a New Snippet
+    Click **Add Snippet** and fill in:
+    - **Trigger**: a short key you type in the editor (e.g., `selall`, `joinex`)
+    - **Template**: the SQL text that replaces the trigger
+  </Step>
+  <Step>
+    ### Use the Snippet
+    In the SQL editor, type the trigger key and press `Tab` or select it from the autocomplete list. The template expands in place.
+  </Step>
+</Steps>
+
+## Example Snippets
+
+Here are some useful snippet templates to get started:
+
+**SELECT with common clauses:**
+```sql
+SELECT ${1:columns}
+FROM ${2:table}
+WHERE ${3:condition}
+ORDER BY ${4:column}
+```
+
+**LEFT JOIN pattern:**
+```sql
+LEFT JOIN ${1:table} ON ${2:left_alias}.${3:column} = ${4:right_alias}.${5:column}
+```
+
+**COUNT with GROUP BY:**
+```sql
+SELECT ${1:column}, COUNT(*) AS cnt
+FROM ${2:table}
+GROUP BY ${1:column}
+HAVING COUNT(*) > ${3:threshold}
+ORDER BY cnt DESC
+```
+
+**CREATE TABLE template:**
+```sql
+CREATE TABLE ${1:table_name} (
+    ${2:id} INTEGER PRIMARY KEY,
+    ${3:column} ${4:type}
+);
+```
+
+## Placeholders
+
+Use `${1}`, `${2}`, etc. in templates to mark editable positions. After expansion, press `Tab` to jump between placeholders. Placeholders with the same number are edited simultaneously.
+
+## Tips
+
+- Keep triggers short but memorable (3-6 characters works well)
+- Use a consistent prefix for personal snippets (e.g., `my_selall`)
+- Review expanded snippets before execution, especially on production databases
+- Share useful snippets with your team for consistent query patterns

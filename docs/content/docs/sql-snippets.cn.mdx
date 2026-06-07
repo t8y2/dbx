@@ -1,0 +1,77 @@
+---
+title: SQL 代码片段
+description: 创建带有自定义触发键的可复用 SQL 模板，加速查询编写。
+---
+
+SQL 代码片段允许你定义可复用的 SQL 模板，输入触发键时自动展开。这对于经常编写的查询模式、标准子句或团队特定的 SQL 约定非常有用。
+
+## 代码片段工作原理
+
+1. 使用**触发键**和**模板**定义一个代码片段
+2. 在 SQL 编辑器中输入触发键
+3. DBX 将触发键自动完成为完整模板
+4. 模板中的占位符让你可以按 Tab 键在可编辑位置之间跳转
+
+## 创建代码片段
+
+<Steps>
+  <Step>
+    ### 打开代码片段设置
+    前往**设置 → SQL 代码片段**。
+  </Step>
+  <Step>
+    ### 添加新片段
+    点击**添加片段**并填写：
+    - **触发键**：在编辑器中输入的简短关键字（如 `selall`、`joinex`）
+    - **模板**：替换触发键的 SQL 文本
+  </Step>
+  <Step>
+    ### 使用代码片段
+    在 SQL 编辑器中输入触发键，然后按 `Tab` 或从自动补全列表中选择。模板会在光标处展开。
+  </Step>
+</Steps>
+
+## 示例片段
+
+以下是一些实用的片段模板：
+
+**带常用子句的 SELECT：**
+```sql
+SELECT ${1:columns}
+FROM ${2:table}
+WHERE ${3:condition}
+ORDER BY ${4:column}
+```
+
+**LEFT JOIN 模式：**
+```sql
+LEFT JOIN ${1:table} ON ${2:left_alias}.${3:column} = ${4:right_alias}.${5:column}
+```
+
+**带 GROUP BY 的 COUNT：**
+```sql
+SELECT ${1:column}, COUNT(*) AS cnt
+FROM ${2:table}
+GROUP BY ${1:column}
+HAVING COUNT(*) > ${3:threshold}
+ORDER BY cnt DESC
+```
+
+**CREATE TABLE 模板：**
+```sql
+CREATE TABLE ${1:table_name} (
+    ${2:id} INTEGER PRIMARY KEY,
+    ${3:column} ${4:type}
+);
+```
+
+## 占位符
+
+在模板中使用 `${1}`、`${2}` 等标记可编辑位置。展开后，按 `Tab` 在占位符之间跳转。相同编号的占位符会同时编辑。
+
+## 使用建议
+
+- 触发键保持简短但易记（3-6 个字符效果较好）
+- 使用一致的前缀来区分个人片段（如 `my_selall`）
+- 执行前检查展开的片段，尤其是在生产数据库上
+- 与团队分享实用的片段，以保持查询模式一致

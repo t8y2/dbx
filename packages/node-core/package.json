@@ -1,0 +1,44 @@
+{
+  "name": "@dbx-app/node-core",
+  "version": "0.4.6",
+  "description": "Shared Node.js database and DBX connection utilities for DBX CLI and MCP server",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./backend": "./dist/backend.js",
+    "./bridge": "./dist/bridge.js",
+    "./connections": "./dist/connections.js",
+    "./database": "./dist/database.js",
+    "./diagnostics": "./dist/diagnostics.js",
+    "./entrypoint": "./dist/entrypoint.js",
+    "./format": "./dist/format.js",
+    "./paths": "./dist/paths.js",
+    "./schema-context": "./dist/schema-context.js",
+    "./sql-safety": "./dist/sql-safety.js"
+  },
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "build": "tsc",
+    "prepublishOnly": "tsc"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "keytar": "^7.9.0",
+    "mysql2": "^3.14.1",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.21",
+    "@types/pg": "^8.15.4",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,75 @@
+---
+title: SQL File Execution
+description: Execute .sql files against a selected connection, monitor progress, and cancel remaining statements when needed.
+---
+
+SQL File Execution runs local `.sql` scripts in DBX. Use it for initialization scripts, data patches, database dumps, and migration scripts.
+
+<Callout type="warn">
+SQL files may modify large amounts of data or schema. Confirm the target connection, target database, and script source before running. Back up production databases first.
+</Callout>
+
+## Workflow
+
+<Steps>
+  <Step>
+    ### Open SQL File Execution
+
+    Open the SQL file execution panel in DBX.
+  </Step>
+  <Step>
+    ### Choose a File
+
+    Select a local `.sql` file. Large files may take longer to parse and execute.
+  </Step>
+  <Step>
+    ### Select Target Connection
+
+    Choose the connection and database where the script should run.
+  </Step>
+  <Step>
+    ### Start Execution
+
+    DBX executes the script statement by statement and shows progress.
+  </Step>
+  <Step>
+    ### Check Results
+
+    After execution, review successful statements, failed statements, and error messages.
+  </Step>
+</Steps>
+
+## Statement Splitting
+
+DBX reads SQL files as a stream and tries to detect statement boundaries correctly instead of splitting on every semicolon:
+
+- Semicolons inside strings are not treated as statement endings
+- Semicolons inside line and block comments are ignored
+- PostgreSQL dollar-quoted function bodies are kept together
+- SQL Server `GO` lines split batches
+- MySQL executable comments are prepared for the target connection before import: MySQL-compatible connections unwrap executable content, non-MySQL connections skip it, and import-helper directives such as `ENABLE/DISABLE KEYS`, `LOCK/UNLOCK TABLES`, and session state restores are skipped
+
+## Database Coverage
+
+SQL file execution is for SQL-oriented engines. DBX hides or disables it for Redis, MongoDB, and Elasticsearch because those connections do not execute relational SQL scripts.
+
+## Error Handling
+
+By default, execution stops when a statement fails. You can enable continue-on-error to keep running later statements while recording failures.
+
+## Cancelling Execution
+
+You can cancel while execution is running. Cancelling stops later statements from running, but statements already submitted to the database are not rolled back automatically.
+
+<Callout type="info">
+If a script must be atomic, include transaction control in the script itself and confirm the target database supports the required transaction behavior.
+</Callout>
+
+## Before Running
+
+- Confirm the active connection is the intended environment
+- Verify the script comes from a trusted source
+- Look for `DROP`, `TRUNCATE`, broad `UPDATE`, or broad `DELETE`
+- Run the script in a test environment first when possible
+- Decide whether continue-on-error is appropriate
+- Back up with [Database Export](/en/docs/database-export) when needed

@@ -1,0 +1,70 @@
+---
+title: 什么是 DBX？
+description: DBX 是一个开源数据库工作台，覆盖连接管理、SQL 编辑、数据浏览、结构工具、AI 助手和自托管访问。
+---
+
+DBX 是一个开源数据库工作台。它把日常数据库工作里的高频动作放在同一个界面里：连接数据库、写 SQL、查看和编辑数据、浏览结构、对比 Schema、导入导出数据，以及在需要时让 AI 辅助分析。
+
+它同时提供桌面应用和 Docker 版本。桌面应用适合本机开发和日常连接管理；Docker 版本适合在服务器上自托管，通过浏览器访问同一套能力。
+
+![DBX 截图](/screenshot-dark.png)
+
+## 适合的场景
+
+<Cards>
+  <Card title="日常查询与排查" href="/cn/docs/query-editor">
+    使用 SQL 编辑器编写、格式化和执行查询，并通过查询历史快速找回之前的排查过程。
+  </Card>
+  <Card title="查看与修改数据" href="/cn/docs/data-grid">
+    在数据表格中筛选、排序、编辑、预览 SQL，再决定是否写入数据库。
+  </Card>
+  <Card title="理解数据库结构" href="/cn/docs/schema-browser">
+    通过侧边栏浏览数据库、Schema、表、字段、索引、外键和触发器，适合接手陌生库时快速定位对象。
+  </Card>
+  <Card title="跨环境同步" href="/cn/docs/schema-diff">
+    对比开发、测试、生产等环境之间的结构差异，生成可审查的同步 SQL。
+  </Card>
+</Cards>
+
+## 主要能力
+
+| 能力 | 说明 |
+|---|---|
+| 多数据库连接 | 支持 MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle 等数据库 |
+| SQL 编辑器 | 基于 CodeMirror 6，支持语法高亮、元数据补全、格式化、选中执行和查询历史 |
+| 数据表格 | 虚拟滚动、行内编辑、WHERE/ORDER BY 控制、SQL 预览和多格式导出 |
+| 结构工具 | 结构浏览、表结构编辑、Schema 对比、ER 图、字段血缘、数据库导出和 SQL 文件执行 |
+| 数据流转 | 表数据导入、数据传输、SQL 文件执行，以及支持进度和取消的 SQL 导出 |
+| 专项浏览器 | Redis 键值浏览和 MongoDB 文档浏览 |
+| AI 与自动化 | 根据连接元数据生成 SQL、解释查询、优化语句、辅助修复错误，并通过 MCP 暴露连接给编程助手 |
+| 自托管访问 | Docker 版本可部署在服务器上，通过浏览器访问 DBX |
+
+## 设计取向
+
+DBX 优先覆盖数据库客户端里的核心工作流，而不是把所有数据库管理场景都塞进一个复杂入口。它更关注这些细节：
+
+- **少切换上下文**：结构浏览、SQL 编辑、数据表格和结果查看尽量在同一工作区内完成。
+- **操作可审查**：涉及数据或结构变更时，尽量先展示将要执行的 SQL。
+- **多环境可区分**：连接颜色、置顶、搜索和上下文菜单帮助区分开发、测试和生产环境。
+- **轻量部署**：桌面版适合个人日常工作，Docker 版适合团队或服务器环境。
+
+## 数据与安全
+
+- 连接配置保存在本机应用数据目录的 SQLite 数据库中，密码、SSH 密码、SSH 密钥密码等敏感字段会从普通连接配置中拆出，单独存放在 `connection_secrets` 表。
+- 配置导出支持 AES-GCM 加密，适合在多台设备之间迁移连接。
+- SSH 隧道可以连接私有网络或防火墙后的数据库。
+- AI Ask 模式不会执行生成的 SQL。Agent 和 MCP 流程会使用保守执行策略，并默认阻止危险 SQL。
+
+## 下一步
+
+<Cards>
+  <Card title="安装并创建连接" href="/cn/docs/getting-started">
+    从桌面应用或 Docker 版本开始，创建第一个数据库连接。
+  </Card>
+  <Card title="查看支持的数据库" href="/cn/docs/databases">
+    了解不同数据库引擎、兼容协议和 ODBC 场景的支持情况。
+  </Card>
+  <Card title="配置 AI 助手" href="/cn/docs/ai-assistant">
+    设置 API Key 后，在 SQL 编辑器中使用自然语言生成和解释查询。
+  </Card>
+</Cards>

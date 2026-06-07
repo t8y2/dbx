@@ -1,0 +1,48 @@
+{
+  "protocolVersion": 1,
+  "handshakeMethod": "handshake",
+  "handshakeResponseFields": [
+    "protocolVersion",
+    "agentProtocolVersion",
+    "capabilities"
+  ],
+  "capabilities": [
+    "connect",
+    "test_connection",
+    "metadata",
+    "query",
+    "paged_query",
+    "transaction",
+    "ddl"
+  ],
+  "commonMethods": [
+    "handshake",
+    "connect",
+    "test_connection",
+    "list_databases",
+    "list_schemas",
+    "list_tables",
+    "list_objects",
+    "get_object_source",
+    "get_table_ddl",
+    "get_columns",
+    "list_indexes",
+    "list_foreign_keys",
+    "list_triggers",
+    "execute_query",
+    "execute_query_page",
+    "fetch_query_page",
+    "close_query_session",
+    "execute_transaction",
+    "disconnect",
+    "shutdown"
+  ],
+  "mongoLegacyMethods": [
+    "list_databases",
+    "list_collections",
+    "find_documents",
+    "insert_document",
+    "update_document",
+    "delete_document"
+  ]
+}

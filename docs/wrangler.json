@@ -1,0 +1,7 @@
+{
+  "name": "dbx",
+  "compatibility_date": "2026-05-07",
+  "assets": {
+    "directory": "./out"
+  }
+}

@@ -1,0 +1,100 @@
+---
+title: Query Editor
+description: Write, complete, format, execute, and reuse SQL in DBX.
+---
+
+The query editor is where daily SQL work happens: writing queries, using completion, formatting statements, executing selected fragments, and returning to previous SQL through history.
+
+## Basic Workflow
+
+<Steps>
+  <Step>
+    ### Open a Connection
+
+    Select a database connection from the sidebar. DBX loads the database type and metadata for the active connection.
+  </Step>
+  <Step>
+    ### Write SQL
+
+    Type SQL in the editor. Completion suggestions use SQL keywords, tables, views, columns, and available relationship metadata.
+  </Step>
+  <Step>
+    ### Execute the Query
+
+    Use the shortcut to execute all SQL or only the selected fragment. Results appear in the data grid below the editor.
+  </Step>
+  <Step>
+    ### Reuse History
+
+    Open query history to bring back previously executed SQL for repeated debugging or analysis.
+  </Step>
+</Steps>
+
+## Execute SQL
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Execute all SQL | `Cmd+Enter` | `Ctrl+Enter` |
+| Execute selected SQL | Select text, then `Cmd+Enter` | Select text, then `Ctrl+Enter` |
+
+<Callout type="info">
+When text is selected, DBX executes only the selected SQL. When nothing is selected, it executes the full editor content.
+</Callout>
+
+After execution, the result area shows returned rows, duration, affected row count, or the error message. For multi-statement scripts, select the exact fragment you want to run to reduce mistakes.
+
+DBX also tracks query sessions so long-running result sets can be closed when you leave them, and active queries can be cancelled from the UI when the database driver supports cancellation.
+
+## Execution Scope
+
+| Scope | How It Is Chosen | Use Case |
+|---|---|---|
+| Selected SQL | Highlight text before running | Safest option for multi-statement scratch pads |
+| Current statement | Use editor cursor workflows where available | Run one statement without selecting text manually |
+| Full editor | Run with no selection | Single-purpose query tabs and short scripts |
+
+<Callout type="warn">
+DBX can execute batches and scripts, but the query editor is still safest when you run one reviewed statement at a time. Use [SQL File Execution](/en/docs/sql-file) for large `.sql` files that need progress tracking.
+</Callout>
+
+## Autocomplete
+
+Completion suggestions come from the active database context:
+
+- **SQL keywords**: `SELECT`, `FROM`, `WHERE`, `GROUP BY`, and more
+- **Object names**: tables, views, schemas, and databases
+- **Column names**: inferred from referenced tables and aliases
+- **JOIN suggestions**: related tables and join conditions from foreign keys or known relationships
+- **SQL Server syntax**: `CROSS APPLY`, `OUTER APPLY`, and related completions for SQL Server connections
+
+<Callout type="info">
+Completion accuracy depends on connection metadata. If you just created a table or changed columns, refresh the connection metadata and try again.
+</Callout>
+
+## Format SQL
+
+Use the format button in the toolbar to standardize indentation, line breaks, and keyword style. Formatting is useful before sharing a query, reviewing a migration script, or debugging a complex statement.
+
+Formatting only changes the editor text. It does not execute SQL or modify the database.
+
+## Query History
+
+DBX records executed SQL so you can reuse it later:
+
+- History is stored per connection
+- Previous statements can be reviewed by time
+- Clicking a history item loads it back into the editor
+- Useful for investigation queries, reports, and repair statements
+- History entries preserve enough context to identify manual queries and AI-assisted work
+
+<Callout type="warn">
+Query history may include business fields, table names, or filter values. Be mindful of sensitive information on shared machines or demo environments.
+</Callout>
+
+## Working With the Data Grid
+
+Query results open in the [Data Grid](/en/docs/data-grid). If the result is editable, DBX shows the SQL before saving changes. For analysis-only results, you can export CSV, JSON, or Markdown.
+
+## Working With AI
+
+The editor can send the current SQL, active connection type, database name, recent error, result preview, and loaded schema context to the [AI Assistant](/en/docs/ai-assistant). In Ask mode, AI returns SQL and explanations only. In Agent mode, DBX applies an execution policy before attempting to run generated SQL.

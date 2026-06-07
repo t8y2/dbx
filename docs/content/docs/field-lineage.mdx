@@ -1,0 +1,55 @@
+---
+title: Field Lineage
+description: Trace where columns come from, how they are referenced, and which relationships may exist.
+---
+
+Field Lineage helps answer a common question: where does a column's data come from, and what might depend on it? Use it to understand complex schemas, inspect impact, and read legacy structures.
+
+<Callout type="info">
+Field Lineage is enabled for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, and GaussDB. Other engines may not expose enough relationship metadata for DBX to build useful lineage.
+</Callout>
+
+## What It Helps With
+
+- Before changing a column, see which tables, views, or queries may depend on it
+- Understand relationships in an unfamiliar database
+- Trace where report fields may originate
+- Discover possible relationships that are not declared as foreign keys
+
+## Relationship Sources
+
+| Source | Confidence | Details |
+|---|---|---|
+| Foreign keys | High | Constraints declared in the database |
+| Views | High | Field mappings analyzed from view definitions |
+| Query history | Medium | Relationships inferred from executed SQL, including `JOIN` and `WHERE` usage |
+| Same-name columns | Low to medium | Possible relationships inferred from similar column names |
+
+<Callout type="info">
+Field Lineage is an analysis aid, not a strongly governed lineage platform. For critical decisions, confirm results with database constraints, view definitions, and application code.
+</Callout>
+
+## Navigation
+
+- Search by table or column name
+- Filter relationships by confidence
+- Click a table or column to open data or structure views
+- Start from one column and inspect upstream or downstream relationships
+
+## Recommendations
+
+- Treat foreign key and view relationships as the strongest signals
+- Review query-history and same-name inferences carefully
+- Before changing a column, combine lineage with schema diff and application code search
+- For important business fields, add database constraints or documentation comments where possible
+
+## Related Features
+
+<Cards>
+  <Card title="Schema Browser" href="/en/docs/schema-browser">
+    Inspect tables, columns, foreign keys, and comments.
+  </Card>
+  <Card title="Schema Diff" href="/en/docs/schema-diff">
+    Compare structure differences across environments.
+  </Card>
+</Cards>

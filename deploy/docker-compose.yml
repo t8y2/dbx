@@ -1,0 +1,15 @@
+services:
+  dbx:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "4224:4224"
+    environment:
+      - DBX_PASSWORD=changeme
+    volumes:
+      - dbx-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  dbx-data:

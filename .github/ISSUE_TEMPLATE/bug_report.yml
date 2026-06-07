@@ -1,0 +1,61 @@
+name: "🐞 Bug Report / 问题反馈"
+description: Crashes, connection failures, query errors, display bugs, or other reproducible issues. / 程序崩溃、连接失败、查询异常、界面显示错误或其他可复现问题。
+title: "[🐞 Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。涉及敏感信息请脱敏。请尽量提供数据库类型、版本和错误日志。
+
+  - type: input
+    id: database
+    attributes:
+      label: 数据库类型和版本
+      description: 例如 PostgreSQL 16、MySQL 8.0、Redis 7.2。
+      placeholder: "例如：PostgreSQL 16.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 发生了什么？希望发生什么？
+      placeholder: "例如：连接 PostgreSQL 后一直 loading，没有错误提示，期望能正常展开 schema。复现步骤：1. 新建连接 2. 填写信息 3. 点击保存..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志
+      description: 终端、DevTools 或应用内的错误信息。
+      render: shell
+
+  - type: input
+    id: app-version
+    attributes:
+      label: DBX 版本
+      placeholder: "例如：v0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      multiple: true
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 截图、SQL 样例、连接方式、特殊环境等。

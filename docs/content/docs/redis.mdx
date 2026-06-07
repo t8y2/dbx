@@ -1,0 +1,77 @@
+---
+title: Redis Browser
+description: Browse Redis keys, view and edit values, search by pattern, and run commands across all Redis data types.
+---
+
+DBX provides a full Redis key browser with support for all core Redis data types. It replaces the need to switch between a Redis CLI and a GUI by combining browsing, editing, searching, and command execution in one view.
+
+## Key Browser
+
+The Redis key browser displays keys in a table format for easier scanning and filtering:
+
+- Keys are paginated to avoid blocking on large keyspaces
+- Click any key to open its value in the detail panel
+- Use the search bar to filter keys by pattern (e.g., `user:*`, `cache:*`)
+- Key type, TTL, and size are shown inline
+
+<Callout type="info">
+For Redis instances with millions of keys, use specific key patterns in the search bar instead of loading the entire keyspace. Set the scan page size in Settings to control how many keys are fetched per batch.
+</Callout>
+
+## Value Viewer and Editor
+
+Each Redis data type has a dedicated viewer and editor:
+
+| Type | Viewer | Editing |
+|---|---|---|
+| String | Plain text or JSON viewer | Inline text edit |
+| Hash | Field/value table with resizable columns | Edit individual fields |
+| List | Ordered list with index | Add, remove, reorder elements |
+| Set | Member list with cardinality | Add and remove members |
+| Sorted Set | Member list with scores | Edit members and scores |
+| Stream | Entry list with IDs | View stream entries |
+
+## JSON Value Viewer
+
+For String keys that contain valid JSON, DBX automatically renders a structured JSON viewer with collapsible nodes, syntax highlighting, and copy support.
+
+## Value Search
+
+Search Redis values by content, not just keys:
+
+- Scan String values for matching text
+- Find Hash fields by value
+- Results are streamed progressively for large keyspaces
+
+<Callout type="warn">
+Value search scans all keys that match the current pattern. On large databases this can be resource-intensive. Narrow the key pattern before starting a value search.
+</Callout>
+
+## Bulk Operations
+
+Perform batch actions on multiple keys at once:
+
+- Delete multiple keys in one operation
+- View key statistics including memory usage and access patterns
+
+## Command Runner
+
+Execute arbitrary Redis commands directly from the UI:
+
+- Type commands in Redis CLI syntax
+- Results are displayed in a structured table
+- Useful for `INFO`, `CONFIG GET`, `CLIENT LIST`, and other admin commands
+
+## Flush Database
+
+The **Flush DB** button removes all keys from the current Redis database. This action cannot be undone. Confirm the active connection and database number before flushing.
+
+## Key Statistics
+
+Enable key statistics tracking in Settings to monitor:
+
+- Memory usage per key
+- Access frequency
+- Idle time
+
+This data helps identify large or infrequently used keys that may need attention.

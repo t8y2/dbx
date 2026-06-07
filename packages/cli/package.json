@@ -1,0 +1,47 @@
+{
+  "name": "@dbx-app/cli",
+  "version": "0.4.6",
+  "description": "Command line interface for DBX database connections, schema, and safe queries",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "dbx": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "test": "pnpm --filter @dbx-app/node-core build && tsx --test tests/*.test.ts",
+    "build": "pnpm --filter @dbx-app/node-core build && tsc",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "cli",
+    "database",
+    "dbx",
+    "codex",
+    "terminal",
+    "automation",
+    "postgresql",
+    "mysql",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/t8y2/dbx/tree/main/packages/cli",
+  "dependencies": {
+    "@dbx-app/node-core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

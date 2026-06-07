@@ -1,0 +1,259 @@
+---
+title: MCP 集成
+description: 通过 MCP 协议让 Claude Code、Cursor 等 AI 编程助手直接查询你的数据库。
+---
+
+<Callout type="info">
+一行配置，让 AI 编程助手直接查询你的数据库。支持 Claude Code、Cursor、Windsurf、VS Code Copilot。
+</Callout>
+
+## 什么是 MCP？
+
+MCP（Model Context Protocol）是一个开放协议，让 AI 编程助手能够调用外部工具。DBX 的 MCP Server 把你在 DBX 中配置的数据库连接暴露给 AI 助手，这样你可以用自然语言查询数据库，AI 自动生成并执行 SQL。
+
+```
+你："查看 orders 表最近 7 天的订单量趋势"
+
+AI 助手 → MCP Server → 你的数据库 → 返回结果
+                ↓
+         DBX 的连接配置（含密码）
+```
+
+## 快速开始
+
+<Steps>
+  <Step>
+    ### 安装 MCP Server
+
+    ```bash
+    npm install -g @dbx-app/mcp-server
+    ```
+  </Step>
+  <Step>
+    ### 配置 AI 助手
+
+    在你的工作目录创建 `.mcp.json`：
+
+    ```json
+    {
+      "mcpServers": {
+        "dbx": {
+          "command": "npx",
+          "args": ["-y", "@dbx-app/mcp-server"]
+        }
+      }
+    }
+    ```
+  </Step>
+  <Step>
+    ### 开始使用
+
+    在 AI 助手中直接用自然语言说：
+
+    - "列出我的数据库连接"
+    - "查看 local-pg 上有哪些表"
+    - "查看 users 表的结构"
+    - "查询最近 7 天的订单数量"
+    - "打开 orders 表"（需要 DBX 运行中）
+  </Step>
+</Steps>
+
+## 支持的 AI 助手
+
+| 助手 | 配置方式 |
+|---|---|
+| Claude Code | `.mcp.json`（原生支持） |
+| Cursor | `.cursor/mcp.json` |
+| Windsurf | `.windsurfrules` |
+| VS Code + Copilot | MCP 扩展 |
+
+## 工具列表
+
+DBX MCP Server 提供以下工具，AI 助手会根据你的需求自动调用：
+
+### `dbx_list_connections`
+
+列出 DBX 中所有已配置的数据库连接。
+
+**示例对话：**
+> "列出我的数据库连接"
+
+**返回：**
+```
+| Name     | Type     | Host      | Port | Database |
+| -------- | -------- | --------- | ---- | -------- |
+| local-pg | postgres | 127.0.0.1 | 5432 |          |
+| prod-db  | mysql    | db.example| 3306 | myapp    |
+```
+
+### `dbx_list_tables`
+
+列出指定连接的表和视图。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | DBX 连接名称 |
+| `schema` | 否 | Schema 名称（默认 public） |
+
+### `dbx_describe_table`
+
+获取表的列定义，AI 用它来理解你的数据结构。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | DBX 连接名称 |
+| `table` | 是 | 表名 |
+| `schema` | 否 | Schema 名称（默认 public） |
+
+**返回：**
+```
+| Column      | Type      | Nullable | Default | Comment |
+| ----------- | --------- | -------- | ------- | ------- |
+| id (PK)     | integer   | NO       |         |         |
+| user_id     | integer   | NO       |         | 用户 ID  |
+| total       | numeric   | NO       | 0       | 订单金额 |
+| created_at  | timestamp | NO       | now()   |         |
+```
+
+### `dbx_execute_query`
+
+执行 SQL 查询，返回结果（最多 100 行）。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | DBX 连接名称 |
+| `sql` | 是 | SQL 查询语句 |
+
+### `dbx_get_schema_context`
+
+返回用于生成 SQL 的紧凑表结构上下文。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | DBX 连接名称 |
+| `schema` | 否 | Schema 名称 |
+| `tables` | 否 | 指定要包含的表名 |
+| `max_tables` | 否 | 最多包含多少张表，范围限制在 1 到 20 |
+
+### `dbx_add_connection`
+
+添加新的数据库连接。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `name` | 是 | 连接名称 |
+| `db_type` | 是 | 数据库类型（postgres、mysql、sqlite、redis 等） |
+| `host` | 是 | 数据库主机 |
+| `port` | 是 | 数据库端口 |
+| `username` | 否 | 用户名 |
+| `password` | 否 | 密码 |
+| `database` | 否 | 默认数据库名 |
+| `ssl` | 否 | 是否启用 SSL（默认 false） |
+
+**示例对话：**
+> "添加一个 PostgreSQL 连接，名称 prod-db，地址 db.example.com:5432"
+
+### `dbx_remove_connection`
+
+删除数据库连接。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | 要删除的连接名称 |
+
+**示例对话：**
+> "删除 test-db 连接"
+
+### `dbx_open_table`
+
+在 DBX 桌面端打开指定表。**需要 DBX 正在运行。**
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | DBX 连接名称 |
+| `table` | 是 | 表名 |
+| `database` | 否 | 数据库名 |
+| `schema` | 否 | Schema 名称 |
+
+DBX 会自动新开一个 tab 显示数据，窗口自动置前。
+
+### `dbx_execute_and_show`
+
+在 DBX 桌面端执行 SQL 并展示结果。**需要 DBX 正在运行。**
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `connection_name` | 是 | DBX 连接名称 |
+| `sql` | 是 | SQL 查询语句 |
+| `database` | 否 | 数据库名 |
+
+## 工作原理
+
+### 连接配置
+
+MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
+
+| 平台 | 路径 |
+|---|---|
+| macOS | `~/Library/Application Support/com.dbx.app/dbx.db` |
+| Linux | `~/.config/com.dbx.app/dbx.db` |
+| Windows | `%APPDATA%\com.dbx.app\dbx.db` |
+
+### UI 联动
+
+`dbx_open_table` 和 `dbx_execute_and_show` 通过本地 HTTP 接口与运行中的 DBX 应用通信：
+
+```
+AI 助手 → MCP Server → HTTP localhost → DBX 后端 → Tauri 事件 → 前端打开 tab
+```
+
+### 支持的数据库
+
+桌面本地模式下，MCP 查询支持 PostgreSQL、MySQL 及兼容数据库。Web 模式会通过 `DBX_WEB_URL` 转发到 DBX Web 后端。打开表等 UI 联动能力支持当前 DBX 桌面端可以打开的所有数据库类型。
+
+### SQL 安全
+
+MCP 查询执行默认非常保守：
+
+| 规则 | 默认行为 |
+|---|---|
+| 空 SQL 或无法识别的 SQL | 阻止 |
+| 多条 SQL 语句 | 允许；会逐条进行安全检查并依次执行 |
+| 非只读 SQL | 阻止，除非显式允许写入 |
+| `DROP`、`TRUNCATE`、`ALTER` | 阻止，除非显式允许危险 SQL |
+| 允许写入时没有 `WHERE` 的 `UPDATE` 或 `DELETE` | 阻止 |
+
+设置 `DBX_MCP_ALLOW_WRITES=1` 可以允许写入语句。只有在受控环境并且确实需要破坏性 SQL 时，才设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
+
+### 桌面模式与 Web 模式
+
+| 模式 | 如何选择 | 说明 |
+|---|---|---|
+| 桌面本地模式 | 默认 | 读取 DBX 桌面端连接存储，并可调用桌面专属 UI bridge 工具 |
+| Web 模式 | 设置 `DBX_WEB_URL` | 不读取本机桌面存储，而是把请求发给 DBX Web 后端 |
+
+## 常见问题
+
+<Accordions>
+  <Accordion title="MCP Server 连不上数据库">
+    检查 DBX 中该连接是否能正常连接。MCP Server 使用相同的连接配置和密码。确认数据库服务正在运行，网络可达。
+  </Accordion>
+  <Accordion title="dbx_open_table 报 'DBX is not running'">
+    需要先启动 DBX 桌面应用。UI 联动功能依赖 DBX 运行时的本地 HTTP 服务（端口 4224）。
+  </Accordion>
+  <Accordion title="连接名称找不到">
+    连接名称匹配不区分大小写，但需要和 DBX 中配置的名称一致。用 `dbx_list_connections` 查看所有可用名称。
+  </Accordion>
+  <Accordion title="查询超时">
+    MCP Server 的查询超时为 30 秒。如果查询较慢，考虑添加索引或简化查询。也可以让 AI 助手先用 `dbx_describe_table` 了解表结构，再生成优化后的查询。
+  </Accordion>
+  <Accordion title="Docker 环境下如何使用 MCP？">
+    Docker 部署的 DBX 同样支持 MCP。MCP Server 会读取 Docker 容器内的连接配置。确保 MCP Server 能访问到 DBX 的配置目录。
+  </Accordion>
+</Accordions>
+
+## 系统要求
+
+- [DBX](https://github.com/t8y2/dbx) 已安装并配置了至少一个数据库连接
+- Node.js 18+
+- UI 联动功能需要 DBX v0.3.9+

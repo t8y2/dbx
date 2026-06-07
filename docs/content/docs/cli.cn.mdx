@@ -1,0 +1,182 @@
+---
+title: DBX CLI
+description: 在终端、脚本、CI 和 Codex 中使用 DBX 连接。
+---
+
+<Callout type="info">
+DBX CLI 是独立命令行包，适合终端、脚本和 AI 编程助手工作流。它与 MCP Server 共享 DBX 连接存储和 SQL 安全规则。
+</Callout>
+
+## 安装
+
+```bash
+npm install -g @dbx-app/cli
+```
+
+需要 Node.js 22.13.0 或更高版本。
+
+查看版本：
+
+```bash
+dbx --version
+```
+
+## 常用命令
+
+```bash
+dbx doctor
+dbx capabilities
+dbx connections list --json
+dbx connections list --format csv
+dbx schema list local --json
+dbx schema describe local users --json
+dbx query local "select count(*) as total from users" --json
+dbx query local "select id, name from users" --format csv
+dbx query local "select * from users" --limit 50 --timeout 10s --json
+dbx query local --file ./query.sql --json
+dbx context local --tables users,orders
+dbx open local users
+```
+
+## 诊断
+
+使用 `dbx doctor` 查看本地 DBX 路径、连接存储健康状态，以及桌面端 bridge 是否可用：
+
+```bash
+dbx doctor
+dbx doctor --json
+```
+
+如果切换 Node.js 版本后，`dbx doctor` 报 `NODE_MODULE_VERSION` 不匹配，请用运行 `dbx` 的同一个 Node.js 版本重建 native 依赖：
+
+```bash
+pnpm rebuild better-sqlite3 keytar --pending
+```
+
+如果是全局 npm 安装，使用同一个 Node.js 版本重新安装 CLI：
+
+```bash
+npm uninstall -g @dbx-app/cli
+npm install -g @dbx-app/cli
+```
+
+使用 `dbx capabilities` 查看哪些数据库类型可以直接查询，哪些当前需要 DBX 桌面端：
+
+```bash
+dbx capabilities
+dbx capabilities --json
+```
+
+当前直接执行支持 PostgreSQL/Redshift、MySQL 兼容数据库（MySQL、Doris、StarRocks）和 SQLite。其它数据库类型在对应驱动加入 `@dbx-app/node-core` 前，会使用 DBX 桌面端 bridge。
+
+## 默认连接
+
+设置 `DBX_CONNECTION` 后，`query` 和 `context` 命令可以省略连接名：
+
+```bash
+DBX_CONNECTION=local dbx query "select 1" --json
+DBX_CONNECTION=local dbx context --tables users,orders
+```
+
+## 输出格式
+
+使用 `--json` 或 `--format json` 可以获得稳定的机器可读输出。`--format csv` 适合把查询、连接、Schema 数据传给其它命令行工具。
+
+```bash
+dbx query local "select id, name from users" --format csv
+```
+
+错误会写入 stderr，并返回非零退出码。
+
+## 查询控制
+
+`dbx query` 执行单条 SQL，默认只读。
+
+```bash
+dbx query local "select * from users" --limit 50 --timeout 10s --json
+```
+
+时间支持 `ms`、`s`、`m`，例如 `500ms`、`10s`、`1m`。
+
+非危险写操作需要显式使用 `--allow-writes`：
+
+```bash
+dbx query local "update users set name = 'Ada' where id = 1" --allow-writes
+```
+
+`DROP`、`TRUNCATE`、`ALTER` 等危险 SQL 需要同时显式使用 `--allow-writes` 和 `--allow-dangerous-sql`。
+
+## 以短横线开头的 SQL
+
+如果 SQL 以短横线开头，在 SQL 前加 `--`：
+
+```bash
+dbx query local --json -- "-- comment
+select 1"
+```
+
+## 错误码
+
+CLI JSON 错误使用稳定错误码：
+
+| 错误码 | 含义 |
+|---|---|
+| `UNKNOWN_OPTION` | 使用了不支持的参数 |
+| `INVALID_OPTION` | 参数缺少值或值不合法 |
+| `INVALID_ARGUMENT` | 位置参数缺失或冲突 |
+| `CONNECTION_STORE_ERROR` | DBX 连接存储存在，但无法读取 |
+| `CONNECTION_NOT_FOUND` | 找不到指定的 DBX 连接 |
+| `SQL_BLOCKED` | SQL 被安全规则拦截 |
+| `DBX_NOT_RUNNING` | DBX 桌面端 bridge 不可用 |
+| `ERROR` | 未预期的运行时错误 |
+
+## 桌面端 Deep Link
+
+DBX 桌面端支持通过 `dbx://connection/new` 从浏览器、堡垒机或脚本打开新建连接窗口并预填连接信息。
+
+DSN 模式：
+
+```bash
+open 'dbx://connection/new?url=postgres%3A%2F%2Fapp%3Asecret%40db.internal%3A5432%2Forders'
+```
+
+字段模式：
+
+```bash
+open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&password=secret&database=test'
+```
+
+支持的字段：
+
+| 字段 | 含义 |
+|---|---|
+| `type` | 数据库类型，例如 `mysql`、`postgres`、`redis`、`mongodb` |
+| `url` | 数据库 DSN，建议 URL encode |
+| `name` | DBX 中显示的连接名；未传时优先使用 `database`，其次使用 `host` |
+| `host` | 主机地址 |
+| `port` | 端口 |
+| `user` | 用户名 |
+| `password` | 密码 |
+| `database` | 数据库名；Redis 可传 DB index，例如 `0` |
+| `url_params` | 额外连接参数，例如 `sslmode=require` |
+| `ssl` | 是否启用 SSL，`true` 表示启用 |
+| `one_time` | `true` 时自动连接，断开后自动删除连接信息 |
+
+一次性连接示例：
+
+```bash
+open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
+```
+
+<Callout type="info">
+测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://connection/new?...'` 测试。
+</Callout>
+
+## Codex
+
+Codex 可以直接通过 shell 调用 CLI：
+
+```bash
+dbx schema describe local users --json
+dbx context local --tables users,orders | codex exec "Write a retention query"
+```

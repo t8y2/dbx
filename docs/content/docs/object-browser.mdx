@@ -1,0 +1,60 @@
+---
+title: Object Browser
+description: Browse views, procedures, functions, and other database objects beyond tables and schemas.
+---
+
+The Object Browser extends the sidebar beyond tables and collections. It surfaces database objects that are often hidden or require separate queries to inspect.
+
+## What the Object Browser Shows
+
+| Object Type | Information Shown |
+|---|---|
+| Views | View definition (DDL), column list, schema |
+| Procedures | Source code, parameters, language |
+| Functions | Return type, parameters, source code |
+| Triggers | Timing, event, table, source |
+| Routines | Combined view of procedures and functions |
+
+<Callout type="info">
+Object Browser availability depends on the database engine and its metadata support. Not all databases expose source code or routine metadata through standard SQL.
+</Callout>
+
+## Opening the Object Browser
+
+Open the Object Browser from the sidebar:
+
+- **Double-click** a database or schema node to open its Object Browser
+- Right-click and choose **Object Browser** from the context menu
+- Use the **View DDL** action on any object to see its source definition
+
+## View DDL
+
+The **View DDL** action shows the complete `CREATE` statement for a view, procedure, or function:
+
+- Displayed in a read-only SQL viewer with syntax highlighting
+- Copy the DDL to use in migration scripts or documentation
+- Compare definitions between environments
+
+## Editing Object Source
+
+For databases that support `CREATE OR REPLACE` semantics, you can edit object source directly:
+
+- Procedures and functions can be edited and saved
+- DBX generates the appropriate `CREATE OR REPLACE` or `ALTER` statement
+- Review the generated SQL before applying changes
+
+<Callout type="warn">
+Editing database objects in place may affect running applications. Verify the object's usage before saving changes, especially on production databases.
+</Callout>
+
+## Object Timestamps
+
+When the database provides it, the Object Browser shows object metadata timestamps:
+
+- Creation time
+- Last modification time
+- Useful for tracking recent changes or finding stale objects
+
+## Feature Boundaries
+
+Object source editing is supported for databases that allow programmatic source replacement. Read-only databases, certain legacy versions, and some cloud database services may not expose editable object source. In those cases, use the Object Browser for inspection and copy the DDL for manual execution.

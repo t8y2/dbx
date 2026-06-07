@@ -1,0 +1,49 @@
+name: "🔀 Compatibility Issue / 数据库兼容性问题"
+description: A specific database, version, or SQL dialect incompatibility. / 某个数据库、版本或 SQL 方言不兼容。
+title: "[🔀 Compatibility] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        用于收集数据库兼容性细节，例如连接失败、schema 读取不完整、字段类型显示错误等。请脱敏。
+
+  - type: input
+    id: database
+    attributes:
+      label: 数据库类型和版本
+      description: 也请注明发行版，如 MariaDB、AWS RDS、TiDB 等。
+      placeholder: "例如：MariaDB 10.11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 什么操作，出了什么错，期望怎样？
+      placeholder: "例如：展开 schema 时报错 'unknown type'，期望能正常显示字段。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: 错误信息
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: DBX 版本
+      placeholder: "例如：v0.1.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 表结构、SQL 样例、截图、部署方式（Docker/云/自建）等。

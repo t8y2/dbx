@@ -1,0 +1,33 @@
+name: "💡 Feature Request / 功能建议"
+description: Propose a new feature, interaction improvement, or enhancement. / 提议新功能、交互改进或现有功能增强。
+title: "[💡 Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        好的建议最好说明使用场景和期望效果。请尽量避免只写“支持 X”。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 当前痛点
+      description: 现在做这件事有什么不方便？
+      placeholder: "例如：每次查询后都要手动复制结果再转成 Markdown。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 希望怎么支持？
+      placeholder: "例如：在查询结果右上角增加导出 Markdown 按钮。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 参考截图、相关数据库类型、替代方案等。

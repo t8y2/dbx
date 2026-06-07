@@ -1,0 +1,508 @@
+{
+  "schemaVersion": 1,
+  "drivers": [
+    {
+      "dbType": "mysql",
+      "label": "MySQL",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": true,
+      "skipTcpProbe": false,
+      "defaultPort": 3306
+    },
+    {
+      "dbType": "postgres",
+      "label": "PostgreSQL",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 5432
+    },
+    {
+      "dbType": "sqlite",
+      "label": "SQLite",
+      "runtimeMode": "file",
+      "mcpMode": "direct",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true
+    },
+    {
+      "dbType": "rqlite",
+      "label": "RQLite",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 4001
+    },
+    {
+      "dbType": "redis",
+      "label": "Redis",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 6379
+    },
+    {
+      "dbType": "duckdb",
+      "label": "DuckDB",
+      "runtimeMode": "file",
+      "mcpMode": "bridge",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true
+    },
+    {
+      "dbType": "clickhouse",
+      "label": "ClickHouse",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8123
+    },
+    {
+      "dbType": "sqlserver",
+      "label": "SQL Server",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 1433
+    },
+    {
+      "dbType": "mongodb",
+      "label": "MongoDB (Legacy)",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "mongodb",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 27017
+    },
+    {
+      "dbType": "oracle",
+      "label": "Oracle",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "oracle",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 1521,
+      "driverProfiles": [
+        { "profile": "oracle-legacy", "label": "Oracle Legacy", "agentKey": "oracle-legacy" },
+        { "profile": "oracle-10g", "label": "Oracle 10g", "agentKey": "oracle-10g" }
+      ]
+    },
+    {
+      "dbType": "elasticsearch",
+      "label": "Elasticsearch",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 9200
+    },
+    {
+      "dbType": "doris",
+      "label": "Doris",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 9030
+    },
+    {
+      "dbType": "starrocks",
+      "label": "StarRocks",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 9030
+    },
+    {
+      "dbType": "redshift",
+      "label": "Redshift",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 5439
+    },
+    {
+      "dbType": "dameng",
+      "label": "达梦 DM8",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "dameng",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5236
+    },
+    {
+      "dbType": "kingbase",
+      "label": "人大金仓 KingbaseES",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "kingbase",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 54321
+    },
+    {
+      "dbType": "highgo",
+      "label": "瀚高 HighGo",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "highgo",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5866
+    },
+    {
+      "dbType": "vastbase",
+      "label": "Vastbase",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "vastbase",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5432
+    },
+    {
+      "dbType": "goldendb",
+      "label": "GoldenDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "goldendb",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 3306
+    },
+    {
+      "dbType": "gaussdb",
+      "label": "GaussDB",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8000
+    },
+    {
+      "dbType": "kwdb",
+      "label": "KWDB",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 26257
+    },
+    {
+      "dbType": "yashandb",
+      "label": "崖山 YashanDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "yashandb",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 1688
+    },
+    {
+      "dbType": "databricks",
+      "label": "Databricks SQL",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "databricks",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 443
+    },
+    {
+      "dbType": "saphana",
+      "label": "SAP HANA",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "saphana",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 30015
+    },
+    {
+      "dbType": "teradata",
+      "label": "Teradata",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "teradata",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 1025
+    },
+    {
+      "dbType": "vertica",
+      "label": "Vertica",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "vertica",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5433
+    },
+    {
+      "dbType": "firebird",
+      "label": "Firebird",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "firebird",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 3050
+    },
+    {
+      "dbType": "exasol",
+      "label": "Exasol",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "exasol",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8563
+    },
+    {
+      "dbType": "opengauss",
+      "label": "openGauss",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 5432
+    },
+    {
+      "dbType": "oceanbase-oracle",
+      "label": "OceanBase Oracle Mode",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "oceanbase-oracle",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 2881
+    },
+    {
+      "dbType": "gbase",
+      "label": "GBase",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "gbase",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5258,
+      "driverProfiles": [
+        { "profile": "gbase8s", "label": "GBase 8s", "agentKey": "gbase8s" }
+      ]
+    },
+    {
+      "dbType": "access",
+      "label": "Microsoft Access",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "access",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true
+    },
+    {
+      "dbType": "h2",
+      "label": "H2",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "h2",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9092
+    },
+    {
+      "dbType": "snowflake",
+      "label": "Snowflake",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "snowflake",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 443
+    },
+    {
+      "dbType": "trino",
+      "label": "Trino (Presto)",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "trino",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8080
+    },
+    {
+      "dbType": "hive",
+      "label": "Apache Hive",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "hive",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000
+    },
+    {
+      "dbType": "db2",
+      "label": "IBM DB2",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "db2",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 50000
+    },
+    {
+      "dbType": "informix",
+      "label": "IBM Informix",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "informix",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9088
+    },
+    {
+      "dbType": "neo4j",
+      "label": "Neo4j",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "neo4j",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 7687
+    },
+    {
+      "dbType": "cassandra",
+      "label": "Apache Cassandra",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "cassandra",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9042
+    },
+    {
+      "dbType": "bigquery",
+      "label": "Google BigQuery",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "bigquery",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true
+    },
+    {
+      "dbType": "kylin",
+      "label": "Apache Kylin",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "kylin",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 7070
+    },
+    {
+      "dbType": "sundb",
+      "label": "SunDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "sundb",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 22581
+    },
+    {
+      "dbType": "tdengine",
+      "label": "TDengine",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "tdengine",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 6041
+    },
+    {
+      "dbType": "xugu",
+      "label": "虚谷 XuguDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "xugu",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5138
+    },
+    {
+      "dbType": "iris",
+      "label": "InterSystems IRIS",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "iris",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 1972
+    },
+    {
+      "dbType": "jdbc",
+      "label": "JDBC",
+      "runtimeMode": "external",
+      "mcpMode": "bridge",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true
+    }
+  ]
+}

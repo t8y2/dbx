@@ -1,0 +1,93 @@
+---
+title: Data Transfer
+description: Move table data between connections or database engines.
+---
+
+Data Transfer copies table data from one connection to another. Use it for development, testing, migration, and consolidation workflows. It is not a replacement for a production-grade replication pipeline.
+
+## Use Cases
+
+- Copy part of production data into a development environment
+- Move data between engines such as MySQL, PostgreSQL, SQLite, and SQL Server
+- Consolidate multiple sources into an analysis database
+- Prepare reproducible datasets for testing
+
+<Callout type="warn">
+Cross-engine transfer involves type mapping, defaults, constraints, and auto-increment differences. Validate transferred data afterward, and rehearse important migrations in a test environment first.
+</Callout>
+
+## Workflow
+
+<Steps>
+  <Step>
+    ### Select the Source
+
+    The source connection is where data is read from. Confirm the account can read the selected tables.
+  </Step>
+  <Step>
+    ### Select the Target
+
+    The target connection is where data is written. Confirm write permissions and verify the target environment.
+  </Step>
+  <Step>
+    ### Choose Tables
+
+    Transfer all tables or select only the tables you need. For large tables, consider transferring in smaller batches.
+  </Step>
+  <Step>
+    ### Start Transfer
+
+    DBX reads rows table by table and writes them to the target database using the selected mode. You can also choose whether target tables should be created.
+  </Step>
+  <Step>
+    ### Check Results
+
+    After transfer, inspect row counts, errors, and key fields.
+  </Step>
+</Steps>
+
+## During Transfer
+
+DBX shows:
+
+- Current table
+- Rows transferred
+- Overall progress
+- Errors and the table that caused each error
+
+If a table fails, the current transfer stops and shows the error. Fix the structure, permission, or constraint issue, then start the transfer again.
+
+## Transfer Options
+
+| Option | Details |
+|---|---|
+| Create target table | Try to create the target table from the source structure when it does not exist |
+| Append | Insert data after existing target rows |
+| Overwrite | Clear the target table before writing source rows |
+| Upsert | Use key-aware write behavior where the target database path supports it |
+| Batch size | Control how many rows are written per batch |
+
+## Database Coverage
+
+SQL-based transfer is available for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, ClickHouse, DuckDB, DM, and GaussDB. Cross-engine transfers use DBX's type mapping layer, so always verify row counts and important column values after transfer.
+
+## Before You Transfer
+
+| Check | Why It Matters |
+|---|---|
+| Target environment | Avoid writing to the wrong database |
+| Table structure | Field names, types, primary keys, and unique constraints affect inserts |
+| Data volume | Large tables may take longer or hit timeouts |
+| Constraints | Foreign keys, unique constraints, and NOT NULL fields may fail writes |
+| Sensitive data | Production data may need masking before copying into lower environments |
+
+## Related Features
+
+<Cards>
+  <Card title="Table Import" href="/en/docs/table-import">
+    Import CSV, TSV, JSON, or Excel into a single table.
+  </Card>
+  <Card title="Database Export" href="/en/docs/database-export">
+    Export a database as SQL for backup or offline migration.
+  </Card>
+</Cards>

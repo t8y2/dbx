@@ -1,0 +1,41 @@
+name: Sync Changelog to R2
+
+on:
+  workflow_run:
+    workflows: ['Publish Packages']
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate changelog JSON
+        run: node .github/scripts/sync-changelog.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      - name: Upload to R2
+        run: |
+          pip install awscli --quiet
+          aws s3 cp releases-cn.json "s3://${R2_BUCKET_NAME}/changelog/releases-cn.json" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json
+          if [ -f releases-en.json ]; then
+            aws s3 cp releases-en.json "s3://${R2_BUCKET_NAME}/changelog/releases-en.json" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --content-type application/json
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}

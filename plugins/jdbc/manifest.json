@@ -1,0 +1,16 @@
+{
+  "id": "jdbc",
+  "name": "DBX JDBC Plugin",
+  "version": "0.1.9",
+  "protocol_version": 1,
+  "description": "Adds optional JDBC driver support to DBX.",
+  "executable": "bin/dbx-jdbc-plugin",
+  "drivers": [
+    {
+      "id": "jdbc",
+      "label": "JDBC",
+      "kind": "external",
+      "database_type": "jdbc"
+    }
+  ]
+}

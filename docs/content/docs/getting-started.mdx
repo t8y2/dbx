@@ -1,0 +1,222 @@
+---
+title: Getting Started
+description: Install DBX, create your first connection, and understand the desktop, Docker, and source workflows.
+---
+
+This guide gets you through three things:
+
+1. Install DBX or start the Docker version
+2. Create and test your first database connection
+3. Run DBX from source when you want to contribute or debug locally
+
+## Choose An Install Method
+
+<Tabs groupId="platform" items={['macOS', 'Windows', 'Linux', 'Docker']}>
+  <Tab value="macOS">
+    Install with Homebrew:
+
+    ```bash
+    brew install --cask dbx
+    ```
+
+    Update later with:
+
+    ```bash
+    brew upgrade --cask dbx
+    ```
+
+    You can also download a `.dmg` installer from [GitHub Releases](https://github.com/t8y2/dbx/releases).
+  </Tab>
+  <Tab value="Windows">
+    Install with Scoop:
+
+    ```bash
+    scoop bucket add dbx https://github.com/t8y2/scoop-bucket
+    scoop install dbx
+    ```
+
+    Update later with:
+
+    ```bash
+    scoop update dbx
+    ```
+
+    You can also download a `.msi` installer from [GitHub Releases](https://github.com/t8y2/dbx/releases).
+  </Tab>
+  <Tab value="Linux">
+    Download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
+
+    | Format | Use Case |
+    |---|---|
+    | `.deb` | Debian, Ubuntu, and compatible distributions |
+    | `.AppImage` | Portable Linux desktop usage |
+
+    For `.AppImage`, make the file executable before first run:
+
+    ```bash
+    chmod +x DBX*.AppImage
+    ```
+  </Tab>
+  <Tab value="Docker">
+    Docker is for self-hosting DBX on a server and opening it from a browser:
+
+    ```bash
+    docker run -d \
+      --name dbx \
+      -p 4224:4224 \
+      -v dbx-data:/app/data \
+      t8y2/dbx
+    ```
+
+    Then open `http://localhost:4224`.
+
+    Docker Compose:
+
+    ```yaml
+    services:
+      dbx:
+        image: t8y2/dbx
+        ports:
+          - "4224:4224"
+        volumes:
+          - dbx-data:/app/data
+        restart: unless-stopped
+
+    volumes:
+      dbx-data:
+    ```
+  </Tab>
+</Tabs>
+
+## Desktop Or Docker
+
+| Mode | Best For | Backend Path | Storage |
+|---|---|---|---|
+| Desktop | Daily local work, local files, native windows, DBX UI opened from MCP | Tauri commands calling the Rust core | Local app data directory |
+| Docker / Web | Self-hosted access from a server or browser | HTTP routes calling the same Rust core | Docker volume or server data directory |
+
+<Callout type="info">
+The core database features are shared, but desktop-only integrations such as opening DBX windows from MCP require the desktop app to be running.
+</Callout>
+
+## Create Your First Connection
+
+<Steps>
+  <Step>
+    ### Open New Connection
+
+    Click **New Connection** from the sidebar or toolbar.
+  </Step>
+  <Step>
+    ### Pick A Database Type
+
+    Choose a built-in profile such as MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, or one of the compatibility and Agent/JDBC profiles listed in [Database Support](/en/docs/databases).
+  </Step>
+  <Step>
+    ### Fill Connection Details
+
+    For network databases, enter host, port, username, password, and default database when needed. For SQLite, DuckDB, and Access, select a local database file instead of host and port.
+  </Step>
+  <Step>
+    ### Paste A URL When Available
+
+    DBX can parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, DM, GaussDB, openGauss, TDengine, and Access. Review the parsed fields before saving.
+  </Step>
+  <Step>
+    ### Add Network Options
+
+    Enable [SSH Tunnel](/en/docs/ssh-tunnel) for databases behind private networks or bastion hosts. Use the proxy tab when your environment requires SOCKS5 or HTTP proxy access.
+  </Step>
+  <Step>
+    ### Test And Save
+
+    Click **Test** to verify credentials, network access, and permissions. After the test passes, save the connection and open it from the sidebar.
+  </Step>
+</Steps>
+
+<Callout type="info">
+Connection passwords, SSH passwords, SSH key passphrases, and connection strings are stored separately from the regular connection JSON in DBX's local storage. Use [Config Export/Import](/en/docs/config-export) when you need to migrate encrypted connection settings.
+</Callout>
+
+## Reduce Production Mistakes
+
+- Give production connections a distinct name, for example `prod-orders`.
+- Use connection colors so production, staging, and local databases are visually different.
+- Use visible database filtering when a server contains many databases but you only need a few.
+- Review generated SQL before applying edits, imports, transfers, SQL files, or schema sync operations.
+
+## What To Try Next
+
+<Cards>
+  <Card title="Write SQL" href="/en/docs/query-editor">
+    Use completion, formatting, selected execution, cancellation, and history.
+  </Card>
+  <Card title="Browse Data" href="/en/docs/data-grid">
+    Inspect results, edit rows when safe, preview SQL, and export data.
+  </Card>
+  <Card title="Explore Schema" href="/en/docs/schema-browser">
+    Browse databases, schemas, tables, columns, Redis keys, and MongoDB collections.
+  </Card>
+</Cards>
+
+## Common Connection Problems
+
+| Symptom | Check |
+|---|---|
+| Timeout | Host, port, firewall, security group, VPN, Docker host reachability, or private network access |
+| Authentication failed | Username, password, auth mode, SSL requirement, remote login permission |
+| Connected but no tables | Default database, schema, permissions, metadata read access, visible database filter |
+| File database cannot open | File path, file permissions, mounted Docker volume, or unsupported file extension |
+| Private database unreachable | Configure SSH tunnel, proxy, VPN, or run Docker on a machine that can reach the database |
+
+## Run From Source
+
+Use source mode when contributing or debugging DBX locally.
+
+### Requirements
+
+- [Node.js](https://nodejs.org/) >= 18
+- [pnpm](https://pnpm.io/)
+- [Rust](https://www.rust-lang.org/tools/install) >= 1.77
+
+### System Dependencies
+
+<Tabs groupId="dev-platform" items={['macOS', 'Linux', 'Windows']}>
+  <Tab value="macOS">
+    ```bash
+    brew install unixodbc
+    ```
+  </Tab>
+  <Tab value="Linux">
+    ```bash
+    sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev unixodbc-dev
+    ```
+  </Tab>
+  <Tab value="Windows">
+    Windows usually needs no extra system dependency for local DBX development.
+  </Tab>
+</Tabs>
+
+### Start Development
+
+```bash
+git clone https://github.com/t8y2/dbx.git
+cd dbx
+pnpm install
+pnpm dev:tauri
+```
+
+For the web version:
+
+```bash
+pnpm dev:web
+pnpm dev:backend
+```
+
+### Build Desktop Packages
+
+```bash
+pnpm tauri build
+```
+
+Desktop installers are written to `src-tauri/target/release/bundle/`.

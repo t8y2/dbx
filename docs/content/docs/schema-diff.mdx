@@ -1,0 +1,88 @@
+---
+title: Schema Diff
+description: Compare two database schemas and generate reviewable sync SQL.
+---
+
+Schema Diff helps compare structure between database environments, such as development and production, staging and QA, or databases before and after a migration.
+
+<Callout type="warn">
+Schema sync may include destructive operations such as dropping tables, dropping columns, or changing column types. Review generated SQL line by line, and back up production databases first.
+</Callout>
+
+## Use Cases
+
+- Check whether schema changes from development are already applied to production
+- Align staging, QA, and production environments
+- Generate migration SQL for team review
+- Compare tables, columns, indexes, and constraints between database versions
+
+## Workflow
+
+<Steps>
+  <Step>
+    ### Select the Source
+
+    The source is usually the database whose structure is newer or considered correct.
+  </Step>
+  <Step>
+    ### Select the Target
+
+    The target is the database to inspect or sync. It can be on another server or even another database engine.
+  </Step>
+  <Step>
+    ### Run the Comparison
+
+    DBX reads table, column, and index metadata from both sides. The current comparison handles tables, not views.
+  </Step>
+  <Step>
+    ### Review Differences
+
+    Check missing tables, extra tables, column type changes, nullable changes, default value changes, added or removed indexes, and data risk.
+  </Step>
+  <Step>
+    ### Generate Sync SQL
+
+    DBX generates statements such as `CREATE TABLE`, `ALTER TABLE`, and `DROP TABLE`. Review them before execution.
+  </Step>
+</Steps>
+
+## Difference Types
+
+| Type | Meaning |
+|---|---|
+| Source only | The object is missing from the target and may need to be created |
+| Target only | The object exists only in the target; confirm usage before dropping it |
+| Column difference | Type, nullable flag, or default value differs |
+| Index difference | Added or removed indexes, matched by index name |
+
+<Callout type="info">
+Schema Diff currently does not fully compare foreign keys, triggers, view definitions, column comments, or changed columns/uniqueness inside an index with the same name. Important migrations still need manual SQL review.
+</Callout>
+
+## Database Coverage
+
+Schema Diff depends on table, column, and index metadata. It works best on relational engines where DBX can list structures consistently, such as MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, and GaussDB-family engines. Redis, MongoDB, and Elasticsearch use different data models and are not good targets for relational schema sync.
+
+## Before Running Sync SQL
+
+Before applying generated SQL, confirm:
+
+- The active connection color and environment name are correct
+- The target database has been backed up
+- `DROP`, `TRUNCATE`, and column type changes are intentional
+- The operation should run during a maintenance window
+- The SQL has been tested in a non-production environment
+
+## Related Features
+
+<Cards>
+  <Card title="Table Structure Editor" href="/en/docs/table-structure">
+    Edit one table visually and preview DDL before applying changes.
+  </Card>
+  <Card title="Database Export" href="/en/docs/database-export">
+    Export structure and data before high-risk sync operations.
+  </Card>
+  <Card title="Database Support" href="/en/docs/databases">
+    Check which engines support schema and structure workflows.
+  </Card>
+</Cards>

@@ -1,0 +1,50 @@
+{
+  "name": "@dbx-app/mcp-server",
+  "version": "0.4.6",
+  "mcpName": "io.github.t8y2/dbx",
+  "description": "MCP server for DBX — query databases from Claude Code, Cursor, and other AI agents",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "mcp-server": "dist/index.js",
+    "dbx-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "server.json"
+  ],
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "pnpm --filter @dbx-app/mcp-server build && tsx --test tests/*.test.ts",
+    "build": "pnpm --filter @dbx-app/node-core build && tsc",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "mcp",
+    "database",
+    "dbx",
+    "claude",
+    "postgresql",
+    "mysql",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/mcp-server"
+  },
+  "homepage": "https://github.com/t8y2/dbx/tree/main/packages/mcp-server",
+  "dependencies": {
+    "@dbx-app/node-core": "workspace:^",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.25.20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

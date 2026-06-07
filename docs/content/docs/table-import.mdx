@@ -1,0 +1,90 @@
+---
+title: Table Import
+description: Import CSV, TSV, JSON, or Excel files into a table with reviewed column mapping and import mode.
+---
+
+Table Import writes a local file into a selected database table. Use it for one-off test data, operational data backfills, or moving data out of spreadsheet tools.
+
+## Supported Files
+
+| Format | Details |
+|---|---|
+| CSV | Comma-separated text for general data exchange |
+| TSV | Tab-separated text, useful when values contain commas |
+| JSON | JSON arrays exported from APIs or scripts |
+| Excel | `.xlsx`, `.xlsm`, or `.xls` files; DBX reads the first sheet |
+
+DBX previews the first 50 rows before import. Empty CSV/TSV cells are treated as `NULL`. JSON imports can be a single object, an array of objects, or an array of arrays; mixed object and array rows are rejected.
+
+## Import Workflow
+
+<Steps>
+  <Step>
+    ### Select the Target Table
+
+    Right-click the target table in the sidebar and choose **Import Data**.
+  </Step>
+  <Step>
+    ### Choose a File
+
+    Select a CSV, TSV, JSON, or Excel file.
+  </Step>
+  <Step>
+    ### Review Column Mapping
+
+    DBX tries to match file columns to table columns by name. Check primary keys, required fields, dates, and numeric values.
+  </Step>
+  <Step>
+    ### Choose Import Mode
+
+    Select append or truncate-then-import. Truncate mode removes existing target data first.
+  </Step>
+  <Step>
+    ### Run and Inspect
+
+    After import, check inserted rows, failures, and the resulting table data.
+  </Step>
+</Steps>
+
+## Import Modes
+
+| Mode | Behavior | Best For |
+|---|---|---|
+| Append | Keep existing data and insert new rows | Backfills and sample data |
+| Truncate then import | Remove existing rows first, then insert file data | Rebuilding test tables or replacing temporary data |
+
+<Callout type="warn">
+Truncate-then-import deletes existing rows from the target table. Confirm backups and impact before using it on production data.
+</Callout>
+
+Imports run in batches. The default batch size is 500 rows, and the progress view reports imported rows, total rows, errors, and cancellation state.
+
+## Column Mapping Rules
+
+- Exact column names are matched first
+- Normalized names also match when spacing, underscores, hyphens, or case differ
+- A source column can be skipped
+- A target column cannot be mapped more than once
+- At least one column must be mapped before import can start
+
+## Database Coverage
+
+Table import is available for MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL Server, Oracle, Doris, StarRocks, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, and Access.
+
+## Before Importing
+
+- Confirm whether the first row contains column names
+- Check file encoding
+- Verify date, number, and boolean formats
+- Ensure required fields have values
+- Check for primary key and unique index conflicts
+- Import parent tables before child tables when foreign keys are involved
+
+## Troubleshooting
+
+| Symptom | Possible Cause |
+|---|---|
+| Some columns are skipped | File column names do not match table columns, or the mapping was disabled |
+| Import fails | Required value missing, type mismatch, primary key conflict, or unique constraint conflict |
+| Text is garbled | File encoding does not match parser settings |
+| Dates are wrong | Date format is not recognized by the target database |

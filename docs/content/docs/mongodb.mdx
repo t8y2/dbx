@@ -1,0 +1,68 @@
+---
+title: MongoDB Browser
+description: Browse MongoDB databases and collections, view documents, and edit data with the built-in JSON editor.
+---
+
+DBX supports browsing and editing MongoDB databases with a document-oriented interface designed for MongoDB's flexible schema model.
+
+## Collections Browser
+
+MongoDB databases and collections appear in the sidebar alongside relational databases. The browser supports:
+
+- Listing all databases on the server
+- Listing collections within each database
+- Paginated document browsing within collections
+- Filter and sort support for document queries
+
+<Callout type="info">
+MongoDB connections support both standard connection strings and legacy connection formats. For replica sets, use the standard `mongodb://` connection URL with the replica set name.
+</Callout>
+
+## Table View
+
+Collections are displayed in a table view that flattens the document structure:
+
+- Top-level fields appear as columns
+- Nested fields are shown in dot notation (e.g., `address.city`)
+- Missing fields across documents are handled gracefully
+- Column widths auto-fit to content
+
+## Document Viewer
+
+Click any document to open it in the detail panel. The JSON viewer provides:
+
+- Syntax-highlighted JSON display
+- Collapsible nested objects and arrays
+- Copy individual fields or the entire document
+
+## Inline Editing
+
+Edit documents directly from the table view:
+
+- Double-click a cell to edit its value
+- Changes are staged locally before saving
+- Review the generated update command before applying
+
+## JSON Editor
+
+For complex edits that span nested fields, use the JSON editor:
+
+- Edit the full document as JSON
+- Syntax validation before saving
+- Useful for adding new nested fields or restructuring documents
+
+## MongoDB Versions
+
+DBX supports MongoDB 4.2 and later through the built-in driver. For pre-4.2 MongoDB instances, DBX can fall back to the JDBC agent driver. See [Driver Management](/en/docs/driver-management) for details on configuring agent drivers.
+
+## Feature Coverage
+
+| Feature | Support |
+|---|---|
+| List databases and collections | All versions |
+| Document browsing with pagination | All versions |
+| Table view with flattened fields | All versions |
+| Filter and sort | MongoDB 4.2+ |
+| Inline editing | All versions |
+| JSON document editor | All versions |
+| SSH tunnel | Standard connections |

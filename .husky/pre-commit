@@ -1,0 +1,20 @@
+pnpm exec lint-staged
+
+# Only format and re-add Rust files that are already staged
+TOPLEVEL=$(git rev-parse --show-toplevel)
+
+format_staged_rust() {
+  dir="$1"
+  staged=$(git diff --staged --name-only --diff-filter=ACM -- "$dir" | grep '\.rs$' || true)
+  if [ -n "$staged" ]; then
+    echo "Formatting staged Rust files in $dir"
+    cargo fmt --manifest-path "$TOPLEVEL/$dir/Cargo.toml"
+    echo "$staged" | while IFS= read -r f; do
+      git add "$TOPLEVEL/$f" 2>/dev/null || true
+    done
+  fi
+}
+
+format_staged_rust "src-tauri"
+format_staged_rust "crates/dbx-core"
+format_staged_rust "crates/dbx-web"

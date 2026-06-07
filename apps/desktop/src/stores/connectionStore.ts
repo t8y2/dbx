@@ -2304,5 +2304,17 @@ export const useConnectionStore = defineStore("connection", () => {
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
       updateLayoutAndRebuild(reorderEntryOp(sidebarLayout.value, draggedId, targetId, position));
     },
+    reorderSidebarEntries(draggedIds: string[], targetId: string, position: DropPosition) {
+      // Apply each dragged entry in turn so a multi-selection moves together,
+      // not just the single grabbed row (issue #681).
+      let layout = sidebarLayout.value;
+      let changed = false;
+      for (const id of draggedIds) {
+        if (id === targetId) continue;
+        layout = reorderEntryOp(layout, id, targetId, position);
+        changed = true;
+      }
+      if (changed) updateLayoutAndRebuild(layout);
+    },
   };
 });

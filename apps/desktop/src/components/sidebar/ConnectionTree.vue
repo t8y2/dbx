@@ -188,6 +188,15 @@ async function scrollToSidebarNode(nodeId: string) {
   }
 }
 
+function clearSidebarSelection() {
+  // Clicking the blank area of the tree clears the current selection. Row
+  // clicks call event.stopPropagation(), so this only fires for blank clicks
+  // (issue #681 — selection wasn't cleared in double-click activation mode).
+  store.selectedTreeNodeId = null;
+  store.selectedTreeNodeIds = [];
+  store.treeSelectionAnchorId = null;
+}
+
 async function createNewGroup() {
   const groupId = store.createConnectionGroup(t("connectionGroup.newGroupDefault"));
   pendingRenameGroupId.value = groupId;
@@ -490,6 +499,7 @@ defineExpose({ focusSearch, createNewGroup });
       ref="treeScrollerRef"
       class="sidebar-tree connection-tree-scroller min-h-0 flex-1 overflow-y-auto"
       :class="sidebarTreeOverflowClass"
+      @click="clearSidebarSelection"
       :items="flatNodes"
       :item-size="SIDEBAR_TREE_ROW_HEIGHT"
       :buffer="SIDEBAR_TREE_SCROLL_BUFFER"
@@ -517,6 +527,7 @@ defineExpose({ focusSearch, createNewGroup });
       ref="plainTreeScrollerRef"
       class="sidebar-tree min-h-0 flex-1 overflow-y-auto"
       :class="sidebarTreeOverflowClass"
+      @click="clearSidebarSelection"
     >
       <TreeItem
         v-for="item in flatNodes"

@@ -523,6 +523,9 @@ function onClick(event: MouseEvent) {
     event.stopPropagation();
     return;
   }
+  // Row clicks must not bubble to the tree container, whose click handler
+  // clears the selection when the blank area is clicked (issue #681).
+  event.stopPropagation();
   if (event.shiftKey) {
     selectTreeNodeRange(props.node);
     rowRef.value?.focus({ preventScroll: true });
@@ -2584,15 +2587,18 @@ watch(
 );
 
 function finishRenameGroup() {
+  // Guard against double invocation: pressing Enter sets isRenamingGroup=false
+  // and unmounts the input, which then fires @blur -> finishRenameGroup again.
+  // The first call can rebuild the tree and recycle props.node onto a different
+  // group, so a second run would act on the wrong group and cascade across
+  // groups (issue #681).
+  if (!isRenamingGroup.value) return;
   isRenamingGroup.value = false;
   const trimmed = renameInput.value.trim();
-  if (!trimmed) {
-    connectionStore.deleteConnectionGroup(props.node.id);
-    return;
-  }
-  if (trimmed !== props.node.label) {
-    connectionStore.renameConnectionGroup(props.node.id, trimmed);
-  }
+  // An empty name cancels the rename and keeps the group as-is — never delete
+  // here. Deleting a group is done explicitly via the context menu (issue #681).
+  if (!trimmed || trimmed === props.node.label) return;
+  connectionStore.renameConnectionGroup(props.node.id, trimmed);
 }
 
 function deleteConnectionGroup() {
@@ -2718,7 +2724,13 @@ const {
   startDrag,
   updateTarget,
   clearTarget,
-} = useDragSort((draggedId, targetId, position) => connectionStore.reorderSidebarEntry(draggedId, targetId, position));
+} = useDragSort((draggedId, targetId, position) => {
+  // If the grabbed row is part of a multi-selection, move all selected rows
+  // together; otherwise just the grabbed one (issue #681).
+  const selected = connectionStore.selectedTreeNodeIds;
+  const draggedIds = selected.length > 1 && selected.includes(draggedId) ? [...selected] : [draggedId];
+  connectionStore.reorderSidebarEntries(draggedIds, targetId, position);
+});
 
 const isDraggable = computed(() => {
   if (props.dragDisabled) return false;

@@ -521,10 +521,7 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::FetchQueryPage, params, timeout_duration).await
     }
 
-    pub async fn get_explain_info<T: DeserializeOwned + Send + 'static>(
-        &mut self,
-        params: Value,
-    ) -> Result<T, String> {
+    pub async fn get_explain_info<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
         self.call_method(AgentMethod::GetExplainInfo, params).await
     }
 

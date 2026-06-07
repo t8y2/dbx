@@ -484,9 +484,7 @@ pub async fn get_explain_info(
 ) -> Result<Json<String>, AppError> {
     let client = {
         let connections = state.app.connections.read().await;
-        let pool = connections
-            .get(&req.connection_id)
-            .ok_or_else(|| AppError("Connection not found".to_string()))?;
+        let pool = connections.get(&req.connection_id).ok_or_else(|| AppError("Connection not found".to_string()))?;
         match pool {
             dbx_core::connection::PoolKind::Agent(client) => client.clone(),
             _ => return Err(AppError("Connection is not an agent-based connection".to_string())),
@@ -522,9 +520,7 @@ pub async fn get_explain_info(
     }
 }
 
-pub async fn build_create_user_sql(
-    Json(req): Json<BuildCreateUserSqlRequest>,
-) -> Result<Json<String>, AppError> {
+pub async fn build_create_user_sql(Json(req): Json<BuildCreateUserSqlRequest>) -> Result<Json<String>, AppError> {
     Ok(Json(dbx_core::db_admin_sql::build_create_user_sql(&req.username, &req.password, &req.tablespace)))
 }
 

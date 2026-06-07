@@ -421,6 +421,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
 
         Ok(crate::types::QueryResult {
             columns: all_keys,
+            column_types: Vec::new(),
             rows,
             affected_rows: total,
             execution_time_ms: start.elapsed().as_millis(),
@@ -434,6 +435,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
             let row_count = rows.len() as u64;
             Ok(crate::types::QueryResult {
                 columns,
+                column_types: Vec::new(),
                 rows,
                 affected_rows: row_count,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -445,6 +447,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
             let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
             Ok(crate::types::QueryResult {
                 columns: vec!["status".to_string(), "response".to_string()],
+                column_types: Vec::new(),
                 rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -457,6 +460,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         Ok(crate::types::QueryResult {
             columns: vec!["status".to_string(), "response".to_string()],
+            column_types: Vec::new(),
             rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),

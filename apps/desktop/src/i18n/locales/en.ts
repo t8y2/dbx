@@ -1639,6 +1639,8 @@ export default {
     dataGridDisplay: "Data grid display",
     showColumnCommentsInHeader: "Show column comments under names",
     showColumnCommentsInHeaderDescription: "Display table column comments directly below grid column names.",
+    showColumnTypesInHeader: "Show column types under names",
+    showColumnTypesInHeaderDescription: "Display each column's data type directly below grid column names.",
     compactColumnHeaderActions: "Compact column header tools",
     compactColumnHeaderActionsDescription:
       "Move formatter and local filter tools into a more menu so column names get priority.",

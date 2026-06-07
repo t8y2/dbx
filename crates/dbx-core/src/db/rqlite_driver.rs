@@ -293,6 +293,7 @@ pub async fn execute_query_with_max_rows(
         let affected_rows = result.rows_affected.unwrap_or(0);
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -340,6 +341,7 @@ fn query_result_from_rqlite_result(
     }
     QueryResult {
         columns: result.columns,
+        column_types: Vec::new(),
         rows: result.values,
         affected_rows: 0,
         execution_time_ms,

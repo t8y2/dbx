@@ -246,6 +246,7 @@ export interface EditorSettings {
   redisScanPageSize: number;
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
+  showColumnTypesInHeader: boolean;
   compactColumnHeaderActions: boolean;
   dataGridRenderMode: DataGridRenderMode;
   structureEditorDensity: StructureEditorDensity;
@@ -311,6 +312,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   redisScanPageSize: 1000,
   mongoViewMode: "document",
   showColumnCommentsInHeader: false,
+  showColumnTypesInHeader: true,
   compactColumnHeaderActions: true,
   dataGridRenderMode: "canvas",
   structureEditorDensity: "compact",
@@ -466,6 +468,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader:
       settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
+    showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
     compactColumnHeaderActions:
       settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
@@ -648,6 +651,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined)
       editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
+    if (partial.showColumnTypesInHeader !== undefined)
+      editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
     if (partial.compactColumnHeaderActions !== undefined)
       editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.dataGridRenderMode !== undefined)

@@ -83,6 +83,7 @@ import { createColumnDrafts } from "@/lib/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { uuid } from "@/lib/utils";
+import { resolveHeaderColumnType } from "@/lib/dataGridColumnType";
 import {
   canEditExistingTableRows,
   hiveTablePropertiesIndicateTransactional,
@@ -341,12 +342,23 @@ const columnCommentMap = computed(() => {
   return map;
 });
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
+const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 
 function headerColumnComment(column: string): string {
   if (!showColumnCommentsInHeader.value) return "";
   return columnCommentMap.value.get(column) || "";
+}
+
+function headerColumnType(column: string, actualColIdx: number): string {
+  if (!showColumnTypesInHeader.value) return "";
+  const resolved = resolveHeaderColumnType({
+    tableColumnType: columnTypeMap.value.get(column),
+    resultColumnTypes: props.result.column_types,
+    actualColIdx,
+  });
+  return resolved ? shortTypeName(resolved) : "";
 }
 
 function shortTypeName(t: string): string {
@@ -6504,6 +6516,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
                           <span class="min-w-0 truncate leading-4">
                             {{ col.name }}
+                          </span>
+                          <span
+                            v-if="headerColumnType(col.name, col.actualColIdx)"
+                            class="min-w-0 truncate text-[10px] font-normal leading-3"
+                            :class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
+                            :title="headerColumnType(col.name, col.actualColIdx)"
+                          >
+                            {{ headerColumnType(col.name, col.actualColIdx) }}
                           </span>
                           <span
                             v-if="headerColumnComment(col.name)"

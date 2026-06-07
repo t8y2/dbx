@@ -61,6 +61,11 @@ pub struct ColumnInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
+    /// Database type name for each column, parallel to `columns`. May be empty
+    /// when a driver cannot supply types (e.g. schemaless stores or fallback
+    /// query paths); consumers must tolerate a shorter/empty vector.
+    #[serde(default)]
+    pub column_types: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,

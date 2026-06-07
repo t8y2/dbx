@@ -29,6 +29,7 @@ export interface TabResultSnapshot {
 
 interface ColumnarQueryResult {
   columns: string[];
+  column_types?: string[];
   columnValues: CellValue[][];
   rowCount: number;
   affected_rows: number;
@@ -111,6 +112,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
   if (!result) return undefined;
   return {
     columns: [...result.columns],
+    column_types: result.column_types ? [...result.column_types] : undefined,
     rows: result.rows.map((row) => [...row]),
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
@@ -129,6 +131,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
   const columnValues = result.columns.map((_, colIndex) => result.rows.map((row) => row[colIndex] ?? null));
   return removeUndefinedFields({
     columns: [...result.columns],
+    column_types: result.column_types ? [...result.column_types] : undefined,
     columnValues,
     rowCount: result.rows.length,
     affected_rows: result.affected_rows,
@@ -145,6 +148,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
   );
   return {
     columns: [...result.columns],
+    column_types: result.column_types ? [...result.column_types] : undefined,
     rows,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,

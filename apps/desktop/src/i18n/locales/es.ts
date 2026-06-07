@@ -1527,6 +1527,9 @@ export default {
     showColumnCommentsInHeader: "Mostrar comentarios bajo los nombres",
     showColumnCommentsInHeaderDescription:
       "Muestra los comentarios de columnas directamente debajo del nombre de la columna.",
+    showColumnTypesInHeader: "Mostrar tipos de columna bajo los nombres",
+    showColumnTypesInHeaderDescription:
+      "Muestra el tipo de dato de cada columna directamente debajo del nombre de la columna.",
     compactColumnHeaderActions: "Compactar herramientas del encabezado",
     compactColumnHeaderActionsDescription:
       "Mueve formatear y filtrar a un menú de más acciones para priorizar el nombre de columna.",

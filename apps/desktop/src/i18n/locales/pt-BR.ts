@@ -1660,6 +1660,9 @@ export default {
     showColumnCommentsInHeader: "Mostrar comentários de coluna sob os nomes",
     showColumnCommentsInHeaderDescription:
       "Exibir comentários de colunas da tabela diretamente abaixo dos nomes das colunas da grade.",
+    showColumnTypesInHeader: "Mostrar tipos de coluna sob os nomes",
+    showColumnTypesInHeaderDescription:
+      "Exibir o tipo de dado de cada coluna diretamente abaixo dos nomes das colunas da grade.",
     compactColumnHeaderActions: "Ferramentas compactas no cabeçalho da coluna",
     compactColumnHeaderActionsDescription:
       "Mover as ferramentas de formatação e filtro local para um menu de mais opções para que os nomes das colunas tenham prioridade.",

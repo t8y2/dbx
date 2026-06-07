@@ -1672,6 +1672,7 @@ pub async fn execute_on_pool_with_max_rows(
                     }
                     Ok(db::QueryResult {
                         columns,
+                        column_types: Vec::new(),
                         rows: result_rows,
                         affected_rows: 0,
                         execution_time_ms: start.elapsed().as_millis(),
@@ -1683,6 +1684,7 @@ pub async fn execute_on_pool_with_max_rows(
                     let affected = con.execute(&sql, []).map_err(|e| e.to_string())?;
                     Ok(db::QueryResult {
                         columns: vec![],
+                        column_types: Vec::new(),
                         rows: vec![],
                         affected_rows: affected as u64,
                         execution_time_ms: start.elapsed().as_millis(),

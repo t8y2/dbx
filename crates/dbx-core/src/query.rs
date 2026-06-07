@@ -234,6 +234,7 @@ pub fn duckdb_execute_with_max_rows(
         }
         Ok(db::QueryResult {
             columns,
+            column_types: Vec::new(),
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -245,6 +246,7 @@ pub fn duckdb_execute_with_max_rows(
         let affected = con.execute(sql, []).map_err(|e| e.to_string())?;
         Ok(db::QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: affected as u64,
             execution_time_ms: start.elapsed().as_millis(),
@@ -948,6 +950,7 @@ async fn execute_multi_mysql(
 fn error_query_result(message: String) -> db::QueryResult {
     db::QueryResult {
         columns: vec!["Error".to_string()],
+        column_types: Vec::new(),
         rows: vec![vec![serde_json::Value::String(message)]],
         affected_rows: 0,
         execution_time_ms: 0,
@@ -972,6 +975,7 @@ async fn execute_multi_sqlserver(
         if is_canceled(&cancel_token) {
             all_results.push(db::QueryResult {
                 columns: vec!["Error".to_string()],
+                column_types: Vec::new(),
                 rows: vec![vec![serde_json::Value::String(canceled_error())]],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -1004,6 +1008,7 @@ async fn execute_multi_sqlserver(
             Err(e) => {
                 all_results.push(db::QueryResult {
                     columns: vec!["Error".to_string()],
+                    column_types: Vec::new(),
                     rows: vec![vec![serde_json::Value::String(e)]],
                     affected_rows: 0,
                     execution_time_ms: 0,
@@ -1018,6 +1023,7 @@ async fn execute_multi_sqlserver(
     if all_results.is_empty() {
         all_results.push(db::QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: 0,
@@ -1081,6 +1087,7 @@ pub async fn execute_statements(
 
     Ok(db::QueryResult {
         columns: vec![],
+        column_types: Vec::new(),
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1183,6 +1190,7 @@ async fn exec_tx_pg_inner(
     match tx_result {
         Ok(total_affected) => Ok(db::QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1230,6 +1238,7 @@ async fn exec_tx_mysql_inner(
     conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {}", e))?;
     Ok(db::QueryResult {
         columns: vec![],
+        column_types: Vec::new(),
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1261,6 +1270,7 @@ async fn exec_tx_sqlite_inner(
             conn.execute_batch("COMMIT").map_err(|e| format!("COMMIT failed: {}", e))?;
             Ok(db::QueryResult {
                 columns: vec![],
+                column_types: Vec::new(),
                 rows: vec![],
                 affected_rows: total_affected,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -1340,6 +1350,7 @@ async fn exec_tx_explicit_inner(
 
     Ok(db::QueryResult {
         columns: vec![],
+        column_types: Vec::new(),
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1381,6 +1392,7 @@ async fn exec_tx_none_inner(
 
     Ok(db::QueryResult {
         columns: vec![],
+        column_types: Vec::new(),
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1404,6 +1416,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(30)).await;
             Ok(db::QueryResult {
                 columns: vec![],
+                column_types: Vec::new(),
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -1423,6 +1436,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             Ok(db::QueryResult {
                 columns: vec![],
+                column_types: Vec::new(),
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -1721,6 +1735,7 @@ mod tests {
     fn query_results_convert_unsafe_json_integers_to_strings_for_js() {
         let result = db::QueryResult {
             columns: vec!["id".to_string(), "nested".to_string()],
+            column_types: Vec::new(),
             rows: vec![vec![
                 serde_json::json!(2_041_797_190_226_354_178_i64),
                 serde_json::json!([1, 2_041_797_190_226_354_178_i64]),

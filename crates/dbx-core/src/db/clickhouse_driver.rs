@@ -148,13 +148,23 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
 
 fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows: Option<usize>) -> QueryResult {
     let columns: Vec<String> = result.meta.iter().map(|c| c.name.clone()).collect();
+    let column_types: Vec<String> = result.meta.iter().map(|c| c._type.clone()).collect();
     let mut rows = result.data;
     let row_limit = query_result_row_limit(max_rows);
     let truncated = rows.len() > row_limit;
     if truncated {
         rows.truncate(row_limit);
     }
-    QueryResult { columns, rows, affected_rows: 0, execution_time_ms, truncated, session_id: None, has_more: false }
+    QueryResult {
+        columns,
+        column_types,
+        rows,
+        affected_rows: 0,
+        execution_time_ms,
+        truncated,
+        session_id: None,
+        has_more: false,
+    }
 }
 
 pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(), String> {
@@ -259,6 +269,7 @@ pub async fn execute_query_with_max_rows(
         }
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),

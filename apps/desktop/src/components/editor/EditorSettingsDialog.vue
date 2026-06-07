@@ -116,6 +116,7 @@ const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
+const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
@@ -273,6 +274,7 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
+      editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
       editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
@@ -320,6 +322,7 @@ function hasChanges(): boolean {
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
+    editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
     editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
@@ -354,6 +357,7 @@ async function persistSettings() {
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     appLayout: editAppLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
+    showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
@@ -401,6 +405,7 @@ function resetDefaults() {
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
+  editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
@@ -1568,6 +1573,17 @@ watch(
                     </p>
                   </div>
                   <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="show-column-types-in-header">
+                      {{ t("settings.showColumnTypesInHeader") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showColumnTypesInHeaderDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

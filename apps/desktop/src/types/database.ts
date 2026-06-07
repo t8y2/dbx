@@ -235,6 +235,12 @@ export interface TriggerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /**
+   * Database type name for each column, parallel to `columns`. Optional and may
+   * be shorter/empty when a driver cannot supply types (schemaless stores,
+   * fallback query paths, older backends). Consumers must tolerate gaps.
+   */
+  column_types?: string[];
   rows: (string | number | boolean | null)[][];
   affected_rows: number;
   execution_time_ms: number;

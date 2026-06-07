@@ -187,6 +187,42 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
     serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
 }
 
+/// Map a MySQL column to a user-facing type name for the result-grid header.
+/// Returns the bare lowercase type name (no length/precision/signedness), which
+/// is enough for display; unknown variants fall back to a lowercased debug name.
+fn mysql_column_type_name(ty: ColumnType) -> String {
+    use mysql_async::consts::ColumnType::*;
+    match ty {
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_INT24 => "mediumint",
+        MYSQL_TYPE_LONG => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_BIT => "bit",
+        MYSQL_TYPE_YEAR => "year",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "datetime",
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "timestamp",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_ENUM => "enum",
+        MYSQL_TYPE_SET => "set",
+        MYSQL_TYPE_TINY_BLOB => "tinyblob",
+        MYSQL_TYPE_MEDIUM_BLOB => "mediumblob",
+        MYSQL_TYPE_LONG_BLOB => "longblob",
+        MYSQL_TYPE_BLOB => "blob",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
+        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_GEOMETRY => "geometry",
+        MYSQL_TYPE_NULL => "null",
+        other => return format!("{:?}", other).to_lowercase(),
+    }
+    .to_string()
+}
+
 fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
     let Some(column) = row.columns_ref().get(idx) else {
         return serde_json::Value::Null;
@@ -1251,6 +1287,8 @@ async fn execute_result_set_with_text_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let column_types: Vec<String> =
+        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1275,6 +1313,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
 
     Ok(QueryResult {
         columns,
+        column_types,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1292,6 +1331,8 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let column_types: Vec<String> =
+        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1316,6 +1357,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 
     Ok(QueryResult {
         columns,
+        column_types,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1378,6 +1420,7 @@ pub async fn execute_query_on_conn_with_max_rows(
 
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1565,6 +1608,21 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 mod tests {
     use super::*;
     use mysql_async::consts::ColumnFlags;
+
+    #[test]
+    fn mysql_column_type_names_map_to_friendly_names() {
+        use mysql_async::consts::ColumnType::*;
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_TINY), "tinyint");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONG), "int");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONGLONG), "bigint");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_NEWDECIMAL), "decimal");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VARCHAR), "varchar");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VAR_STRING), "varchar");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_STRING), "char");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_DATETIME), "datetime");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_JSON), "json");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_BLOB), "blob");
+    }
 
     #[test]
     fn mysql_with_queries_are_treated_as_result_sets() {

@@ -1669,6 +1669,9 @@ export default {
     showColumnCommentsInHeader: "Mostra i commenti delle colonne sotto i nomi",
     showColumnCommentsInHeaderDescription:
       "Visualizza i commenti delle colonne della tabella direttamente sotto i nomi delle colonne nella griglia.",
+    showColumnTypesInHeader: "Mostra i tipi di colonna sotto i nomi",
+    showColumnTypesInHeaderDescription:
+      "Visualizza il tipo di dato di ciascuna colonna direttamente sotto i nomi delle colonne nella griglia.",
     compactColumnHeaderActions: "Strumenti intestazione colonna compatti",
     compactColumnHeaderActionsDescription:
       "Sposta gli strumenti del formattatore e dei filtri locali in un menu 'altro' in modo che i nomi delle colonne abbiano la priorità.",

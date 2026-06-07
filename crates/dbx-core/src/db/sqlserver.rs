@@ -98,6 +98,17 @@ fn columns_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String> {
     metadata.columns().iter().map(|c| c.name().to_string()).collect()
 }
 
+/// Map a tiberius column to a user-facing type name for the result-grid header.
+/// Uses the TDS column-type debug name lowercased; good enough for display, with
+/// no risk of mismatching the enum variants across tiberius versions.
+fn sqlserver_column_type_name(column: &tiberius::Column) -> String {
+    format!("{:?}", column.column_type()).to_lowercase()
+}
+
+fn column_types_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String> {
+    metadata.columns().iter().map(sqlserver_column_type_name).collect()
+}
+
 async fn collect_first_result_limited(
     mut stream: QueryStream<'_>,
     start: Instant,
@@ -105,6 +116,7 @@ async fn collect_first_result_limited(
 ) -> Result<QueryResult, String> {
     let row_limit = query_result_row_limit(max_rows);
     let mut columns: Vec<String> = vec![];
+    let mut column_types: Vec<String> = vec![];
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut truncated = false;
 
@@ -112,6 +124,7 @@ async fn collect_first_result_limited(
         match item {
             QueryItem::Metadata(metadata) if metadata.result_index() == 0 => {
                 columns = columns_from_metadata(&metadata);
+                column_types = column_types_from_metadata(&metadata);
             }
             QueryItem::Metadata(_) => {}
             QueryItem::Row(row) if row.result_index() == 0 => {
@@ -127,6 +140,7 @@ async fn collect_first_result_limited(
 
     Ok(QueryResult {
         columns,
+        column_types,
         rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -138,6 +152,7 @@ async fn collect_first_result_limited(
 
 struct SqlServerResultSet {
     columns: Vec<String>,
+    column_types: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     truncated: bool,
 }
@@ -467,6 +482,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
         }
         results.push(QueryResult {
             columns: result.columns,
+            column_types: result.column_types,
             rows: result.rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -492,6 +508,7 @@ async fn collect_result_sets_limited(
                 push_sqlserver_result_set(&mut results, current.take(), start);
                 current = Some(SqlServerResultSet {
                     columns: columns_from_metadata(&metadata),
+                    column_types: column_types_from_metadata(&metadata),
                     rows: Vec::new(),
                     truncated: false,
                 });
@@ -499,6 +516,7 @@ async fn collect_result_sets_limited(
             QueryItem::Row(row) => {
                 let result = current.get_or_insert_with(|| SqlServerResultSet {
                     columns: row.columns().iter().map(|c| c.name().to_string()).collect(),
+                    column_types: row.columns().iter().map(sqlserver_column_type_name).collect(),
                     rows: Vec::new(),
                     truncated: false,
                 });
@@ -922,6 +940,7 @@ pub async fn execute_query_with_max_rows(
         let _ = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -933,6 +952,7 @@ pub async fn execute_query_with_max_rows(
         let result = sqlserver_driver_result(client.execute(sql, &[])).await?;
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: result.rows_affected().iter().sum::<u64>(),
             execution_time_ms: start.elapsed().as_millis(),
@@ -967,6 +987,7 @@ pub async fn execute_batch_with_max_rows(
     if results.is_empty() {
         results.push(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1262,6 +1283,7 @@ mod tests {
             &mut results,
             Some(SqlServerResultSet {
                 columns: vec!["id".to_string(), "name".to_string()],
+                column_types: vec![],
                 rows: vec![],
                 truncated: false,
             }),
@@ -1278,7 +1300,7 @@ mod tests {
         let mut results = Vec::new();
         super::push_sqlserver_result_set(
             &mut results,
-            Some(SqlServerResultSet { columns: vec![], rows: vec![], truncated: false }),
+            Some(SqlServerResultSet { columns: vec![], column_types: vec![], rows: vec![], truncated: false }),
             Instant::now(),
         );
 

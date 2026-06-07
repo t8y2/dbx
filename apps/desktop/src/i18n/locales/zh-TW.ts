@@ -1583,6 +1583,8 @@ export default {
     dataGridDisplay: "資料表格顯示",
     showColumnCommentsInHeader: "在欄位名稱下方顯示註解",
     showColumnCommentsInHeaderDescription: "直接在資料表格欄位名稱下方顯示資料表欄位註解。",
+    showColumnTypesInHeader: "在欄位名稱下方顯示資料類型",
+    showColumnTypesInHeaderDescription: "直接在資料表格欄位名稱下方顯示每個欄位的資料類型。",
     compactColumnHeaderActions: "收起欄位表頭工具",
     compactColumnHeaderActionsDescription: "將格式設定和本機篩選工具移到更多選單，讓欄位名稱優先顯示。",
     sidebarActivation: "側邊欄開啟方式",

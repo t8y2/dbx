@@ -670,6 +670,7 @@ async fn execute_select_prepared(
         truncated,
         session_id: None,
         has_more: false,
+        column_types,
     })
 }
 
@@ -719,6 +720,7 @@ async fn execute_select_text(
         truncated,
         session_id: None,
         has_more: false,
+        column_types: Vec::new(),
     })
 }
 
@@ -1412,6 +1414,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            column_types: Vec::new(),
         })
     }
 }
@@ -1497,6 +1500,7 @@ async fn execute_query_with_max_rows_inner(
             truncated: false,
             session_id: None,
             has_more: false,
+            column_types: Vec::new(),
         })
     }
 }

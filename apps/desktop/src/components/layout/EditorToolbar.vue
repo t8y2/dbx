@@ -181,7 +181,7 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
         :disabled="activeTab.isExecuting"
         @click="emit('update:explainMode', props.explainMode === 'autotrace' ? 'explain' : 'autotrace')"
       >
-        <span class="text-[9px] font-bold">A</span>
+        <span class="font-bold" style="font-size:9px">A</span>
       </Button>
       <Tooltip>
         <TooltipTrigger as-child>

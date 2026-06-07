@@ -130,6 +130,7 @@ import {
   treeSelectionRangeIdsByIndex,
   treeSelectionRangeIds,
 } from "@/lib/sidebarTreeSelection";
+import { selectedConnectionDeleteTargets } from "@/lib/sidebarConnectionSelection";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
@@ -903,20 +904,41 @@ async function refresh() {
 
 const showDeleteConfirm = ref(false);
 
+function connectionDeleteTargets() {
+  return selectedConnectionDeleteTargets(props.node, selectedTreeNodesInVisibleOrder());
+}
+
+function connectionDeleteMenuLabel(): string {
+  const count = connectionDeleteTargets().length;
+  return count > 1 ? t("contextMenu.deleteSelectedConnections", { count }) : t("contextMenu.deleteConnection");
+}
+
+function connectionDeleteConfirmMessage(): string {
+  const targets = connectionDeleteTargets();
+  return targets.length > 1
+    ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length })
+    : t("contextMenu.confirmDeleteMessage", { name: props.node.label });
+}
+
 function deleteConnection() {
+  if (!connectionDeleteTargets().length) return;
   showDeleteConfirm.value = true;
 }
 
 async function confirmDelete() {
-  const node = props.node;
-  if (node.connectionId) {
-    try {
-      await connectionStore.disconnect(node.connectionId);
-      await connectionStore.removeConnection(node.connectionId);
-      toast(t("connection.deleted"), 2000);
-    } catch (e: any) {
-      toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+  const targets = connectionDeleteTargets();
+  if (!targets.length) return;
+  try {
+    for (const target of targets) {
+      await connectionStore.disconnect(target.connectionId);
     }
+    await connectionStore.removeConnections(targets.map((target) => target.connectionId));
+    toast(
+      targets.length > 1 ? t("connection.deletedSelected", { count: targets.length }) : t("connection.deleted"),
+      2000,
+    );
+  } catch (e: any) {
+    toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 
@@ -2912,7 +2934,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("contextMenu.duplicateConnection"), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
     items.push({
-      label: t("contextMenu.deleteConnection"),
+      label: connectionDeleteMenuLabel(),
       action: deleteConnection,
       icon: Trash2,
       shortcut: shortcutDelete,
@@ -3382,7 +3404,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         <DialogTitle>{{ t("contextMenu.confirmDeleteTitle") }}</DialogTitle>
       </DialogHeader>
       <p class="text-sm text-muted-foreground">
-        {{ t("contextMenu.confirmDeleteMessage", { name: node.label }) }}
+        {{ connectionDeleteConfirmMessage() }}
       </p>
       <DialogFooter>
         <Button variant="outline" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -3392,7 +3414,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
             showDeleteConfirm = false;
             confirmDelete();
           "
-          >{{ t("contextMenu.deleteConnection") }}</Button
+          >{{ connectionDeleteMenuLabel() }}</Button
         >
       </DialogFooter>
     </DialogContent>

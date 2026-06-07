@@ -584,21 +584,39 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function removeConnection(id: string) {
-    const nextConnections = connections.value.filter((c) => c.id !== id);
+  async function removeConnections(ids: Iterable<string>) {
+    const connectionIds = [...new Set(ids)].filter((id) => connections.value.some((c) => c.id === id));
+    if (!connectionIds.length) return;
+
+    const removedIds = new Set(connectionIds);
+    const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
     connections.value = nextConnections;
-    pinnedTreeNodeIds.value = prunePinnedTreeNodeIdsForConnection(pinnedTreeNodeIds.value, id);
+    for (const id of removedIds) {
+      pinnedTreeNodeIds.value = prunePinnedTreeNodeIdsForConnection(pinnedTreeNodeIds.value, id);
+    }
     persistPinnedTreeNodeIds();
-    clearConnectionError(id);
-    sidebarLayout.value = removeConnectionFromSidebarLayout(sidebarLayout.value, id);
+    for (const id of removedIds) {
+      clearConnectionError(id);
+      connectedIds.value.delete(id);
+      sidebarLayout.value = removeConnectionFromSidebarLayout(sidebarLayout.value, id);
+    }
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
-    if (activeConnectionId.value === id) {
+    if (activeConnectionId.value && removedIds.has(activeConnectionId.value)) {
       activeConnectionId.value = null;
     }
-    invalidateCompletionCache(id);
-    clearLoadedChildrenCache(id);
+    selectedTreeNodeIds.value = selectedTreeNodeIds.value.filter((id) => !removedIds.has(id));
+    if (selectedTreeNodeId.value && removedIds.has(selectedTreeNodeId.value)) selectedTreeNodeId.value = null;
+    if (treeSelectionAnchorId.value && removedIds.has(treeSelectionAnchorId.value)) treeSelectionAnchorId.value = null;
+    for (const id of removedIds) {
+      invalidateCompletionCache(id);
+      clearLoadedChildrenCache(id);
+    }
+  }
+
+  async function removeConnection(id: string) {
+    await removeConnections([id]);
   }
 
   async function updateConnection(config: ConnectionConfig) {
@@ -2126,6 +2144,7 @@ export const useConnectionStore = defineStore("connection", () => {
     setVisibleDatabases,
     clearVisibleDatabases,
     removeConnection,
+    removeConnections,
     editingConnectionId,
     newConnectionGroupId,
     startEditing,

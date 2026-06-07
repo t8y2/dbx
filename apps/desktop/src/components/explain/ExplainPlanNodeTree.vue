@@ -1,43 +1,71 @@
 <script setup lang="ts">
-import { ChevronRight } from "@lucide/vue";
+import { ref } from "vue";
+import { ChevronRight, ChevronDown } from "@lucide/vue";
 import type { ExplainPlanNode } from "@/lib/explainPlan";
 
-defineProps<{
+const props = defineProps<{
   node: ExplainPlanNode;
   depth?: number;
 }>();
+
+const collapsed = ref(false);
+
+function toggle() {
+  if (props.node.children.length > 0) {
+    collapsed.value = !collapsed.value;
+  }
+}
+
+function actualRowsFromDetails(): string | undefined {
+  for (const d of props.node.details) {
+    const m = d.match(/Actual Rows:\s*(\S+)/);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+const actualRows = actualRowsFromDetails();
+const hasActualStats = !!actualRows;
+const rowDiffers = hasActualStats && actualRows !== props.node.rows;
 </script>
 
 <template>
-  <div class="space-y-2">
-    <div class="rounded border bg-background px-3 py-2 shadow-xs">
-      <div class="flex min-w-0 items-center gap-2">
-        <ChevronRight class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <div class="min-w-0 flex-1">
-          <div class="truncate text-sm font-medium">{{ node.title }}</div>
-          <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-            <span class="rounded bg-muted px-1.5 py-0.5">{{ node.nodeType }}</span>
-            <span
-              v-if="node.relation"
-              class="rounded bg-blue-50 px-1.5 py-0.5 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
-              >{{ node.relation }}</span
-            >
-            <span
-              v-if="node.index"
-              class="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-              >{{ node.index }}</span
-            >
-            <span v-if="node.cost">{{ node.cost }}</span>
-            <span v-if="node.rows">{{ node.rows }} rows</span>
-          </div>
-        </div>
-      </div>
-      <div v-if="node.details.length" class="mt-2 space-y-1 border-t pt-2 text-xs text-muted-foreground">
-        <div v-for="detail in node.details" :key="detail" class="break-all">{{ detail }}</div>
-      </div>
+  <div>
+    <!-- Single line: collapse icon + title + badges all in one row -->
+    <div
+      class="flex cursor-pointer items-center gap-1 rounded border bg-background px-2 py-1 text-xs hover:bg-muted/30"
+      :class="{ 'border-green-300 dark:border-green-700': hasActualStats }"
+      @click="toggle"
+    >
+      <ChevronRight v-if="node.children.length > 0 && collapsed" class="h-3 w-3 shrink-0 text-muted-foreground" />
+      <ChevronDown v-else-if="node.children.length > 0" class="h-3 w-3 shrink-0 text-muted-foreground" />
+
+      <span class="shrink-0 rounded bg-muted px-1 py-0.5 font-medium">{{ node.nodeType }}</span>
+      <span v-if="node.relation" class="shrink-0 truncate max-w-[120px] text-blue-600 dark:text-blue-400">{{
+        node.relation
+      }}</span>
+      <span v-if="node.index" class="shrink-0 text-emerald-600 dark:text-emerald-400">[{{ node.index }}]</span>
+      <span v-if="node.cost" class="shrink-0 tabular-nums text-muted-foreground">c:{{ node.cost }}</span>
+      <span v-if="node.rows" class="shrink-0 tabular-nums text-amber-600 dark:text-amber-400">e:{{ node.rows }}</span>
+      <span
+        v-if="hasActualStats"
+        class="shrink-0 tabular-nums font-semibold"
+        :class="rowDiffers ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'"
+        >a:{{ actualRows
+        }}<span v-if="rowDiffers">({{ Math.round((Number(actualRows) / Number(node.rows)) * 100) }}%)</span></span
+      >
+
+      <!-- Details collapsed into tooltip on hover -->
+      <span
+        v-if="node.details.length"
+        class="ml-auto shrink-0 overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground/40"
+        :title="node.details.join('\n')"
+        >{{ node.details.join(" ") }}</span
+      >
     </div>
 
-    <div v-if="node.children.length" class="space-y-2 border-l pl-4">
+    <!-- Children (collapsible) -->
+    <div v-if="node.children.length && !collapsed" class="ml-3 mt-px space-y-px border-l pl-2">
       <ExplainPlanNodeTree v-for="child in node.children" :key="child.id" :node="child" :depth="(depth || 0) + 1" />
     </div>
   </div>

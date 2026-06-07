@@ -93,13 +93,14 @@ pub enum AgentMethod {
     ExecuteQueryPage,
     FetchQueryPage,
     CloseQuerySession,
+    GetExplainInfo,
     ExecuteTransaction,
     Disconnect,
     Shutdown,
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Handshake,
         Self::Connect,
         Self::TestConnection,
@@ -117,6 +118,7 @@ impl AgentMethod {
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
         Self::CloseQuerySession,
+        Self::GetExplainInfo,
         Self::ExecuteTransaction,
         Self::Disconnect,
         Self::Shutdown,
@@ -141,6 +143,7 @@ impl AgentMethod {
             Self::ExecuteQueryPage => "execute_query_page",
             Self::FetchQueryPage => "fetch_query_page",
             Self::CloseQuerySession => "close_query_session",
+            Self::GetExplainInfo => "get_explain_info",
             Self::ExecuteTransaction => "execute_transaction",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
@@ -516,6 +519,13 @@ impl AgentDriverClient {
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
         self.call_method_with_timeout(AgentMethod::FetchQueryPage, params, timeout_duration).await
+    }
+
+    pub async fn get_explain_info<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_method(AgentMethod::GetExplainInfo, params).await
     }
 
     pub async fn close_query_session<T: DeserializeOwned + Send + 'static>(

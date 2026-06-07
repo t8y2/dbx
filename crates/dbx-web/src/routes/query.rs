@@ -460,6 +460,74 @@ pub async fn build_explain_sql(
     Json(dbx_core::query_execution_sql::build_explain_sql(req.options))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetExplainInfoRequest {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub sql: String,
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildCreateUserSqlRequest {
+    pub username: String,
+    pub password: String,
+    pub tablespace: String,
+}
+
+pub async fn get_explain_info(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<GetExplainInfoRequest>,
+) -> Result<Json<String>, AppError> {
+    let client = {
+        let connections = state.app.connections.read().await;
+        let pool = connections
+            .get(&req.connection_id)
+            .ok_or_else(|| AppError("Connection not found".to_string()))?;
+        match pool {
+            dbx_core::connection::PoolKind::Agent(client) => client.clone(),
+            _ => return Err(AppError("Connection is not an agent-based connection".to_string())),
+        }
+    };
+
+    let config = {
+        let configs = state.app.configs.read().await;
+        configs.get(&req.connection_id).cloned()
+    };
+    let config = config.ok_or_else(|| AppError("Connection config not found".to_string()))?;
+    let timeout_secs = config.query_timeout_secs;
+
+    let mut client = client.lock().await;
+    let mode = req.mode.unwrap_or_else(|| "explain".to_string());
+    let params = serde_json::json!({
+        "sql": req.sql,
+        "database": req.database.unwrap_or_default(),
+        "schema": req.schema.unwrap_or_default(),
+        "timeoutSecs": timeout_secs as i64,
+        "mode": mode,
+    });
+
+    let result: Result<serde_json::Value, String> = client.get_explain_info::<serde_json::Value>(params).await;
+    match result {
+        Ok(serde_json::Value::String(s)) => Ok(Json(s)),
+        Ok(serde_json::Value::Object(obj)) => {
+            let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(Json(plan))
+        }
+        Ok(val) => Err(AppError(format!("Unexpected result type from getExplainInfo: {:?}", val))),
+        Err(e) => Err(AppError(e)),
+    }
+}
+
+pub async fn build_create_user_sql(
+    Json(req): Json<BuildCreateUserSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    Ok(Json(dbx_core::db_admin_sql::build_create_user_sql(&req.username, &req.password, &req.tablespace)))
+}
+
 pub async fn build_dropped_file_preview_sql(
     Json(req): Json<BuildDroppedFilePreviewSqlRequest>,
 ) -> Json<Option<String>> {

@@ -451,3 +451,66 @@ pub fn build_database_sql_export(
 ) -> Result<String, String> {
     dbx_core::database_export::build_database_sql_export(options)
 }
+
+#[tauri::command]
+pub async fn get_explain_info(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    connection_id: String,
+    database: Option<String>,
+    schema: Option<String>,
+    sql: String,
+    mode: Option<String>,
+) -> Result<String, String> {
+    let client = {
+        let connections = state.connections.read().await;
+        let pool = connections.get(&connection_id).ok_or_else(|| "Connection not found".to_string())?;
+        match pool {
+            dbx_core::connection::PoolKind::Agent(client) => client.clone(),
+            _ => return Err("Connection is not an agent-based connection".to_string()),
+        }
+    };
+
+    let config = {
+        let configs = state.configs.read().await;
+        configs.get(&connection_id).cloned()
+    };
+    let config = config.ok_or_else(|| "Connection config not found".to_string())?;
+    let timeout_secs = config.query_timeout_secs;
+
+    let mut client = client.lock().await;
+    let mode = mode.unwrap_or_else(|| "explain".to_string());
+    let params = serde_json::json!({
+        "sql": sql,
+        "database": database.unwrap_or_default(),
+        "schema": schema.unwrap_or_default(),
+        "timeoutSecs": timeout_secs as i64,
+        "mode": mode,
+    });
+
+    let result: Result<serde_json::Value, String> = client.get_explain_info::<serde_json::Value>(params).await;
+    match result {
+        Ok(serde_json::Value::String(s)) => {
+            eprintln!("[get_explain_info] OK string, len={}", s.len());
+            Ok(s)
+        }
+        Ok(serde_json::Value::Object(obj)) => {
+            let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let has_stats = obj.get("has_actual_stats").and_then(|v| v.as_bool()).unwrap_or(false);
+            eprintln!("[get_explain_info] OK object, plan_len={}, has_actual_stats={}", plan.len(), has_stats);
+            Ok(plan)
+        }
+        Ok(val) => {
+            eprintln!("[get_explain_info] OK unexpected type: {:?}", val);
+            Err(format!("Unexpected result type from getExplainInfo: {:?}", val))
+        }
+        Err(e) => {
+            eprintln!("[get_explain_info] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn build_create_user_sql(username: String, password: String, tablespace: String) -> Result<String, String> {
+    Ok(dbx_core::db_admin_sql::build_create_user_sql(&username, &password, &tablespace))
+}

@@ -33,12 +33,14 @@ const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
   executableSql: string;
+  explainMode?: string;
 }>();
 
 const emit = defineEmits<{
   execute: [];
   cancel: [];
   explain: [];
+  "update:explainMode": [mode: "explain" | "autotrace"];
   formatSql: [];
   saveSql: [];
   openSql: [];
@@ -165,6 +167,22 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
           activeTab.isExplaining ? t("toolbar.stopExplain") : t("toolbar.explainPlan")
         }}</TooltipContent>
       </Tooltip>
+      <!-- Autotrace toggle (only for DM) -->
+      <Button
+        v-if="activeConnection?.db_type === 'dameng'"
+        variant="ghost"
+        size="icon"
+        class="h-6 w-6"
+        :class="
+          props.explainMode === 'autotrace'
+            ? 'text-green-600 bg-green-100 dark:text-green-300 dark:bg-green-900/30'
+            : 'text-muted-foreground/50'
+        "
+        :disabled="activeTab.isExecuting"
+        @click="emit('update:explainMode', props.explainMode === 'autotrace' ? 'explain' : 'autotrace')"
+      >
+        <span class="text-[9px] font-bold">A</span>
+      </Button>
       <Tooltip>
         <TooltipTrigger as-child>
           <Button

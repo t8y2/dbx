@@ -6,7 +6,7 @@ import type { DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/queryExecutionState";
 import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
-import { buildExplainSql, parseExplainResult } from "@/lib/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/explainPlan";
 import {
   allEditableColumnsWriteable,
   allPrimaryKeysPresent,
@@ -1284,11 +1284,63 @@ export const useQueryStore = defineStore("query", () => {
     await trimResultCache();
   }
 
-  async function explainTabSql(id: string, sql: string, databaseType?: DatabaseType) {
+  async function explainTabSql(id: string, sql: string, databaseType?: DatabaseType, explainMode?: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return { ok: false as const, reason: "empty" as const };
     const conn = useConnectionStore().getConfig(tab.connectionId);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
+    const executionId = uuid();
+
+    tab.isExplaining = true;
+    tab.explainExecutionId = executionId;
+    tab.explainError = undefined;
+    tab.lastExplainedSql = sql;
+
+    // DM uses native getExplainInfo via JDBC (supports explain + autotrace modes)
+    // Autotrace mode executes the SQL — reject dangerous statements
+    if (databaseType === "dameng") {
+      if (explainMode === "autotrace") {
+        const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
+        const cleaned = sql
+          .replace(/\/\*[\s\S]*?\*\//g, " ")
+          .replace(/--.*$/gm, " ")
+          .replace(/#.*$/gm, " ");
+        if (cleaned.split(";").some((stmt) => DANGER_RE.test(stmt))) {
+          tab.isExplaining = false;
+          tab.explainExecutionId = undefined;
+          return { ok: false as const, reason: "unsafe" as const };
+        }
+      }
+      try {
+        const mode = explainMode === "autotrace" ? "autotrace" : "explain";
+        const planText = (await api.getExplainInfo(tab.connectionId, tab.database, tab.schema, sql, mode)) as
+          | string
+          | undefined;
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          if (planText && planText.length > 0) {
+            current.explainPlan = parseDamengExplainText(planText);
+            current.explainSql = sql;
+            current.explainError = undefined;
+          } else {
+            current.explainPlan = undefined;
+            current.explainError = "No explain plan returned";
+          }
+        }
+      } catch (e: any) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.explainPlan = undefined;
+          current.explainError = String(e?.message || e);
+        }
+      } finally {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+        }
+      }
+      return { ok: true as const };
+    }
 
     const built = await buildExplainSql(databaseType, sql);
     if (!built.ok) {
@@ -1297,12 +1349,7 @@ export const useQueryStore = defineStore("query", () => {
       return built;
     }
 
-    const executionId = uuid();
-    tab.isExplaining = true;
-    tab.explainExecutionId = executionId;
-    tab.explainError = undefined;
     tab.explainSql = built.sql;
-    tab.lastExplainedSql = sql;
     try {
       const result = await api.executeQuery(tab.connectionId, tab.database, built.sql, tab.schema, executionId, {
         timeoutSecs: queryTimeoutSecs,

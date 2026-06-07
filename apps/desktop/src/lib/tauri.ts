@@ -602,6 +602,26 @@ export async function buildExplainSql(options: BuildExplainSqlOptions): Promise<
   return invoke("build_explain_sql", { options });
 }
 
+export async function buildCreateUserSql(username: string, password: string, tablespace: string): Promise<string> {
+  return invoke("build_create_user_sql", { username, password, tablespace });
+}
+
+export async function getExplainInfo(
+  connectionId: string,
+  database: string | undefined,
+  schema: string | undefined,
+  sql: string,
+  mode: string,
+): Promise<string | undefined> {
+  try {
+    const result = await invoke<string>("get_explain_info", { connectionId, database, schema, sql, mode });
+    return result;
+  } catch (e: any) {
+    console.error("[getExplainInfo] invoke failed:", e?.message || e);
+    return undefined;
+  }
+}
+
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
   const result = await invoke<string | null>("build_dropped_file_preview_sql", { options });
   return result ?? undefined;

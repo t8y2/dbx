@@ -204,6 +204,7 @@ const {
   cancelActiveExecution,
   tryExplain,
   onDangerConfirm,
+  explainMode,
 } = useSqlExecution({
   activeTab,
   activeConnection,
@@ -1073,6 +1074,8 @@ onUnmounted(() => {
                   :active-tab="activeTab"
                   :active-connection="activeConnection"
                   :executable-sql="executableSql"
+                  :explain-mode="explainMode"
+                  @update:explain-mode="(m: 'explain' | 'autotrace') => (explainMode = m)"
                   @execute="tryExecute()"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"

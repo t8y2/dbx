@@ -33,6 +33,7 @@
     "execute_query_page",
     "fetch_query_page",
     "close_query_session",
+    "get_explain_info",
     "execute_transaction",
     "disconnect",
     "shutdown"

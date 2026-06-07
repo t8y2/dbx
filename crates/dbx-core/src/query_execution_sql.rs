@@ -43,6 +43,8 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
 
     let sql = if options.database_type == Some(DatabaseType::Postgres) {
         format!("EXPLAIN (FORMAT JSON) {source}")
+    } else if options.database_type == Some(DatabaseType::Dameng) {
+        format!("EXPLAIN {source}")
     } else {
         format!("EXPLAIN FORMAT=JSON {source}")
     };
@@ -69,7 +71,7 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 }
 
 pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
-    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Postgres))
+    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Dameng))
 }
 
 fn explain_err(reason: &str) -> ExplainSqlBuildResult {
@@ -148,6 +150,23 @@ mod tests {
             ExplainSqlBuildResult {
                 ok: true,
                 sql: Some("EXPLAIN (FORMAT JSON) select * from users where id = 1".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn builds_dameng_explain_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Dameng),
+            sql: "SELECT * FROM t1 WHERE id = 1".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN SELECT * FROM t1 WHERE id = 1".to_string()),
                 reason: None,
             }
         );

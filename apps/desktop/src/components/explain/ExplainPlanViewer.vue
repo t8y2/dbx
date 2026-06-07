@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertCircle, Braces, GitBranch, Table2 } from "@lucide/vue";
+import { AlertCircle, Braces, GitBranch, Table2, FileText } from "@lucide/vue";
 import type { ParsedExplainPlan, ExplainPlanNode } from "@/lib/explainPlan";
 import { flattenExplainPlanNodes } from "@/lib/explainPlan";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
-const activeView = ref<"tree" | "summary" | "json">("tree");
+const activeView = ref<"tree" | "summary" | "raw">("tree");
 
 const flatRows = computed(() => {
   const rows: Array<{ node: ExplainPlanNode; depth: number }> = [];
@@ -28,7 +28,15 @@ const flatRows = computed(() => {
   return rows;
 });
 
-const rawJson = computed(() => (props.plan ? JSON.stringify(props.plan.raw, null, 2) : ""));
+const rawContent = computed(() => {
+  if (!props.plan?.raw) return "";
+  // DM returns raw plan text as a string → show as-is
+  if (typeof props.plan.raw === "string") return props.plan.raw;
+  // Other DBs return JSON → pretty-print
+  return JSON.stringify(props.plan.raw, null, 2);
+});
+
+const isRawString = computed(() => typeof props.plan?.raw === "string");
 const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.plan.nodes).length : 0));
 </script>
 
@@ -41,6 +49,11 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
       </span>
       <span v-if="plan" class="text-muted-foreground"
         >{{ plan.databaseType.toUpperCase() }} · {{ t("explain.nodeCount", { count: nodeCount }) }}</span
+      >
+      <span
+        v-if="plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')"
+        class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300"
+        >A-TRACE</span
       >
       <span class="flex-1" />
       <div v-if="plan" class="inline-flex rounded-md border bg-muted/40 p-0.5">
@@ -64,12 +77,13 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
         </Button>
         <Button
           size="sm"
-          :variant="activeView === 'json' ? 'secondary' : 'ghost'"
+          :variant="activeView === 'raw' ? 'secondary' : 'ghost'"
           class="h-6 px-2 text-xs gap-1"
-          @click="activeView = 'json'"
+          @click="activeView = 'raw'"
         >
-          <Braces class="h-3.5 w-3.5" />
-          JSON
+          <FileText v-if="isRawString" class="h-3.5 w-3.5" />
+          <Braces v-else class="h-3.5 w-3.5" />
+          {{ isRawString ? "TEXT" : "JSON" }}
         </Button>
       </div>
     </div>
@@ -92,7 +106,7 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
     </div>
 
     <div v-else class="flex-1 min-h-0 overflow-auto">
-      <div v-if="activeView === 'tree'" class="mx-auto max-w-5xl space-y-3 p-4">
+      <div v-if="activeView === 'tree'" class="mx-auto max-w-5xl space-y-px p-2">
         <ExplainPlanNodeTree v-for="node in plan.nodes" :key="node.id" :node="node" />
       </div>
 
@@ -127,7 +141,11 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
         </div>
       </div>
 
-      <pre v-else class="m-3 overflow-auto rounded border bg-muted/30 p-3 text-xs leading-relaxed">{{ rawJson }}</pre>
+      <pre
+        v-else
+        class="m-3 overflow-auto whitespace-pre rounded border bg-muted/30 p-3 font-mono text-xs leading-relaxed"
+        >{{ rawContent }}</pre
+      >
     </div>
   </div>
 </template>

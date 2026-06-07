@@ -144,6 +144,10 @@ pub fn build_duckdb_attach_database_sql(options: DuckDbAttachDatabaseSqlOptions)
     )
 }
 
+pub fn build_create_user_sql(username: &str, password: &str, tablespace: &str) -> String {
+    format!("CREATE USER \"{}\" IDENTIFIED BY \"{}\" DEFAULT TABLESPACE \"{}\";", username, password, tablespace)
+}
+
 pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
     format!(
         "DROP {} {};",

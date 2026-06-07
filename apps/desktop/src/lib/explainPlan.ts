@@ -15,7 +15,7 @@ export interface ExplainPlanNode {
 }
 
 export interface ParsedExplainPlan {
-  databaseType: "mysql" | "postgres";
+  databaseType: "mysql" | "postgres" | "dameng";
   raw: unknown;
   nodes: ExplainPlanNode[];
 }
@@ -24,8 +24,8 @@ export type BuildExplainSqlResult =
   | { ok: true; sql: string }
   | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres"]);
-export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" {
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng"]);
+export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" {
   return !!databaseType && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
@@ -33,11 +33,220 @@ export function buildExplainSql(databaseType: DatabaseType | undefined, sql: str
   return api.buildExplainSql({ databaseType, sql }) as Promise<BuildExplainSqlResult>;
 }
 
-export function parseExplainResult(databaseType: "mysql" | "postgres", result: QueryResult): ParsedExplainPlan {
+export function parseExplainResult(
+  databaseType: "mysql" | "postgres" | "dameng",
+  result: QueryResult,
+): ParsedExplainPlan {
+  if (databaseType === "dameng") {
+    return parseDamengExplain(result);
+  }
   const raw = parseExplainCell(result.rows[0]?.[0]);
   const nodes = databaseType === "postgres" ? parsePostgresExplain(raw) : parseMysqlExplain(raw);
-
   return { databaseType, raw, nodes };
+}
+
+/**
+ * Parse DM's getExplainInfo() text output.
+ * Format (flat list with indentation):
+ *   1   #NSET2: [cost, rows, width]
+ *   2     #PIPE2: [cost, rows, width]
+ *   3       #PRJT2: [cost, rows, width]; props...
+ *   ...
+ *   Statistics
+ *       logical reads
+ *       exec time(ms)
+ *
+ * For autotrace, rows include ->actual: [cost, estRows->actualRows, width]
+ */
+export function parseDamengExplainText(planText: string): ParsedExplainPlan {
+  const lines = planText.split("\n");
+  const operatorLines: { indent: number; line: string; raw: string }[] = [];
+  const stats: Record<string, string> = {};
+  let inStats = false;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+
+    // Check for Statistics section
+    if (trimmed.toLowerCase() === "statistics") {
+      inStats = true;
+      continue;
+    }
+    if (inStats) {
+      const m = trimmed.match(/^(\d+)\s+(.+)$/);
+      if (m) {
+        stats[m[2].trim()] = m[1];
+      }
+      continue;
+    }
+
+    // Try to parse operator line: <line_number><spaces>#OPERATOR...
+    const opMatch = trimmed.match(/^\d+(\s+)#/);
+    if (opMatch) {
+      // indent = number of spaces between line number and #
+      const indent = opMatch[1].length;
+      operatorLines.push({ indent, line: trimmed.substring(trimmed.indexOf("#")), raw: rawLine });
+    }
+  }
+
+  // Build tree from flat operator lines using indent spacing
+  // First line's indent = baseline (depth 0), each +2 spaces = +1 depth
+  const baseIndent = operatorLines.length > 0 ? operatorLines[0].indent : 0;
+  const rootNodes: ExplainPlanNode[] = [];
+  const parentStack: ExplainPlanNode[] = [];
+
+  for (const { indent, line } of operatorLines) {
+    const nodeInfo = parseDamengPlanLine(line);
+    if (!nodeInfo) continue;
+
+    const depth = Math.max(0, Math.round((indent - baseIndent) / 2));
+    while (parentStack.length > depth) parentStack.pop();
+
+    const childIndex =
+      parentStack.length === 0 ? rootNodes.length + 1 : parentStack[parentStack.length - 1].children.length + 1;
+    const id =
+      parentStack.length === 0 ? String(childIndex) : `${parentStack[parentStack.length - 1].id}.${childIndex}`;
+
+    const details: string[] = [];
+    if (nodeInfo.props) details.push(nodeInfo.props);
+    if (nodeInfo.actualRows) details.push(`Actual Rows: ${nodeInfo.actualRows}`);
+    if (nodeInfo.memUsed) details.push(`Memory: ${nodeInfo.memUsed}`);
+    if (nodeInfo.diskUsed) details.push(`Disk: ${nodeInfo.diskUsed}`);
+
+    const node: ExplainPlanNode = {
+      id,
+      title: nodeInfo.relation ? `${nodeInfo.nodeType} on ${nodeInfo.relation}` : nodeInfo.nodeType,
+      nodeType: nodeInfo.operation,
+      cost: nodeInfo.cost || undefined,
+      rows: nodeInfo.rows || undefined,
+      relation: nodeInfo.relation || undefined,
+      details,
+      children: [],
+    };
+
+    if (parentStack.length === 0) {
+      rootNodes.push(node);
+    } else {
+      parentStack[parentStack.length - 1].children.push(node);
+    }
+    parentStack.push(node);
+  }
+
+  // Add stats summary to root node
+  if (Object.keys(stats).length > 0) {
+    const statsDetail = Object.entries(stats)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(", ");
+    if (rootNodes.length > 0 && !rootNodes[0].details.some((d) => d.startsWith("Statistics:"))) {
+      rootNodes[0].details.push(`Statistics: ${statsDetail}`);
+    }
+  }
+
+  return { databaseType: "dameng", raw: planText, nodes: rootNodes };
+}
+
+interface DamengOpInfo {
+  operation: string;
+  nodeType: string;
+  cost?: string;
+  rows?: string;
+  actualRows?: string;
+  width?: string;
+  relation?: string;
+  props?: string;
+  memUsed?: string;
+  diskUsed?: string;
+}
+
+/**
+ * Parse a single DM operator line:
+ *   #NSET2: [cost, rows, width]; props
+ *   #HASH2 INNER JOIN: [cost, rows->actual, width]; KEY_NUM(1), MEM_USED(20352KB)
+ *   #CSCN2: [cost, rows, width]; INDEX_NAME; btr_scan(1)
+ */
+function parseDamengPlanLine(line: string): DamengOpInfo | null {
+  // Remove leading #
+  const content = line.replace(/^#+/, "").trim();
+
+  // Split at first colon
+  const colonIdx = content.indexOf(":");
+  if (colonIdx < 0) return null;
+
+  const operator = content.substring(0, colonIdx).trim();
+  const rest = content.substring(colonIdx + 1).trim();
+
+  // Extract [cost, rows, width] or [cost, estRows->actualRows, width]
+  let costPart = "";
+  let afterBracket = rest;
+  const bracketMatch = rest.match(/^\[([^\]]+)\]/);
+  if (bracketMatch) {
+    costPart = bracketMatch[1];
+    afterBracket = rest.substring(bracketMatch[0].length).trim();
+  }
+
+  // Parse cost part
+  let cost: string | undefined;
+  let rows: string | undefined;
+  let actualRows: string | undefined;
+  let width: string | undefined;
+
+  if (costPart) {
+    const parts = costPart.split(",").map((s) => s.trim());
+    if (parts.length >= 1) cost = parts[0];
+    if (parts.length >= 2) {
+      const rowPart = parts[1];
+      const arrowIdx = rowPart.indexOf("->");
+      if (arrowIdx >= 0) {
+        rows = rowPart.substring(0, arrowIdx).trim();
+        actualRows = rowPart.substring(arrowIdx + 2).trim();
+      } else {
+        rows = rowPart;
+      }
+    }
+    if (parts.length >= 3) width = parts[2];
+  }
+
+  // Extract props after semicolons
+  const semiParts = afterBracket
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let relation: string | undefined;
+  let memUsed: string | undefined;
+  let diskUsed: string | undefined;
+  const otherProps: string[] = [];
+
+  for (const part of semiParts) {
+    if (/^[A-Za-z_]\w*\(/.test(part) || part.includes("(")) {
+      otherProps.push(part);
+    } else if (part.toUpperCase().includes("MEM_USED")) {
+      const m = part.match(/MEM_USED\((\d+)(KB|MB)\)/i);
+      if (m) memUsed = `${m[1]}${m[2]}`;
+      otherProps.push(part);
+    } else if (part.toUpperCase().includes("DISK_USED")) {
+      const m = part.match(/DISK_USED\((\d+)(KB|MB)\)/i);
+      if (m) diskUsed = `${m[1]}${m[2]}`;
+      otherProps.push(part);
+    } else if (!relation && part.length > 0 && part.length < 100 && !part.includes(" ")) {
+      relation = part; // likely an index or table name
+    } else if (part.length > 0) {
+      otherProps.push(part);
+    }
+  }
+
+  return {
+    operation: operator,
+    nodeType: operator,
+    cost,
+    rows,
+    actualRows,
+    width,
+    relation,
+    props: otherProps.length > 0 ? otherProps.join("; ") : undefined,
+    memUsed,
+    diskUsed,
+  };
 }
 
 export function flattenExplainPlanNodes(nodes: ExplainPlanNode[]): ExplainPlanNode[] {
@@ -58,6 +267,145 @@ function parseExplainCell(value: unknown): unknown {
     return value;
   }
 }
+
+// ── DM (达梦) tabular explain parser ──────────────────────────────────
+
+interface DamengExplainRow {
+  id: string;
+  operation: string;
+  options: string;
+  objectName: string;
+  objectType: string;
+  cost: string;
+  cardinality: string;
+  [key: string]: unknown;
+}
+
+/**
+ * DM's EXPLAIN returns a tabular result set.
+ * Columns: EXPLAIN_ID, ID, OPERATION, OPTIONS, OBJECT_NAME, OBJECT_TYPE,
+ *          COST, CARDINALITY, CPU_COST, IO_COST, etc.
+ * ID is hierarchical dot-notation (1, 2, 2.1, 2.2, 3).
+ */
+function parseDamengExplain(result: QueryResult): ParsedExplainPlan {
+  const colIndex = buildColumnIndex(result.columns);
+  const rows: DamengExplainRow[] = result.rows.map((row: unknown[]) => ({
+    id: String(row[colIndex.id] ?? ""),
+    operation: String(row[colIndex.operation] ?? ""),
+    options: String(row[colIndex.options] ?? ""),
+    objectName: String(row[colIndex.objectName] ?? ""),
+    objectType: String(row[colIndex.objectType] ?? ""),
+    cost: String(row[colIndex.cost] ?? ""),
+    cardinality: String(row[colIndex.cardinality] ?? ""),
+  }));
+
+  const nodes = buildDamengTree(rows);
+  return { databaseType: "dameng", raw: rows, nodes };
+}
+
+function buildColumnIndex(columns: string[]): Record<string, number> {
+  const lower = columns.map((c) => c.toLowerCase());
+  const idx = (name: string) => {
+    const i = lower.indexOf(name);
+    // fallback search for similar names
+    if (i >= 0) return i;
+    if (name === "id") return lower.findIndex((c) => c === "id" || c === "step" || c === "step_id");
+    if (name === "operation") return lower.findIndex((c) => c.includes("operation"));
+    if (name === "options") return lower.findIndex((c) => c === "options" || c === "option");
+    if (name === "objectName") return lower.findIndex((c) => c.includes("object_name"));
+    if (name === "objectType") return lower.findIndex((c) => c.includes("object_type"));
+    if (name === "cost") return lower.findIndex((c) => c === "cost" || c === "total_cost");
+    if (name === "cardinality")
+      return lower.findIndex((c) => c === "cardinality" || c.includes("cardinality") || c === "rows");
+    return -1;
+  };
+  return {
+    id: idx("id"),
+    operation: idx("operation"),
+    options: idx("options"),
+    objectName: idx("objectName"),
+    objectType: idx("objectType"),
+    cost: idx("cost"),
+    cardinality: idx("cardinality"),
+  };
+}
+
+/**
+ * Build a tree from flat DM explain rows using dot-notation ID hierarchy.
+ * Root nodes have IDs like "1", "2", "3".
+ * Children have IDs like "1.1", "1.2", "2.1.1".
+ */
+function buildDamengTree(rows: DamengExplainRow[]): ExplainPlanNode[] {
+  const nodes: ExplainPlanNode[] = [];
+
+  // First pass: create all nodes
+  const nodeMap = new Map<string, ExplainPlanNode>();
+  for (const row of rows) {
+    const nodeType = [row.operation, row.options].filter(Boolean).join(" ");
+    const relation = row.objectName || undefined;
+    const index = row.objectType === "INDEX" ? row.objectName : undefined;
+
+    const details: string[] = [];
+    if (row.objectType && row.objectType !== "TABLE" && row.objectType !== "INDEX") {
+      details.push(`Object Type: ${row.objectType}`);
+    }
+    if (row.cardinality && row.cardinality !== "0") {
+      details.push(`Cardinality: ${row.cardinality}`);
+    }
+
+    const node: ExplainPlanNode = {
+      id: row.id,
+      title: relation ? `${nodeType} on ${relation}` : nodeType || "Plan",
+      nodeType: row.operation || "Plan",
+      relation,
+      index,
+      cost: row.cost || undefined,
+      rows: row.cardinality || undefined,
+      details,
+      children: [],
+    };
+    nodeMap.set(row.id, node);
+  }
+
+  // Second pass: build parent-child relationships based on dot notation
+  for (const row of rows) {
+    const node = nodeMap.get(row.id);
+    if (!node) continue;
+
+    const parts = row.id.split(".");
+    if (parts.length === 1) {
+      // Root-level node
+      nodes.push(node);
+    } else {
+      // Child node: find parent
+      const parentId = parts.slice(0, -1).join(".");
+      const parent = nodeMap.get(parentId);
+      if (parent) {
+        parent.children.push(node);
+      } else {
+        // Orphan — treat as root
+        nodes.push(node);
+      }
+    }
+  }
+
+  // Sort children by their last ID segment (numerically)
+  function sortChildren(nodes: ExplainPlanNode[]) {
+    for (const n of nodes) {
+      sortChildren(n.children);
+    }
+    nodes.sort((a, b) => {
+      const aLast = parseInt(a.id.split(".").pop() || "0", 10);
+      const bLast = parseInt(b.id.split(".").pop() || "0", 10);
+      return aLast - bLast;
+    });
+  }
+  sortChildren(nodes);
+
+  return nodes;
+}
+
+// ── PostgreSQL JSON explain parser ────────────────────────────────────
 
 function parsePostgresExplain(raw: unknown): ExplainPlanNode[] {
   const plans = Array.isArray(raw) ? raw : [raw];
@@ -106,6 +454,8 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
     children,
   };
 }
+
+// ── MySQL JSON explain parser ─────────────────────────────────────────
 
 function parseMysqlExplain(raw: unknown): ExplainPlanNode[] {
   const root = objectValue(raw);
@@ -182,6 +532,8 @@ function parseMysqlTable(table: Record<string, unknown>, id: string): ExplainPla
     children: [],
   };
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)

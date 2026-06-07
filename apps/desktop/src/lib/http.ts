@@ -589,6 +589,25 @@ export async function buildExplainSql(options: BuildExplainSqlOptions): Promise<
   return post("/api/query/build-explain-sql", { options });
 }
 
+export async function buildCreateUserSql(username: string, password: string, tablespace: string): Promise<string> {
+  return post("/api/query/build-create-user-sql", { username, password, tablespace });
+}
+
+export async function getExplainInfo(
+  connectionId: string,
+  database: string | undefined,
+  schema: string | undefined,
+  sql: string,
+  mode: string,
+): Promise<string | undefined> {
+  try {
+    const result = await post<string>("/api/query/get-explain-info", { connectionId, database, schema, sql, mode });
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
   const result = await post<string | null>("/api/query/build-dropped-file-preview-sql", { options });
   return result ?? undefined;

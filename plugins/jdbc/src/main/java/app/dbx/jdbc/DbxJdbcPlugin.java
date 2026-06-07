@@ -26,6 +26,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.lang.reflect.Method;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
@@ -170,6 +171,14 @@ public final class DbxJdbcPlugin {
                 optionalText(params, "schema"),
                 requireText(params, "table")
             );
+            case "getExplainInfo" -> getExplainInfo(
+                connection,
+                requireText(params, "sql"),
+                optionalText(params, "database"),
+                optionalText(params, "schema"),
+                nonNegativeInt(params, "timeoutSecs", -1),
+                optionalText(params, "mode")
+            );
             default -> throw new IllegalArgumentException("Unsupported JDBC plugin method: " + method);
         };
     }
@@ -310,6 +319,94 @@ public final class DbxJdbcPlugin {
             result.put("truncated", truncated);
             return result;
         }
+    }
+
+    /**
+     * Get DM execution plan using DmdbConnection.getExplainInfo() via reflection.
+     *
+     * Two modes:
+     *   mode="explain" (default) — dmConn.getExplainInfo(sqlStr) — direct plan, no execution
+     *   mode="autotrace"         — execute SQL, then dmConn.getExplainInfo(stmt) — actual stats
+     *
+     * Falls back to standard EXPLAIN if DM driver is not available.
+     */
+    private static JsonNode getExplainInfo(
+        JsonNode connection,
+        String sql,
+        String database,
+        String schema,
+        int timeoutSecs,
+        String mode
+    ) throws Exception {
+        Connection conn = openConnection(connection);
+        applyExecutionContext(connection, conn, database, schema);
+
+        boolean autotrace = "autotrace".equalsIgnoreCase(mode);
+        String planText = null;
+        String dmMethod = null;
+
+        if (autotrace) {
+            // ── Autotrace mode: execute SQL first, then getExplainInfo(stmt) ──
+            try (Statement s = conn.createStatement()) {
+                s.execute("SF_SET_SESSION_PARA_VALUE('MONITOR_SQL_EXEC', 1)");
+            } catch (Exception ignored) {}
+
+            try (Statement stmt = conn.createStatement()) {
+                if (timeoutSecs >= 0) {
+                    try { stmt.setQueryTimeout(timeoutSecs); } catch (SQLFeatureNotSupportedException ignored) {}
+                }
+                boolean hasResultSet = stmt.execute(trimStatementSql(sql));
+                if (hasResultSet) {
+                    try (ResultSet rs = stmt.getResultSet()) {
+                        while (rs.next()) { /* consume */ }
+                    }
+                }
+
+                // Try DM getExplainInfo(Statement)
+                try {
+                    Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
+                    if (dmConnClass.isInstance(conn)) {
+                        Method m = dmConnClass.getMethod("getExplainInfo", Statement.class);
+                        planText = (String) m.invoke(dmConnClass.cast(conn), stmt);
+                        dmMethod = "getExplainInfo(stmt)";
+                    }
+                } catch (ClassNotFoundException | NoSuchMethodException e) {
+                    // Not DM or DM driver version doesn't support it
+                }
+            }
+        } else {
+            // ── Explain mode: direct plan via getExplainInfo(sqlStr), no execution ──
+            try {
+                Class<?> dmConnClass = Class.forName("dm.jdbc.driver.DmdbConnection");
+                if (dmConnClass.isInstance(conn)) {
+                    Method m = dmConnClass.getMethod("getExplainInfo", String.class);
+                    planText = (String) m.invoke(dmConnClass.cast(conn), sql);
+                    dmMethod = "getExplainInfo(sql)";
+                }
+            } catch (ClassNotFoundException | NoSuchMethodException e) {
+                // Not DM or DM driver version doesn't support it
+            }
+        }
+
+        // Fallback: if DM method didn't work, try standard EXPLAIN
+        if (planText == null || planText.trim().isEmpty()) {
+            try (Statement explainStmt = conn.createStatement();
+                 ResultSet rs = explainStmt.executeQuery("EXPLAIN " + sql)) {
+                StringBuilder sb = new StringBuilder();
+                while (rs.next()) {
+                    sb.append(rs.getString(1)).append("\n");
+                }
+                planText = sb.toString().trim();
+            }
+            dmMethod = "explain(sql)";
+        }
+
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("ok", true);
+        result.put("plan", planText != null ? planText : "");
+        result.put("has_actual_stats", "getExplainInfo(stmt)".equals(dmMethod));
+        result.put("mode", autotrace ? "autotrace" : "explain");
+        return result;
     }
 
     private static void applyStatementOptions(Statement statement, int maxRows, int fetchSize, int timeoutSecs)

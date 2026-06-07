@@ -411,6 +411,8 @@ pub fn run() {
             commands::query::prepare_query_pagination_execution_plan,
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
+            commands::query::get_explain_info,
+            commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,

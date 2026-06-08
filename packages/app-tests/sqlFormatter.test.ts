@@ -1,6 +1,27 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import { formatSqlText, MAX_SQL_FORMAT_CHARS } from "../../apps/desktop/src/lib/sqlFormatter.ts";
+
+afterEach(() => {
+  vi.doUnmock("sql-formatter");
+});
+
+test("rejects very large SQL before importing formatter", async () => {
+  vi.resetModules();
+  vi.doMock("sql-formatter", () => {
+    throw new Error("formatter should not load");
+  });
+
+  const {
+    formatSqlText: isolatedFormatSqlText,
+    MAX_SQL_FORMAT_CHARS: isolatedMaxSqlFormatChars,
+  } = await import("../../apps/desktop/src/lib/sqlFormatter.ts");
+
+  await assert.rejects(
+    () => isolatedFormatSqlText("x".repeat(isolatedMaxSqlFormatChars + 1), "generic"),
+    /too large/i,
+  );
+});
 
 test("formats SQL with uppercase keywords and readable line breaks by default", async () => {
   const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");

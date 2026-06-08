@@ -4,6 +4,7 @@ node_modules/
 .codex/
 .superpowers/
 .trellis/
+.worktrees/
 openspec/
 .mcp.json
 AGENTS.md

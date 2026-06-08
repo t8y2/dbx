@@ -72,6 +72,25 @@ const logicalOperatorOptions: { value: SqlFormatterLogicalOperatorNewline; label
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];
 const expressionWidthOptions: SqlFormatterExpressionWidth[] = [50, 80, 120];
 const linesBetweenQueriesOptions: SqlFormatterLinesBetweenQueries[] = [0, 1, 2];
+const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterSettings, string> = {
+  keywordCase: "settings.sqlFormatterKeywordCase",
+  dataTypeCase: "settings.sqlFormatterDataTypeCase",
+  functionCase: "settings.sqlFormatterFunctionCase",
+  useTabs: "settings.sqlFormatterIndent",
+  tabWidth: "settings.sqlFormatterTabWidth",
+  logicalOperatorNewline: "settings.sqlFormatterLogicalOperatorNewline",
+  expressionWidth: "settings.sqlFormatterExpressionWidth",
+  linesBetweenQueries: "settings.sqlFormatterLinesBetweenQueries",
+  denseOperators: "settings.sqlFormatterDenseOperators",
+  newlineBeforeSemicolon: "settings.sqlFormatterNewlineBeforeSemicolon",
+};
+const sqlFormatterConfigErrorKeys: Record<string, string> = {
+  "Invalid JSON.": "settings.sqlFormatterConfigErrorInvalidJson",
+  "Config must be a JSON object.": "settings.sqlFormatterConfigErrorObject",
+  "Unsupported config version.": "settings.sqlFormatterConfigErrorVersion",
+  "Unsupported formatter.": "settings.sqlFormatterConfigErrorFormatter",
+  "Config options must be a JSON object.": "settings.sqlFormatterConfigErrorOptionsObject",
+};
 
 function emitValidity(value: boolean) {
   if (lastValidity === value) return;
@@ -87,9 +106,29 @@ function setJsonDraftText(text: string) {
   });
 }
 
+function localizeSqlFormatterConfigError(message: string): string {
+  const exactKey = sqlFormatterConfigErrorKeys[message];
+  if (exactKey) return t(exactKey);
+
+  const unknownOption = message.match(/^Unknown formatter option: (.+)\.$/);
+  if (unknownOption?.[1]) {
+    return t("settings.sqlFormatterConfigErrorUnknownOption", { option: unknownOption[1] });
+  }
+
+  const invalidOption = message.match(/^Invalid formatter option value: (.+)\.$/);
+  if (invalidOption?.[1]) {
+    const labelKey = sqlFormatterOptionLabelKeys[invalidOption[1] as keyof SqlFormatterSettings];
+    if (labelKey) {
+      return t("settings.sqlFormatterConfigErrorInvalidOptionValue", { option: t(labelKey) });
+    }
+  }
+
+  return t("settings.sqlFormatterConfigErrorInvalidConfig");
+}
+
 function validateJsonDraft(text = jsonDraft.value): boolean {
   const result = parseSqlFormatterConfig(text);
-  jsonValidationMessage.value = result.ok ? "" : result.message;
+  jsonValidationMessage.value = result.ok ? "" : localizeSqlFormatterConfigError(result.message);
   const valid = result.ok;
   emitValidity(activeMode.value === "json" ? valid : true);
   return valid;
@@ -146,7 +185,7 @@ async function onImportFile(event: Event) {
     const text = await file.text();
     const result = parseSqlFormatterConfig(text);
     if (!result.ok) {
-      importError.value = result.message;
+      importError.value = localizeSqlFormatterConfigError(result.message);
       return;
     }
     updateSettings(result.settings);
@@ -171,7 +210,7 @@ function exportConfig() {
 function applyJsonDraft(): boolean {
   const result = parseSqlFormatterConfig(jsonDraft.value);
   if (!result.ok) {
-    jsonValidationMessage.value = result.message;
+    jsonValidationMessage.value = localizeSqlFormatterConfigError(result.message);
     emitValidity(false);
     return true;
   }
@@ -187,7 +226,7 @@ function applyJsonDraft(): boolean {
 function formatJsonDraft(): boolean {
   const result = parseSqlFormatterConfig(jsonDraft.value);
   if (!result.ok) {
-    jsonValidationMessage.value = result.message;
+    jsonValidationMessage.value = localizeSqlFormatterConfigError(result.message);
     emitValidity(false);
     return true;
   }

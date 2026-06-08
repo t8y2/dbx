@@ -1109,7 +1109,71 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolea
   ) {
     return true;
   }
-  return /[\w$.]/.test(previousChar);
+  return /[\w$.@]/.test(previousChar);
+}
+
+export function isSqlLikeCompletionStatement(sql: string, cursor: number): boolean {
+  const statement = extractStatementAt(sql, cursor).trimStart();
+  if (/^(select|with)\b/i.test(statement)) return true;
+  return currentLineBlockStartsSql(sql, cursor);
+}
+
+function currentLineBlockStartsSql(sql: string, cursor: number): boolean {
+  return currentSqlLikeLineBlockSpan(sql, cursor) != null;
+}
+
+function currentSqlLikeLineBlockSpan(sql: string, cursor: number): { start: number; end: number } | null {
+  const safeCursor = Math.max(0, Math.min(cursor, sql.length));
+  const beforeCursor = sql.slice(0, safeCursor);
+  const lines = beforeCursor.split(/\r?\n/);
+  let start: number | null = null;
+  let offset = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (trimmed) {
+      const indentation = line.length - trimmed.length;
+      if (/^(select|with)\b/i.test(trimmed)) start = offset + indentation;
+      if (/^(get|post|put|delete|patch|head)\s+\//i.test(trimmed)) start = null;
+    }
+    offset += line.length + 1;
+  }
+
+  if (start == null) return null;
+
+  let end = sql.length;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  for (let index = start; index < sql.length; index += 1) {
+    const ch = sql[index];
+    if (ch === "'" && !inDoubleQuote) inSingleQuote = !inSingleQuote;
+    else if (ch === '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
+    else if (ch === ";" && !inSingleQuote && !inDoubleQuote && index >= safeCursor) {
+      end = index;
+      break;
+    }
+  }
+
+  const blockEnd = currentLineBlockEnd(sql, safeCursor, start);
+  if (blockEnd != null) end = Math.min(end, blockEnd);
+
+  return { start, end };
+}
+
+function currentLineBlockEnd(sql: string, cursor: number, start: number): number | null {
+  let lineStart = sql.lastIndexOf("\n", cursor - 1) + 1;
+  while (lineStart < sql.length) {
+    const lineEnd = sql.indexOf("\n", lineStart);
+    const boundedLineEnd = lineEnd >= 0 ? lineEnd : sql.length;
+    const line = sql.slice(lineStart, boundedLineEnd);
+    const trimmed = line.trimStart();
+    if (lineStart > start && (!trimmed || /^(get|post|put|delete|patch|head)\s+\//i.test(trimmed))) {
+      return lineStart;
+    }
+    if (lineEnd < 0) break;
+    lineStart = lineEnd + 1;
+  }
+  return null;
 }
 
 export function getSqlCompletionResultValidFor(sql: string, cursor: number): RegExp | undefined {
@@ -1144,6 +1208,9 @@ export function getSqlFunctionSignatureHelp(sql: string, cursor: number): SqlFun
  * Respects semicolons and string literals.
  */
 function extractStatementStart(sql: string, cursor: number): number {
+  const lineBlock = currentSqlLikeLineBlockSpan(sql, cursor);
+  if (lineBlock) return lineBlock.start;
+
   let start = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
@@ -1166,6 +1233,9 @@ function extractStatementStart(sql: string, cursor: number): number {
  * Respects semicolons and string literals.
  */
 function extractStatementAt(sql: string, cursor: number): string {
+  const lineBlock = currentSqlLikeLineBlockSpan(sql, cursor);
+  if (lineBlock) return sql.slice(lineBlock.start, lineBlock.end).trim();
+
   const start = extractStatementStart(sql, cursor);
   let end = sql.length;
   let inSingleQuote = false;
@@ -1364,11 +1434,11 @@ function parseTrailingIdentifierPart(input: string, endExclusive: number): { sta
   }
 
   let start = end;
-  while (start >= 0 && /[A-Za-z0-9_$]/.test(input[start] ?? "")) start -= 1;
+  while (start >= 0 && /[A-Za-z0-9_$@]/.test(input[start] ?? "")) start -= 1;
   start += 1;
   if (start >= endExclusive) return null;
   const raw = input.slice(start, endExclusive);
-  if (!/^[A-Za-z_][\w$]*$/.test(raw)) return null;
+  if (!/^[@A-Za-z_][\w$@]*$/.test(raw)) return null;
   return { start, raw };
 }
 
@@ -1599,19 +1669,29 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
   ]);
 
   const pattern =
-    /\b(?:from|join|update|into|apply)\s+((?:"[^"]+"|`[^`]+`|[A-Za-z_][\w$]*)(?:\.(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w$]*))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
+    /\b(?:from|join|update|into|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
   const referenced: SqlCompletionReferencedTable[] = [];
   for (const match of sql.matchAll(pattern)) {
     const rawName = match[1];
     const alias = match[2];
-    const [first, second] = splitQualifiedName(rawName);
-    if (!first) continue;
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
+    if (isElasticsearchStyleIndexName(rawName)) {
+      referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
+      continue;
+    }
+    const [first, second] = splitQualifiedName(rawName);
+    if (!first) continue;
     const table = second ? { schema: first, name: second, alias: cleanAlias } : { name: first, alias: cleanAlias };
     referenced.push(table);
   }
   return referenced;
+}
+
+function isElasticsearchStyleIndexName(name: string | undefined): name is string {
+  if (!name) return false;
+  if ((name.startsWith('"') && name.endsWith('"')) || (name.startsWith("`") && name.endsWith("`"))) return false;
+  return /[-*]/.test(name);
 }
 
 function extractSelectAliases(sql: string): string[] {
@@ -2292,7 +2372,7 @@ function buildColumnApply(
   context: SqlCompletionContext,
   dialect?: "mysql" | "postgres" | "sqlserver",
 ): string {
-  if (context.qualifier || !column.displayLabel.includes(".")) {
+  if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return quoteSqlIdentifier(column.name, dialect);
   }
   return `${quoteSqlIdentifier(column.table, dialect)}.${quoteSqlIdentifier(column.name, dialect)}`;

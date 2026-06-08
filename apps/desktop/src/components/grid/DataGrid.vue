@@ -1857,9 +1857,24 @@ const showTruncationWarning = computed(
   () => props.result.truncated === true && typeof props.pageLimit !== "number" && props.result.has_more !== true,
 );
 const isResultsContext = computed(() => props.context === "results");
-const displayedTotalRowCount = computed(() => props.totalRowCount ?? manualTotalRowCount.value);
+// affected_rows reported by the backend can be larger than the rows we
+// actually have in memory — e.g. ES auto-pages SELECT * on a big index and
+// reports the index's true match count. Surface that in the status bar so
+// the user sees the real total, but do NOT use it to unlock pagination:
+// we don't have those rows, so letting the user page into them would just
+// show blank screens.
+const inferredBackendTotalRowCount = computed(() => {
+  const affected = props.result.affected_rows;
+  if (typeof affected !== "number" || !Number.isFinite(affected)) return undefined;
+  if (affected <= props.result.rows.length) return undefined;
+  return affected;
+});
+const serverKnownTotalRowCount = computed(() => props.totalRowCount ?? manualTotalRowCount.value);
+const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? inferredBackendTotalRowCount.value);
+// Only a server-confirmed total drives pagination — an inferred total means
+// rows exist that we never fetched, so navigation must stay inside rows.length.
 const hasKnownTotalRowCount = computed(
-  () => typeof displayedTotalRowCount.value === "number" && displayedTotalRowCount.value >= 0,
+  () => typeof serverKnownTotalRowCount.value === "number" && serverKnownTotalRowCount.value >= 0,
 );
 // When context=results and the caller hasn't configured server-side
 // pagination (no pageLimit), the backend handed us every row up-front and

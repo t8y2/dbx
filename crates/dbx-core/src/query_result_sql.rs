@@ -178,6 +178,19 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         return ok(add_mysql_limit(&statement, safe_limit, safe_offset));
     }
 
+    if options.database_type == Some(DatabaseType::Elasticsearch) {
+        // If the user wrote their own LIMIT, leave the SQL alone — they
+        // explicitly bounded the result set and the front-end will paginate
+        // client-side. Otherwise wrap with an explicit OFFSET (even when
+        // 0) so the ES driver can tell a plan-wrapped query from one the
+        // user wrote, which decides whether affected_rows should reflect
+        // the index total or the row count we actually returned.
+        if has_top_level_limit(&statement) {
+            return err("unsupported");
+        }
+        return ok(format!("{statement} LIMIT {safe_limit} OFFSET {safe_offset};"));
+    }
+
     if options.database_type.is_some_and(uses_fetch_first) {
         return ok(add_fetch_first_limit(&statement, safe_limit, safe_offset));
     }
@@ -190,6 +203,11 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
         return err(single_statement_error_reason(&options.original_sql));
     };
     if unsupported_pagination_type(options.database_type) {
+        return err("unsupported");
+    }
+    // ES SQL can't wrap a SELECT in `SELECT COUNT(*) FROM (...)` — the
+    // driver already reports the true match count via affected_rows.
+    if options.database_type == Some(DatabaseType::Elasticsearch) {
         return err("unsupported");
     }
 
@@ -274,10 +292,7 @@ fn err(reason: &str) -> QuerySqlBuildResult {
 }
 
 fn unsupported_pagination_type(database_type: Option<DatabaseType>) -> bool {
-    matches!(
-        database_type,
-        Some(DatabaseType::Neo4j | DatabaseType::MongoDb | DatabaseType::Redis | DatabaseType::Elasticsearch)
-    )
+    matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::MongoDb | DatabaseType::Redis))
 }
 
 fn single_selectable_statement(original_sql: &str) -> Result<String, ()> {

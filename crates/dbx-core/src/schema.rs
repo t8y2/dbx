@@ -1297,6 +1297,9 @@ pub async fn get_columns_core(
         PoolKind::Rqlite(client) => {
             db::rqlite_driver::get_columns(client, schema, table).await.map(deduplicate_column_infos)
         }
+        PoolKind::Elasticsearch(client) => {
+            db::elasticsearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+        }
         _ => Ok(vec![]),
     }
 }

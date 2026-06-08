@@ -1,0 +1,148 @@
+import assert from "node:assert/strict";
+import { test } from "vitest";
+import {
+  DEFAULT_SQL_FORMATTER_SETTINGS,
+  parseSqlFormatterConfig,
+  serializeSqlFormatterConfig,
+  normalizeSqlFormatterSettings,
+  sqlFormatterOptions,
+} from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
+
+test("normalizes empty formatter settings to defaults", () => {
+  assert.deepEqual(normalizeSqlFormatterSettings({}), DEFAULT_SQL_FORMATTER_SETTINGS);
+});
+
+test("keeps valid formatter settings and clamps invalid values", () => {
+  const settings = normalizeSqlFormatterSettings({
+    keywordCase: "lower",
+    dataTypeCase: "upper",
+    functionCase: "lower",
+    useTabs: true,
+    tabWidth: 4,
+    logicalOperatorNewline: "after",
+    expressionWidth: 120,
+    linesBetweenQueries: 2,
+    denseOperators: true,
+    newlineBeforeSemicolon: true,
+  });
+
+  assert.deepEqual(settings, {
+    keywordCase: "lower",
+    dataTypeCase: "upper",
+    functionCase: "lower",
+    useTabs: true,
+    tabWidth: 4,
+    logicalOperatorNewline: "after",
+    expressionWidth: 120,
+    linesBetweenQueries: 2,
+    denseOperators: true,
+    newlineBeforeSemicolon: true,
+  });
+
+  assert.deepEqual(
+    normalizeSqlFormatterSettings({
+      keywordCase: "camel",
+      dataTypeCase: "invalid",
+      functionCase: "invalid",
+      useTabs: "yes",
+      tabWidth: 99,
+      logicalOperatorNewline: "middle",
+      expressionWidth: -1,
+      linesBetweenQueries: 9,
+      denseOperators: "true",
+      newlineBeforeSemicolon: "false",
+    }),
+    DEFAULT_SQL_FORMATTER_SETTINGS,
+  );
+});
+
+test("serializes formatter config as a stable versioned envelope", () => {
+  const json = serializeSqlFormatterConfig({
+    ...DEFAULT_SQL_FORMATTER_SETTINGS,
+    keywordCase: "lower",
+  });
+  assert.equal(
+    json,
+    JSON.stringify(
+      {
+        version: 1,
+        formatter: "sql-formatter",
+        options: {
+          ...DEFAULT_SQL_FORMATTER_SETTINGS,
+          keywordCase: "lower",
+        },
+      },
+      null,
+      2,
+    ),
+  );
+});
+
+test("parses valid formatter config files", () => {
+  const result = parseSqlFormatterConfig(
+    JSON.stringify({
+      version: 1,
+      formatter: "sql-formatter",
+      ignoredTopLevelField: "ok",
+      options: {
+        keywordCase: "lower",
+        functionCase: "upper",
+        dataTypeCase: "preserve",
+        useTabs: false,
+        tabWidth: 4,
+        logicalOperatorNewline: "after",
+        expressionWidth: 80,
+        linesBetweenQueries: 0,
+        denseOperators: false,
+        newlineBeforeSemicolon: true,
+      },
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.settings, {
+    keywordCase: "lower",
+    functionCase: "upper",
+    dataTypeCase: "preserve",
+    useTabs: false,
+    tabWidth: 4,
+    logicalOperatorNewline: "after",
+    expressionWidth: 80,
+    linesBetweenQueries: 0,
+    denseOperators: false,
+    newlineBeforeSemicolon: true,
+  });
+});
+
+test("rejects malformed formatter config files", () => {
+  assert.deepEqual(parseSqlFormatterConfig("{bad json").ok, false);
+  assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: {} })).ok, false);
+  assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "prettier", options: {} })).ok, false);
+  assert.deepEqual(
+    parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { unknown: true } })).ok,
+    false,
+  );
+});
+
+test("maps DBX formatter settings to sql-formatter options", () => {
+  assert.deepEqual(
+    sqlFormatterOptions({
+      ...DEFAULT_SQL_FORMATTER_SETTINGS,
+      keywordCase: "lower",
+      useTabs: true,
+      newlineBeforeSemicolon: true,
+    }),
+    {
+      keywordCase: "lower",
+      dataTypeCase: "preserve",
+      functionCase: "preserve",
+      useTabs: true,
+      tabWidth: 2,
+      logicalOperatorNewline: "before",
+      expressionWidth: 50,
+      linesBetweenQueries: 1,
+      denseOperators: false,
+      newlineBeforeSemicolon: true,
+    },
+  );
+});

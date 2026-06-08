@@ -124,6 +124,26 @@ test("rejects malformed formatter config files", () => {
   );
 });
 
+test("rejects invalid known formatter option values when parsing config files", () => {
+  const invalidKeywordCase = parseSqlFormatterConfig(
+    JSON.stringify({ version: 1, formatter: "sql-formatter", options: { keywordCase: "camel" } }),
+  );
+  assert.equal(invalidKeywordCase.ok, false);
+  if (!invalidKeywordCase.ok) assert.match(invalidKeywordCase.message, /keywordCase/);
+
+  const invalidBoolean = parseSqlFormatterConfig(
+    JSON.stringify({ version: 1, formatter: "sql-formatter", options: { useTabs: "yes" } }),
+  );
+  assert.equal(invalidBoolean.ok, false);
+  if (!invalidBoolean.ok) assert.match(invalidBoolean.message, /useTabs/);
+
+  const invalidNumericChoice = parseSqlFormatterConfig(
+    JSON.stringify({ version: 1, formatter: "sql-formatter", options: { tabWidth: 3 } }),
+  );
+  assert.equal(invalidNumericChoice.ok, false);
+  if (!invalidNumericChoice.ok) assert.match(invalidNumericChoice.message, /tabWidth/);
+});
+
 test("maps DBX formatter settings to sql-formatter options", () => {
   assert.deepEqual(
     sqlFormatterOptions({

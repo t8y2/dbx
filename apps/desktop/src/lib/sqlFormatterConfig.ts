@@ -62,8 +62,29 @@ const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterSettings>([
   "newlineBeforeSemicolon",
 ]);
 
+const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterSettings, (value: unknown) => boolean> = {
+  keywordCase: (value) => isStringChoice(value, CASE_VALUES),
+  dataTypeCase: (value) => isStringChoice(value, CASE_VALUES),
+  functionCase: (value) => isStringChoice(value, CASE_VALUES),
+  useTabs: (value) => typeof value === "boolean",
+  tabWidth: (value) => isNumberChoice(value, TAB_WIDTH_VALUES),
+  logicalOperatorNewline: (value) => isStringChoice(value, LOGICAL_OPERATOR_NEWLINE_VALUES),
+  expressionWidth: (value) => isNumberChoice(value, EXPRESSION_WIDTH_VALUES),
+  linesBetweenQueries: (value) => isNumberChoice(value, LINES_BETWEEN_QUERIES_VALUES),
+  denseOperators: (value) => typeof value === "boolean",
+  newlineBeforeSemicolon: (value) => typeof value === "boolean",
+};
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringChoice(value: unknown, values: readonly string[]): boolean {
+  return typeof value === "string" && values.includes(value);
+}
+
+function isNumberChoice(value: unknown, values: readonly number[]): boolean {
+  return typeof value === "number" && values.includes(value);
 }
 
 function normalizeChoice<T extends readonly string[]>(value: unknown, values: T, fallback: T[number]): T[number] {
@@ -138,6 +159,12 @@ export function parseSqlFormatterConfig(text: string): SqlFormatterConfigParseRe
     (key) => !SQL_FORMATTER_OPTION_KEYS.has(key as keyof SqlFormatterSettings),
   );
   if (unknownOption) return { ok: false, message: `Unknown formatter option: ${unknownOption}.` };
+
+  const invalidOption = Object.entries(parsed.options).find(([key, value]) => {
+    const optionKey = key as keyof SqlFormatterSettings;
+    return !SQL_FORMATTER_OPTION_VALIDATORS[optionKey](value);
+  });
+  if (invalidOption) return { ok: false, message: `Invalid formatter option value: ${invalidOption[0]}.` };
 
   return { ok: true, settings: normalizeSqlFormatterSettings(parsed.options) };
 }

@@ -30,7 +30,7 @@ export function createSqlFormatterConfigKeymap(
     { key: "Shift-Alt-ArrowUp", run: commands.copyLineUp },
     { key: "Shift-Alt-ArrowDown", run: commands.copyLineDown },
     { key: "Ctrl-h", mac: "Mod-Alt-f", run: commands.openSearchPanel, preventDefault: true },
-    { key: "Shift-Alt-f", run: actions.formatJson, preventDefault: true },
+    { key: "Shift-Alt-f", mac: "Shift-Mod-f", run: actions.formatJson, preventDefault: true },
     { key: "Mod-s", run: actions.apply, preventDefault: true },
   ];
 }
@@ -52,6 +52,7 @@ function altLabel(platform = globalThis.navigator?.platform || ""): "Option" | "
 export function sqlFormatterConfigShortcutRows(
   platform = globalThis.navigator?.platform || "",
 ): SqlFormatterConfigShortcutRow[] {
+  const isMac = platform.toLowerCase().includes("mac");
   const mod = modLabel(platform);
   const alt = altLabel(platform);
 
@@ -60,7 +61,7 @@ export function sqlFormatterConfigShortcutRows(
     {
       id: "replace",
       labelKey: "settings.sqlFormatterShortcutReplace",
-      shortcut: platform.toLowerCase().includes("mac") ? "Cmd+Option+F" : "Ctrl+H",
+      shortcut: isMac ? "Cmd+Option+F" : "Ctrl+H",
     },
     { id: "indentMore", labelKey: "settings.sqlFormatterShortcutIndentMore", shortcut: "Tab" },
     { id: "indentLess", labelKey: "settings.sqlFormatterShortcutIndentLess", shortcut: "Shift+Tab" },
@@ -68,7 +69,11 @@ export function sqlFormatterConfigShortcutRows(
     { id: "deleteLine", labelKey: "settings.sqlFormatterShortcutDeleteLine", shortcut: `${mod}+Shift+K` },
     { id: "moveLine", labelKey: "settings.sqlFormatterShortcutMoveLine", shortcut: `${alt}+Up/Down` },
     { id: "copyLine", labelKey: "settings.sqlFormatterShortcutCopyLine", shortcut: `Shift+${alt}+Up/Down` },
-    { id: "formatJson", labelKey: "settings.sqlFormatterShortcutFormatJson", shortcut: `Shift+${alt}+F` },
+    {
+      id: "formatJson",
+      labelKey: "settings.sqlFormatterShortcutFormatJson",
+      shortcut: isMac ? "Shift+Cmd+F" : "Shift+Alt+F",
+    },
     { id: "apply", labelKey: "settings.sqlFormatterShortcutApply", shortcut: `${mod}+S` },
   ];
 }

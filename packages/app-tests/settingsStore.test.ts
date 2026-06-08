@@ -263,3 +263,50 @@ test("normalizeEditorSettings clamps UI scale into the supported range", () => {
 test("normalizeEditorSettings keeps valid UI scales with two-decimal precision", () => {
   assert.equal(normalizeEditorSettings({ uiScale: 1.125 }).uiScale, 1.13);
 });
+
+test("defaults SQL formatter settings", () => {
+  assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sqlFormatter, {
+    keywordCase: "upper",
+    dataTypeCase: "preserve",
+    functionCase: "preserve",
+    useTabs: false,
+    tabWidth: 2,
+    logicalOperatorNewline: "before",
+    expressionWidth: 50,
+    linesBetweenQueries: 1,
+    denseOperators: false,
+    newlineBeforeSemicolon: false,
+  });
+  assert.deepEqual(normalizeEditorSettings({}).sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+});
+
+test("normalizes saved SQL formatter settings", () => {
+  assert.deepEqual(
+    normalizeEditorSettings({
+      sqlFormatter: {
+        keywordCase: "lower",
+        functionCase: "upper",
+        dataTypeCase: "upper",
+        useTabs: true,
+        tabWidth: 4,
+        logicalOperatorNewline: "after",
+        expressionWidth: 120,
+        linesBetweenQueries: 2,
+        denseOperators: true,
+        newlineBeforeSemicolon: true,
+      },
+    } as any).sqlFormatter,
+    {
+      keywordCase: "lower",
+      functionCase: "upper",
+      dataTypeCase: "upper",
+      useTabs: true,
+      tabWidth: 4,
+      logicalOperatorNewline: "after",
+      expressionWidth: 120,
+      linesBetweenQueries: 2,
+      denseOperators: true,
+      newlineBeforeSemicolon: true,
+    },
+  );
+});

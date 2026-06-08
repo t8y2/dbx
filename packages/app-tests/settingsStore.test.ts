@@ -1,11 +1,48 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
+import { createPinia, setActivePinia } from "pinia";
+import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
 import {
   AI_PROVIDER_PRESETS,
   DEFAULT_EDITOR_SETTINGS,
   normalizeAiConfig,
   normalizeEditorSettings,
+  useSettingsStore,
 } from "../../apps/desktop/src/stores/settingsStore.ts";
+
+const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
+
+function withMockLocalStorage(initial: Record<string, string>, run: () => void) {
+  const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const values = new Map(Object.entries(initial));
+  const localStorageMock = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+    },
+    removeItem: (key: string) => {
+      values.delete(key);
+    },
+    clear: () => {
+      values.clear();
+    },
+  };
+
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: localStorageMock,
+  });
+
+  try {
+    run();
+  } finally {
+    if (previousDescriptor) {
+      Object.defineProperty(globalThis, "localStorage", previousDescriptor);
+    } else {
+      delete (globalThis as any).localStorage;
+    }
+  }
+}
 
 test("defaults Redis scan page size to 1000 keys", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.redisScanPageSize, 1000);
@@ -309,4 +346,55 @@ test("normalizes saved SQL formatter settings", () => {
       newlineBeforeSemicolon: true,
     },
   );
+});
+
+test("keeps SQL formatter default objects distinct", () => {
+  const normalized = normalizeEditorSettings({});
+
+  assert.notEqual(DEFAULT_EDITOR_SETTINGS.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
+  assert.notEqual(normalized.sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+  assert.notEqual(normalized.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
+});
+
+test("does not leak default-loaded SQL formatter mutations into defaults", () => {
+  withMockLocalStorage({}, () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    const editorDefaultKeywordCase = DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase;
+    const formatterDefaultKeywordCase = DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase;
+
+    try {
+      store.editorSettings.sqlFormatter.keywordCase = "lower";
+
+      assert.notEqual(store.editorSettings.sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+      assert.notEqual(store.editorSettings.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
+      assert.equal(DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase, editorDefaultKeywordCase);
+      assert.equal(DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase, formatterDefaultKeywordCase);
+    } finally {
+      DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase = editorDefaultKeywordCase;
+      DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase = formatterDefaultKeywordCase;
+    }
+  });
+});
+
+test("does not leak migrated SQL formatter mutations into defaults", () => {
+  withMockLocalStorage({ [OLD_FONT_SIZE_KEY]: "18" }, () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    const editorDefaultKeywordCase = DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase;
+    const formatterDefaultKeywordCase = DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase;
+
+    try {
+      assert.equal(store.editorSettings.fontSize, 18);
+      store.editorSettings.sqlFormatter.keywordCase = "lower";
+
+      assert.notEqual(store.editorSettings.sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+      assert.notEqual(store.editorSettings.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
+      assert.equal(DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase, editorDefaultKeywordCase);
+      assert.equal(DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase, formatterDefaultKeywordCase);
+    } finally {
+      DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase = editorDefaultKeywordCase;
+      DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase = formatterDefaultKeywordCase;
+    }
+  });
 });

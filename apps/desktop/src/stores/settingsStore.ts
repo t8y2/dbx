@@ -330,7 +330,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   cellDetailDrawerWidth: 320,
   cellDetailPanelLayout: "bottom",
   shortcuts: normalizeShortcutSettings(),
-  sqlFormatter: DEFAULT_SQL_FORMATTER_SETTINGS,
+  sqlFormatter: { ...DEFAULT_SQL_FORMATTER_SETTINGS },
   sidebarActivation: "single",
   sidebarObjectDisplay: "grouped",
   autoSelectActiveSidebarNode: false,
@@ -548,10 +548,7 @@ function loadEditorSettings(): EditorSettings {
     if (oldSize) {
       const parsed = parseInt(oldSize, 10);
       if (!isNaN(parsed)) {
-        const migrated: EditorSettings = {
-          ...DEFAULT_EDITOR_SETTINGS,
-          fontSize: parsed,
-        };
+        const migrated = normalizeEditorSettings({ fontSize: parsed });
         saveEditorSettings(migrated);
         localStorage.removeItem(OLD_FONT_SIZE_KEY);
         return migrated;
@@ -561,7 +558,7 @@ function loadEditorSettings(): EditorSettings {
     /* ignore */
   }
 
-  return { ...DEFAULT_EDITOR_SETTINGS };
+  return normalizeEditorSettings({});
 }
 
 function saveEditorSettings(settings: EditorSettings) {

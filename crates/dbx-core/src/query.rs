@@ -15,6 +15,11 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
 
+async fn connection_is_mongodb(state: &AppState, connection_id: &str) -> bool {
+    let configs = state.configs.read().await;
+    configs.get(connection_id).is_some_and(|config| config.db_type == DatabaseType::MongoDb)
+}
+
 async fn connection_database_type(state: &AppState, connection_id: &str) -> Option<DatabaseType> {
     let configs = state.configs.read().await;
     configs.get(connection_id).map(|config| config.db_type)
@@ -804,6 +809,14 @@ pub async fn execute_sql_statement_with_options(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, String> {
+    // MongoDB connections use shell-style commands dispatched through the
+    // frontend parser. Queries that fall through to the generic SQL executor
+    // (e.g. typos) must be rejected before any pool/key creation so that
+    // session-scoped pools do not leak MongoDB Clients and SSH tunnels.
+    if connection_is_mongodb(state, connection_id).await {
+        return Err("Use MongoDB-specific commands".to_string());
+    }
+
     // When a query tab has a client session, keep even database-less execution
     // on that tab-scoped pool so connection-level state (for example MySQL @vars)
     // survives across runs.
@@ -893,6 +906,11 @@ pub async fn execute_multi_core_with_options(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<db::QueryResult>, String> {
+    // Reject MongoDB queries that fall through to the generic executor.
+    if connection_is_mongodb(state, connection_id).await {
+        return Err("Use MongoDB-specific commands".to_string());
+    }
+
     let pool_key = if database.is_empty() {
         state.get_or_create_pool_for_session(connection_id, None, options.client_session_id.as_deref()).await?
     } else {

@@ -270,6 +270,7 @@ export default {
     sshHopInvalidTimeout: "{hop}: SSH timeout must be between 1 and 300 seconds",
     connectTimeout: "Connection Timeout (seconds)",
     queryTimeout: "Query Timeout (seconds)",
+    idleTimeout: "Idle Timeout (seconds)",
     proxy: "Proxy",
     proxyEnable: "Connect database through proxy",
     proxyType: "Proxy Type",

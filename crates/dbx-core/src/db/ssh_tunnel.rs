@@ -309,9 +309,15 @@ impl TunnelManager {
         remote_port: u16,
         expose_to_lan: bool,
     ) -> Result<u16, String> {
-        if let Some(local_port) = self.local_port(connection_id).await {
-            return Ok(local_port);
+        // Check cache under lock to avoid race with concurrent callers.
+        // Also evict stale entries whose background task has exited.
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
         }
+        // Slow SSH connection — do this outside the lock.
         let (handle, local_port) = spawn_tunnel(
             ssh_host,
             ssh_port,
@@ -326,9 +332,26 @@ impl TunnelManager {
         )
         .await?;
 
-        self.tunnels.lock().await.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
-
+        // Re-check under lock: another caller may have beaten us.
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            // Another task already created a live tunnel; abort ours.
+            handle.abort();
+            return Ok(port);
+        }
+        tunnels.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
         Ok(local_port)
+    }
+
+    /// Returns the local port for a cached tunnel entry, or `None` if the entry
+    /// is stale (all background handles have exited).
+    fn get_active_port(tunnels: &mut HashMap<String, TunnelEntry>, connection_id: &str) -> Option<u16> {
+        let entry = tunnels.get(connection_id)?;
+        if entry.handles.iter().all(|h| h.is_finished()) {
+            tunnels.remove(connection_id);
+            return None;
+        }
+        Some(entry.local_port)
     }
 
     pub async fn start_chain(
@@ -341,8 +364,12 @@ impl TunnelManager {
         if hops.is_empty() {
             return Err("No SSH tunnel hops configured".to_string());
         }
-        if let Some(local_port) = self.local_port(connection_id).await {
-            return Ok(local_port);
+        // Check cache under lock; evict stale entries.
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
         }
 
         let mut handles = Vec::new();
@@ -379,11 +406,15 @@ impl TunnelManager {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
-        self.tunnels
-            .lock()
-            .await
-            .insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
-
+        // Re-check under lock: another caller may have beaten us.
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            for handle in handles {
+                handle.abort();
+            }
+            return Ok(port);
+        }
+        tunnels.insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
         Ok(final_local_port)
     }
 

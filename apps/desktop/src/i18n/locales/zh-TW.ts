@@ -255,6 +255,7 @@ export default {
     sshHopInvalidTimeout: "{hop}：SSH 逾時時間必須在 1 到 300 秒之間",
     connectTimeout: "連線逾時（秒）",
     queryTimeout: "查詢逾時（秒）",
+    idleTimeout: "閒置逾時（秒）",
     proxy: "代理伺服器",
     proxyEnable: "藉由代理伺服器連線資料庫",
     proxyType: "代理伺服器類型",

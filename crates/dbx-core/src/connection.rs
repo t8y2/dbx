@@ -331,6 +331,7 @@ impl AppState {
         probe_connection_endpoint(&db_config, &host, port).await?;
         let url = connection_url_for_endpoint(&db_config, &host, port);
         let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
+        let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
         let mysql_pool_max_connections = if normalize_client_session_id(client_session_id).is_some() { 1 } else { 3 };
         let pool = match db_config.db_type {
             DatabaseType::Mysql => {
@@ -408,7 +409,7 @@ impl AppState {
                 PoolKind::DuckDb(con)
             }
             DatabaseType::MongoDb => {
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => match db::mongo_driver::test_connection(
                         &client,
                         connect_timeout,
@@ -417,7 +418,12 @@ impl AppState {
                     .await
                     {
                         Ok(()) => {
-                            self.connections.write().await.insert(pool_key.clone(), PoolKind::MongoDb(client));
+                            let mut conns = self.connections.write().await;
+                            // Re-check: another task may have created the pool while we were connecting.
+                            if conns.contains_key(&pool_key) {
+                                return Ok(pool_key);
+                            }
+                            conns.insert(pool_key.clone(), PoolKind::MongoDb(client));
                             return Ok(pool_key);
                         }
                         Err(e) => e,

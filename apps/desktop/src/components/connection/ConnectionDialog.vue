@@ -116,6 +116,7 @@ const defaultForm = (): ConnectionForm => ({
   transport_layers: [],
   connect_timeout_secs: 5,
   query_timeout_secs: 30,
+  idle_timeout_secs: 60,
   ssl: false,
   ca_cert_path: "",
   client_cert_path: "",
@@ -517,6 +518,7 @@ watch(
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_secs || 5,
         query_timeout_secs: config.query_timeout_secs ?? 30,
+        idle_timeout_secs: config.idle_timeout_secs ?? 60,
         ssl: config.ssl || false,
         ca_cert_path: config.ca_cert_path || "",
         client_cert_path: config.client_cert_path || "",
@@ -983,6 +985,8 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   config.connect_timeout_secs = Number.isFinite(connectTimeout) && connectTimeout > 0 ? connectTimeout : 5;
   const queryTimeout = Number(config.query_timeout_secs);
   config.query_timeout_secs = Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
+  const idleTimeout = Number(config.idle_timeout_secs);
+  config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
   if (!config.one_time) config.one_time = undefined;
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
     config.connection_string = undefined;
@@ -2943,6 +2947,17 @@ function openExternalUrl(url: string) {
                     type="number"
                     min="0"
                     max="300"
+                    step="1"
+                    class="col-span-3"
+                  />
+                </div>
+                <div v-show="form.db_type === 'mongodb'" class="grid grid-cols-4 items-center gap-4">
+                  <Label class="text-right text-xs">{{ t("connection.idleTimeout") }}</Label>
+                  <Input
+                    v-model.number="form.idle_timeout_secs"
+                    type="number"
+                    min="0"
+                    max="600"
                     step="1"
                     class="col-span-3"
                   />

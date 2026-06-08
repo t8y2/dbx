@@ -247,6 +247,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
     let url = connection_url_for_endpoint(&config, &host, port);
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
+    let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
     let result = match probe_result {
         Err(e) => Err(e),
@@ -324,7 +325,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
             }
             DatabaseType::MongoDb => {
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
                         match db::mongo_driver::test_connection(&client, connect_timeout, config.effective_database())
                             .await
@@ -434,6 +435,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     probe_connection_endpoint(&db_config, &host, port).await?;
     let url = connection_url_for_endpoint(&db_config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
+    let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
 
     let pool = match db_config.db_type {
         DatabaseType::Mysql => {
@@ -489,7 +491,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             PoolKind::DuckDb(con)
         }
         DatabaseType::MongoDb => {
-            let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+            let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                 Ok(client) => {
                     match db::mongo_driver::test_connection(&client, connect_timeout, db_config.effective_database())
                         .await

@@ -251,6 +251,7 @@ export default {
     sshHopInvalidTimeout: "{hop}: el tiempo de espera SSH debe estar entre 1 y 300 segundos",
     connectTimeout: "Tiempo de espera de conexión (segundos)",
     queryTimeout: "Tiempo de espera de consulta (segundos)",
+    idleTimeout: "Tiempo de espera inactivo (segundos)",
     proxy: "Proxy",
     proxyEnable: "Conectar la base de datos mediante proxy",
     proxyType: "Tipo de proxy",

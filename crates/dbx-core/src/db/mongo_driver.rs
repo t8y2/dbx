@@ -16,11 +16,17 @@ pub struct MongoDocumentResult {
     pub total: u64,
 }
 
-pub async fn connect(url: &str, timeout: Duration) -> Result<Client, String> {
+pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
     with_connection_timeout("MongoDB", timeout, async {
         let mut options = ClientOptions::parse(url).await.map_err(|e| format!("MongoDB connection failed: {e}"))?;
         options.connect_timeout = Some(timeout);
         options.server_selection_timeout = Some(timeout);
+        // Close idle connections before the server-side timeout drops them,
+        // preventing "Broken pipe" (os error 32) or "unexpected end of file".
+        // 0 means no idle timeout (keep connections alive indefinitely).
+        if idle_timeout.as_secs() > 0 {
+            options.max_idle_time = Some(idle_timeout);
+        }
         Client::with_options(options).map_err(|e| format!("MongoDB connection failed: {e}"))
     })
     .await

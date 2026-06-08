@@ -266,6 +266,7 @@ export default {
     sshHopInvalidTimeout: "{hop}：SSH 超时时间必须在 1 到 300 秒之间",
     connectTimeout: "连接超时（秒）",
     queryTimeout: "查询超时（秒）",
+    idleTimeout: "空闲超时（秒）",
     proxy: "代理",
     proxyEnable: "通过代理连接数据库",
     proxyType: "代理类型",

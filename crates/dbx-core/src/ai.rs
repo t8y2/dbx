@@ -290,6 +290,25 @@ fn responses_max_output_tokens(max_tokens: Option<u32>) -> u32 {
     max_tokens.unwrap_or(2048).max(16)
 }
 
+fn is_openai_api_config(config: &AiConfig) -> bool {
+    matches!(config.provider, AiProvider::Openai) || config.endpoint.to_ascii_lowercase().contains("api.openai.com")
+}
+
+fn is_openai_reasoning_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-5") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
+}
+
+pub fn supports_temperature(config: &AiConfig) -> bool {
+    !(is_openai_api_config(config) && is_openai_reasoning_model(&config.model))
+}
+
+fn add_temperature_if_supported(body: &mut serde_json::Value, request: &AiCompletionRequest) {
+    if supports_temperature(&request.config) {
+        body["temperature"] = json!(request.temperature.unwrap_or(0.2));
+    }
+}
+
 fn responses_text(data: &serde_json::Value) -> String {
     if let Some(text) = data["output_text"].as_str().filter(|text| !text.is_empty()) {
         return text.to_string();
@@ -538,8 +557,8 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "model": request.config.model,
         "messages": messages,
         "max_tokens": request.max_tokens.unwrap_or(2048),
-        "temperature": request.temperature.unwrap_or(0.2),
     });
+    add_temperature_if_supported(&mut body_obj, &request);
     if !request.config.enable_thinking {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
@@ -566,12 +585,12 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
 pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let body = json!({
+    let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
-        "temperature": request.temperature.unwrap_or(0.2),
     });
+    add_temperature_if_supported(&mut body, &request);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -815,9 +834,9 @@ async fn stream_openai(
         "model": request.config.model,
         "messages": messages,
         "max_tokens": request.max_tokens.unwrap_or(2048),
-        "temperature": request.temperature.unwrap_or(0.2),
         "stream": true,
     });
+    add_temperature_if_supported(&mut body_obj, request);
     if !request.config.enable_thinking {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
@@ -903,13 +922,13 @@ async fn stream_responses_api(
 ) -> Result<(), String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let body = json!({
+    let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
-        "temperature": request.temperature.unwrap_or(0.2),
         "stream": true,
     });
+    add_temperature_if_supported(&mut body, request);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1112,8 +1131,8 @@ pub fn load_config(path: &Path) -> Result<Option<AiConfig>, String> {
 mod tests {
     use super::{
         build_ai_http_client, gemini_text, openai_response_text, openai_stream_text, parse_model_list_response,
-        resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens, responses_text, validate_config,
-        AiApiStyle, AiConfig, AiModelInfo, AiProvider,
+        resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens, responses_text,
+        supports_temperature, validate_config, AiApiStyle, AiConfig, AiModelInfo, AiProvider,
     };
 
     #[test]
@@ -1271,6 +1290,33 @@ mod tests {
         assert_eq!(responses_max_output_tokens(Some(16)), 16);
         assert_eq!(responses_max_output_tokens(Some(2400)), 2400);
         assert_eq!(responses_max_output_tokens(None), 2048);
+    }
+
+    #[test]
+    fn omits_temperature_for_openai_reasoning_models() {
+        let mut config = AiConfig {
+            provider: AiProvider::Openai,
+            api_key: "key".to_string(),
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            model: "gpt-5.5".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: true,
+        };
+
+        assert!(!supports_temperature(&config));
+
+        config.model = "o4-mini".to_string();
+        assert!(!supports_temperature(&config));
+
+        config.model = "gpt-4o".to_string();
+        assert!(supports_temperature(&config));
+
+        config.provider = AiProvider::OpenaiCompatible;
+        config.endpoint = "http://localhost:11434/v1".to_string();
+        config.model = "gpt-5-local".to_string();
+        assert!(supports_temperature(&config));
     }
 
     #[test]

@@ -792,7 +792,11 @@ async function formatCurrentSql() {
   if (!source.trim()) return;
 
   try {
-    const formatted = await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic");
+    const formatted = await formatSqlText(
+      source,
+      props.formatDialect ?? props.dialect ?? "generic",
+      settingsStore.editorSettings.sqlFormatter,
+    );
     if (formatted === source) return;
     currentView.dispatch({
       changes: { from, to, insert: formatted },

@@ -1861,6 +1861,11 @@ const displayedTotalRowCount = computed(() => props.totalRowCount ?? manualTotal
 const hasKnownTotalRowCount = computed(
   () => typeof displayedTotalRowCount.value === "number" && displayedTotalRowCount.value >= 0,
 );
+// When context=results and the caller hasn't configured server-side
+// pagination (no pageLimit), the backend handed us every row up-front and
+// rowCount IS the total. Without this hint, the "page is full → assume more"
+// fallback in canGoNextDataGridPage lets the user keep clicking next forever.
+const allRowsLoaded = computed(() => isResultsContext.value && props.pageLimit === undefined);
 const canGoNextPage = computed(() => {
   return canGoNextDataGridPage({
     hasMore: props.result.has_more,
@@ -1869,10 +1874,13 @@ const canGoNextPage = computed(() => {
     pageOffset: props.pageOffset,
     currentPage: currentPage.value,
     totalRowCount: hasKnownTotalRowCount.value ? displayedTotalRowCount.value : undefined,
+    allRowsLoaded: allRowsLoaded.value,
   });
 });
 const canJumpLastPage = computed(
-  () => canGoNextPage.value && (hasKnownTotalRowCount.value || !!props.tableMeta || !!props.countSql),
+  () =>
+    canGoNextPage.value &&
+    (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql),
 );
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(
@@ -2013,6 +2021,15 @@ async function lastPage() {
     currentPage.value = lastPageNum;
     resetGridVerticalScroll(true);
     emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+    return;
+  }
+  if (allRowsLoaded.value) {
+    const total = props.result.rows.length;
+    if (total <= 0) return;
+    const lastPageNum = Math.ceil(total / pageSize.value);
+    if (lastPageNum <= currentPage.value) return;
+    currentPage.value = lastPageNum;
+    resetGridVerticalScroll(true);
     return;
   }
   if (!props.connectionId) return;

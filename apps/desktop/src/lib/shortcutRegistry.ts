@@ -5,6 +5,7 @@ export type ShortcutActionId =
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
+  | "openSettings"
   | "closeTab"
   | "focusSearch"
   | "zoomInUi"
@@ -63,6 +64,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutNewQuery",
     scope: "global",
     defaultShortcut: "Mod+T",
+  },
+  {
+    id: "openSettings",
+    labelKey: "settings.shortcutOpenSettings",
+    scope: "global",
+    defaultShortcut: "Mod+,",
   },
   {
     id: "closeTab",

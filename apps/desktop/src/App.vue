@@ -47,6 +47,7 @@ import {
   isModRShortcut,
   isNewQueryShortcut,
   isObjectSourceSaveShortcutTarget,
+  isOpenSettingsShortcut,
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
@@ -760,6 +761,12 @@ function handleKeydown(e: KeyboardEvent) {
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
 
+  if (isOpenSettingsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    showSettingsDialog.value = true;
+    return;
+  }
   if (isFocusSearchShortcut(e, shortcuts)) {
     const focused = contentAreaRef.value?.focusSearch() || appSidebarRef.value?.focusSearch();
     if (focused) {

@@ -1799,6 +1799,7 @@ export default {
     shortcutCopyCurrentRow: "Copia riga dati corrente",
     shortcutDeleteCurrentRow: "Elimina riga dati corrente",
     shortcutNewQuery: "Nuova query",
+    shortcutOpenSettings: "Apri impostazioni",
     shortcutCloseTab: "Chiudi scheda",
     shortcutFocusSearch: "Focalizza ricerca",
     shortcutZoomInUi: "Ingrandisci UI",

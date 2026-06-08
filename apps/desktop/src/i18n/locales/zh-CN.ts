@@ -1816,6 +1816,7 @@ export default {
     shortcutCopyCurrentRow: "复制当前数据行",
     shortcutDeleteCurrentRow: "删除当前数据行",
     shortcutNewQuery: "新建查询",
+    shortcutOpenSettings: "打开设置",
     shortcutCloseTab: "关闭标签页",
     shortcutFocusSearch: "聚焦搜索",
     shortcutZoomInUi: "放大全局界面",

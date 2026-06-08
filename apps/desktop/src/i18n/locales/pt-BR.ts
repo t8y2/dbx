@@ -1788,6 +1788,7 @@ export default {
     shortcutCopyCurrentRow: "Copiar linha de dados atual",
     shortcutDeleteCurrentRow: "Excluir linha de dados atual",
     shortcutNewQuery: "Nova consulta",
+    shortcutOpenSettings: "Abrir configurações",
     shortcutCloseTab: "Fechar aba",
     shortcutFocusSearch: "Focar na pesquisa",
     shortcutZoomInUi: "Aumentar zoom da UI",

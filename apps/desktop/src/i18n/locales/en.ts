@@ -1863,6 +1863,7 @@ export default {
     shortcutCopyCurrentRow: "Copy current data row",
     shortcutDeleteCurrentRow: "Delete current data row",
     shortcutNewQuery: "New query",
+    shortcutOpenSettings: "Open settings",
     shortcutCloseTab: "Close tab",
     shortcutFocusSearch: "Focus search",
     shortcutZoomInUi: "Zoom in UI",

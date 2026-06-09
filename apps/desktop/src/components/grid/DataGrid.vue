@@ -5178,6 +5178,7 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: colIdx };
   if (hasRowSelection.value && isRowSelected(rowId)) {
+    clearCellSelection();
     void prefetchCopyStatements();
     return;
   }
@@ -5192,6 +5193,9 @@ function onRowContext(rowId: number, rowIndex: number) {
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: -1 };
+  if (hasRowSelection.value && isRowSelected(rowId)) {
+    clearCellSelection();
+  }
   if (!isRowSelected(rowId)) {
     clearCellSelection();
     selectedRowIds.value = new Set([rowId]);

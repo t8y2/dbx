@@ -420,6 +420,24 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         return execute_search_query(client, search_query, start).await;
     }
 
+    // `SELECT *` with clauses our simple parser doesn't cover (WHERE, IN,
+    // BETWEEN, LIKE, ...). Translate the SQL to an ES `_search` body
+    // ourselves rather than going through ES's `_sql` endpoint — `_sql`
+    // refuses several common shapes (LIKE on a `text` field with no
+    // `.keyword`, `SELECT *` returning an array field like `host.ip`, ...)
+    // that translate cleanly to raw DSL. Adapt first so that hyphenated
+    // index names (`aifanfan-python-bot-logs-*`) and `@timestamp`-style
+    // identifiers come out as double-quoted identifiers sqlparser will
+    // accept.
+    let adapted_for_translator = adapt_elasticsearch_sql_query(input);
+    match crate::db::elasticsearch_sql::translate_select_star(&adapted_for_translator) {
+        Ok(Some(translated)) => {
+            return execute_translated_select_star(client, translated, start).await;
+        }
+        Ok(None) => {}
+        Err(message) => return Err(format!("Elasticsearch SQL error: {message}")),
+    }
+
     if is_elasticsearch_sql_query(input) {
         return execute_sql_query(client, input, start).await;
     }
@@ -524,7 +542,10 @@ fn parse_elasticsearch_response(
 ) -> Result<crate::types::QueryResult, String> {
     if let Some(result) = parse_sql_response(&body, start) {
         Ok(result)
-    } else if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()).filter(|h| !h.is_empty()) {
+    } else if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
+        // Treat any `_search`-shaped body as the hits result, even when empty —
+        // a 0-row match is a valid empty result, not a reason to fall back to
+        // the raw-JSON status/response view.
         let mut all_keys = Vec::<String>::new();
         let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
             .iter()
@@ -544,6 +565,11 @@ fn parse_elasticsearch_response(
                 row
             })
             .collect();
+        if all_keys.is_empty() {
+            // 0 hits → there's no doc to derive columns from; surface `_id`
+            // so the grid at least shows a column header for the empty set.
+            all_keys.push("_id".to_string());
+        }
 
         let rows: Vec<Vec<serde_json::Value>> = docs
             .iter()
@@ -711,6 +737,32 @@ fn is_elasticsearch_sql_query(input: &str) -> bool {
         .split_once(char::is_whitespace)
         .map(|(keyword, _)| keyword.eq_ignore_ascii_case("select"))
         .unwrap_or_else(|| input.trim_start().eq_ignore_ascii_case("select"))
+}
+
+async fn execute_translated_select_star(
+    client: &EsClient,
+    translated: crate::db::elasticsearch_sql::TranslatedSelectStar,
+    start: std::time::Instant,
+) -> Result<crate::types::QueryResult, String> {
+    let report_index_total = !translated.user_limited;
+    let path = format!("/{}/_search", translated.index);
+    let resp = client
+        .post(&path)
+        .json(&translated.body)
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+
+    let mut result = parse_elasticsearch_response(status, body, start)?;
+    if report_index_total {
+        if let Some(total) = index_total {
+            result.affected_rows = total;
+        }
+    }
+    Ok(result)
 }
 
 async fn execute_sql_query(

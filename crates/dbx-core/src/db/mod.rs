@@ -2,6 +2,7 @@ pub mod agent_driver;
 pub mod clickhouse_driver;
 pub mod duckdb_driver;
 pub mod elasticsearch_driver;
+pub mod elasticsearch_sql;
 pub mod file_validator;
 pub mod mongo_driver;
 pub mod mysql;

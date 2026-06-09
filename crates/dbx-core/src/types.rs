@@ -67,6 +67,10 @@ pub struct QueryResult {
     /// query paths); consumers must tolerate a shorter/empty vector.
     #[serde(default)]
     pub column_types: Vec<String>,
+    /// Sortable for each column. Parallel to `columns`. Optional and may
+    /// be shorter/empty when a driver cannot supply sortable information.
+    #[serde(default)]
+    pub column_sortables: Vec<bool>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,

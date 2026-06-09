@@ -159,6 +159,7 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
     QueryResult {
         columns,
         column_types,
+        column_sortables: vec![],
         rows,
         affected_rows: 0,
         execution_time_ms,
@@ -271,6 +272,7 @@ pub async fn execute_query_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),

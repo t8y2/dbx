@@ -303,6 +303,7 @@ pub fn duckdb_execute_with_max_rows(
         Ok(db::QueryResult {
             columns,
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -315,6 +316,7 @@ pub fn duckdb_execute_with_max_rows(
         Ok(db::QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: affected as u64,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1028,6 +1030,7 @@ fn error_query_result(message: String) -> db::QueryResult {
     db::QueryResult {
         columns: vec!["Error".to_string()],
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: vec![vec![serde_json::Value::String(message)]],
         affected_rows: 0,
         execution_time_ms: 0,
@@ -1053,6 +1056,7 @@ async fn execute_multi_sqlserver(
             all_results.push(db::QueryResult {
                 columns: vec!["Error".to_string()],
                 column_types: Vec::new(),
+                column_sortables: vec![],
                 rows: vec![vec![serde_json::Value::String(canceled_error())]],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -1086,6 +1090,7 @@ async fn execute_multi_sqlserver(
                 all_results.push(db::QueryResult {
                     columns: vec!["Error".to_string()],
                     column_types: Vec::new(),
+                    column_sortables: vec![],
                     rows: vec![vec![serde_json::Value::String(e)]],
                     affected_rows: 0,
                     execution_time_ms: 0,
@@ -1101,6 +1106,7 @@ async fn execute_multi_sqlserver(
         all_results.push(db::QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: 0,
@@ -1165,6 +1171,7 @@ pub async fn execute_statements(
     Ok(db::QueryResult {
         columns: vec![],
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1268,6 +1275,7 @@ async fn exec_tx_pg_inner(
         Ok(total_affected) => Ok(db::QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1316,6 +1324,7 @@ async fn exec_tx_mysql_inner(
     Ok(db::QueryResult {
         columns: vec![],
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1348,6 +1357,7 @@ async fn exec_tx_sqlite_inner(
             Ok(db::QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                column_sortables: vec![],
                 rows: vec![],
                 affected_rows: total_affected,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -1428,6 +1438,7 @@ async fn exec_tx_explicit_inner(
     Ok(db::QueryResult {
         columns: vec![],
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1470,6 +1481,7 @@ async fn exec_tx_none_inner(
     Ok(db::QueryResult {
         columns: vec![],
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1494,6 +1506,7 @@ mod tests {
             Ok(db::QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                column_sortables: vec![],
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -1514,6 +1527,7 @@ mod tests {
             Ok(db::QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                column_sortables: vec![],
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
@@ -1857,6 +1871,7 @@ mod tests {
         let result = db::QueryResult {
             columns: vec!["id".to_string(), "nested".to_string()],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![vec![
                 serde_json::json!(2_041_797_190_226_354_178_i64),
                 serde_json::json!([1, 2_041_797_190_226_354_178_i64]),

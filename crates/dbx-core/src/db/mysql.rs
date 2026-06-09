@@ -1448,6 +1448,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
     Ok(QueryResult {
         columns,
         column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1492,6 +1493,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     Ok(QueryResult {
         columns,
         column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1555,6 +1557,7 @@ pub async fn execute_query_on_conn_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),

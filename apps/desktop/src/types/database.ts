@@ -247,6 +247,11 @@ export interface QueryResult {
    * fallback query paths, older backends). Consumers must tolerate gaps.
    */
   column_types?: string[];
+  /**
+   * Sortable for each column. Parallel to `columns`. Optional and may
+   * be shorter/empty when a driver cannot supply sortable information.
+   */
+  column_sortables?: boolean[];
   rows: (string | number | boolean | null)[][];
   affected_rows: number;
   execution_time_ms: number;

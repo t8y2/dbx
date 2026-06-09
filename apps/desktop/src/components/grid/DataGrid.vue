@@ -381,6 +381,11 @@ function shortTypeName(t: string): string {
   return t;
 }
 
+function headerColumnSortable(actualColIdx: number): boolean {
+  const resolved = props.result.column_sortables?.[actualColIdx];
+  return resolved !== undefined ? resolved : true;
+}
+
 function typeColorClass(t: string): string {
   // Strip precision/scale suffix like (20,6)
   const base = t.replace(/\(.*\)$/, "").toLowerCase();
@@ -6757,6 +6762,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           </span>
                         </span>
                         <button
+                          v-if="headerColumnSortable(col.actualColIdx)"
                           type="button"
                           class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
                           :class="

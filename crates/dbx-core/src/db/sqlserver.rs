@@ -141,6 +141,7 @@ async fn collect_first_result_limited(
     Ok(QueryResult {
         columns,
         column_types,
+        column_sortables: vec![],
         rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -483,6 +484,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
         results.push(QueryResult {
             columns: result.columns,
             column_types: result.column_types,
+            column_sortables: vec![],
             rows: result.rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -941,6 +943,7 @@ pub async fn execute_query_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -953,6 +956,7 @@ pub async fn execute_query_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: result.rows_affected().iter().sum::<u64>(),
             execution_time_ms: start.elapsed().as_millis(),
@@ -988,6 +992,7 @@ pub async fn execute_batch_with_max_rows(
         results.push(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),

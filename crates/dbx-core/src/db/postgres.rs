@@ -686,6 +686,7 @@ async fn execute_select_prepared(
 
     Ok(QueryResult {
         columns,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -736,6 +737,7 @@ async fn execute_select_text(
 
     Ok(QueryResult {
         columns,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1432,6 +1434,7 @@ pub async fn execute_query_with_max_rows(
 
         Ok(QueryResult {
             columns: vec![],
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1518,6 +1521,7 @@ async fn execute_query_with_max_rows_inner(
 
         Ok(QueryResult {
             columns: vec![],
+            column_sortables: vec![],
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),

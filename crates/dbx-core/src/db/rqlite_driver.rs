@@ -294,6 +294,7 @@ pub async fn execute_query_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -342,6 +343,7 @@ fn query_result_from_rqlite_result(
     QueryResult {
         columns: result.columns,
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: result.values,
         affected_rows: 0,
         execution_time_ms,

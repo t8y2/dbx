@@ -638,6 +638,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
             Ok(QueryResult {
                 columns,
                 column_types: Vec::new(),
+                column_sortables: vec![],
                 rows: result_rows,
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_millis(),
@@ -650,6 +651,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
             Ok(QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                column_sortables: vec![],
                 rows: vec![],
                 affected_rows: conn.changes(),
                 execution_time_ms: start.elapsed().as_millis(),

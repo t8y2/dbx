@@ -320,7 +320,7 @@ fn trino_agent_jdbc_params(config: &ConnectionConfig, base: &str) -> String {
     if !user_params.is_empty() {
         params.push(user_params.to_string());
     }
-    if config.ssl && !url_params_has_key(&user_params, "SSL") && !url_has_query_key(base, "SSL") {
+    if config.ssl && !url_params_has_key(user_params, "SSL") && !url_has_query_key(base, "SSL") {
         params.push("SSL=true".to_string());
     }
     params.join("&")
@@ -372,7 +372,9 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::connection::{default_connect_timeout_secs, default_query_timeout_secs};
+    use crate::models::connection::{
+        default_connect_timeout_secs, default_idle_timeout_secs, default_query_timeout_secs,
+    };
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
@@ -393,7 +395,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
-            idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),

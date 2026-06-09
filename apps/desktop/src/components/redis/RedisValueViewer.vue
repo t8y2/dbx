@@ -78,6 +78,9 @@ const isResizingMemberSheet = ref(false);
 const hashTableRef = ref<HTMLElement | null>(null);
 const hashFieldWidth = ref(280);
 const isResizingHashColumns = ref(false);
+const zsetTableRef = ref<HTMLElement | null>(null);
+const zsetScoreWidth = ref(220);
+const isResizingZsetColumns = ref(false);
 type RedisValueView = "json" | "raw";
 const REDIS_JSON_WRAP_STORAGE_KEY = "dbx-redis-json-word-wrap";
 const stringValueView = ref<RedisValueView>("raw");
@@ -96,6 +99,9 @@ const memberRawJsonHtml = computed(() =>
 );
 const hashGridStyle = computed(() => ({
   gridTemplateColumns: `${hashFieldWidth.value}px minmax(12rem, 1fr) 84px`,
+}));
+const zsetGridStyle = computed(() => ({
+  gridTemplateColumns: `${zsetScoreWidth.value}px minmax(0, 1fr) 84px`,
 }));
 const selectedMemberCanEdit = computed(
   () => selectedMemberContext.value != null && canEditRedisMemberDetail(selectedMemberContext.value.kind),
@@ -116,6 +122,8 @@ let memberSheetResizeStartX = 0;
 let memberSheetResizeStartWidth = 0;
 let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
+let zsetResizeStartX = 0;
+let zsetResizeStartWidth = 0;
 
 type RedisMemberContext =
   | { kind: "list"; index: number }
@@ -491,6 +499,33 @@ function startResizeHashColumns(event: PointerEvent) {
   window.addEventListener("pointerup", stopResizeHashColumns);
 }
 
+function clampZsetScoreWidth(width: number) {
+  const containerWidth = zsetTableRef.value?.clientWidth ?? 900;
+  const min = 120;
+  const max = Math.max(min, containerWidth - 220);
+  return Math.min(max, Math.max(min, width));
+}
+
+function stopResizeZsetColumns() {
+  isResizingZsetColumns.value = false;
+  window.removeEventListener("pointermove", resizeZsetColumns);
+  window.removeEventListener("pointerup", stopResizeZsetColumns);
+}
+
+function resizeZsetColumns(event: PointerEvent) {
+  if (!isResizingZsetColumns.value) return;
+  const delta = event.clientX - zsetResizeStartX;
+  zsetScoreWidth.value = clampZsetScoreWidth(zsetResizeStartWidth + delta);
+}
+
+function startResizeZsetColumns(event: PointerEvent) {
+  isResizingZsetColumns.value = true;
+  zsetResizeStartX = event.clientX;
+  zsetResizeStartWidth = zsetScoreWidth.value;
+  window.addEventListener("pointermove", resizeZsetColumns);
+  window.addEventListener("pointerup", stopResizeZsetColumns);
+}
+
 function startEditMember() {
   memberEditValue.value = selectedMemberDetail.value.text;
   isEditingMember.value = true;
@@ -717,6 +752,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopResizeMemberSheet();
   stopResizeHashColumns();
+  stopResizeZsetColumns();
 });
 </script>
 
@@ -1090,7 +1126,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- Sorted Set -->
-      <div v-else-if="data.key_type === 'zset'" class="flex-1 flex flex-col overflow-hidden">
+      <div v-else-if="data.key_type === 'zset'" ref="zsetTableRef" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground">{{
             collectionCountLabel("members", collectionItems.length, data.total)
@@ -1102,9 +1138,15 @@ onBeforeUnmount(() => {
             ><Plus class="w-3 h-3 mr-1" />Add</Button
           >
         </div>
-        <div class="grid grid-cols-[100px_1fr_84px] border-b bg-muted/50 shrink-0">
-          <div class="px-3 py-1 text-xs font-medium text-muted-foreground border-r">Score</div>
-          <div class="px-3 py-1 text-xs font-medium text-muted-foreground">Member</div>
+        <div class="grid border-b bg-muted/50 shrink-0" :style="zsetGridStyle">
+          <div class="relative px-3 py-1 text-xs font-medium text-muted-foreground border-r select-none">
+            Score
+            <div
+              class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none"
+              @pointerdown.prevent="startResizeZsetColumns"
+            />
+          </div>
+          <div class="px-3 py-1 text-xs font-medium text-muted-foreground min-w-0">Member</div>
           <div />
         </div>
         <RecycleScroller
@@ -1118,9 +1160,9 @@ onBeforeUnmount(() => {
           <template #default="{ item: row }">
             <div
               data-redis-value-row
-              class="dbx-editor-font-family grid grid-cols-[100px_1fr_84px] border-b text-sm hover:bg-accent/50 group cursor-pointer"
+              class="dbx-editor-font-family grid border-b text-sm hover:bg-accent/50 group cursor-pointer"
               :class="{ 'bg-accent/60': isSelectedMember(String(row.value.score), row.value.member) }"
-              :style="{ height: `${REDIS_COLLECTION_ROW_HEIGHT}px` }"
+              :style="{ ...zsetGridStyle, height: `${REDIS_COLLECTION_ROW_HEIGHT}px` }"
               @click="
                 viewMember(String(row.value.score), row.value.member, {
                   kind: 'zset',
@@ -1129,8 +1171,15 @@ onBeforeUnmount(() => {
                 })
               "
             >
-              <div class="px-3 py-1.5 text-muted-foreground text-xs border-r">{{ row.value.score }}</div>
-              <div class="px-3 py-1.5 truncate">{{ row.value.member }}</div>
+              <div
+                class="px-3 py-1.5 text-muted-foreground text-xs border-r min-w-0 truncate"
+                :title="String(row.value.score)"
+              >
+                {{ row.value.score }}
+              </div>
+              <div class="px-3 py-1.5 min-w-0 truncate" :title="String(row.value.member)">
+                {{ row.value.member }}
+              </div>
               <div class="flex items-center justify-center gap-1">
                 <Button
                   variant="ghost"

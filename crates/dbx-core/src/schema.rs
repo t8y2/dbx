@@ -638,7 +638,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
-            idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            idle_timeout_secs: 60,
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),

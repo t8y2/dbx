@@ -840,11 +840,8 @@ pub async fn execute_sql_statement_with_options(
     match &result {
         Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
             let db_opt = if database.is_empty() { None } else { Some(database) };
-            let new_key = if database.is_empty() {
-                state.reconnect_pool_for_session(connection_id, db_opt, options.client_session_id.as_deref()).await?
-            } else {
-                state.reconnect_pool_for_session(connection_id, db_opt, options.client_session_id.as_deref()).await?
-            };
+            let new_key =
+                state.reconnect_pool_for_session(connection_id, db_opt, options.client_session_id.as_deref()).await?;
             do_execute(state, &new_key, mysql_dialect, Some(database), sql, schema, cancel_token, options).await
         }
         _ => result,
@@ -1732,7 +1729,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
-            idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            idle_timeout_secs: 60,
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),

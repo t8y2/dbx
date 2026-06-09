@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import {
   cancelSqlFileExecution,
   executeSqlFile,
@@ -199,7 +200,10 @@ async function loadDatabasesForConnection(id: string) {
   loadingDatabases.value = true;
   try {
     await store.ensureConnected(id);
-    const names = (await listDatabases(id)).map((db) => db.name);
+    const names = databaseOptionsForConnection(
+      (await listDatabases(id)).map((db) => db.name),
+      store.getConfig(id),
+    );
     if (token !== databaseLoadToken) return;
     databaseOptions.value = names;
     database.value = chooseDatabase(names, id);

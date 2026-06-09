@@ -29,7 +29,10 @@ export function useDatabaseOptions() {
       await connectionStore.ensureConnected(connectionId);
       if (connection.db_type === "redis") {
         const dbs = await api.redisListDatabases(connectionId);
-        databaseOptions.value[connectionId] = dbs.map((db) => String(db.db));
+        databaseOptions.value[connectionId] = databaseOptionsForConnection(
+          dbs.map((db) => String(db.db)),
+          connection,
+        );
       } else if (connection.db_type === "mongodb") {
         databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(
           await api.mongoListDatabases(connectionId),

@@ -1146,6 +1146,7 @@ export default {
     showAll: "Show all",
     showSystemDatabases: "Show system databases",
     save: "Save",
+    emptySelection: "Select at least one database, or use Show all to clear the filter.",
     loadFailed: "Failed to load databases: {message}",
   },
   tree: {

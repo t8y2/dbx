@@ -4,6 +4,7 @@ import {
   filterDatabaseNamesForConnection,
   filterVisibleDatabaseNames,
   isSystemDatabaseName,
+  canSaveVisibleDatabaseSelection,
   normalizeVisibleDatabaseSelection,
   visibleDatabaseFilterIsEnabled,
 } from "../../apps/desktop/src/lib/visibleDatabases.ts";
@@ -21,6 +22,11 @@ test("configured visible database filter keeps selected databases in source orde
 test("empty configured visible database filter hides every database", () => {
   assert.deepEqual(filterVisibleDatabaseNames(["app", "analytics"], []), []);
   assert.equal(visibleDatabaseFilterIsEnabled([]), true);
+});
+
+test("empty visible database selection cannot be saved", () => {
+  assert.equal(canSaveVisibleDatabaseSelection(["app"]), true);
+  assert.equal(canSaveVisibleDatabaseSelection([]), false);
 });
 
 test("normalizes selected database names against fresh database names", () => {

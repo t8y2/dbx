@@ -13,6 +13,7 @@ import * as api from "@/lib/api";
 import type { TransferProgress, TransferMode } from "@/lib/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { nextTransferTerminalState } from "@/lib/transferProgressState";
 import { ArrowRightLeft, Check, X, Loader2, Square, CheckSquare } from "@lucide/vue";
 
@@ -107,9 +108,10 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const names = isMongoConnection(connectionId)
+    const rawNames = isMongoConnection(connectionId)
       ? await api.mongoListDatabases(connectionId)
       : (await api.listDatabases(connectionId)).map((d) => d.name);
+    const names = databaseOptionsForConnection(rawNames, store.getConfig(connectionId));
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";

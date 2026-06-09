@@ -40,6 +40,7 @@ import {
   ArrowLeft,
   ArrowDown,
   ArrowUp,
+  CheckSquare,
   ChevronRight,
   Copy,
   ExternalLink,
@@ -50,12 +51,27 @@ import {
   KeyRound,
   Link2,
   List,
+  ListFilter,
+  Loader2,
   Pipette,
   Plus,
   Search,
   ShieldCheck,
+  Square,
   Trash2,
 } from "@lucide/vue";
+import {
+  buildDraftVisibleDatabasesConnectionId,
+  connectionCanChooseVisibleDatabases,
+  initialVisibleDatabaseSelection,
+  visibleDatabaseSelectionIsStale,
+} from "@/lib/connectionVisibleDatabases";
+import {
+  canSaveVisibleDatabaseSelection,
+  filterDatabaseNamesForConnection,
+  isSystemDatabaseName,
+  normalizeVisibleDatabaseSelection,
+} from "@/lib/visibleDatabases";
 
 type DbOption = { value: string; label: string };
 type DbCategory = { key: string; title: string; options: DbOption[] };
@@ -107,6 +123,13 @@ const isTesting = ref(false);
 const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const editingId = ref<string | null>(null);
+const showVisibleDatabasesDialog = ref(false);
+const isLoadingVisibleDatabases = ref(false);
+const visibleDatabaseNames = ref<string[]>([]);
+const visibleDatabaseSelection = ref<Set<string>>(new Set());
+const visibleDatabaseSearchText = ref("");
+const visibleDatabaseError = ref("");
+const visibleDatabaseShowSystem = ref(false);
 let testRunId = 0;
 
 const defaultForm = (): ConnectionForm => ({
@@ -142,6 +165,7 @@ const defaultForm = (): ConnectionForm => ({
   redis_sentinel_tls: false,
   redis_cluster_nodes: "",
   etcd_endpoints: "",
+  visible_databases: undefined,
 });
 
 function defaultSshTunnel(): SshTunnelConfig {
@@ -573,6 +597,7 @@ watch(
         redis_sentinel_tls: config.redis_sentinel_tls || false,
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         etcd_endpoints: config.etcd_endpoints || "",
+        visible_databases: config.visible_databases,
       };
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -950,6 +975,30 @@ const canUseTransportLayers = computed(
 const shouldShowAgentDriverInstallHint = computed(() =>
   showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile),
 );
+const canChooseVisibleDatabases = computed(() => connectionCanChooseVisibleDatabases(form.value));
+const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases));
+const visibleDatabaseSummary = computed(() => {
+  const configured = form.value.visible_databases;
+  if (!Array.isArray(configured)) return t("visibleDatabases.showAll");
+  return t("visibleDatabases.selectedCount", { selected: configured.length, total: visibleDatabaseNames.value.length });
+});
+const listedVisibleDatabaseNames = computed(() => {
+  const connection = connectionConfigSnapshotForVisibleDatabases();
+  if (visibleDatabaseShowSystem.value) return visibleDatabaseNames.value;
+  return filterDatabaseNamesForConnection(visibleDatabaseNames.value, connection);
+});
+const filteredVisibleDatabaseNames = computed(() => {
+  const query = visibleDatabaseSearchText.value.trim().toLowerCase();
+  if (!query) return listedVisibleDatabaseNames.value;
+  return listedVisibleDatabaseNames.value.filter((name) => name.toLowerCase().includes(query));
+});
+const visibleDatabaseSelectedCount = computed(() => visibleDatabaseSelection.value.size);
+const visibleDatabaseTotalCount = computed(() => listedVisibleDatabaseNames.value.length);
+const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value]));
+const visibleDatabaseHasSystemDatabases = computed(() => {
+  const connection = connectionConfigSnapshotForVisibleDatabases();
+  return visibleDatabaseNames.value.some((database) => isSystemDatabaseName(connection.db_type, database));
+});
 const testResultMessage = computed(() => {
   if (!testResult.value) return "";
   return testResult.value.ok ? t("connection.testSuccess") : testResult.value.message;
@@ -1190,7 +1239,19 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   delete legacy.proxy_port;
   delete legacy.proxy_username;
   delete legacy.proxy_password;
+  config.visible_databases =
+    Array.isArray(config.visible_databases) && config.visible_databases.length > 0
+      ? config.visible_databases
+      : undefined;
   return config as ConnectionConfig;
+}
+
+function connectionConfigSnapshotForVisibleDatabases(): ConnectionConfig {
+  return {
+    ...(form.value as ConnectionConfig),
+    id: editingId.value || "draft",
+    visible_databases: form.value.visible_databases,
+  };
 }
 
 function getUrlParam(params: string | undefined, key: string): string {
@@ -1401,6 +1462,95 @@ function resetTestState() {
   testResult.value = null;
 }
 
+function resetVisibleDatabaseDraftState() {
+  showVisibleDatabasesDialog.value = false;
+  isLoadingVisibleDatabases.value = false;
+  visibleDatabaseNames.value = [];
+  visibleDatabaseSelection.value = new Set();
+  visibleDatabaseSearchText.value = "";
+  visibleDatabaseError.value = "";
+  visibleDatabaseShowSystem.value = false;
+}
+
+async function openVisibleDatabasesPicker() {
+  if (!ensureConnectionHostResolvedFromUrl()) return;
+  if (!canChooseVisibleDatabases.value || isLoadingVisibleDatabases.value) return;
+
+  isLoadingVisibleDatabases.value = true;
+  visibleDatabaseError.value = "";
+  visibleDatabaseSearchText.value = "";
+  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  const draftConfig = {
+    ...connectionConfigForSubmit(draftId),
+    id: draftId,
+    one_time: true,
+  };
+
+  try {
+    await api.connectDb(draftConfig);
+    const names = await loadVisibleDatabaseNames(draftId, draftConfig);
+    visibleDatabaseNames.value = names;
+    const initialSelection = initialVisibleDatabaseSelection(names, form.value.visible_databases, draftConfig);
+    visibleDatabaseSelection.value = new Set(initialSelection);
+    visibleDatabaseShowSystem.value = initialSelection.some((database) =>
+      isSystemDatabaseName(draftConfig.db_type, database),
+    );
+    showVisibleDatabasesDialog.value = true;
+  } catch (e: any) {
+    visibleDatabaseNames.value = [];
+    visibleDatabaseSelection.value = new Set();
+    visibleDatabaseError.value = mongodbAuthFailureHint(String(e?.message || e));
+    testResult.value = { ok: false, message: visibleDatabaseError.value };
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+    isLoadingVisibleDatabases.value = false;
+  }
+}
+
+async function loadVisibleDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
+  if (config.db_type === "oracle" || config.db_type === "dameng") {
+    return api.listSchemas(connectionId, config.database || "");
+  }
+  if (config.db_type === "redis") {
+    return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
+  }
+  if (config.db_type === "mongodb") {
+    return api.mongoListDatabases(connectionId);
+  }
+  return (await api.listDatabases(connectionId)).map((database) => database.name);
+}
+
+function toggleVisibleDatabase(database: string) {
+  const next = new Set(visibleDatabaseSelection.value);
+  if (next.has(database)) next.delete(database);
+  else next.add(database);
+  visibleDatabaseSelection.value = next;
+}
+
+function selectAllVisibleDatabases() {
+  visibleDatabaseSelection.value = new Set(listedVisibleDatabaseNames.value);
+}
+
+function clearVisibleDatabaseSelection() {
+  visibleDatabaseSelection.value = new Set();
+}
+
+function showAllVisibleDatabases() {
+  form.value.visible_databases = undefined;
+  visibleDatabaseSelection.value = new Set();
+  visibleDatabaseNames.value = [];
+  showVisibleDatabasesDialog.value = false;
+}
+
+function saveVisibleDatabaseSelection() {
+  if (!visibleDatabaseCanSave.value) return;
+  form.value.visible_databases = normalizeVisibleDatabaseSelection(
+    [...visibleDatabaseSelection.value],
+    visibleDatabaseNames.value,
+  );
+  showVisibleDatabasesDialog.value = false;
+}
+
 function applyConnectionUrl() {
   if (applyConnectionUrlToForm(connectionUrlInput.value)) {
     toast(t("connection.parseConnectionUrlApplied"), 2000);
@@ -1433,6 +1583,7 @@ function resetForm() {
   dbPickerView.value = "icon";
   dbSearchQuery.value = "";
   configTab.value = "connection";
+  resetVisibleDatabaseDraftState();
   resetTestState();
 }
 
@@ -1534,6 +1685,25 @@ watch(
 
 watch([() => form.value.db_type, () => form.value.username], () => {
   if (isOracleSysUser(form.value)) form.value.sysdba = true;
+});
+
+watch(
+  () => connectionConfigSnapshotForVisibleDatabases(),
+  (current, previous) => {
+    if (!previous || !form.value.visible_databases?.length) return;
+    if (!visibleDatabaseSelectionIsStale(previous, current)) return;
+    form.value.visible_databases = undefined;
+    visibleDatabaseNames.value = [];
+    visibleDatabaseSelection.value = new Set();
+  },
+);
+
+watch(visibleDatabaseShowSystem, (show) => {
+  if (show) return;
+  const connection = connectionConfigSnapshotForVisibleDatabases();
+  visibleDatabaseSelection.value = new Set(
+    [...visibleDatabaseSelection.value].filter((database) => !isSystemDatabaseName(connection.db_type, database)),
+  );
 });
 
 watch(canUseTransportLayers, (value) => {
@@ -3447,6 +3617,17 @@ function openExternalUrl(url: string) {
               </Button>
             </template>
           </div>
+          <Button
+            v-if="canChooseVisibleDatabases"
+            variant="outline"
+            class="shrink-0"
+            :disabled="isTesting || isSaving || isLoadingVisibleDatabases || !hasRequiredConnectionTarget"
+            @click="openVisibleDatabasesPicker"
+          >
+            <Loader2 v-if="isLoadingVisibleDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
+            <ListFilter v-else class="mr-1.5 h-4 w-4" />
+            {{ hasVisibleDatabaseFilter ? visibleDatabaseSummary : t("contextMenu.selectVisibleDatabases") }}
+          </Button>
           <Button variant="outline" class="shrink-0" :disabled="isTesting || isSaving" @click="testConnection">
             {{ isTesting ? t("connection.testing") : t("connection.test") }}
           </Button>
@@ -3461,6 +3642,119 @@ function openExternalUrl(url: string) {
           </Button>
         </DialogFooter>
       </template>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showVisibleDatabasesDialog">
+    <DialogContent class="sm:max-w-[460px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("visibleDatabases.title") }}</DialogTitle>
+        <p class="text-sm text-muted-foreground">
+          {{ t("visibleDatabases.description", { connection: form.name || selectedProfile().label }) }}
+        </p>
+      </DialogHeader>
+
+      <div class="flex items-center gap-2 rounded-md border bg-background px-2">
+        <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
+        <Input
+          v-model="visibleDatabaseSearchText"
+          :placeholder="t('visibleDatabases.searchPlaceholder')"
+          class="h-8 border-0 px-0 shadow-none focus-visible:ring-0"
+          :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError"
+        />
+      </div>
+
+      <div class="flex items-center justify-between text-xs text-muted-foreground">
+        <span>
+          {{
+            t("visibleDatabases.selectedCount", {
+              selected: visibleDatabaseSelectedCount,
+              total: visibleDatabaseTotalCount,
+            })
+          }}
+        </span>
+        <div class="flex items-center gap-2">
+          <button
+            class="hover:text-foreground disabled:opacity-50"
+            :disabled="isLoadingVisibleDatabases"
+            @click="selectAllVisibleDatabases"
+          >
+            {{ t("visibleDatabases.selectAll") }}
+          </button>
+          <button
+            class="hover:text-foreground disabled:opacity-50"
+            :disabled="isLoadingVisibleDatabases"
+            @click="clearVisibleDatabaseSelection"
+          >
+            {{ t("visibleDatabases.clear") }}
+          </button>
+          <button
+            class="hover:text-foreground disabled:opacity-50"
+            :disabled="isLoadingVisibleDatabases"
+            @click="showAllVisibleDatabases"
+          >
+            {{ t("visibleDatabases.showAll") }}
+          </button>
+        </div>
+      </div>
+      <p
+        v-if="!isLoadingVisibleDatabases && !visibleDatabaseError && !visibleDatabaseCanSave"
+        class="text-xs text-destructive"
+      >
+        {{ t("visibleDatabases.emptySelection") }}
+      </p>
+
+      <label
+        v-if="visibleDatabaseHasSystemDatabases"
+        class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground"
+      >
+        <input
+          v-model="visibleDatabaseShowSystem"
+          type="checkbox"
+          class="h-3.5 w-3.5 accent-primary"
+          :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError"
+        />
+        <span>{{ t("visibleDatabases.showSystemDatabases") }}</span>
+      </label>
+
+      <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
+        <div
+          v-if="isLoadingVisibleDatabases"
+          class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground"
+        >
+          <Loader2 class="h-4 w-4 animate-spin" />
+          {{ t("common.loading") }}
+        </div>
+        <div v-else-if="visibleDatabaseError" class="p-3 text-sm text-destructive">
+          {{ t("visibleDatabases.loadFailed", { message: visibleDatabaseError }) }}
+        </div>
+        <div v-else-if="!filteredVisibleDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
+          {{ t("grid.noSearchResults") }}
+        </div>
+        <template v-else>
+          <button
+            v-for="database in filteredVisibleDatabaseNames"
+            :key="database"
+            type="button"
+            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+            @click="toggleVisibleDatabase(database)"
+          >
+            <CheckSquare v-if="visibleDatabaseSelection.has(database)" class="h-4 w-4 shrink-0 text-primary" />
+            <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span class="truncate">{{ database }}</span>
+          </button>
+        </template>
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" @click="showVisibleDatabasesDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button
+          :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError || !visibleDatabaseCanSave"
+          @click="saveVisibleDatabaseSelection"
+        >
+          {{ t("visibleDatabases.save") }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

@@ -1067,6 +1067,7 @@ export default {
     showAll: "顯示全部",
     showSystemDatabases: "顯示系統庫",
     save: "儲存",
+    emptySelection: "至少選擇一個資料庫，或使用「顯示全部」清除篩選。",
     loadFailed: "載入資料庫失敗：{message}",
   },
   tree: {

@@ -749,6 +749,7 @@ export const useConnectionStore = defineStore("connection", () => {
     };
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    invalidateCompletionCache(connectionId);
     rebuildTreeNodes();
   }
 

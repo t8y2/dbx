@@ -68,6 +68,10 @@ export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | unde
   return Array.isArray(visibleDatabases);
 }
 
+export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
+  return selectedNames.length > 0;
+}
+
 export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined): string[] {
   if (!visibleDatabaseFilterIsEnabled(visibleDatabases)) return databaseNames;
   const visible = new Set(visibleDatabases);

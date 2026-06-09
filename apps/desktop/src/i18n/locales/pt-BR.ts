@@ -1131,6 +1131,7 @@ export default {
     showAll: "Mostrar todos",
     showSystemDatabases: "Mostrar bancos de dados do sistema",
     save: "Salvar",
+    emptySelection: "Selecione pelo menos um banco de dados, ou use Mostrar todos para limpar o filtro.",
     loadFailed: "Falha ao carregar bancos de dados: {message}",
   },
   tree: {

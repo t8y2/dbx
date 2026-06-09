@@ -2556,7 +2556,8 @@ const nodeIconClass = computed(() => {
 });
 const canConfigureVisibleDatabases = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;
-  return connectionStore.getConfig(props.node.connectionId)?.db_type !== "elasticsearch";
+  const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
+  return dbType !== "elasticsearch" && dbType !== "etcd";
 });
 const canCopyFinalProxyPort = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;

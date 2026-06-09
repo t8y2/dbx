@@ -1120,6 +1120,7 @@ export default {
     showAll: "显示全部",
     showSystemDatabases: "显示系统库",
     save: "保存",
+    emptySelection: "至少选择一个数据库，或使用“显示全部”清除过滤。",
     loadFailed: "加载数据库失败：{message}",
   },
   tree: {

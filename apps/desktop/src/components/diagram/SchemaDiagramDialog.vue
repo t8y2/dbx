@@ -10,6 +10,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import {
   buildDiagramRelationships,
   filterDiagramTables,
@@ -372,7 +373,10 @@ async function loadDatabases(id: string) {
   try {
     await store.ensureConnected(id);
     const dbs = await api.listDatabases(id);
-    databases.value = dbs.map((db) => db.name);
+    databases.value = databaseOptionsForConnection(
+      dbs.map((db) => db.name),
+      store.getConfig(id),
+    );
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {

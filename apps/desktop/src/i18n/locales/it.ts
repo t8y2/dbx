@@ -1136,6 +1136,7 @@ export default {
     showAll: "Mostra tutto",
     showSystemDatabases: "Mostra database di sistema",
     save: "Salva",
+    emptySelection: "Seleziona almeno un database, oppure usa Mostra tutto per rimuovere il filtro.",
     loadFailed: "Impossibile caricare i database: {message}",
   },
   tree: {

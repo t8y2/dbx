@@ -610,6 +610,9 @@ pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: Strin
     }
     drop(conns);
     state.reset_connection_transport(&connection_id).await;
+    if connection_id.starts_with("__visible_draft_") {
+        state.configs.write().await.remove(&connection_id);
+    }
     Ok(())
 }
 

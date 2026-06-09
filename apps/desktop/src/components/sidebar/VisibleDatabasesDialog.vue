@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
 import {
+  canSaveVisibleDatabaseSelection,
   filterDatabaseNamesForConnection,
   isSystemDatabaseName,
   normalizeVisibleDatabaseSelection,
@@ -45,6 +46,7 @@ const filteredDatabaseNames = computed(() => {
 });
 const selectedCount = computed(() => selectedNames.value.size);
 const totalCount = computed(() => listedDatabaseNames.value.length);
+const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value]));
 const hasSystemDatabases = computed(() =>
   databaseNames.value.some((database) => isSystemDatabaseName(connection.value?.db_type, database)),
 );
@@ -126,6 +128,7 @@ async function showAllDatabases() {
 }
 
 async function saveSelection() {
+  if (!canSaveSelection.value) return;
   await connectionStore.setVisibleDatabases(props.connectionId, [...selectedNames.value]);
   emit("update:open", false);
 }
@@ -169,6 +172,9 @@ async function saveSelection() {
           </button>
         </div>
       </div>
+      <p v-if="!isLoading && !errorMessage && !canSaveSelection" class="text-xs text-destructive">
+        {{ t("visibleDatabases.emptySelection") }}
+      </p>
 
       <label
         v-if="hasSystemDatabases"
@@ -211,7 +217,7 @@ async function saveSelection() {
 
       <DialogFooter>
         <Button variant="outline" @click="emit('update:open', false)">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="isLoading || !!errorMessage" @click="saveSelection">
+        <Button :disabled="isLoading || !!errorMessage || !canSaveSelection" @click="saveSelection">
           {{ t("visibleDatabases.save") }}
         </Button>
       </DialogFooter>

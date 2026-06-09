@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { copyToClipboard } from "@/lib/clipboard";
 import type {
@@ -375,7 +376,10 @@ async function loadSchemas(side: "source" | "target", preferredSchema = "") {
 async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   await store.ensureConnected(connectionId);
-  const names = (await api.listDatabases(connectionId)).map((database) => database.name);
+  const names = databaseOptionsForConnection(
+    (await api.listDatabases(connectionId)).map((database) => database.name),
+    store.getConfig(connectionId),
+  );
   if (side === "source") {
     sourceDatabases.value = names;
     sourceDatabase.value = names.length === 1 ? names[0] : "";

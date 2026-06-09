@@ -1004,6 +1004,7 @@ export default {
     showAll: "Mostrar todo",
     showSystemDatabases: "Mostrar bases de datos del sistema",
     save: "Guardar",
+    emptySelection: "Selecciona al menos una base de datos, o usa Mostrar todo para quitar el filtro.",
     loadFailed: "No se pudieron cargar las bases de datos: {message}",
   },
   tree: {

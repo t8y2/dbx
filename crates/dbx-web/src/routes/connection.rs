@@ -112,6 +112,9 @@ pub async fn disconnect_db(
     drop(connections);
 
     app.reset_connection_transport(&body.connection_id).await;
+    if body.connection_id.starts_with("__visible_draft_") {
+        app.configs.write().await.remove(&body.connection_id);
+    }
 
     Ok(Json(()))
 }
@@ -286,6 +289,28 @@ mod tests {
 
         let configs = state.app.configs.read().await;
         assert!(configs.contains_key("conn"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disconnect_db_removes_visible_database_draft_config() {
+        let (state, dir) = test_web_state().await;
+        let conn_path = dir.join("draft.db");
+        let draft_id = "__visible_draft_test";
+        std::fs::File::create(&conn_path).unwrap();
+
+        {
+            let mut configs = state.app.configs.write().await;
+            configs.insert(draft_id.to_string(), sqlite_config(draft_id, &conn_path.to_string_lossy()));
+        }
+
+        let result =
+            disconnect_db(State(state.clone()), Json(DisconnectRequest { connection_id: draft_id.to_string() })).await;
+        assert!(result.is_ok());
+
+        let configs = state.app.configs.read().await;
+        assert!(!configs.contains_key(draft_id));
 
         let _ = std::fs::remove_dir_all(dir);
     }

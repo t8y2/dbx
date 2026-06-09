@@ -10,6 +10,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import type { ExportProgress } from "@/lib/api";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { generateDatabaseExportId } from "@/lib/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -93,7 +94,10 @@ async function loadDatabases(connId: string) {
   try {
     await store.ensureConnected(connId);
     const dbs = await api.listDatabases(connId);
-    const names = dbs.map((d) => d.name);
+    const names = databaseOptionsForConnection(
+      dbs.map((d) => d.name),
+      store.getConfig(connId),
+    );
     databases.value = names;
     database.value = names.length === 1 ? names[0] : "";
     schemas.value = [];

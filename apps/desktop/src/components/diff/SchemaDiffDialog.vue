@@ -10,6 +10,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { TableDiff, TableSchemaDetail } from "@/lib/schemaDiff";
 import type { TableInfo } from "@/types/database";
@@ -110,7 +111,10 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
   try {
     await store.ensureConnected(connectionId);
     const dbs = await api.listDatabases(connectionId);
-    const names = dbs.map((d) => d.name);
+    const names = databaseOptionsForConnection(
+      dbs.map((d) => d.name),
+      store.getConfig(connectionId),
+    );
     if (side === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";

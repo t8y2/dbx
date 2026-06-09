@@ -205,6 +205,10 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
   return false;
 }
 
+function isTidbCloudHost(host: string): boolean {
+  return host.toLowerCase().endsWith(".tidbcloud.com");
+}
+
 export function connectionProfileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
   if ((scheme === "http" || scheme === "https") && preferredProfile) {
     return HTTP_SELECTED_PROFILES[preferredProfile];
@@ -433,7 +437,11 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
     database: databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
-    ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams),
+    ssl:
+      scheme === "rediss" ||
+      scheme === "https" ||
+      urlParamsRequireTls(profile.type, effectiveUrlParams) ||
+      (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
   };
 }
 

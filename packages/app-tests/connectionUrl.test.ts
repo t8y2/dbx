@@ -50,6 +50,15 @@ test("parses mysql TLS URL params into the SSL switch state", () => {
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?require_ssl=true").ssl, true);
 });
 
+test("parses TiDB Cloud MySQL URLs as TLS connections", () => {
+  const parsed = parseConnectionUrl(
+    "mysql://root:secret@gateway01.us-west-2.prod.aws.tidbcloud.com:4000/test",
+  );
+
+  assert.equal(parsed.dbType, "mysql");
+  assert.equal(parsed.ssl, true);
+});
+
 test("parses MySQL JDBC user and password URL params as credentials", () => {
   const parsed = parseConnectionUrl(
     "jdbc:mysql://127.0.0.1:1234/example?user=admin&password=pwd&useUnicode=true&characterEncoding=UTF8&useSSL=false",

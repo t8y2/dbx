@@ -921,7 +921,9 @@ impl ConnectionConfig {
             return normalize_bare_mysql_url_params(value);
         }
         match self.db_type {
-            DatabaseType::Mysql => normalize_mysql_url_params(value, self.ssl, self.ca_cert_path.trim().is_empty()),
+            DatabaseType::Mysql => {
+                normalize_mysql_url_params(value, self.mysql_uses_tls(), self.ca_cert_path.trim().is_empty())
+            }
             DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Databend => {
                 normalize_bare_mysql_url_params(value)
             }
@@ -933,6 +935,10 @@ impl ConnectionConfig {
 
     pub fn clickhouse_uses_tls(&self) -> bool {
         self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+    }
+
+    fn mysql_uses_tls(&self) -> bool {
+        self.ssl || self.host.to_ascii_lowercase().ends_with(".tidbcloud.com")
     }
 
     fn redis_tls_insecure_fragment(&self) -> &'static str {
@@ -987,10 +993,12 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
 
     if force_tls {
-        parts.retain(|part| !url_param_key_is(part, "ssl-mode") && !url_param_key_is(part, "sslmode"));
-        if !parts.iter().any(|part| url_param_key_is(part, "require_ssl")) {
-            parts.insert(0, "require_ssl=true".to_string());
-        }
+        parts.retain(|part| {
+            !url_param_key_is(part, "ssl-mode")
+                && !url_param_key_is(part, "sslmode")
+                && !url_param_key_is(part, "require_ssl")
+        });
+        parts.insert(0, "require_ssl=true".to_string());
         if accept_invalid_certs && !parts.iter().any(|part| url_param_key_is(part, "verify_ca")) {
             parts.push("verify_ca=false".to_string());
         }
@@ -1664,6 +1672,19 @@ mod tests {
         assert_eq!(
             config.connection_url(),
             "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_identity=false&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn tidb_cloud_mysql_url_requires_tls() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.host = "gateway01.us-west-2.prod.aws.tidbcloud.com".to_string();
+        config.port = 4000;
+        config.url_params = Some("require_ssl=false&charset=utf8mb4".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@gateway01.us-west-2.prod.aws.tidbcloud.com:4000/test?require_ssl=true&verify_ca=false&verify_identity=false&charset=utf8mb4"
         );
     }
 

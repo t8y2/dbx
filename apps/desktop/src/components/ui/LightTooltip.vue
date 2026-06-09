@@ -8,12 +8,14 @@ const props = withDefaults(
     side?: "top" | "right" | "bottom" | "left";
     sideOffset?: number;
     delay?: number;
+    openOnFocus?: boolean;
   }>(),
   {
     disabled: false,
     side: "top",
     sideOffset: 8,
     delay: 300,
+    openOnFocus: true,
   },
 );
 
@@ -147,6 +149,11 @@ function scheduleOpen() {
   timer = setTimeout(open, props.delay);
 }
 
+function scheduleFocusOpen() {
+  if (!props.openOnFocus) return;
+  scheduleOpen();
+}
+
 onBeforeUnmount(close);
 
 watch(
@@ -164,7 +171,7 @@ watch(
     class="contents"
     @mouseenter="scheduleOpen"
     @mouseleave="close"
-    @focusin="scheduleOpen"
+    @focusin="scheduleFocusOpen"
     @focusout="close"
   >
     <slot />

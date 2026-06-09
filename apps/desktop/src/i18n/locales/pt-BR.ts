@@ -631,6 +631,11 @@ export default {
     copyAlterSqlFailed: "Falha ao copiar: {message}",
     copySqlCondition: "Copiar Condição SQL",
     transpose: "Transpor Linha",
+    transposeMultiRowToggle: "Várias linhas",
+    transposeSingleRow: "Linha atual",
+    transposeMultiRow: "Várias linhas",
+    transposeMultiRowHint:
+      "Quando ativado, a visualização transposta mostra várias linhas. Quando desativado, mostra apenas a linha atual.",
     rowsPerPageShort: " linhas",
     columnDetails: "Detalhes da Coluna",
     tableInfo: "Informações da Tabela",

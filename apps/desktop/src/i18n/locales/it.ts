@@ -632,6 +632,11 @@ export default {
     copyAlterSqlFailed: "Copia non riuscita: {message}",
     copySqlCondition: "Copia Condizione SQL",
     transpose: "Traspone Riga",
+    transposeMultiRowToggle: "Più righe",
+    transposeSingleRow: "Riga corrente",
+    transposeMultiRow: "Più righe",
+    transposeMultiRowHint:
+      "Quando è attiva, la vista trasposta mostra più righe. Quando è disattiva, mostra solo la riga corrente.",
     rowsPerPageShort: " righe",
     columnDetails: "Dettagli Colonna",
     tableInfo: "Informazioni Tabella",

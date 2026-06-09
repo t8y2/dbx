@@ -23,6 +23,8 @@ import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
@@ -81,6 +83,8 @@ type DataGridHandle = {
   toggleAllNullColumns: () => void;
   showDdl: boolean;
   toggleDdl: () => void;
+  multiRowTranspose: boolean;
+  setMultiRowTranspose: (value: boolean) => void;
 };
 
 type SearchableBrowserHandle = {
@@ -864,7 +868,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 variant="ghost"
                 size="icon"
                 class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                :class="{ 'bg-accent text-foreground': dataGridRef?.nullColumnsHidden }"
+                :class="{
+                  'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose,
+                }"
                 :title="t('grid.viewOptions')"
                 :aria-label="t('grid.viewOptions')"
               >
@@ -880,6 +886,28 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               <div class="border-b bg-muted/40 px-3 py-2">
                 <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
               </div>
+              <LightTooltip
+                :text="t('grid.transposeMultiRowHint')"
+                side="left"
+                :side-offset="6"
+                :delay="0"
+                :open-on-focus="false"
+              >
+                <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
+                  <span class="min-w-0 flex items-center gap-1.5 font-medium">
+                    {{ t("grid.transposeMultiRowToggle") }}
+                    <span class="text-muted-foreground">
+                      {{ dataGridRef?.multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
+                    </span>
+                  </span>
+                  <Switch
+                    size="sm"
+                    :model-value="!!dataGridRef?.multiRowTranspose"
+                    :aria-label="t('grid.transposeMultiRow')"
+                    @update:model-value="(value: boolean) => dataGridRef?.setMultiRowTranspose(value)"
+                  />
+                </label>
+              </LightTooltip>
               <label
                 class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent"
                 :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }"

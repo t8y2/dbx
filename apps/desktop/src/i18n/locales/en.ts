@@ -654,6 +654,11 @@ export default {
     copyAlterSqlFailed: "Copy failed: {message}",
     copySqlCondition: "Copy SQL Condition",
     transpose: "Transpose Row",
+    transposeMultiRowToggle: "Multi-row",
+    transposeSingleRow: "Current row",
+    transposeMultiRow: "Multi-row",
+    transposeMultiRowHint:
+      "When enabled, transpose view shows multiple rows. When disabled, it only shows the current row.",
     rowsPerPageShort: " rows",
     columnDetails: "Column Details",
     tableInfo: "Table Info",

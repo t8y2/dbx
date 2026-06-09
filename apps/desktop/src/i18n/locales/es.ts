@@ -588,6 +588,11 @@ export default {
     copyColumnName: "Copiar nombre de columna",
     copySqlCondition: "Copiar condición SQL",
     transpose: "Transponer fila",
+    transposeMultiRowToggle: "Varias filas",
+    transposeSingleRow: "Fila actual",
+    transposeMultiRow: "Varias filas",
+    transposeMultiRowHint:
+      "Cuando está activado, la vista transpuesta muestra varias filas. Cuando está desactivado, solo muestra la fila actual.",
     rowsPerPageShort: " filas",
     columnDetails: "Detalles de columna",
     tableInfoSearch: "Buscar...",

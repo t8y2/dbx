@@ -105,6 +105,7 @@ import {
   nextKeyboardTransposeState,
   nextTransposeState,
   nextTransposeStateForRecordCount,
+  transposeRecordIndexesForMode,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
@@ -456,6 +457,7 @@ const sideGeometryCanvas = ref<HTMLCanvasElement | null>(null);
 const dialogGeometryCanvas = ref<HTMLCanvasElement | null>(null);
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
+const multiRowTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
 const transposeScrollRef = ref<HTMLElement | { $el?: HTMLElement }>();
 const transposeScrollLeft = ref(0);
@@ -4814,22 +4816,37 @@ const visibleTransposeRecordIndexes = computed(() => {
   const window = transposeRecordWindow.value;
   return Array.from({ length: window.end - window.start }, (_, offset) => window.start + offset);
 });
+const activeTransposeRecordIndexes = computed(() =>
+  transposeRecordIndexesForMode({
+    multiRow: multiRowTranspose.value,
+    activeRecordIndex: transposeRowIndex.value,
+    totalRecords: displayRowCount.value,
+    visibleRecordIndexes: visibleTransposeRecordIndexes.value,
+  }),
+);
+const transposeBeforeSpacerWidth = computed(() =>
+  multiRowTranspose.value ? transposeRecordWindow.value.beforeWidth : 0,
+);
+const transposeAfterSpacerWidth = computed(() =>
+  multiRowTranspose.value ? transposeRecordWindow.value.afterWidth : 0,
+);
 const transposeRows = computed(() => {
   return buildVisibleTransposeRows({
     columns: visibleColumns.value,
     records: displayRowRefs.value.map((_, index) => displayItemAt(index)?.data ?? []),
-    recordIndexes: visibleTransposeRecordIndexes.value,
+    recordIndexes: activeTransposeRecordIndexes.value,
     valueIndexes: visibleColumnIndexes.value,
     typeByColumn: columnTypeMap.value,
     displayValue: (value, _column, index) => formatCellCached(value, visibleColumnIndexes.value[index]),
   });
 });
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
-const transposeTotalWidth = computed(
-  () =>
-    transposePinnedWidth.value +
-    Array.from({ length: displayRowCount.value }, (_, i) => getTransposeRecordWidth(i)).reduce((sum, w) => sum + w, 0),
-);
+const transposeTotalWidth = computed(() => {
+  const recordIndexes = multiRowTranspose.value
+    ? Array.from({ length: displayRowCount.value }, (_, i) => i)
+    : activeTransposeRecordIndexes.value;
+  return transposePinnedWidth.value + recordIndexes.reduce((sum, i) => sum + getTransposeRecordWidth(i), 0);
+});
 
 function transposeScrollElement(): HTMLElement | undefined {
   const raw = transposeScrollRef.value;
@@ -4864,6 +4881,26 @@ function scrollTransposeRecordIntoView(rowIndex: number) {
     });
     updateTransposeViewport();
   });
+}
+
+function setMultiRowTranspose(value: boolean) {
+  multiRowTranspose.value = value;
+  if (!showTranspose.value) return;
+  nextTick(updateTransposeViewport);
+  if (value && transposeRowIndex.value !== null) {
+    scrollTransposeRecordIntoView(transposeRowIndex.value);
+  } else {
+    nextTick(() => {
+      const el = transposeScrollElement();
+      if (!el) return;
+      el.scrollLeft = 0;
+      updateTransposeViewport();
+    });
+  }
+}
+
+function toggleMultiRowTranspose() {
+  setMultiRowTranspose(!multiRowTranspose.value);
 }
 
 function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: number | null }) {
@@ -5602,6 +5639,9 @@ defineExpose({
   toggleDdl: toggleTableInfo,
   showTableInfo,
   toggleTableInfo,
+  multiRowTranspose,
+  setMultiRowTranspose,
+  toggleMultiRowTranspose,
   focusSearch,
   visibleColumnCount,
   displayableColumnCount,
@@ -6396,6 +6436,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <span class="text-xs text-muted-foreground">
                   {{ t("grid.rowNumber") }} {{ (transposeRowIndex ?? 0) + 1 }}
                 </span>
+                <span
+                  class="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                >
+                  {{ multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
+                </span>
                 <span class="flex-1" />
                 <Button
                   variant="ghost"
@@ -6448,9 +6493,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @mousedown.stop="onTransposePinnedResizeStart"
                       />
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.beforeWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
                     <div
-                      v-for="recordIndex in visibleTransposeRecordIndexes"
+                      v-for="recordIndex in activeTransposeRecordIndexes"
                       :key="`transpose-head-${recordIndex}`"
                       class="shrink-0 border-r border-border px-2 py-1.5 text-center tabular-nums relative"
                       :class="{
@@ -6474,7 +6519,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @dblclick.stop="autoFitTransposeRecord(recordIndex)"
                       />
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.afterWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                   </div>
                 </template>
                 <template #default="{ item }">
@@ -6489,7 +6534,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     >
                       {{ item.column }}
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.beforeWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
                     <div
                       v-for="cell in item.values"
                       :key="`${item.id}:${cell.recordIndex}`"
@@ -6607,7 +6652,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </div>
                       </template>
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.afterWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                   </div>
                 </template>
               </RecycleScroller>

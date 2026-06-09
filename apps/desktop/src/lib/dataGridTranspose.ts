@@ -92,6 +92,13 @@ export interface TransposeScrollLeftOptions {
   recordWidth: number;
 }
 
+export interface TransposeRecordIndexesForModeOptions {
+  multiRow: boolean;
+  activeRecordIndex: number | null;
+  totalRecords: number;
+  visibleRecordIndexes: number[];
+}
+
 export function nextTransposeState(
   showTranspose: boolean,
   transposeRowIndex: number | null,
@@ -199,6 +206,13 @@ export function visibleTransposeRecordWindow(options: TransposeRecordWindowOptio
     beforeWidth: start * options.recordWidth,
     afterWidth: Math.max(0, (options.totalRecords - end) * options.recordWidth),
   };
+}
+
+export function transposeRecordIndexesForMode(options: TransposeRecordIndexesForModeOptions): number[] {
+  if (options.totalRecords <= 0) return [];
+  if (options.multiRow) return options.visibleRecordIndexes;
+  const requested = options.activeRecordIndex ?? 0;
+  return [Math.max(0, Math.min(options.totalRecords - 1, requested))];
 }
 
 export function transposeAnchorRowIndex(options: TransposeAnchorOptions): number {

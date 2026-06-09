@@ -54,7 +54,12 @@ function close() {
   show.value = false;
 }
 
-function onClickOutside(e: MouseEvent) {
+function onPointerDownOutside(e: PointerEvent) {
+  // Only respond to primary (left) button presses. This avoids a macOS
+  // issue where Ctrl+right-click generates a synthetic click event on
+  // mouseup. By using pointerdown (which fires on press, before
+  // contextmenu) instead of click, we never see that synthetic event.
+  if (e.button !== 0) return;
   const target = e.target as Node;
   const inMenu = menuRef.value?.contains(target);
   const inSub = subRef.value?.contains(target);
@@ -78,13 +83,13 @@ function onResize() {
 watch(show, (val) => {
   if (val) {
     openMenus.add(close);
-    document.addEventListener("click", onClickOutside, true);
+    document.addEventListener("pointerdown", onPointerDownOutside, true);
     document.addEventListener("keydown", onKeydown);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
   } else {
     openMenus.delete(close);
-    document.removeEventListener("click", onClickOutside, true);
+    document.removeEventListener("pointerdown", onPointerDownOutside, true);
     document.removeEventListener("keydown", onKeydown);
     document.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", onResize);
@@ -229,7 +234,7 @@ function shortcutKeys(shortcut?: string): string[] {
 
 onBeforeUnmount(() => {
   openMenus.delete(close);
-  document.removeEventListener("click", onClickOutside, true);
+  document.removeEventListener("pointerdown", onPointerDownOutside, true);
   document.removeEventListener("keydown", onKeydown);
   document.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", onResize);

@@ -12,6 +12,8 @@ import {
   type Ref,
 } from "vue";
 import * as api from "@/lib/api";
+import type { CellValue } from "@/lib/cellValue";
+import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
 import { normalizeDataGridSaveError } from "@/lib/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/gridRowStatus";
 import { supportsDataGridTransaction } from "@/lib/tableEditing";
@@ -19,8 +21,6 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/tableEditing";
-
-type CellValue = string | number | boolean | null;
 
 interface RowItem {
   id: number;
@@ -378,40 +378,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Cell value coercion ---
-  function isNull(value: unknown): boolean {
-    return value === null;
+  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+    return coerceDataGridCellValue({
+      value,
+      oldValue,
+      databaseType: databaseType.value,
+      columnInfo: tableColumnForGridColumn(columnIndex),
+    }) as CellValue;
   }
 
-  function coerceCellValue(value: string, oldVal: CellValue | undefined): CellValue {
-    if (value.toUpperCase() === "NULL") return null;
-    if (value === "" && isNull(oldVal)) return null;
-    if (typeof oldVal === "number") {
-      const num = Number(value);
-      if (!Number.isNaN(num)) return num;
-    }
-    if (typeof oldVal === "boolean") {
-      return value === "true" || value === "1";
-    }
-    return normalizeSmartQuotedJsonInput(value);
-  }
-
-  function normalizeSmartQuotedJsonInput(value: string): string {
-    if (!/[“”]/.test(value)) return value;
-    const trimmed = value.trim();
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
-    try {
-      JSON.parse(value);
-      return value;
-    } catch {
-      // macOS smart punctuation can turn JSON delimiters into Chinese-style quotes.
-    }
-    const normalized = value.replace(/[“”]/g, '"');
-    try {
-      JSON.parse(normalized);
-      return normalized;
-    } catch {
-      return value;
-    }
+  function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
+    const columnName = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
+    if (!columnName) return undefined;
+    return tableMeta.value?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
   }
 
   function canEditColumn(columnIndex: number): boolean {
@@ -437,7 +416,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     suppressNextBlurCommit = false;
     editingCell.value = { rowId, col: colIdx };
     const val = item?.data[colIdx] ?? null;
-    editValue.value = val === null ? "" : typeof val === "object" ? JSON.stringify(val) : String(val);
+    editValue.value = dataGridCellEditorText({
+      value: val,
+      databaseType: databaseType.value,
+      columnInfo: tableColumnForGridColumn(colIdx),
+    });
     focusEditInput();
   }
 
@@ -453,7 +436,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     if (item.isNew && item.newIndex !== undefined) {
       const oldVal = newRows.value[item.newIndex]?.[col];
-      const newVal = coerceCellValue(editValue.value, oldVal);
+      const newVal = coerceCellValue(editValue.value, oldVal, col);
       if (newRows.value[item.newIndex]) {
         newRows.value[item.newIndex][col] = newVal;
       }
@@ -471,7 +454,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
-    const newVal = coerceCellValue(editValue.value, oldVal);
+    const newVal = coerceCellValue(editValue.value, oldVal, col);
     if (newVal !== oldVal) {
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
       dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);
@@ -501,7 +484,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     if (item.isNew && item.newIndex !== undefined) {
       const oldVal = newRows.value[item.newIndex]?.[col];
-      newRows.value[item.newIndex][col] = value === null ? null : coerceCellValue(value, oldVal);
+      newRows.value[item.newIndex][col] = value === null ? null : coerceCellValue(value, oldVal, col);
       newRows.value = [...newRows.value];
       return;
     }
@@ -510,7 +493,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!canEditExistingRows.value) return;
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
-    const newVal = value === null ? null : coerceCellValue(value, oldVal);
+    const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
     if (newVal !== oldVal) {
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
       dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);

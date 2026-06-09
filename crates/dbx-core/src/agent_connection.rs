@@ -1,12 +1,15 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::models::connection::{ConnectionConfig, DatabaseType};
+use crate::path_utils::expand_tilde;
 
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         oracle_agent_database(config, database)
+    } else if is_h2_file_connection(config) {
+        h2_agent_database(config)
     } else {
         database.to_string()
     };
@@ -20,15 +23,18 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         sap_hana_jdbc_connection_string(config, host, port, database)
     } else if config.db_type == DatabaseType::Trino {
         trino_agent_jdbc_connection_string(config, host, port, database)
+    } else if config.db_type == DatabaseType::H2 {
+        h2_agent_jdbc_connection_string(config)
     } else {
         config.connection_string.as_deref().unwrap_or("").to_string()
     };
     let etcd_endpoints =
         if config.db_type == DatabaseType::Etcd { normalize_etcd_endpoints(config, host, port) } else { String::new() };
+    let (agent_host, agent_port) = if is_h2_file_connection(config) { ("", 0) } else { (host, port) };
 
     serde_json::json!({
-        "host": host,
-        "port": port,
+        "host": agent_host,
+        "port": agent_port,
         "database": agent_database,
         "username": config.username,
         "password": config.password,
@@ -71,6 +77,85 @@ fn mongo_agent_database(config: &ConnectionConfig, database: &str) -> String {
 fn non_empty_database(database: &str) -> Option<&str> {
     let database = database.trim();
     (!database.is_empty()).then_some(database)
+}
+
+pub fn is_h2_file_connection(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::H2
+        && (config.connection_string.as_deref().is_some_and(is_h2_file_jdbc_url)
+            || (config.port == 0 && !config.host.trim().is_empty()))
+}
+
+pub fn h2_agent_jdbc_connection_string(config: &ConnectionConfig) -> String {
+    if let Some(connection_string) =
+        config.connection_string.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    {
+        if is_h2_file_jdbc_url(connection_string) {
+            return normalize_h2_file_jdbc_url(connection_string).unwrap_or_else(|| connection_string.to_string());
+        }
+        return connection_string.to_string();
+    }
+    if is_h2_file_connection(config) {
+        return h2_file_jdbc_url(&config.host);
+    }
+    String::new()
+}
+
+fn h2_agent_database(config: &ConnectionConfig) -> String {
+    let jdbc_url = h2_agent_jdbc_connection_string(config);
+    jdbc_url.strip_prefix("jdbc:h2:").unwrap_or(&jdbc_url).to_string()
+}
+
+pub fn h2_file_jdbc_url(path: &str) -> String {
+    let url = h2_file_jdbc_url_base(path);
+    format!("{url};AUTO_SERVER=TRUE")
+}
+
+fn h2_file_jdbc_url_base(path: &str) -> String {
+    let path = h2_jdbc_file_base_path(path);
+    format!("jdbc:h2:file:{path}")
+}
+
+pub fn h2_jdbc_file_base_path(path: &str) -> String {
+    let path = expand_tilde(path.trim());
+    let lower = path.to_ascii_lowercase();
+    for suffix in [".mv.db", ".h2.db"] {
+        if lower.ends_with(suffix) {
+            return path[..path.len() - suffix.len()].to_string();
+        }
+    }
+    path
+}
+
+pub fn h2_file_path_from_jdbc_url(connection_string: &str) -> Option<String> {
+    let connection_string = connection_string.trim();
+    let prefix = "jdbc:h2:file:";
+    if connection_string.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+        return Some(connection_string[prefix.len()..].split(';').next().unwrap_or("").to_string());
+    }
+    None
+}
+
+fn normalize_h2_file_jdbc_url(connection_string: &str) -> Option<String> {
+    let connection_string = connection_string.trim();
+    let prefix = "jdbc:h2:file:";
+    if !connection_string.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let rest = &connection_string[prefix.len()..];
+    let (path, options) = rest.split_once(';').map(|(path, options)| (path, Some(options))).unwrap_or((rest, None));
+    let mut url = if options.is_some() { h2_file_jdbc_url_base(path) } else { h2_file_jdbc_url(path) };
+    if let Some(options) = options {
+        url.push(';');
+        url.push_str(options);
+    }
+    Some(url)
+}
+
+fn is_h2_file_jdbc_url(connection_string: &str) -> bool {
+    connection_string
+        .trim()
+        .get(.."jdbc:h2:file:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:h2:file:"))
 }
 
 fn mongo_uri_database(uri: &str) -> Option<String> {
@@ -338,6 +423,55 @@ mod tests {
         let params = agent_connect_params(&cfg, "127.0.0.1", 27017, "");
 
         assert_eq!(params["database"], "app_db");
+    }
+
+    #[test]
+    fn h2_file_path_builds_jdbc_file_url_and_strips_database_suffix() {
+        assert_eq!(h2_file_jdbc_url("/tmp/app.mv.db"), "jdbc:h2:file:/tmp/app;AUTO_SERVER=TRUE");
+        assert_eq!(h2_file_jdbc_url("/tmp/App.MV.DB"), "jdbc:h2:file:/tmp/App;AUTO_SERVER=TRUE");
+        assert_eq!(h2_file_jdbc_url("/tmp/legacy.h2.db"), "jdbc:h2:file:/tmp/legacy;AUTO_SERVER=TRUE");
+        assert_eq!(h2_file_jdbc_url("/tmp/app"), "jdbc:h2:file:/tmp/app;AUTO_SERVER=TRUE");
+    }
+
+    #[test]
+    fn h2_file_connection_passes_jdbc_file_url_to_agent() {
+        let mut cfg = config(DatabaseType::H2, None);
+        cfg.host = "/tmp/app.mv.db".to_string();
+        cfg.port = 0;
+
+        let params = agent_connect_params(&cfg, "/tmp/app.mv.db", 0, "");
+
+        assert_eq!(params["host"], "");
+        assert_eq!(params["port"], 0);
+        assert_eq!(params["database"], "file:/tmp/app;AUTO_SERVER=TRUE");
+        assert_eq!(params["connection_string"], "jdbc:h2:file:/tmp/app;AUTO_SERVER=TRUE");
+    }
+
+    #[test]
+    fn h2_file_connection_normalizes_existing_jdbc_file_url_and_preserves_options() {
+        let mut cfg = config(DatabaseType::H2, None);
+        cfg.connection_string = Some("jdbc:h2:file:/tmp/app.mv.db;AUTO_SERVER=TRUE".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+
+        assert_eq!(params["host"], "");
+        assert_eq!(params["port"], 0);
+        assert_eq!(params["database"], "file:/tmp/app;AUTO_SERVER=TRUE");
+        assert_eq!(params["connection_string"], "jdbc:h2:file:/tmp/app;AUTO_SERVER=TRUE");
+    }
+
+    #[test]
+    fn h2_tcp_connection_keeps_empty_agent_connection_string() {
+        let mut cfg = config(DatabaseType::H2, Some("test"));
+        cfg.host = "127.0.0.1".to_string();
+        cfg.port = 9092;
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+
+        assert_eq!(params["host"], "127.0.0.1");
+        assert_eq!(params["port"], 9092);
+        assert_eq!(params["database"], "test");
+        assert_eq!(params["connection_string"], "");
     }
 
     #[test]

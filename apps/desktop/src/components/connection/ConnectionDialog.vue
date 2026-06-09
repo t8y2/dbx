@@ -26,6 +26,12 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connectionUrl";
 import type { ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connectionPresentation";
+import {
+  h2ConnectionModeForConfig,
+  h2FileJdbcUrl,
+  h2FilePathFromJdbcUrl,
+  type H2ConnectionMode,
+} from "@/lib/h2Connection";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
@@ -265,6 +271,7 @@ const agentDrivers = ref<AgentDriverInstallState[]>([]);
 const selectedJdbcDriverPath = ref("");
 const connectionUrlInput = ref("");
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
+const h2ConnectionMode = ref<H2ConnectionMode>("file");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>("icon");
 const dbSearchQuery = ref("");
@@ -468,6 +475,12 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "sqlite" || profile.type === "duckdb" || profile.type === "access") {
       form.value.host = "";
     }
+    if (profile.type === "h2") {
+      h2ConnectionMode.value = "file";
+      form.value.host = "";
+      form.value.port = 0;
+      form.value.connection_string = undefined;
+    }
     if (profile.type === "jdbc") {
       form.value.host = "";
       form.value.connection_string = "";
@@ -509,7 +522,7 @@ watch(
         driver_profile: profile,
         driver_label: config.driver_label || driverProfiles[profile]?.label || config.db_type,
         url_params: config.url_params || "",
-        host: config.host,
+        host: config.db_type === "h2" ? config.host || h2FilePathFromJdbcUrl(config.connection_string) : config.host,
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
@@ -537,6 +550,7 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         etcd_endpoints: config.etcd_endpoints || "",
       };
+      h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
       selectedType.value = profile;
       if (profile === "oceanbase") {
@@ -557,6 +571,7 @@ watch(
       selectedType.value = "mysql";
       customDriverName.value = "";
       oceanbaseSubMode.value = "mysql";
+      h2ConnectionMode.value = "file";
       dialogStep.value = "select";
       configTab.value = "connection";
     }
@@ -618,6 +633,7 @@ function defaultDatabaseForProfile() {
     return "postgres";
   if (form.value.db_type === "sqlserver") return "master";
   if (form.value.db_type === "oracle") return "ORCL";
+  if (form.value.db_type === "h2" && h2ConnectionMode.value === "tcp") return "test";
   return "";
 }
 
@@ -625,6 +641,26 @@ function onDbTypeChange(val: string) {
   customDriverName.value = "";
   applyProfile(val, !!editingId.value);
   resetTestState();
+}
+
+function switchH2ConnectionMode(mode: H2ConnectionMode) {
+  h2ConnectionMode.value = mode;
+  if (mode === "file") {
+    form.value.host = h2FilePathFromJdbcUrl(form.value.connection_string) || "";
+    form.value.port = 0;
+  } else {
+    form.value.host =
+      form.value.host.trim() && !isH2FileJdbcUrlLikePath(form.value.host) ? form.value.host : "127.0.0.1";
+    form.value.port = form.value.port || 9092;
+    if (form.value.connection_string && h2FilePathFromJdbcUrl(form.value.connection_string)) {
+      form.value.connection_string = undefined;
+    }
+  }
+  resetTestState();
+}
+
+function isH2FileJdbcUrlLikePath(value: string): boolean {
+  return /\.(mv|h2)\.db$/i.test(value.trim()) || value.includes("/") || value.includes("\\");
 }
 
 const iconTypeMap: Record<string, string> = {
@@ -778,11 +814,20 @@ const filteredDbCategories = computed<DbCategory[]>(() => {
 const hasDbPickerResults = computed(() => filteredDbCategories.value.some((category) => category.options.length > 0));
 const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value);
 const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
+const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionMode.value === "file");
+const usesLocalFilePathInput = computed(
+  () =>
+    form.value.db_type === "sqlite" ||
+    form.value.db_type === "duckdb" ||
+    form.value.db_type === "access" ||
+    isH2FileMode.value,
+);
 
 const connectionUrlPlaceholder = computed(() => getUrlPlaceholder(form.value.db_type));
 const filePathPlaceholder = computed(() => {
   if (form.value.db_type === "duckdb") return "/path/to/database.duckdb or :memory:";
   if (form.value.db_type === "access") return "/path/to/database.accdb";
+  if (form.value.db_type === "h2") return "/path/to/database.mv.db";
   return "/path/to/database.db or :memory:";
 });
 const supportsMemoryDatabasePath = computed(() => form.value.db_type === "sqlite" || form.value.db_type === "duckdb");
@@ -874,13 +919,24 @@ const etcdEndpointsLines = computed({
     form.value.etcd_endpoints = normalizeEndpointLines(value);
   },
 });
-const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access");
+const canUseTransportLayers = computed(
+  () => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isH2FileMode.value,
+);
 const shouldShowAgentDriverInstallHint = computed(() =>
   showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile),
 );
 const testResultMessage = computed(() => {
   if (!testResult.value) return "";
   return testResult.value.ok ? t("connection.testSuccess") : testResult.value.message;
+});
+const hasRequiredConnectionTarget = computed(() => {
+  if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
+  return !!(
+    form.value.host ||
+    (mongoUseUrl.value && form.value.connection_string) ||
+    (form.value.db_type === "jdbc" && form.value.connection_string) ||
+    connectionUrlInput.value.trim()
+  );
 });
 const mongoAuthDatabase = computed({
   get: () => mongoUrlParam(form.value.url_params, "authSource"),
@@ -1071,6 +1127,26 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter(Boolean);
+  }
+  if (config.db_type === "h2") {
+    if (h2ConnectionMode.value === "file") {
+      const filePath = config.host?.trim() || h2FilePathFromJdbcUrl(config.connection_string);
+      if (!filePath) {
+        throw new Error(t("connection.h2FilePathRequired"));
+      }
+      config.host = filePath;
+      config.port = 0;
+      config.connection_string = h2FileJdbcUrl(filePath);
+      config.transport_layers = [];
+    } else {
+      config.host = config.host?.trim() || "127.0.0.1";
+      config.port = Number(config.port) || 9092;
+      if (h2FilePathFromJdbcUrl(config.connection_string)) {
+        config.connection_string = undefined;
+      } else {
+        config.connection_string = config.connection_string?.trim() || undefined;
+      }
+    }
   }
   const legacy = config as LegacyConnectionConfig;
   delete legacy.ssh_enabled;
@@ -1708,7 +1784,9 @@ async function browseDbFilePath() {
         ? [{ name: "DuckDB", extensions: ["duckdb", "db"] }]
         : form.value.db_type === "access"
           ? [{ name: "Microsoft Access", extensions: ["accdb", "mdb"] }]
-          : [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }];
+          : form.value.db_type === "h2"
+            ? [{ name: "H2", extensions: ["db"] }]
+            : [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }];
     const selected = await open({
       title: "Select Database File",
       multiple: false,
@@ -2078,6 +2156,26 @@ function openExternalUrl(url: string) {
                   </div>
                 </div>
 
+                <div v-if="form.db_type === 'h2'" class="grid grid-cols-4 items-center gap-4">
+                  <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
+                  <div class="col-span-3 flex gap-2">
+                    <Button
+                      size="sm"
+                      :variant="h2ConnectionMode === 'file' ? 'default' : 'outline'"
+                      @click="switchH2ConnectionMode('file')"
+                    >
+                      {{ t("connection.h2FileMode") }}
+                    </Button>
+                    <Button
+                      size="sm"
+                      :variant="h2ConnectionMode === 'tcp' ? 'default' : 'outline'"
+                      @click="switchH2ConnectionMode('tcp')"
+                    >
+                      {{ t("connection.h2TcpMode") }}
+                    </Button>
+                  </div>
+                </div>
+
                 <!-- JDBC: optional external plugin -->
                 <template v-if="form.db_type === 'jdbc'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -2161,9 +2259,7 @@ function openExternalUrl(url: string) {
                 </template>
 
                 <!-- Local database files: file path only -->
-                <template
-                  v-else-if="form.db_type === 'sqlite' || form.db_type === 'duckdb' || form.db_type === 'access'"
-                >
+                <template v-else-if="usesLocalFilePathInput">
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.filePath") }}</Label>
                     <div class="col-span-3 space-y-1">
@@ -2225,6 +2321,16 @@ function openExternalUrl(url: string) {
                       </p>
                     </div>
                   </div>
+                  <template v-if="form.db_type === 'h2'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">{{ t("connection.user") }}</Label>
+                      <Input v-model="form.username" class="col-span-3" placeholder="sa" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">{{ t("connection.password") }}</Label>
+                      <Input v-model="form.password" type="password" class="col-span-3" />
+                    </div>
+                  </template>
                 </template>
 
                 <!-- Redis: host, port, user, password, ssl -->
@@ -3282,17 +3388,7 @@ function openExternalUrl(url: string) {
           <Button variant="outline" class="shrink-0" :disabled="isTesting || isSaving" @click="testConnection">
             {{ isTesting ? t("connection.testing") : t("connection.test") }}
           </Button>
-          <Button
-            class="shrink-0"
-            @click="save"
-            :disabled="
-              isSaving ||
-              (!form.host &&
-                !(mongoUseUrl && form.connection_string) &&
-                !(form.db_type === 'jdbc' && form.connection_string) &&
-                !connectionUrlInput.trim())
-            "
-          >
+          <Button class="shrink-0" @click="save" :disabled="isSaving || !hasRequiredConnectionTarget">
             {{
               isSaving
                 ? t("common.loading")

@@ -16,7 +16,7 @@ export type SidebarActivation = "single" | "double";
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view"]);
 const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mongo-collection", "user-admin"]);
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
-const sourceNodeTypes = new Set<TreeNodeType>(["procedure", "function", "package", "package-body"]);
+const sourceNodeTypes = new Set<TreeNodeType>(["procedure", "function", "sequence", "package", "package-body"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-columns",
   "group-indexes",
@@ -29,6 +29,7 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-views",
   "group-procedures",
   "group-functions",
+  "group-sequences",
   "group-packages",
 ]);
 
@@ -36,6 +37,7 @@ export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKin
   if (type === "view") return "VIEW";
   if (type === "procedure") return "PROCEDURE";
   if (type === "function") return "FUNCTION";
+  if (type === "sequence") return "SEQUENCE";
   if (type === "package") return "PACKAGE";
   if (type === "package-body") return "PACKAGE_BODY";
   return null;

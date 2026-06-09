@@ -47,6 +47,7 @@ import {
   isModRShortcut,
   isNewQueryShortcut,
   isObjectSourceSaveShortcutTarget,
+  isOpenSettingsShortcut,
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
@@ -124,7 +125,7 @@ const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 const selectedSql = ref("");
 const cursorPos = ref(0);
-const formatSqlRequestId = ref(0);
+const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
 const showSaveSqlDialog = ref(false);
@@ -362,7 +363,10 @@ function analyzeHistoryWithAi(entry: HistoryEntry) {
 function formatActiveSql() {
   const tab = activeTab.value;
   if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
-  formatSqlRequestId.value++;
+  formatSqlRequest.value = {
+    id: (formatSqlRequest.value?.id ?? 0) + 1,
+    tabId: tab.id,
+  };
 }
 
 function defaultSavedSqlName(title: string) {
@@ -760,6 +764,12 @@ function handleKeydown(e: KeyboardEvent) {
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
 
+  if (isOpenSettingsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    showSettingsDialog.value = true;
+    return;
+  }
   if (isFocusSearchShortcut(e, shortcuts)) {
     const focused = contentAreaRef.value?.focusSearch() || appSidebarRef.value?.focusSearch();
     if (focused) {
@@ -1096,7 +1106,7 @@ onUnmounted(() => {
                     :active-connection="activeConnection"
                     :executable-sql="executableSql"
                     :active-output-view="activeOutputView"
-                    :format-sql-request-id="formatSqlRequestId"
+                    :format-sql-request="formatSqlRequest"
                     :selected-sql="selectedSql"
                     :cursor-pos="cursorPos"
                     @update:active-output-view="activeOutputView = $event"
@@ -1104,11 +1114,7 @@ onUnmounted(() => {
                     @execute="tryExecute()"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
-                    @editor-update="
-                      (v: string) => {
-                        if (queryStore.activeTabId) queryStore.updateSql(queryStore.activeTabId, v);
-                      }
-                    "
+                    @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
                     @editor-selection-change="(v: string) => (selectedSql = v)"
                     @editor-cursor-change="(p: number) => (cursorPos = p)"
                     @format-error="toast(t('toolbar.formatSqlFailed'))"

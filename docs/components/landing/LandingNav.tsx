@@ -4,8 +4,15 @@ import Link from 'next/link';
 import { useEffect, useRef } from 'react';
 
 const i18n = {
-  en: { home: 'Home', docs: 'Docs', changelog: 'Changelog', community: 'Community', lang: '中文' },
-  cn: { home: '首页', docs: '文档', changelog: '更新日志', community: '交流群', lang: 'English' },
+  en: {
+    home: 'Home',
+    docs: 'Docs',
+    changelog: 'Changelog',
+    community: 'Community',
+    drivers: 'Offline Drivers',
+    lang: '中文',
+  },
+  cn: { home: '首页', docs: '文档', changelog: '更新日志', community: '交流群', drivers: '离线驱动', lang: 'English' },
 };
 
 export function LandingNav({
@@ -13,7 +20,7 @@ export function LandingNav({
   active,
 }: {
   lang: 'en' | 'cn';
-  active?: 'home' | 'changelog' | 'community';
+  active?: 'home' | 'changelog' | 'community' | 'drivers';
 }) {
   const ref = useRef<HTMLElement>(null);
   const t = i18n[lang];
@@ -21,6 +28,7 @@ export function LandingNav({
   const langHrefMap: Record<string, string> = {
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
+    drivers: `/${otherLang}/drivers`,
   };
   const langHref = langHrefMap[active ?? ''] ?? `/${otherLang}`;
 
@@ -68,6 +76,12 @@ export function LandingNav({
             className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'community' ? 'text-landing-ink' : 'text-landing-muted'}`}
           >
             {t.community}
+          </Link>
+          <Link
+            href={`/${lang}/drivers`}
+            className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'drivers' ? 'text-landing-ink' : 'text-landing-muted'}`}
+          >
+            {t.drivers}
           </Link>
           <Link
             href="https://github.com/t8y2/dbx"

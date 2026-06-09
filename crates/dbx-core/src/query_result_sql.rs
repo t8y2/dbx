@@ -191,6 +191,10 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         return ok(format!("{statement} LIMIT {safe_limit} OFFSET {safe_offset};"));
     }
 
+    if options.database_type == Some(DatabaseType::Oracle) {
+        return ok(format!("{statement};"));
+    }
+
     if options.database_type.is_some_and(uses_fetch_first) {
         return ok(add_fetch_first_limit(&statement, safe_limit, safe_offset));
     }
@@ -784,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_fetch_first_pagination_for_oracle() {
+    fn oracle_pagination_skips_sql_clause() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM users".to_string(),
             database_type: Some(DatabaseType::Oracle),
@@ -792,7 +796,7 @@ mod tests {
             offset: 0,
         });
 
-        assert_eq!(result.sql.unwrap(), "SELECT id FROM users FETCH FIRST 100 ROWS ONLY;");
+        assert_eq!(result.sql.unwrap(), "SELECT id FROM users;");
     }
 
     #[test]

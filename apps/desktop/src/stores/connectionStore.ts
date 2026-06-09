@@ -760,19 +760,21 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionError(config.id);
       if (id !== config.id) clearConnectionError(id);
 
-      const node: TreeNode = {
-        id,
-        label: config.name,
-        type: "connection",
-        connectionId: id,
-        isExpanded: false,
-        children: [],
-      };
-      const existing = treeNodes.value.findIndex((n) => n.id === id);
-      if (existing >= 0) {
-        treeNodes.value[existing] = node;
+      const existing = findNode(treeNodes.value, id);
+      if (existing) {
+        existing.label = config.name;
+        existing.type = "connection";
+        existing.connectionId = id;
+        existing.children = existing.children || [];
       } else {
-        treeNodes.value.push(node);
+        treeNodes.value.push({
+          id,
+          label: config.name,
+          type: "connection",
+          connectionId: id,
+          isExpanded: false,
+          children: [],
+        });
       }
       return id;
     } catch (e) {
@@ -787,6 +789,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function disconnect(connectionId: string) {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
     await api.disconnectDb(connectionId);
+    clearConnectionError(connectionId);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
@@ -1592,6 +1595,7 @@ export const useConnectionStore = defineStore("connection", () => {
       node.type === "group-views" ||
       node.type === "group-procedures" ||
       node.type === "group-functions" ||
+      node.type === "group-sequences" ||
       node.type === "group-packages"
     ) {
       await loadObjectGroupChildren(node, options);

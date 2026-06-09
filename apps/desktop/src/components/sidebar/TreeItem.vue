@@ -270,6 +270,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "function":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "sequence":
+      return { icon: ListTree, colorClass: "text-emerald-500" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -282,6 +284,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "group-sequences":
+      return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-partitions":
@@ -300,6 +304,7 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-views",
   "group-procedures",
   "group-functions",
+  "group-sequences",
   "group-packages",
   "group-partitions",
   "saved-sql-root",
@@ -368,6 +373,7 @@ async function toggle() {
     node.type === "group-views" ||
     node.type === "group-procedures" ||
     node.type === "group-functions" ||
+    node.type === "group-sequences" ||
     node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
@@ -473,6 +479,7 @@ function runRowClickAction() {
   } else if (
     node.type === "procedure" ||
     node.type === "function" ||
+    node.type === "sequence" ||
     node.type === "package" ||
     node.type === "package-body"
   ) {
@@ -1225,11 +1232,13 @@ function viewObjectSource() {
     .then(async (result) => {
       const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
       queryStore.updateSql(tabId, result.source);
-      queryStore.setObjectSource(tabId, {
-        schema,
-        name: node.label,
-        objectType,
-      });
+      if (objectType !== "SEQUENCE") {
+        queryStore.setObjectSource(tabId, {
+          schema,
+          name: node.label,
+          objectType,
+        });
+      }
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -3248,6 +3257,13 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
+  if (node.type === "sequence") {
+    items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    return items;
+  }
+
   if (node.type === "package" || node.type === "package-body") {
     items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
     items.push({ label: "", separator: true });
@@ -3410,6 +3426,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
               node.type === 'group-views' ||
               node.type === 'group-procedures' ||
               node.type === 'group-functions' ||
+              node.type === 'group-sequences' ||
               node.type === 'group-packages' ||
               node.type === 'group-partitions') &&
             node.objectCount != null

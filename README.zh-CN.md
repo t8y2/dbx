@@ -284,7 +284,7 @@ pnpm tauri build
 
 <details>
 <summary><strong>可以离线使用吗？</strong></summary>
-可以。桌面端完全支持离线使用。AI 功能需要网络访问模型端点（或通过 Ollama 使用本地模型）。
+可以。桌面端完全支持离线使用。内网环境安装驱动时，可在有网机器打开[离线驱动下载页](https://dbxio.com/cn/drivers)下载离线驱动包，传输到内网机器后，在 DBX 的「设置 > 驱动管理」中导入。AI 功能需要网络访问模型端点（或通过 Ollama 使用本地模型）。
 </details>
 
 <details>

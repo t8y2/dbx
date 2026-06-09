@@ -57,6 +57,7 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.copyCurrentRow, "Mod+D");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Delete");
   assert.equal(settings.shortcuts.newQuery, "Mod+T");
+  assert.equal(settings.shortcuts.openSettings, "Mod+,");
   assert.equal(settings.shortcuts.focusSearch, "Mod+F");
   assert.equal(settings.shortcuts.zoomInUi, "Mod+=");
   assert.equal(settings.shortcuts.zoomOutUi, "Mod+-");
@@ -72,6 +73,7 @@ test("keeps saved shortcut overrides", () => {
       copyCurrentRow: "Alt+Shift+D",
       deleteCurrentRow: "Backspace",
       newQuery: "Shift+Mod+N",
+      openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
     } as any,
   });
@@ -80,6 +82,7 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.copyCurrentRow, "Alt+Shift+D");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Backspace");
   assert.equal(settings.shortcuts.newQuery, "Shift+Mod+N");
+  assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
 });

@@ -36,28 +36,30 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 <template>
   <DialogPortal>
     <DialogOverlay />
-    <DialogContent
-      data-slot="dialog-content"
-      v-bind="{ ...$attrs, ...forwarded }"
-      :class="
-        cn(
-          'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-4 rounded-xl p-4 text-sm ring-1 duration-100 sm:max-w-sm fixed top-1/2 left-1/2 z-50 w-full -translate-x-1/2 -translate-y-1/2 outline-none overflow-hidden',
-          props.class,
-        )
-      "
-    >
-      <VisuallyHidden as-child>
-        <DialogDescription />
-      </VisuallyHidden>
+    <div class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
+      <DialogContent
+        data-slot="dialog-content"
+        v-bind="{ ...$attrs, ...forwarded }"
+        :class="
+          cn(
+            'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 ring-foreground/10 relative grid max-h-[calc(100dvh-2rem)] w-full max-w-full gap-4 overflow-hidden rounded-xl p-4 text-sm ring-1 duration-100 outline-none pointer-events-auto sm:max-w-sm',
+            props.class,
+          )
+        "
+      >
+        <VisuallyHidden as-child>
+          <DialogDescription />
+        </VisuallyHidden>
 
-      <slot />
+        <slot />
 
-      <DialogClose v-if="showCloseButton" data-slot="dialog-close" as-child>
-        <Button variant="ghost" class="absolute top-2 right-2" size="icon-sm">
-          <XIcon />
-          <span class="sr-only">Close</span>
-        </Button>
-      </DialogClose>
-    </DialogContent>
+        <DialogClose v-if="showCloseButton" data-slot="dialog-close" as-child>
+          <Button variant="ghost" class="absolute top-2 right-2" size="icon-sm">
+            <XIcon />
+            <span class="sr-only">Close</span>
+          </Button>
+        </DialogClose>
+      </DialogContent>
+    </div>
   </DialogPortal>
 </template>

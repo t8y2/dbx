@@ -3,10 +3,9 @@ import { test } from "vitest";
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { useDataGridEditor } from "../../apps/desktop/src/composables/useDataGridEditor.ts";
+import type { CellValue } from "../../apps/desktop/src/lib/cellValue.ts";
 import type { DataGridSaveStatementOptions } from "../../apps/desktop/src/lib/dataGridSql.ts";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
-
-type CellValue = string | number | boolean | null;
 
 function installBrowserTestGlobals() {
   globalThis.document = { querySelector: () => null } as unknown as Document;
@@ -82,8 +81,21 @@ function formatGridSqlLiteral(value: CellValue, databaseType?: string): string {
   if (value === null) return "NULL";
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   if (typeof value === "number") return String(value);
+  if (Array.isArray(value) && databaseType === "postgres") {
+    return `'${formatPgArrayLiteral(value)}'`;
+  }
   const escaped = `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
   return databaseType === "sqlserver" ? `N${escaped}` : escaped;
+}
+
+function formatPgArrayLiteral(value: CellValue[]): string {
+  return `{${value
+    .map((item) => {
+      if (Array.isArray(item)) return formatPgArrayLiteral(item);
+      if (item === null) return "NULL";
+      return `"${String(item).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    })
+    .join(",")}}`;
 }
 
 function column(name: string, isPrimaryKey = false, extra: string | null = null): ColumnInfo {
@@ -491,6 +503,61 @@ test("saving manually typed JSON from a MySQL grid normalizes smart quotes", asy
   assert.deepEqual(executedSql, [
     `UPDATE "settings" SET "payload" = '{"2:3":"3:4","3:2":"4:3","21:9":"16:9"}' WHERE "id" = 1;`,
   ]);
+});
+
+test("saving manually typed JSON arrays from a Postgres array column uses array values", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "tags"],
+    rows: [[1, "{legacy}"] as CellValue[]],
+  }));
+  const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
+  const executedSql: string[] = [];
+
+  const editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "postgres"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({
+      tableName: "articles",
+      columns: [column("id", true), { ...column("tags"), data_type: "_text" }],
+      primaryKeys: ["id"],
+    })),
+    onExecuteSql: computed(() => async (sql: string) => {
+      executedSql.push(sql);
+    }),
+    customSave: computed(() => undefined),
+    sql: computed(() => "SELECT id, tags FROM articles"),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter,
+    pageSize: ref(50),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      if (rowId !== 0) return undefined;
+      return {
+        id: 0,
+        sourceIndex: 0,
+        data: result.value.rows[0],
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, false],
+        status: "clean",
+      };
+    },
+    emit: () => {},
+  });
+
+  editor.applyCellValue(0, 1, `["draft","发布"]`);
+  await editor.saveChanges();
+
+  assert.deepEqual(executedSql, [`UPDATE "articles" SET "tags" = '{"draft","发布"}' WHERE "id" = 1;`]);
 });
 
 test("failed table data save records a failed history entry", async () => {

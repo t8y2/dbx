@@ -374,7 +374,9 @@ export function buildSimpleObjectTreeNodes({
 
   for (const obj of objects) {
     const objectType = normalizeObjectType(obj.object_type);
-    if (!["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"].includes(objectType)) continue;
+    if (!["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"].includes(objectType)) {
+      continue;
+    }
 
     const name = normalizeDatabaseObjectName(obj.name);
     if (!name) continue;
@@ -426,6 +428,7 @@ function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType 
   if (objectType === "VIEW") return "view";
   if (objectType === "PROCEDURE") return "procedure";
   if (objectType === "FUNCTION") return "function";
+  if (objectType === "SEQUENCE") return "sequence";
   if (objectType === "PACKAGE_BODY") return "package-body";
   if (objectType === "PACKAGE") return "package";
   return "table";
@@ -459,6 +462,13 @@ const groupDefs: Array<{
     childType: "function",
   },
   {
+    key: "__sequences",
+    label: "tree.sequences",
+    objectTypes: ["SEQUENCE"],
+    nodeType: "group-sequences",
+    childType: "sequence",
+  },
+  {
     key: "__packages",
     label: "tree.packages",
     objectTypes: ["PACKAGE", "PACKAGE_BODY"],
@@ -472,6 +482,7 @@ const objectGroupNodeTypes = new Set<TreeNodeType>([
   "group-views",
   "group-procedures",
   "group-functions",
+  "group-sequences",
   "group-packages",
 ]);
 

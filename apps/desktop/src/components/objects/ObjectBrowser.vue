@@ -17,6 +17,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  ListTree,
   Upload,
   Loader2,
   Network,
@@ -93,7 +94,7 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/objectBrowserRows";
 
-type ObjectFilter = "all" | "tables" | "views" | "procedures" | "functions" | "packages";
+type ObjectFilter = "all" | "tables" | "views" | "procedures" | "functions" | "sequences" | "packages";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -170,6 +171,7 @@ const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE
 const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW").length);
 const procedureCount = computed(() => rows.value.filter((row) => row.type === "PROCEDURE").length);
 const functionCount = computed(() => rows.value.filter((row) => row.type === "FUNCTION").length);
+const sequenceCount = computed(() => rows.value.filter((row) => row.type === "SEQUENCE").length);
 const packageCount = computed(
   () => rows.value.filter((row) => row.type === "PACKAGE" || row.type === "PACKAGE_BODY").length,
 );
@@ -213,6 +215,7 @@ const objectFilters = computed<ObjectFilter[]>(() =>
       ["views", viewCount.value],
       ["procedures", procedureCount.value],
       ["functions", functionCount.value],
+      ["sequences", sequenceCount.value],
       ["packages", packageCount.value],
     ] as Array<[ObjectFilter, number]>
   )
@@ -258,6 +261,7 @@ function iconFor(row: ObjectBrowserRow) {
   if (row.type === "VIEW") return Eye;
   if (row.type === "PROCEDURE") return ScrollText;
   if (row.type === "FUNCTION") return Braces;
+  if (row.type === "SEQUENCE") return ListTree;
   if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") return Package;
   return Table2;
 }
@@ -266,6 +270,7 @@ function typeLabel(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW") return t("objects.view");
   if (type === "PROCEDURE") return t("objects.procedure");
   if (type === "FUNCTION") return t("objects.function");
+  if (type === "SEQUENCE") return t("objects.sequence");
   if (type === "PACKAGE") return t("objects.package");
   if (type === "PACKAGE_BODY") return t("objects.packageBody");
   return t("objects.table");
@@ -290,6 +295,7 @@ function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   if (objectFilter.value === "views") return row.type === "VIEW";
   if (objectFilter.value === "procedures") return row.type === "PROCEDURE";
   if (objectFilter.value === "functions") return row.type === "FUNCTION";
+  if (objectFilter.value === "sequences") return row.type === "SEQUENCE";
   if (objectFilter.value === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
   return true;
 }
@@ -330,6 +336,7 @@ function iconClass(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW") return "text-purple-500";
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
+  if (type === "SEQUENCE") return "text-emerald-500";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "text-cyan-500";
   return "text-green-500";
 }
@@ -351,6 +358,7 @@ function canOpenSource(row: ObjectBrowserRow) {
     row.type === "VIEW" ||
     row.type === "PROCEDURE" ||
     row.type === "FUNCTION" ||
+    row.type === "SEQUENCE" ||
     row.type === "PACKAGE" ||
     row.type === "PACKAGE_BODY"
   );
@@ -405,7 +413,7 @@ async function openSource(row: ObjectBrowserRow) {
     );
     sourceContent.value = result.source;
     sourceDraft.value = result.source;
-    sourceEditing.value = true;
+    sourceEditing.value = row.type !== "SEQUENCE";
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
   } finally {
@@ -1145,6 +1153,7 @@ function filterCount(filter: ObjectFilter) {
   if (filter === "views") return viewCount.value;
   if (filter === "procedures") return procedureCount.value;
   if (filter === "functions") return functionCount.value;
+  if (filter === "sequences") return sequenceCount.value;
   if (filter === "packages") return packageCount.value;
   return rows.value.length;
 }
@@ -1159,9 +1168,11 @@ function filterLabel(filter: ObjectFilter) {
           ? "objects.procedures"
           : filter === "functions"
             ? "objects.functions"
-            : filter === "packages"
-              ? "objects.packages"
-              : "objects.all";
+            : filter === "sequences"
+              ? "objects.sequences"
+              : filter === "packages"
+                ? "objects.packages"
+                : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
 }
 
@@ -1320,6 +1331,7 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW") return getViewMenuItems(item);
+  if (item.type === "SEQUENCE") return getPackageMenuItems(item);
   if (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
 }

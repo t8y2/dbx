@@ -489,14 +489,14 @@ function handleImport() {
         </div>
 
         <!-- Edit area -->
-        <div class="flex-1 min-w-0 overflow-hidden flex flex-col">
-          <Tabs defaultValue="visual" class="w-full flex-1 flex flex-col">
+        <div class="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+          <Tabs defaultValue="visual" class="w-full flex-1 min-h-0 flex flex-col">
             <TabsList class="grid w-full grid-cols-2">
               <TabsTrigger value="visual">{{ t("settings.customThemeVisualEdit") }}</TabsTrigger>
               <TabsTrigger value="json">{{ t("settings.customThemeJsonConfig") }}</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="visual" class="space-y-4 flex-1 overflow-y-auto pr-1">
+            <TabsContent value="visual" class="space-y-4 flex-1 min-h-0 overflow-y-auto pr-1">
               <!-- Preview area -->
               <div class="rounded-lg border bg-black/50 p-5 font-mono text-base">
                 <div class="mb-2 text-sm text-muted-foreground">{{ t("settings.customThemeLivePreview") }}</div>
@@ -592,7 +592,7 @@ function handleImport() {
               </div>
             </TabsContent>
 
-            <TabsContent value="json" class="space-y-4 flex-1 flex flex-col min-h-[400px]">
+            <TabsContent value="json" class="space-y-4 flex-1 min-h-0 flex flex-col">
               <textarea
                 v-model="jsonText"
                 @blur="handleJsonChange"

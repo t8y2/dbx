@@ -32,6 +32,7 @@ pub enum ObjectSourceKind {
     View,
     Procedure,
     Function,
+    Sequence,
     Package,
     PackageBody,
 }

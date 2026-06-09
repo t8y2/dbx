@@ -126,6 +126,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::DuckDb));
     assert!(skips_tcp_probe(&DatabaseType::Jdbc));
     assert!(skips_tcp_probe(&DatabaseType::Access));
+    assert!(skips_tcp_probe(&DatabaseType::H2));
     assert!(skips_tcp_probe(&DatabaseType::Trino));
     assert!(skips_tcp_probe(&DatabaseType::Oracle));
     assert!(skips_tcp_probe(&DatabaseType::Tdengine));

@@ -1534,6 +1534,7 @@ fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::View => "view",
         db::ObjectSourceKind::Procedure
         | db::ObjectSourceKind::Function
+        | db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody => "routine",
     }
@@ -1544,7 +1545,7 @@ fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::View => "'V'",
         db::ObjectSourceKind::Procedure => "'P'",
         db::ObjectSourceKind::Function => "'FN','IF','TF','FS','FT'",
-        db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => "''",
+        db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => "''",
     }
 }
 
@@ -1586,6 +1587,30 @@ pub fn postgres_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSou
                 prokind
             )
         }
+        db::ObjectSourceKind::Sequence => {
+            format!(
+                "SELECT concat_ws(E'\\n\\n', \
+                   '-- auto-generated definition' || E'\\n' || \
+                   'create sequence ' || quote_ident(c.relname) || E'\\n' || \
+                   '    as ' || pg_catalog.format_type(s.seqtypid, NULL) || ';', \
+                   'alter sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident(pg_get_userbyid(c.relowner)) || ';', \
+                   CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
+                     THEN 'alter sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \
+                   END \
+                 ) \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_catalog.pg_sequence s ON s.seqrelid = c.oid \
+                 LEFT JOIN pg_catalog.pg_depend d \
+                   ON d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'a' \
+                 LEFT JOIN pg_catalog.pg_class owned ON owned.oid = d.refobjid \
+                 LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid \
+                 WHERE n.nspname = {} AND c.relname = {} AND c.relkind = 'S' \
+                 ORDER BY c.oid LIMIT 1",
+                sql_string(schema),
+                sql_string(name)
+            )
+        }
         db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => "SELECT NULL WHERE FALSE".to_string(),
     }
 }
@@ -1595,6 +1620,7 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
         db::ObjectSourceKind::View => "VIEW",
         db::ObjectSourceKind::Procedure => "PROCEDURE",
         db::ObjectSourceKind::Function => "FUNCTION",
+        db::ObjectSourceKind::Sequence => "SEQUENCE",
         db::ObjectSourceKind::Package => "PACKAGE",
         db::ObjectSourceKind::PackageBody => "PACKAGE_BODY",
     };
@@ -1623,7 +1649,9 @@ pub fn mysql_object_source_sql(name: &str, kind: &db::ObjectSourceKind) -> Strin
         db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {}", mysql_ident(name)),
         db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {}", mysql_ident(name)),
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {}", mysql_ident(name)),
-        db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => String::new(),
+        db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => {
+            String::new()
+        }
     }
 }
 
@@ -1881,6 +1909,25 @@ mod object_source_tests {
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn builds_postgres_object_source_sql_for_sequences() {
+        let sql = postgres_object_source_sql("tenant's schema", "order id seq", &ObjectSourceKind::Sequence);
+
+        assert!(sql.contains("-- auto-generated definition"));
+        assert!(sql.contains("create sequence"));
+        assert!(sql.contains("alter sequence"));
+        assert!(sql.contains("owner to"));
+        assert!(sql.contains("owned by"));
+        assert!(sql.contains("pg_catalog.pg_sequence"));
+        assert!(sql.contains("n.nspname = 'tenant''s schema'"));
+        assert!(sql.contains("c.relname = 'order id seq'"));
+        assert!(sql.contains("c.relkind = 'S'"));
+        assert!(!sql.contains("MINVALUE"));
+        assert!(!sql.contains("START WITH"));
+        assert!(!sql.contains("CACHE"));
+        assert!(!sql.contains("NO CYCLE"));
     }
 
     #[test]

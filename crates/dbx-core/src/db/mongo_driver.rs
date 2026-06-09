@@ -17,10 +17,14 @@ pub struct MongoDocumentResult {
 }
 
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
-    with_connection_timeout("MongoDB", timeout, async {
+    let is_multi_host = is_multi_host_mongo_uri(url);
+    let parse_timeout = if is_multi_host { std::cmp::max(timeout * 2, Duration::from_secs(10)) } else { timeout };
+
+    with_connection_timeout("MongoDB", parse_timeout, async {
         let mut options = ClientOptions::parse(url).await.map_err(|e| format!("MongoDB connection failed: {e}"))?;
         options.connect_timeout = Some(timeout);
-        options.server_selection_timeout = Some(timeout);
+        options.server_selection_timeout =
+            if is_multi_host { Some(std::cmp::max(timeout * 2, Duration::from_secs(10))) } else { Some(timeout) };
         // Close idle connections before the server-side timeout drops them,
         // preventing "Broken pipe" (os error 32) or "unexpected end of file".
         // 0 means no idle timeout (keep connections alive indefinitely).
@@ -30,6 +34,22 @@ pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Re
         Client::with_options(options).map_err(|e| format!("MongoDB connection failed: {e}"))
     })
     .await
+}
+
+fn is_multi_host_mongo_uri(url: &str) -> bool {
+    let rest = match url.strip_prefix("mongodb://").or_else(|| url.strip_prefix("mongodb+srv://")) {
+        Some(r) => r,
+        None => return false,
+    };
+    let authority = match rest.split('/').next() {
+        Some(a) => a,
+        None => return false,
+    };
+    let host_section = match authority.rfind('@') {
+        Some(idx) => &authority[idx + 1..],
+        None => authority,
+    };
+    host_section.contains(',')
 }
 
 pub async fn test_connection(client: &Client, _timeout: Duration, database: Option<&str>) -> Result<(), String> {

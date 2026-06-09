@@ -23,9 +23,9 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connectionPresentation";
-import { isDefaultDatabase } from "@/lib/defaultDatabase";
+import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabPresentation";
-import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
+import { isSingleDatabase } from "@/lib/databaseCapabilities";
 import { hexToRgba } from "@/lib/color";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
@@ -103,10 +103,10 @@ const toolbarStyle = computed(() => {
 });
 
 function databaseDisplayName(database: string): string {
-  const connection = props.activeConnection;
-  if (connection?.db_type === "redis" && database !== "") return `db${database}`;
-  if (database === "" && usesTreeSchemaMode(connection?.db_type)) return t("editor.defaultDatabase");
-  return database || t("editor.noDatabase");
+  return formatDatabaseLabel(props.activeConnection, database, {
+    defaultDatabase: t("editor.defaultDatabase"),
+    noDatabase: t("editor.noDatabase"),
+  });
 }
 
 function connectionById(connectionId: string): ConnectionConfig | undefined {

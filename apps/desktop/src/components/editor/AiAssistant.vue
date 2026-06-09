@@ -61,7 +61,12 @@ import {
 import type { AiMessage } from "@/lib/api";
 import type { ConnectionConfig, QueryTab, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
+import {
+  decodeSelectableDatabaseValue,
+  encodeSelectableDatabaseValue,
+  formatDatabaseLabel,
+  resolveDefaultDatabase,
+} from "@/lib/defaultDatabase";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
@@ -191,6 +196,32 @@ const dbOptions = computed(() => {
   return allDbOptions.value[props.connection.id] || [];
 });
 
+const dbSelectOptions = computed(() => {
+  const connection = props.connection;
+  if (!connection) return [];
+  return dbOptions.value.map((database) => ({
+    database,
+    value: encodeSelectableDatabaseValue(connection.db_type, database),
+    label: formatDatabaseLabel(connection, database, {
+      defaultDatabase: t("editor.defaultDatabase"),
+      noDatabase: t("editor.noDatabase"),
+    }),
+  }));
+});
+
+const selectedDatabaseSelectValue = computed(() =>
+  props.connection ? encodeSelectableDatabaseValue(props.connection.db_type, props.tab?.database || "") : "",
+);
+
+const selectedDatabaseLabel = computed(() => {
+  if (!props.connection) return t("editor.selectDatabase");
+  if (!props.tab) return t("editor.selectDatabase");
+  return formatDatabaseLabel(props.connection, props.tab.database || "", {
+    defaultDatabase: t("editor.defaultDatabase"),
+    noDatabase: t("editor.noDatabase"),
+  });
+});
+
 async function loadDatabases() {
   if (!props.connection) return;
   await loadDatabaseOptions(props.connection.id);
@@ -217,10 +248,11 @@ async function changeConnection(connectionId: string) {
   }
 }
 
-function changeDatabase(database: string) {
+function changeDatabase(value: string) {
   const tab = props.tab;
-  if (!tab) return;
-  queryStore.updateDatabase(tab.id, database);
+  const connection = props.connection;
+  if (!tab || !connection) return;
+  queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
 }
 
 function appendAssistantDelta(assistantIdx: number, delta: string) {
@@ -885,7 +917,7 @@ const messageRenderer = computed(() => {
           <template v-if="connection">
             <Database class="h-3 w-3 shrink-0 text-foreground/40" />
             <Select
-              :model-value="tab?.database || ''"
+              :model-value="selectedDatabaseSelectValue"
               @update:model-value="(v: any) => changeDatabase(v)"
               @update:open="
                 (open: boolean) => {
@@ -896,14 +928,14 @@ const messageRenderer = computed(() => {
               <SelectTrigger
                 class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
               >
-                <SelectValue :placeholder="t('editor.selectDatabase')">{{
-                  tab?.database || t("editor.selectDatabase")
-                }}</SelectValue>
+                <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="db in dbOptions" :key="db" :value="db">{{ db }}</SelectItem>
-                <SelectItem v-if="!dbOptions.length && tab?.database" :value="tab.database">{{
-                  tab.database
+                <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{
+                  option.label
+                }}</SelectItem>
+                <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{
+                  selectedDatabaseLabel
                 }}</SelectItem>
               </SelectContent>
             </Select>

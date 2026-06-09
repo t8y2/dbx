@@ -1,27 +1,6 @@
 use std::path::Path;
 
-fn expand_tilde(path: &str) -> String {
-    if !path.starts_with('~') {
-        return path.to_string();
-    }
-    if path.len() == 1 {
-        // path is "~"
-        return home_dir().unwrap_or_else(|| path.to_string());
-    }
-    if path.as_bytes().get(1) == Some(&b'/') {
-        // path is "~/..."
-        return match home_dir() {
-            Some(home) => home + &path[1..],
-            None => path.to_string(),
-        };
-    }
-    // "~user" or "~something-without-slash" — not a home-dir expansion
-    path.to_string()
-}
-
-fn home_dir() -> Option<String> {
-    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()
-}
+use crate::path_utils::expand_tilde;
 
 /// Validates a file path for database connections.
 ///

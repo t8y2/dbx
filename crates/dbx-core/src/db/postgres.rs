@@ -1151,6 +1151,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
          WHEN 'm' THEN 'VIEW' \
+         WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
        obj_description(c.oid) AS object_comment, \
@@ -1162,7 +1163,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        ) AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
@@ -1171,7 +1172,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
      LEFT JOIN LATERAL pg_stat_file( \
        CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
      ) stat ON true \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
      UNION ALL \
      SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
@@ -1192,6 +1193,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
          WHEN 'm' THEN 'VIEW' \
+         WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
        obj_description(c.oid) AS object_comment, \
@@ -1199,13 +1201,13 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        NULL::text AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
      UNION ALL \
      SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
@@ -2123,6 +2125,8 @@ mod tests {
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+        assert!(sql.contains("'SEQUENCE'"));
+        assert!(sql.contains("'S'"));
     }
 
     #[test]

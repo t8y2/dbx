@@ -3,9 +3,11 @@ import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Activity,
+  ExternalLink,
   Cpu,
   FolderOpen,
   MemoryStick,
+  Search,
   Square,
   Trash2,
   Download,
@@ -74,6 +76,7 @@ const driverStoreTab = ref("agent");
 // ──────────── Agent drivers ────────────
 
 const drivers = ref<AgentDriverInfo[]>([]);
+const agentDriverSearch = ref("");
 const installing = ref<string | null>(null);
 const upgradingAll = ref(false);
 const upgradingCurrent = ref("");
@@ -93,6 +96,7 @@ const runtimeError = ref("");
 const runtimeBusy = ref<string | null>(null);
 let runtimeTimer: ReturnType<typeof setInterval> | null = null;
 const DRIVER_RUNTIME_POLL_MS = 5000;
+const OFFLINE_DRIVER_DOWNLOAD_URL = "https://dbxio.com/cn/drivers";
 
 let unlisten: (() => void) | null = null;
 
@@ -187,6 +191,15 @@ function isDriverQueued(dbType: string): boolean {
 function canInstallOrUpdateDriver(dbType: string): boolean {
   const driver = drivers.value.find((d) => d.db_type === dbType);
   return Boolean(driver && (!driver.installed || driver.update_available));
+}
+
+async function openOfflineDriverDownload() {
+  if (isWeb) {
+    window.open(OFFLINE_DRIVER_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-shell");
+  await open(OFFLINE_DRIVER_DOWNLOAD_URL);
 }
 
 function queueDriverInstall(dbType: string) {
@@ -470,11 +483,32 @@ function formatSize(bytes: number): string {
 // ──────────── JDBC drivers ────────────
 
 const jdbcDrivers = ref<JdbcDriverInfo[]>([]);
+const jdbcDriverSearch = ref("");
 const isLoadingJdbcDrivers = ref(false);
 const jdbcPluginStatus = ref<JdbcPluginStatus | null>(null);
 const isInstallingJdbcPlugin = ref(false);
 const isUninstallingJdbcPlugin = ref(false);
 const jdbcDriverPathInput = ref("");
+
+const filteredAgentDrivers = computed(() => {
+  const query = agentDriverSearch.value.trim().toLowerCase();
+  if (!query) return drivers.value;
+  return drivers.value.filter((driver) =>
+    [driver.label, driver.db_type, driver.version, driver.installed_version, driver.jre]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query),
+  );
+});
+
+const filteredJdbcDrivers = computed(() => {
+  const query = jdbcDriverSearch.value.trim().toLowerCase();
+  if (!query) return jdbcDrivers.value;
+  return jdbcDrivers.value.filter((driver) =>
+    [driver.name, driver.path, String(driver.size)].join(" ").toLowerCase().includes(query),
+  );
+});
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -803,6 +837,22 @@ watch(driverStoreTab, (tab) => {
                 <div class="mt-0.5 text-xs font-medium">{{ formatBytes(item.bytes) }}</div>
               </div>
             </div>
+            <div class="mt-3 rounded-lg border bg-background/50 px-2.5 py-2">
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0 truncate text-xs text-muted-foreground">
+                  {{ t("driverStore.offlineDownloadHint") }}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-7 shrink-0 rounded-full text-xs gap-1 whitespace-nowrap"
+                  @click="openOfflineDriverDownload"
+                >
+                  <ExternalLink class="h-3.5 w-3.5" />
+                  {{ t("driverStore.offlineDownloadLink") }}
+                </Button>
+              </div>
+            </div>
           </div>
 
           <div class="flex items-center justify-between">
@@ -845,22 +895,43 @@ watch(driverStoreTab, (tab) => {
 
           <!-- Agent Tab -->
           <TabsContent value="agent" class="mt-5 space-y-5">
-            <!-- Java Runtime Mode -->
+            <!-- Java Runtime -->
             <div class="rounded-xl border bg-muted/20 p-4 space-y-3">
-              <div class="flex flex-wrap items-end gap-3">
-                <div class="min-w-[220px] flex-1 space-y-1.5">
-                  <Label>{{ t("driverStore.javaRuntime") }}</Label>
-                  <Select :model-value="javaRuntimeConfig.mode" @update:model-value="setJavaRuntimeMode">
-                    <SelectTrigger class="h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="managed">{{ t("driverStore.javaRuntimeManaged") }}</SelectItem>
-                      <SelectItem value="system">{{ t("driverStore.javaRuntimeSystem") }}</SelectItem>
-                      <SelectItem value="custom">{{ t("driverStore.javaRuntimeCustom") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <Label class="shrink-0">{{ t("driverStore.javaRuntime") }}</Label>
+                <Select :model-value="javaRuntimeConfig.mode" @update:model-value="setJavaRuntimeMode">
+                  <SelectTrigger class="h-8 min-w-[112px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="managed">{{ t("driverStore.javaRuntimeManaged") }}</SelectItem>
+                    <SelectItem value="system">{{ t("driverStore.javaRuntimeSystem") }}</SelectItem>
+                    <SelectItem value="custom">{{ t("driverStore.javaRuntimeCustom") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  v-if="javaRuntimeConfig.mode === 'custom'"
+                  v-model="customJavaPath"
+                  class="h-8 min-w-[180px] flex-1 text-xs"
+                  :placeholder="t('driverStore.customJavaPathPlaceholder')"
+                  @keydown.enter.prevent="saveJavaRuntimeConfig"
+                />
+                <span v-else class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {{
+                    javaRuntimeConfig.mode === "system"
+                      ? t("driverStore.systemJavaHint")
+                      : t("driverStore.jreRuntimeAutoDownloadHint")
+                  }}
+                </span>
+                <Button
+                  v-if="javaRuntimeConfig.mode === 'custom'"
+                  variant="outline"
+                  class="h-8 shrink-0 rounded-full text-xs"
+                  @click="chooseCustomJavaPath"
+                >
+                  <FolderOpen class="h-3.5 w-3.5" />
+                  {{ t("driverStore.choose") }}
+                </Button>
                 <Button
                   class="h-8 shrink-0 rounded-full text-xs"
                   :disabled="savingJavaRuntime || (javaRuntimeConfig.mode === 'custom' && !customJavaPath.trim())"
@@ -869,89 +940,86 @@ watch(driverStoreTab, (tab) => {
                   {{ savingJavaRuntime ? t("driverStore.saving") : t("settings.save") }}
                 </Button>
               </div>
-              <div v-if="javaRuntimeConfig.mode === 'custom'" class="flex items-center gap-2">
-                <Input
-                  v-model="customJavaPath"
-                  class="h-8 flex-1 text-xs"
-                  :placeholder="t('driverStore.customJavaPathPlaceholder')"
-                  @keydown.enter.prevent="saveJavaRuntimeConfig"
-                />
-                <Button variant="outline" class="h-8 shrink-0 rounded-full text-xs" @click="chooseCustomJavaPath">
-                  <FolderOpen class="h-3.5 w-3.5" />
-                  {{ t("driverStore.choose") }}
-                </Button>
-              </div>
-              <p v-else-if="javaRuntimeConfig.mode === 'system'" class="text-xs text-muted-foreground">
-                {{ t("driverStore.systemJavaHint") }}
-              </p>
-            </div>
 
-            <!-- JRE Runtime -->
-            <div v-if="installedJres.length > 0" class="rounded-xl border bg-muted/20 p-4 space-y-2.5">
-              <div v-for="jre in installedJres" :key="jre.key" class="flex items-center justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="text-sm font-medium">{{ t("driverStore.jreRuntimeTitle", { jre: jre.key }) }}</div>
-                </div>
-                <div class="flex shrink-0 items-center gap-3">
-                  <span
-                    v-if="jreUsageLabel(jre.key)"
-                    class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
-                  >
-                    {{ jreUsageLabel(jre.key) }}
-                  </span>
-                  <Check v-if="jre.installed" class="h-4 w-4 text-green-600" />
-                  <span v-else class="text-xs text-muted-foreground">{{ t("driverStore.notInstalled") }}</span>
-                  <DriverInstallProgressCircle
-                    v-if="reinstallingJre === jre.key"
-                    :percent="progressNumber"
-                    :title="progressTitle(jre.installed ? t('driverStore.reinstalling') : t('driverStore.installing'))"
-                  />
-                  <Button
-                    v-else-if="!jre.installed"
-                    type="button"
-                    variant="default"
-                    size="sm"
-                    class="h-8 rounded-full text-xs"
-                    :disabled="reinstallingJre !== null || installing !== null"
-                    @click="reinstallJre(jre.key)"
-                  >
-                    <Download class="h-3.5 w-3.5 mr-1" />
-                    {{ t("driverStore.install") }}
-                  </Button>
-                  <Button
-                    v-else-if="jre.installed"
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    class="h-8 rounded-full text-xs"
-                    :disabled="reinstallingJre !== null || installing !== null"
-                    @click="reinstallJre(jre.key)"
-                  >
-                    <RotateCcw class="h-3.5 w-3.5 mr-1" />
-                    {{ t("driverStore.reinstall") }}
-                  </Button>
-                  <Button
-                    v-if="jre.installed"
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    class="h-8 rounded-full text-xs text-muted-foreground hover:text-destructive"
-                    :disabled="reinstallingJre !== null || installing !== null"
-                    @click="uninstallJre(jre.key)"
-                  >
-                    {{ t("driverStore.uninstall") }}
-                  </Button>
+              <div v-if="installedJres.length > 0" class="divide-y rounded-lg border bg-background/50">
+                <div
+                  v-for="jre in installedJres"
+                  :key="jre.key"
+                  class="flex items-center justify-between gap-3 px-3 py-2.5"
+                >
+                  <div class="min-w-0">
+                    <div class="text-sm font-medium">{{ t("driverStore.jreRuntimeTitle", { jre: jre.key }) }}</div>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-3">
+                    <span
+                      v-if="jreUsageLabel(jre.key)"
+                      class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+                    >
+                      {{ jreUsageLabel(jre.key) }}
+                    </span>
+                    <Check v-if="jre.installed" class="h-4 w-4 text-green-600" />
+                    <span v-else class="text-xs text-muted-foreground">{{ t("driverStore.notInstalled") }}</span>
+                    <DriverInstallProgressCircle
+                      v-if="reinstallingJre === jre.key"
+                      :percent="progressNumber"
+                      :title="
+                        progressTitle(jre.installed ? t('driverStore.reinstalling') : t('driverStore.installing'))
+                      "
+                    />
+                    <Button
+                      v-else-if="!jre.installed"
+                      type="button"
+                      variant="default"
+                      size="sm"
+                      class="h-8 rounded-full text-xs"
+                      :disabled="reinstallingJre !== null || installing !== null"
+                      @click="reinstallJre(jre.key)"
+                    >
+                      <Download class="h-3.5 w-3.5 mr-1" />
+                      {{ t("driverStore.install") }}
+                    </Button>
+                    <Button
+                      v-else-if="jre.installed"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="h-8 rounded-full text-xs"
+                      :disabled="reinstallingJre !== null || installing !== null"
+                      @click="reinstallJre(jre.key)"
+                    >
+                      <RotateCcw class="h-3.5 w-3.5 mr-1" />
+                      {{ t("driverStore.reinstall") }}
+                    </Button>
+                    <Button
+                      v-if="jre.installed"
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      class="h-8 rounded-full text-xs text-muted-foreground hover:text-destructive"
+                      :disabled="reinstallingJre !== null || installing !== null"
+                      @click="uninstallJre(jre.key)"
+                    >
+                      {{ t("driverStore.uninstall") }}
+                    </Button>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div v-else class="rounded-xl border bg-muted/20 p-4">
-              <div class="text-sm font-medium">{{ t("driverStore.jreRuntime") }}</div>
-              <p class="text-xs text-muted-foreground mt-0.5">{{ t("driverStore.jreRuntimeAutoDownloadHint") }}</p>
             </div>
 
             <!-- Driver List -->
+            <div class="relative">
+              <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                v-model="agentDriverSearch"
+                class="h-8 pl-8 text-xs"
+                :placeholder="t('driverStore.searchDrivers')"
+              />
+            </div>
             <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
               {{ t("common.loading") }}
+            </div>
+            <div v-else-if="filteredAgentDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+              {{ t("driverStore.noMatchingDrivers") }}
             </div>
             <div v-else class="rounded-md border divide-y">
               <div v-if="updatableCount > 0" class="flex items-center justify-between px-4 py-2 bg-muted/30">
@@ -974,7 +1042,7 @@ watch(driverStoreTab, (tab) => {
                 </Button>
               </div>
               <div
-                v-for="driver in drivers"
+                v-for="driver in filteredAgentDrivers"
                 :key="driver.db_type"
                 class="flex items-center gap-3 px-4 py-2.5 transition hover:bg-muted/30"
               >
@@ -1180,6 +1248,14 @@ watch(driverStoreTab, (tab) => {
               <div class="space-y-1">
                 <Label>{{ t("settings.jdbcDrivers") }}</Label>
               </div>
+              <div class="relative">
+                <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  v-model="jdbcDriverSearch"
+                  class="h-8 pl-8 text-xs"
+                  :placeholder="t('driverStore.searchJdbcDrivers')"
+                />
+              </div>
               <div class="flex items-center gap-2">
                 <Input
                   v-model="jdbcDriverPathInput"
@@ -1209,8 +1285,11 @@ watch(driverStoreTab, (tab) => {
               <div v-else-if="jdbcDrivers.length === 0" class="p-4 text-sm text-muted-foreground">
                 {{ t("settings.jdbcNoDrivers") }}
               </div>
+              <div v-else-if="filteredJdbcDrivers.length === 0" class="p-4 text-sm text-muted-foreground">
+                {{ t("driverStore.noMatchingDrivers") }}
+              </div>
               <div v-else class="divide-y">
-                <div v-for="driver in jdbcDrivers" :key="driver.path" class="flex items-center gap-3 p-3">
+                <div v-for="driver in filteredJdbcDrivers" :key="driver.path" class="flex items-center gap-3 p-3">
                   <div class="min-w-0 flex-1">
                     <div class="truncate text-sm font-medium">{{ driver.name }}</div>
                     <div class="truncate text-xs text-muted-foreground">{{ driver.path }}</div>

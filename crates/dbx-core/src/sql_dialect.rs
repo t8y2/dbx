@@ -110,6 +110,10 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         );
     }
 
+    if database_type == Some(DatabaseType::Oracle) {
+        return format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}");
+    }
+
     if database_type.is_some_and(uses_fetch_first) {
         let offset = options
             .offset
@@ -865,7 +869,7 @@ mod tests {
                 where_input: None,
                 include_row_id: true,
             }),
-            "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t ORDER BY t.ROWID ASC FETCH FIRST 100 ROWS ONLY"
+            "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t ORDER BY t.ROWID ASC"
         );
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {

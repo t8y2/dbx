@@ -20,7 +20,7 @@ export function connectionDriverLabel(connection?: Pick<ConnectionConfig, "db_ty
 
 export function connectionEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type)) {
+  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connection.host || connection.database || "local";
   }
   if (connection.host && connection.port) return `${connection.host}:${connection.port}`;
@@ -51,7 +51,7 @@ function redactConnectionHost(host: string): string {
 
 export function connectionRedactedEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type)) {
+  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connectionEndpointLabel(connection);
   }
 
@@ -66,7 +66,13 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
 
 export function connectionRedactedNameLabel(connection?: ConnectionNamePresentationConfig): string {
   const name = connection?.name.trim() || "";
-  if (!connection || !name || LOCAL_DATABASE_TYPES.has(connection.db_type)) return name;
+  if (
+    !connection ||
+    !name ||
+    LOCAL_DATABASE_TYPES.has(connection.db_type) ||
+    (connection.db_type === "h2" && connection.port === 0)
+  )
+    return name;
 
   const host = connection.host.trim();
   if (!host) return name;

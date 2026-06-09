@@ -7,8 +7,8 @@ use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
 
 use crate::agent_connection::{
-    agent_connect_params, mongo_legacy_error_with_auth_hint, oracle_alternate_connect_config,
-    oracle_auth_fallback_profiles, should_retry_oracle_with_10g_driver,
+    agent_connect_params, h2_file_path_from_jdbc_url, is_h2_file_connection, mongo_legacy_error_with_auth_hint,
+    oracle_alternate_connect_config, oracle_auth_fallback_profiles, should_retry_oracle_with_10g_driver,
 };
 use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::database_capabilities;
@@ -20,21 +20,13 @@ use crate::external;
 use crate::models::connection::{
     parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host, ConnectionConfig, DatabaseType,
 };
+use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
 use crate::storage::Storage;
 
 pub const JDBC_PLUGIN_NOT_INSTALLED: &str =
     "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.";
-
-pub fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Ok(home) = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-    path.to_string()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MysqlMode {
@@ -327,6 +319,7 @@ impl AppState {
 
         let db_config = database_connection_config(&config, database);
 
+        validate_h2_file_connection(&db_config)?;
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
         probe_connection_endpoint(&db_config, &host, port).await?;
         let url = connection_url_for_endpoint(&db_config, &host, port);
@@ -1076,6 +1069,38 @@ pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, po
     db::probe_tcp_endpoint(&format!("{:?}", config.db_type), host, port, timeout).await
 }
 
+fn validate_h2_file_connection(config: &ConnectionConfig) -> Result<(), String> {
+    if !is_h2_file_connection(config) {
+        return Ok(());
+    }
+    let path = config
+        .connection_string
+        .as_deref()
+        .and_then(h2_file_path_from_jdbc_url)
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| config.host.clone());
+    validate_h2_database_path(&path)
+}
+
+fn validate_h2_database_path(path: &str) -> Result<(), String> {
+    let first_err = match db::validate_file_path(path, |_| false) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
+
+    for suffix in [".mv.db", ".h2.db"] {
+        if path.ends_with(suffix) {
+            continue;
+        }
+        let candidate = format!("{path}{suffix}");
+        if db::validate_file_path(&candidate, |_| false).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(first_err)
+}
+
 fn uses_tcp_probe(config: &ConnectionConfig, host: &str, port: u16) -> bool {
     if config.db_type == DatabaseType::MongoDb
         && config.connection_string.as_deref().is_some_and(|value| !value.is_empty())
@@ -1129,7 +1154,8 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         connection_url_for_endpoint, database_connection_config, metadata_connection_config,
-        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe, AppState, PoolKind,
+        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe, validate_h2_database_path,
+        AppState, PoolKind,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, oracle_alternate_connect_config,
@@ -1201,6 +1227,30 @@ mod tests {
         assert_eq!(params["username"], "informix");
         assert_eq!(params["password"], "in4mix");
         assert_eq!(params["url_params"], "INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8");
+    }
+
+    #[test]
+    fn validates_h2_database_base_path_when_mv_db_file_exists() {
+        let dir = std::env::temp_dir().join(format!("dbx-h2-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("app.mv.db");
+        std::fs::write(&file_path, b"h2").unwrap();
+        let base_path = dir.join("app");
+
+        validate_h2_database_path(base_path.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_h2_database_path() {
+        let dir = std::env::temp_dir().join(format!("dbx-h2-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing_path = dir.join("missing");
+
+        let err = validate_h2_database_path(missing_path.to_str().unwrap()).unwrap_err();
+
+        assert!(err.contains("File does not exist"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1788,6 +1838,23 @@ mod tests {
             assert!(uses_tcp_probe(&config, "192.0.2.10", config.port), "{db_type:?} ip");
             assert!(uses_tcp_probe(&config, "127.0.0.1", 54000), "{db_type:?} forwarded");
         }
+    }
+
+    #[test]
+    fn h2_agent_connections_skip_tcp_probe_for_file_and_tcp_modes() {
+        let mut file_config = mysql_config(None);
+        file_config.db_type = DatabaseType::H2;
+        file_config.host = "/tmp/app.mv.db".to_string();
+        file_config.port = 0;
+
+        assert!(!uses_tcp_probe(&file_config, "/tmp/app.mv.db", 0));
+
+        let mut tcp_config = mysql_config(Some("test"));
+        tcp_config.db_type = DatabaseType::H2;
+        tcp_config.host = "127.0.0.1".to_string();
+        tcp_config.port = 9092;
+
+        assert!(!uses_tcp_probe(&tcp_config, "127.0.0.1", 9092));
     }
 
     #[tokio::test]

@@ -138,8 +138,22 @@ test("mongodb describe table returns inferred document fields", async () => {
     ...backend,
     findConnection: async () => mongoConnection,
     describeTable: async () => [
-      { name: "_id", data_type: "object", is_nullable: false, column_default: null, is_primary_key: true, comment: null },
-      { name: "name", data_type: "string", is_nullable: false, column_default: null, is_primary_key: false, comment: null },
+      {
+        name: "_id",
+        data_type: "object",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: true,
+        comment: null,
+      },
+      {
+        name: "name",
+        data_type: "string",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: false,
+        comment: null,
+      },
     ],
   };
   const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
@@ -159,7 +173,11 @@ test("mongodb execute query formats shell-style find results", async () => {
   const scopedBackend: Backend = {
     ...backend,
     findConnection: async () => mongoConnection,
-    executeQuery: async () => ({ columns: ["_id", "meta", "missing"], rows: [{ _id: "1", meta: { name: "demo" }, missing: null }], row_count: 1 }),
+    executeQuery: async () => ({
+      columns: ["_id", "meta", "missing"],
+      rows: [{ _id: "1", meta: { name: "demo" }, missing: null }],
+      row_count: 1,
+    }),
   };
   const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
 
@@ -184,6 +202,32 @@ test("connection lookup failures include a stable MCP error code", async () => {
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /CONNECTION_NOT_FOUND:/);
   assert.match(result.content[0].text, /missing/);
+});
+
+test("add connection accepts H2 file paths without a port", async () => {
+  let added: Omit<ConnectionConfig, "id"> | undefined;
+  const scopedBackend: Backend = {
+    ...backend,
+    findConnection: async () => undefined,
+    addConnection: async (config) => {
+      added = config;
+      return { id: "h2-file", ...config };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_add_connection.handler({
+    name: "h2-local",
+    db_type: "h2",
+    host: "/data/app.mv.db",
+    username: "sa",
+    password: "",
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(added?.db_type, "h2");
+  assert.equal(added?.host, "/data/app.mv.db");
+  assert.equal(added?.port, 0);
 });
 
 test("SQL safety failures include a stable MCP error code", async () => {

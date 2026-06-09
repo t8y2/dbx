@@ -284,7 +284,7 @@ No. DBX does not collect telemetry. The auto-update feature checks GitHub Releas
 
 <details>
 <summary><strong>Can I use DBX without an internet connection?</strong></summary>
-Yes. The desktop app works fully offline. AI features need network access to the model endpoint (or a local model via Ollama).
+Yes. The desktop app works fully offline. For air-gapped driver installs, download offline driver packages from the [Offline Drivers page](https://dbxio.com/en/drivers) on an internet-connected machine, transfer them to the offline machine, then import them in DBX from Settings > Driver Manager. AI features need network access to the model endpoint (or a local model via Ollama).
 </details>
 
 <details>

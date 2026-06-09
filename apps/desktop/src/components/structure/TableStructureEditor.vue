@@ -98,6 +98,23 @@ const activeTab = ref("columns");
 const loading = ref(false);
 const saving = ref(false);
 const sqlPreviewLoading = ref(false);
+const ddlContent = ref("");
+const ddlLoading = ref(false);
+const ddlFetched = ref(false);
+
+async function fetchDdl() {
+  if (!props.connectionId || !props.database || !props.tableName || ddlFetched.value) return;
+  ddlLoading.value = true;
+  try {
+    ddlContent.value = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    ddlFetched.value = true;
+  } catch (e: any) {
+    ddlContent.value = `-- Error: ${e?.message || e}`;
+    ddlFetched.value = true;
+  } finally {
+    ddlLoading.value = false;
+  }
+}
 const errorMessage = ref("");
 const columns = ref<EditableStructureColumn[]>([]);
 const indexes = ref<EditableStructureIndex[]>([]);
@@ -432,6 +449,8 @@ function resetState() {
   warnings.value = [];
   foreignKeys.value = [];
   triggers.value = [];
+  ddlContent.value = "";
+  ddlFetched.value = false;
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
@@ -776,6 +795,12 @@ watch(refreshVersion, (version, previous) => {
   if (version === previous || !version || isCreateMode.value) return;
   void loadStructure(true);
 });
+
+watch(activeTab, (tab) => {
+  if (tab === "ddl") {
+    void fetchDdl();
+  }
+});
 </script>
 
 <template>
@@ -846,6 +871,7 @@ watch(refreshVersion, (version, previous) => {
               <TabsTrigger value="indexes">{{ t("structureEditor.indexes") }}</TabsTrigger>
               <TabsTrigger value="foreignKeys">{{ t("structureEditor.foreignKeys") }}</TabsTrigger>
               <TabsTrigger value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
+              <TabsTrigger value="ddl" v-if="!isCreateMode">DDL</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
               <div class="flex items-center gap-1.5">
@@ -1443,6 +1469,18 @@ watch(refreshVersion, (version, previous) => {
                 <div class="mt-1 font-mono text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
               </div>
             </div>
+          </TabsContent>
+
+          <TabsContent value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+            <div v-if="ddlLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("common.loading") }}
+            </div>
+            <pre
+              v-else
+              class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text"
+              v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')"
+            ></pre>
           </TabsContent>
         </Tabs>
       </div>

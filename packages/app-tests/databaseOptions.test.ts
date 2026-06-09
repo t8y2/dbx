@@ -3,7 +3,7 @@ import { test } from "vitest";
 import { databaseOptionsForConnection } from "../../apps/desktop/src/composables/useDatabaseOptions.ts";
 
 test("tree-schema connections include the default database when no catalogs are returned", () => {
-  assert.deepEqual(databaseOptionsForConnection([], { db_type: "jdbc" }), [""]);
+  assert.deepEqual(databaseOptionsForConnection([], { db_type: "saphana" }), [""]);
 });
 
 test("non tree-schema connections keep an empty database option list", () => {

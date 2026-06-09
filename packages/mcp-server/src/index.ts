@@ -47,6 +47,7 @@ function formatQueryToolResult(result: QueryResult, title?: string) {
 
 export const DBX_CONNECTION_TYPE_DESCRIPTION =
   "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, doris, starrocks, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, gbase, h2, snowflake, trino, hive, db2, informix, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access";
+const FILE_CAPABLE_CONNECTION_TYPES = new Set(["sqlite", "duckdb", "access", "h2"]);
 
 export function createDbxMcpServer(backend: Backend, options: { isWebMode?: boolean } = {}): McpServer {
   const isWebMode = options.isWebMode ?? !!process.env.DBX_WEB_URL;
@@ -171,7 +172,10 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       name: z.string().describe("Connection name"),
       db_type: z.string().describe(DBX_CONNECTION_TYPE_DESCRIPTION),
       host: z.string().describe("Database host"),
-      port: z.number().optional().describe("Database port (TDengine defaults to 6041, IoTDB defaults to 6667, XuguDB defaults to 5138)"),
+      port: z
+        .number()
+        .optional()
+        .describe("Database port (TDengine defaults to 6041, IoTDB defaults to 6667, XuguDB defaults to 5138)"),
       username: z.string().default("").describe("Username"),
       password: z.string().default("").describe("Password"),
       database: z.string().optional().describe("Default database name"),
@@ -180,9 +184,15 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
     async ({ name, db_type, host, port, username, password, database, ssl }) => {
       const existing = await backend.findConnection(name);
       if (existing) return text(`Connection "${name}" already exists.`);
-      const FILE_BASED_TYPES = new Set(["sqlite", "duckdb", "access"]);
-      const DEFAULT_PORTS: Record<string, number> = { kwdb: 26257, rqlite: 4001, tdengine: 6041, iotdb: 6667, xugu: 5138 };
-      const resolvedPort = port ?? DEFAULT_PORTS[db_type] ?? (FILE_BASED_TYPES.has(db_type) ? 0 : undefined);
+      const DEFAULT_PORTS: Record<string, number> = {
+        kwdb: 26257,
+        rqlite: 4001,
+        tdengine: 6041,
+        iotdb: 6667,
+        xugu: 5138,
+      };
+      const resolvedPort =
+        port ?? DEFAULT_PORTS[db_type] ?? (FILE_CAPABLE_CONNECTION_TYPES.has(db_type) ? 0 : undefined);
       if (resolvedPort === undefined) return text("Port is required for this database type.");
       const config = await backend.addConnection({
         name,

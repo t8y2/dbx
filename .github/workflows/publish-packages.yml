@@ -45,6 +45,7 @@ jobs:
             "${PRODUCT_NAME}_${VERSION}_aarch64.dmg"
             "${PRODUCT_NAME}_${VERSION}_x64.dmg"
             "${PRODUCT_NAME}_${VERSION}_x64-setup.exe"
+            "${PRODUCT_NAME}_${VERSION}_arm64-setup.exe"
           )
 
           for ASSET in "${ASSETS[@]}"; do
@@ -79,7 +80,8 @@ jobs:
           echo "SHA256 hashes:"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64.dmg" "sha_dmg_x64"
-          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe_x64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_arm64-setup.exe" "sha_exe_arm64"
 
       - name: Publish Homebrew Cask
         env:
@@ -148,7 +150,8 @@ jobs:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          SHA_EXE="${{ steps.hashes.outputs.sha_exe }}"
+          SHA_EXE_X64="${{ steps.hashes.outputs.sha_exe_x64 }}"
+          SHA_EXE_ARM64="${{ steps.hashes.outputs.sha_exe_arm64 }}"
 
           git clone --depth 1 \
             "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/scoop-bucket.git" \
@@ -164,7 +167,11 @@ jobs:
               "architecture": {
                   "64bit": {
                       "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/${PRODUCT_NAME}_${VERSION}_x64-setup.exe",
-                      "hash": "${SHA_EXE}"
+                      "hash": "${SHA_EXE_X64}"
+                  },
+                  "arm64": {
+                      "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/${PRODUCT_NAME}_${VERSION}_arm64-setup.exe",
+                      "hash": "${SHA_EXE_ARM64}"
                   }
               },
               "innosetup": false,
@@ -182,6 +189,9 @@ jobs:
                   "architecture": {
                       "64bit": {
                           "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/${PRODUCT_NAME}_\$version_x64-setup.exe"
+                      },
+                      "arm64": {
+                          "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/${PRODUCT_NAME}_\$version_arm64-setup.exe"
                       }
                   }
               }

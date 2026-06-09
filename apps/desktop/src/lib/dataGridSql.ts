@@ -1,7 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import * as api from "@/lib/api";
 
-export type GridCellValue = string | number | boolean | null;
+export type GridCellValue = string | number | boolean | null | unknown[] | { [key: string]: unknown };
 
 export interface DataGridTableMeta {
   schema?: string;

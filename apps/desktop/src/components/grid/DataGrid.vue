@@ -1,5 +1,5 @@
 <script lang="ts">
-import { ref } from "vue";
+import { ref, shallowRef } from "vue";
 const globalDdlOpen = ref(false);
 </script>
 
@@ -79,6 +79,7 @@ import ImagePreviewDialog from "@/components/grid/ImagePreviewDialog.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/api";
+import { coerceDataGridCellValue, dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
@@ -110,6 +111,8 @@ import {
 } from "@/lib/dataGridTranspose";
 import { matchesRowStatusFilter, type RowStatus, type RowStatusFilter } from "@/lib/gridRowStatus";
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
+import { getApplicablePreviewActions } from "@/lib/resultPreviewRegistry";
+import "@/lib/previewHandlers/geometryMapPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
   binaryCellDisplayText,
@@ -246,11 +249,11 @@ const props = defineProps<{
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: () => Promise<QueryResult | undefined>;
   customSave?: (changes: {
-    dirtyRows: Map<number, Map<number, string | number | boolean | null>>;
-    newRows: (string | number | boolean | null)[][];
+    dirtyRows: Map<number, Map<number, CellValue>>;
+    newRows: CellValue[][];
     deletedRows: Set<number>;
     columns: string[];
-    rows: (string | number | boolean | null)[][];
+    rows: CellValue[][];
   }) => Promise<void>;
 }>();
 
@@ -453,6 +456,8 @@ const sideGeometryPreviewOpen = ref(false);
 const dialogGeometryPreviewOpen = ref(false);
 const sideGeometryCanvas = ref<HTMLCanvasElement | null>(null);
 const dialogGeometryCanvas = ref<HTMLCanvasElement | null>(null);
+const previewDialogOpen = ref(false);
+const previewDialogConfig = shallowRef<{ component: any; props: Record<string, any> } | null>(null);
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
@@ -1528,6 +1533,12 @@ const visibleColumnTypes = computed(() =>
   }),
 );
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
+
+/** Preview actions from the result preview registry for the current result. */
+const previewActions = computed(() => {
+  if (!props.result) return [];
+  return getApplicablePreviewActions(props.result);
+});
 const displayableColumnCount = computed(() => displayableColumnIndexes.value.length);
 const hiddenColumnCount = computed(() => displayableColumnCount.value - visibleColumnCount.value);
 const allNullColumnIndexesForResult = computed(() =>
@@ -2193,7 +2204,6 @@ const {
   saveChanges,
   discardChanges,
   rowDataWithChanges,
-  coerceCellValue,
   canEditColumn,
   resetGridVerticalScroll,
   getResetScrollAfterResult,
@@ -2247,6 +2257,15 @@ function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
   const columnName = props.sourceColumns?.[columnIndex] ?? props.result.columns[columnIndex];
   if (!columnName) return undefined;
   return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
+}
+
+function coerceDetailCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+  return coerceDataGridCellValue({
+    value,
+    oldValue,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(columnIndex),
+  }) as CellValue;
 }
 
 function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKind | undefined {
@@ -2662,6 +2681,18 @@ function exportSelectedRowsSql() {
   return exportSql(affectedRowIds());
 }
 
+function executePreviewAction(action: { execute: (ctx: any) => any }) {
+  const config = action.execute({
+    result: props.result,
+    selectedRowIds: affectedRowIds(),
+    displayRowRefs: displayRowRefs.value,
+  });
+  if (config) {
+    previewDialogConfig.value = config;
+    previewDialogOpen.value = true;
+  }
+}
+
 function isRowActive(index: number): boolean {
   const item = displayItemAt(index);
   if (item && isRowSelected(item.id)) return true;
@@ -2904,7 +2935,11 @@ watch(activeCellDetail, (detail) => {
     resetDetailEdit();
     return;
   }
-  detailEditValue.value = cellDetailEditorText(detail.value, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: detail.value,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 });
@@ -2984,7 +3019,11 @@ function closeCellDetails() {
 function startDetailEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
-  detailEditValue.value = cellDetailEditorText(detail.value, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: detail.value,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   isEditingDetail.value = true;
 }
 
@@ -2998,7 +3037,11 @@ function commitDetailEdit() {
 
   if (item.isNew && item.newIndex !== undefined) {
     const oldVal = newRows.value[item.newIndex]?.[detail.colIndex];
-    newRows.value[item.newIndex][detail.colIndex] = coerceCellValue(detailEditValue.value, oldVal);
+    newRows.value[item.newIndex][detail.colIndex] = coerceDetailCellValue(
+      detailEditValue.value,
+      oldVal,
+      detail.colIndex,
+    );
     return;
   }
 
@@ -3006,7 +3049,7 @@ function commitDetailEdit() {
   if (!canEditExistingRows.value) return;
 
   const oldVal = props.result.rows[item.sourceIndex]?.[detail.colIndex];
-  const newVal = coerceCellValue(detailEditValue.value, oldVal);
+  const newVal = coerceDetailCellValue(detailEditValue.value, oldVal, detail.colIndex);
   if (newVal !== oldVal) {
     if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
     dirtyRows.value.get(item.sourceIndex)!.set(detail.colIndex, newVal);
@@ -3035,7 +3078,11 @@ function syncEditorFromDetailEdit() {
 function cancelValueEditorEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
-  detailEditValue.value = cellDetailEditorText(detail.value, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: detail.value,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 }
@@ -3067,7 +3114,11 @@ function restoreDetailOriginalValue() {
     dirtyRows.value = new Map(dirtyRows.value);
   }
 
-  detailEditValue.value = cellDetailEditorText(restoredValue, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: restoredValue,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   syncEditorFromDetailEdit();
   isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
   detailCell.value = { ...detailCell.value! };
@@ -3297,9 +3348,17 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 function formatCell(value: CellValue, columnIndex?: number): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   const columnName = columnIndex === undefined ? undefined : props.result.columns[columnIndex];
+  const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
+  const arrayDisplay = formatter
+    ? undefined
+    : dataGridCellDisplayText({ value, databaseType: props.databaseType, columnInfo });
+  if (arrayDisplay !== undefined) return arrayDisplay;
   const binaryDisplay = formatter
     ? null
-    : binaryCellDisplayText(value, columnName ? columnTypeMap.value.get(columnName) : undefined);
+    : binaryCellDisplayText(
+        value,
+        columnInfo?.data_type ?? (columnName ? columnTypeMap.value.get(columnName) : undefined),
+      );
   if (binaryDisplay) return binaryDisplay;
   const s = applyColumnFormatter(value, formatter);
   return s.length > CELL_DISPLAY_MAX_LENGTH ? s.slice(0, CELL_DISPLAY_MAX_LENGTH) : s;
@@ -5782,6 +5841,24 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
   // 8. Export submenu
   items.push(exportSubmenu());
+
+  // 9. Preview actions from registry (e.g. geometry map preview)
+  if (!contextHeaderColumn.value && contextCell.value) {
+    const colType = props.result.column_types?.[contextCell.value.col];
+    if (colType && isGeometryColumnType(colType)) {
+      const actions = previewActions.value;
+      if (actions.length > 0) {
+        items.push({ label: "", separator: true });
+        for (const action of actions) {
+          items.push({
+            label: t("grid.layerPreview"),
+            action: () => executePreviewAction(action),
+            icon: action.icon,
+          });
+        }
+      }
+    }
+  }
 
   return items;
 });
@@ -8599,6 +8676,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       @confirm="confirmDeleteRow"
     />
     <ImagePreviewDialog v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
+    <component
+      v-if="previewDialogOpen && previewDialogConfig"
+      :is="previewDialogConfig.component"
+      v-model:open="previewDialogOpen"
+      v-bind="previewDialogConfig.props"
+    />
     <ExportProgressDialog v-model:open="exportProgressDialog" v-bind="exportProgressState" disable-cancel />
   </div>
 </template>
@@ -8738,17 +8821,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .cell-selected {
   background-color: var(--data-grid-cell-selected-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .row-cell-selected {
   background-color: var(--data-grid-cell-selected-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .transpose-record-header-selected {
   background-color: var(--data-grid-row-number-selected-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .transpose-record-header-active {
@@ -8757,12 +8843,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .cell-selected-dirty {
   background-color: var(--data-grid-cell-selected-dirty-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .row-cell-selected-dirty {
   background-color: var(--data-grid-cell-selected-dirty-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .data-grid-row-number.bg-emerald-500\/15 {

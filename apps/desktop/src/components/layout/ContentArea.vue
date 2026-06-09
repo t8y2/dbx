@@ -92,7 +92,7 @@ const props = defineProps<{
   activeConnection?: ConnectionConfig;
   executableSql: string;
   activeOutputView: "result" | "summary" | "explain" | "chart";
-  formatSqlRequestId: number;
+  formatSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
   cursorPos: number;
 }>();
@@ -104,7 +104,7 @@ const emit = defineEmits<{
   saveSql: [];
   cancel: [];
   explain: [];
-  editorUpdate: [value: string];
+  editorUpdate: [tabId: string, value: string];
   editorSelectionChange: [value: string];
   editorCursorChange: [pos: number];
   formatError: [];
@@ -410,9 +410,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               :database-type="activeEffectiveDatabaseType"
               :dialect="editorDialect"
               :format-dialect="activeSqlFormatDialect"
-              :format-request-id="formatSqlRequestId"
+              :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
               :execution-error="activeQueryError"
-              @update:model-value="emit('editorUpdate', $event)"
+              @update:model-value="emit('editorUpdate', activeTab.id, $event)"
               @selection-change="emit('editorSelectionChange', $event)"
               @cursor-change="emit('editorCursorChange', $event)"
               @format-error="emit('formatError')"

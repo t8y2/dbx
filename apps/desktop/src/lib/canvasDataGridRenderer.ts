@@ -351,6 +351,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
     ctx.font = normalFont;
 
+    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
+    ctx.strokeStyle = theme.border;
+    ctx.beginPath();
+    ctx.moveTo(0, rowBorderY);
+    ctx.lineTo(width, rowBorderY);
+    ctx.stroke();
+
     let x = rowNumberWidth + columnOffset - scrollLeft;
     for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x < width; visibleColIdx++) {
       const colWidth = renderedColumnWidths[visibleColIdx] ?? 0;
@@ -449,21 +456,20 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         if (selectedBorderVisual && cellPaintWidth >= 2) {
           const selectedLeftX = clippedX + 0.5;
           const selectedRightX = clippedX + cellPaintWidth - 1.5;
-          const selectedTopY = y + 0.5;
-          const selectedBottomY = y + CANVAS_DATA_GRID_ROW_HEIGHT - 1.5;
+          const selectedTopY = Math.max(y + 0.5, 1);
           const drawSelectedLeftBorder = selectedLeftX > rowNumberWidth + 0.5;
           ctx.strokeStyle = theme.cellSelectedBorder;
           ctx.beginPath();
           ctx.moveTo(selectedLeftX, selectedTopY);
           ctx.lineTo(selectedRightX, selectedTopY);
-          ctx.moveTo(selectedLeftX, selectedBottomY);
-          ctx.lineTo(selectedRightX, selectedBottomY);
+          ctx.moveTo(selectedLeftX, rowBorderY);
+          ctx.lineTo(selectedRightX, rowBorderY);
           if (drawSelectedLeftBorder) {
             ctx.moveTo(selectedLeftX, selectedTopY);
-            ctx.lineTo(selectedLeftX, selectedBottomY);
+            ctx.lineTo(selectedLeftX, rowBorderY);
           }
           ctx.moveTo(selectedRightX, selectedTopY);
-          ctx.lineTo(selectedRightX, selectedBottomY);
+          ctx.lineTo(selectedRightX, rowBorderY);
           ctx.stroke();
         }
 
@@ -476,12 +482,6 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       }
       x += colWidth;
     }
-    ctx.strokeStyle = theme.border;
-    ctx.beginPath();
-    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
-    ctx.moveTo(0, rowBorderY);
-    ctx.lineTo(width, rowBorderY);
-    ctx.stroke();
     ctx.globalAlpha = 1;
   }
 }

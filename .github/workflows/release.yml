@@ -65,6 +65,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            arch: x64
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            arch: arm64
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -176,15 +180,16 @@ jobs:
           args: --target ${{ matrix.target }}
 
       - name: Upload Windows portable ZIP
-        if: matrix.platform == 'windows-latest'
+        if: matrix.arch == 'x64' || matrix.arch == 'arm64'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
           $portableRoot = "portable"
-          $portableDir = Join-Path $portableRoot "DBX_${version}_x64"
-          $zipName = "DBX_${version}_x64-portable.zip"
+          $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
+          $zipName = "DBX_${version}_${arch}-portable.zip"
           $exePath = "target/${{ matrix.target }}/release/dbx.exe"
 
           if (!(Test-Path $exePath)) {

@@ -10,6 +10,7 @@ import {
   isModRShortcut,
   isNewQueryShortcut,
   isObjectSourceSaveShortcutTarget,
+  isOpenSettingsShortcut,
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
@@ -61,6 +62,22 @@ test("matches custom shortcut settings for opening a new query", () => {
   assert.equal(isNewQueryShortcut({ key: "t", metaKey: true }, { newQuery: "Shift+Mod+N" } as any), false);
   assert.equal(
     isNewQueryShortcut({ key: "n", ctrlKey: true, shiftKey: true } as any, { newQuery: "Shift+Mod+N" } as any),
+    true,
+  );
+});
+
+test("matches Mod+Comma for opening settings", () => {
+  assert.equal(isOpenSettingsShortcut({ key: ",", metaKey: true }), true);
+  assert.equal(isOpenSettingsShortcut({ key: ",", ctrlKey: true }), true);
+  assert.equal(isOpenSettingsShortcut({ key: ",", altKey: true }), false);
+});
+
+test("matches custom shortcut settings for opening settings", () => {
+  assert.equal(isOpenSettingsShortcut({ key: ",", metaKey: true }, { openSettings: "Shift+Mod+P" } as any), false);
+  assert.equal(
+    isOpenSettingsShortcut({ key: "p", ctrlKey: true, shiftKey: true } as any, {
+      openSettings: "Shift+Mod+P",
+    } as any),
     true,
   );
 });

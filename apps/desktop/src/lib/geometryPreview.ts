@@ -286,3 +286,120 @@ export function renderWktOnCanvas(canvas: HTMLCanvasElement, wkt: string): void 
 
   drawGroups(ctx, groups, type, mapX, mapY);
 }
+
+/** GeoJSON geometry type. */
+export interface GeoJsonGeometry {
+  type: string;
+  coordinates?: any;
+  geometries?: (GeoJsonGeometry | null)[];
+}
+
+/**
+ * Convert a WKT geometry string to a GeoJSON geometry object.
+ * Returns `null` for binary (hex) geometries or parse failures.
+ */
+export function wktToGeoJson(wkt: string): GeoJsonGeometry | null {
+  if (isHexGeometry(wkt)) return null;
+  const type = detectWktType(wkt);
+  if (type === "GEOMETRYCOLLECTION") return geometryCollectionToGeoJson(wkt);
+  const tokens = tokenize(wkt);
+  const { groups } = parseGroups(tokens, 0);
+  if (groups.length === 0) return null;
+  try {
+    switch (type) {
+      case "POINT":
+        return pointToGeoJson(groups);
+      case "MULTIPOINT":
+        return multiPointToGeoJson(groups);
+      case "LINESTRING":
+        return lineStringToGeoJson(groups);
+      case "MULTILINESTRING":
+        return multiLineStringToGeoJson(groups);
+      case "POLYGON":
+        return polygonToGeoJson(groups);
+      case "MULTIPOLYGON":
+        return multiPolygonToGeoJson(groups);
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+// ── GeoJSON conversion helpers ─────────────────────────────────────────────
+
+function getLeafCoords(g: GeometryGroup): number[][] {
+  if (g.coords.length > 0) return g.coords;
+  for (const child of g.children) {
+    const found = getLeafCoords(child);
+    if (found.length > 0) return found;
+  }
+  return [];
+}
+
+function pointToGeoJson(groups: GeometryGroup[]): GeoJsonGeometry {
+  const leaf = getLeafCoords(groups[0]);
+  return { type: "Point", coordinates: leaf[0] ?? [0, 0] };
+}
+
+function multiPointToGeoJson(groups: GeometryGroup[]): GeoJsonGeometry {
+  if (groups[0].coords.length > 0) {
+    return { type: "MultiPoint", coordinates: groups[0].coords };
+  }
+  const coords = groups[0].children.map((c) => getLeafCoords(c)[0] ?? [0, 0]);
+  return { type: "MultiPoint", coordinates: coords };
+}
+
+function lineStringToGeoJson(groups: GeometryGroup[]): GeoJsonGeometry {
+  return { type: "LineString", coordinates: getLeafCoords(groups[0]) };
+}
+
+function multiLineStringToGeoJson(groups: GeometryGroup[]): GeoJsonGeometry {
+  const lines = groups[0].children;
+  const coords = lines.map((l) => getLeafCoords(l));
+  return { type: "MultiLineString", coordinates: coords };
+}
+
+function polygonToGeoJson(groups: GeometryGroup[]): GeoJsonGeometry {
+  const rings = groups[0].children.map((c) => getLeafCoords(c));
+  return { type: "Polygon", coordinates: rings };
+}
+
+function multiPolygonToGeoJson(groups: GeometryGroup[]): GeoJsonGeometry {
+  const polygons = groups[0].children;
+  const coords = polygons.map((p) => p.children.map((c) => getLeafCoords(c)));
+  return { type: "MultiPolygon", coordinates: coords };
+}
+
+function geometryCollectionToGeoJson(wkt: string): GeoJsonGeometry | null {
+  const inner = wkt.trim().replace(/^GEOMETRYCOLLECTION\s*/i, "");
+  if (!inner.startsWith("(") || !inner.endsWith(")")) return null;
+  const content = inner.slice(1, -1).trim();
+  if (!content) return null;
+  const parts = splitGeomCollectionMembers(content);
+  return {
+    type: "GeometryCollection",
+    geometries: parts.map((p) => wktToGeoJson(p)),
+  };
+}
+
+/** Split GEOMETRYCOLLECTION content into individual WKT geometry strings. */
+function splitGeomCollectionMembers(content: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let i = 0;
+  while (i < content.length) {
+    if (content[i] === "(") depth++;
+    else if (content[i] === ")") depth--;
+    else if (content[i] === "," && depth === 0) {
+      parts.push(content.slice(start, i).trim());
+      start = i + 1;
+    }
+    i++;
+  }
+  const last = content.slice(start).trim();
+  if (last) parts.push(last);
+  return parts;
+}

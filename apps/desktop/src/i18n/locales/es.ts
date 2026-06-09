@@ -73,6 +73,7 @@ export default {
     importDbx: "Importar configuración DBX",
     importNavicat: "Importar Navicat NCX",
     importDbeaver: "Importar DBeaver",
+    importDatagrip: "Importar DataGrip",
     export: "Exportar conexiones",
     collapse: "Contraer barra lateral",
     expand: "Expandir barra lateral",
@@ -774,6 +775,8 @@ export default {
     importSuccess: "Se importaron {count} conexión(es)",
     importNavicatSuccess:
       "Se importaron {count} conexión(es) de Navicat. Completa la contraseña de las conexiones que aún la tengan vacía antes de probarlas.",
+    importDatagripSuccess:
+      "Se importaron {count} conexión(es) de DataGrip, se llenaron {filled} contraseña(s) del Keychain.",
     importDbeaverSuccess:
       "Se importaron {count} conexión(es) de DBeaver. Completa la contraseña de las conexiones que aún la tengan vacía antes de probarlas.",
     importNone: "No hay nuevas conexiones para importar",

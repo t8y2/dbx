@@ -177,6 +177,14 @@ export async function loadConnections(): Promise<ConnectionConfig[]> {
   return get("/api/connection/list");
 }
 
+export async function readKeychainPassword(_service: string): Promise<string> {
+  return ""; // Not available in web backend
+}
+
+export async function readKeychainPasswords(services: string[]): Promise<[string, string][]> {
+  return services.map((s) => [s, ""]); // Not available in web backend
+}
+
 export async function decryptConfig(payload: unknown, passphrase: string): Promise<string> {
   return post("/api/app-settings/config/decrypt", { payload, passphrase });
 }

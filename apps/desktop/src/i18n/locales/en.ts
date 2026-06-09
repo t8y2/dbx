@@ -73,6 +73,7 @@ export default {
     importDbx: "Import DBX Config",
     importNavicat: "Import Navicat NCX",
     importDbeaver: "Import DBeaver",
+    importDatagrip: "Import DataGrip",
     export: "Export Connections",
     collapse: "Collapse sidebar",
     expand: "Expand sidebar",
@@ -867,6 +868,7 @@ export default {
     importSuccess: "Imported {count} connection(s)",
     importNavicatSuccess:
       "Imported {count} Navicat connection(s). Fill in any connection whose password is still empty before testing.",
+    importDatagripSuccess: "Imported {count} DataGrip connection(s), filled {filled} password(s) from macOS Keychain.",
     importDbeaverSuccess:
       "Imported {count} DBeaver connection(s). Fill in any connection whose password is still empty before testing.",
     importNone: "No new connections to import",

@@ -205,7 +205,7 @@ export function useDialogSources() {
     }
   }
 
-  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" = "dbx") {
+  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" = "dbx") {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
@@ -216,13 +216,20 @@ export function useDialogSources() {
         showConfigPassphraseDialog.value = true;
       } else {
         const { count, layout } = await connectionStore.importConnectionsFromFile(result.content, null);
+        // For DataGrip imports, read Keychain passwords
+        let keychainFilled = 0;
+        if (source === "datagrip" && count > 0) {
+          keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
+        }
         toast(
           count > 0
             ? source === "navicat"
               ? t("configExport.importNavicatSuccess", { count })
               : source === "dbeaver"
                 ? t("configExport.importDbeaverSuccess", { count })
-                : t("configExport.importSuccess", { count })
+                : source === "datagrip"
+                  ? t("configExport.importDatagripSuccess", { count: count, filled: keychainFilled })
+                  : t("configExport.importSuccess", { count })
             : t("configExport.importNone"),
           4000,
         );

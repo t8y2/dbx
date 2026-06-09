@@ -870,6 +870,14 @@ export async function loadConnections(): Promise<ConnectionConfig[]> {
   return invoke("load_connections");
 }
 
+export async function readKeychainPassword(service: string): Promise<string> {
+  return invoke("read_keychain_password", { service, account: null });
+}
+
+export async function readKeychainPasswords(services: string[]): Promise<[string, string][]> {
+  return invoke("read_keychain_passwords", { services });
+}
+
 export async function decryptConfig(payload: unknown, passphrase: string): Promise<string> {
   const { decryptConfig: decryptConfigPayload } = await import("@/lib/configCrypto");
   return decryptConfigPayload(payload as any, passphrase);

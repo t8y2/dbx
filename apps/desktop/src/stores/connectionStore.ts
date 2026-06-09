@@ -73,7 +73,10 @@ import { useSettingsStore } from "@/stores/settingsStore";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
-type ImportSource = "dbx" | "navicat" | "dbeaver";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+
+// Temporary storage for DataGrip import payload (used to read Keychain passwords after import)
+let pendingDataGripPayload: { format: "datagrip-import"; dataSources: string; dataSourcesLocal?: string } | null = null;
 
 interface TreeClipboardTableStructure {
   kind: "table-structure";
@@ -2373,8 +2376,60 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  async function readDataGripImportFile(): Promise<{ content: string; encrypted: boolean } | null> {
+    let dataSources: string;
+    let dataSourcesLocal = "";
+
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const path = await open({
+        filters: [{ name: "DataGrip dataSources.xml", extensions: ["xml"] }],
+        multiple: false,
+      });
+      if (!path) return null;
+      dataSources = await readTextFile(path as string);
+      // Auto-load dataSources.local.xml from the same directory
+      const dir = (path as string).replace(/[^/\\]*$/, "");
+      try {
+        dataSourcesLocal = await readTextFile(dir + "dataSources.local.xml");
+      } catch {
+        dataSourcesLocal = "";
+      }
+    } else {
+      const files = await new Promise<FileList>((resolve, reject) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".xml";
+        input.multiple = true;
+        input.onchange = () => {
+          if (!input.files?.length) {
+            reject(new Error("No file selected"));
+            return;
+          }
+          resolve(input.files);
+        };
+        input.click();
+      });
+      const fileList = Array.from(files);
+      const dsFile = fileList.find((f) => /^dataSources\.xml$/i.test(f.name)) || fileList[0];
+      const localFile = fileList.find((f) => /^dataSources\.local\.xml$/i.test(f.name));
+      if (!dsFile) throw new Error("Select dataSources.xml");
+      dataSources = await dsFile.text();
+      if (localFile) {
+        dataSourcesLocal = await localFile.text();
+      }
+    }
+
+    return {
+      content: JSON.stringify({ format: "datagrip-import", dataSources, dataSourcesLocal }),
+      encrypted: false,
+    };
+  }
+
   async function readImportFile(source: ImportSource = "dbx"): Promise<{ content: string; encrypted: boolean } | null> {
     if (source === "dbeaver") return readDbeaverImportFile();
+    if (source === "datagrip") return readDataGripImportFile();
 
     let content: string;
 
@@ -2431,7 +2486,16 @@ export const useConnectionStore = defineStore("connection", () => {
       imported = await parseNavicatConnections(content);
     } else if (!passphrase) {
       const { isDbeaverImportPayload, parseDbeaverConnections } = await import("@/lib/dbeaverImport");
-      if (isDbeaverImportPayload(content)) {
+      const { isDataGripImportPayload, parseDataGripConnections } = await import("@/lib/datagripImport");
+      if (isDataGripImportPayload(content)) {
+        const payload = JSON.parse(content) as {
+          format: "datagrip-import";
+          dataSources: string;
+          dataSourcesLocal?: string;
+        };
+        pendingDataGripPayload = payload;
+        imported = parseDataGripConnections(payload);
+      } else if (isDbeaverImportPayload(content)) {
         imported = await parseDbeaverConnections(content);
       } else {
         const parsed = JSON.parse(content);
@@ -2482,6 +2546,61 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     }
     return { count, layout: importedLayout };
+  }
+
+  /** Read macOS Keychain passwords for DataGrip connections and update them. */
+  async function applyDataGripKeychainPasswords(): Promise<number> {
+    const payload = pendingDataGripPayload;
+    pendingDataGripPayload = null;
+    if (!payload) return 0;
+
+    try {
+      const { getDataGripUuidMap, datagripKeychainService } = await import("@/lib/datagripImport");
+      // dedupKey → DataGrip UUID
+      const uuidMap = getDataGripUuidMap(payload);
+      if (uuidMap.size === 0) return 0;
+
+      // Build service names for batch Keychain read
+      const dedupKeyToService = new Map<string, string>();
+      const services: string[] = [];
+      for (const [dedupKey, dgUuid] of uuidMap) {
+        const service = datagripKeychainService(dgUuid);
+        dedupKeyToService.set(dedupKey, service);
+        services.push(service);
+      }
+
+      // Call Tauri command to read Keychain
+      const results: [string, string][] = await api.readKeychainPasswords(services);
+
+      // Build service → password map
+      const passwordByService = new Map<string, string>();
+      for (const [service, password] of results) {
+        if (password) passwordByService.set(service, password);
+      }
+
+      // Update connections that have passwords (match by name/host/port)
+      let filled = 0;
+      const updated = connections.value.map((conn) => {
+        const dedupKey = [conn.name, conn.host, conn.port, conn.database || ""].join("\u0000");
+        const service = dedupKeyToService.get(dedupKey);
+        if (!service) return conn;
+        const password = passwordByService.get(service);
+        if (password) {
+          filled++;
+          return { ...conn, password };
+        }
+        return conn;
+      });
+
+      if (filled > 0) {
+        connections.value = updated;
+        await persistConnections();
+      }
+      return filled;
+    } catch (e) {
+      console.warn("[DataGrip Import] Keychain read failed:", e);
+      return 0;
+    }
   }
 
   function applySidebarLayout(layout: SidebarLayout) {
@@ -2597,6 +2716,7 @@ export const useConnectionStore = defineStore("connection", () => {
     exportConnectionsToFile,
     readImportFile,
     importConnectionsFromFile,
+    applyDataGripKeychainPasswords,
     applySidebarLayout,
     transferSource,
     schemaDiffSource,

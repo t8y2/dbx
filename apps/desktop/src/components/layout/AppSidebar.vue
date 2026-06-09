@@ -16,7 +16,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver"];
+  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip"];
   export: [];
   startResize: [event: MouseEvent];
   collapse: [];
@@ -30,6 +30,7 @@ const importSourceItems = computed(() => [
   { value: "dbx", label: t("sidebar.importDbx") },
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
+  { value: "datagrip", label: t("sidebar.importDatagrip") },
 ]);
 
 async function refreshTree() {
@@ -82,7 +83,7 @@ defineExpose({ focusSearch });
                 :highlight-selected="false"
                 check-position="none"
                 align="end"
-                @update:model-value="(source) => emit('import', source as 'dbx' | 'navicat' | 'dbeaver')"
+                @update:model-value="(source) => emit('import', source as 'dbx' | 'navicat' | 'dbeaver' | 'datagrip')"
               />
             </span>
           </TooltipTrigger>

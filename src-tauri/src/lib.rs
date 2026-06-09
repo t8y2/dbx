@@ -461,6 +461,8 @@ pub fn run() {
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_db::pending_open_db_files,
+            commands::keychain::read_keychain_password,
+            commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,

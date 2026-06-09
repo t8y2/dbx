@@ -5,6 +5,7 @@ import {
   parseSqlFormatterConfig,
   serializeSqlFormatterConfig,
   normalizeSqlFormatterSettings,
+  syncSqlFormatterConfigDraft,
   sqlFormatterOptions,
 } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
 
@@ -142,6 +143,51 @@ test("rejects invalid known formatter option values when parsing config files", 
   );
   assert.equal(invalidNumericChoice.ok, false);
   if (!invalidNumericChoice.ok) assert.match(invalidNumericChoice.message, /tabWidth/);
+});
+
+test("syncs valid JSON drafts so outer settings apply can persist them", () => {
+  let synced = DEFAULT_SQL_FORMATTER_SETTINGS;
+  const result = syncSqlFormatterConfigDraft(
+    JSON.stringify({
+      version: 1,
+      formatter: "sql-formatter",
+      options: {
+        ...DEFAULT_SQL_FORMATTER_SETTINGS,
+        keywordCase: "lower",
+        tabWidth: 4,
+      },
+    }),
+    (settings) => {
+      synced = settings;
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(synced, {
+    ...DEFAULT_SQL_FORMATTER_SETTINGS,
+    keywordCase: "lower",
+    tabWidth: 4,
+  });
+});
+
+test("does not sync invalid JSON drafts", () => {
+  let synced = DEFAULT_SQL_FORMATTER_SETTINGS;
+  const result = syncSqlFormatterConfigDraft(
+    JSON.stringify({
+      version: 1,
+      formatter: "sql-formatter",
+      options: {
+        ...DEFAULT_SQL_FORMATTER_SETTINGS,
+        keywordCase: "camel",
+      },
+    }),
+    (settings) => {
+      synced = settings;
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(synced, DEFAULT_SQL_FORMATTER_SETTINGS);
 });
 
 test("maps DBX formatter settings to sql-formatter options", () => {

@@ -169,6 +169,15 @@ export function parseSqlFormatterConfig(text: string): SqlFormatterConfigParseRe
   return { ok: true, settings: normalizeSqlFormatterSettings(parsed.options) };
 }
 
+export function syncSqlFormatterConfigDraft(
+  text: string,
+  syncSettings: (settings: SqlFormatterSettings) => void,
+): SqlFormatterConfigParseResult {
+  const result = parseSqlFormatterConfig(text);
+  if (result.ok) syncSettings(result.settings);
+  return result;
+}
+
 export function sqlFormatterOptions(settings: unknown) {
   const normalized = normalizeSqlFormatterSettings(settings);
   return {

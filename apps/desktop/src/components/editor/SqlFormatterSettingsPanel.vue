@@ -13,6 +13,7 @@ import {
   normalizeSqlFormatterSettings,
   parseSqlFormatterConfig,
   serializeSqlFormatterConfig,
+  syncSqlFormatterConfigDraft,
   type SqlFormatterCase,
   type SqlFormatterExpressionWidth,
   type SqlFormatterLinesBetweenQueries,
@@ -132,6 +133,13 @@ function validateJsonDraft(text = jsonDraft.value): boolean {
   const valid = result.ok;
   emitValidity(activeMode.value === "json" ? valid : true);
   return valid;
+}
+
+function syncJsonDraft(text = jsonDraft.value): boolean {
+  const result = syncSqlFormatterConfigDraft(text, updateSettings);
+  jsonValidationMessage.value = result.ok ? "" : localizeSqlFormatterConfigError(result.message);
+  emitValidity(activeMode.value === "json" ? result.ok : true);
+  return result.ok;
 }
 
 function updateSettings(next: unknown) {
@@ -299,7 +307,7 @@ async function initJsonEditor() {
         EditorView.updateListener.of((update) => {
           if (!update.docChanged) return;
           jsonDraft.value = update.state.doc.toString();
-          validateJsonDraft(jsonDraft.value);
+          syncJsonDraft(jsonDraft.value);
         }),
         EditorView.theme({
           "&": {
@@ -339,6 +347,17 @@ async function initJsonEditor() {
 watch(
   () => props.modelValue,
   (value) => {
+    if (activeMode.value === "json") {
+      const currentDraft = parseSqlFormatterConfig(jsonDraft.value);
+      if (
+        currentDraft.ok &&
+        serializeSqlFormatterConfig(currentDraft.settings) === serializeSqlFormatterConfig(value)
+      ) {
+        validateJsonDraft(jsonDraft.value);
+        return;
+      }
+    }
+
     const text = serializeSqlFormatterConfig(value);
     setJsonDraftText(text);
     if (activeMode.value === "json") validateJsonDraft(text);

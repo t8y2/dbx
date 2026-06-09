@@ -158,6 +158,8 @@ const disconnectTabHandlingModeDescriptionKey = computed(() => {
     case "keep-tabs-keep-results":
       return "disconnectTabHandlingModeKeepTabsKeepResultsDescription";
   }
+
+  return "disconnectTabHandlingModeCloseTabsDescription";
 });
 
 // --- Snippet state ---

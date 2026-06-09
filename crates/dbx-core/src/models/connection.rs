@@ -1321,6 +1321,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
+            idle_timeout_secs: super::default_idle_timeout_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),

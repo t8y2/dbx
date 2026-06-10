@@ -137,6 +137,18 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
+  influxdb: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
 };
 
 function defaultTableDataCapability(dbType?: DatabaseType): TableDataCapability {

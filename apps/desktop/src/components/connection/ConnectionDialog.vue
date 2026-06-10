@@ -416,6 +416,7 @@ const driverProfiles: Record<
   iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb" },
   etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
+  influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
   custom_mysql: {
     type: "mysql",
     port: 3306,
@@ -715,6 +716,7 @@ const iconTypeMap: Record<string, string> = {
   bigquery: "bigquery",
   kylin: "kylin",
   sundb: "sundb",
+  influxdb: "influxdb",
   jdbc: "jdbc",
   custom_mysql: "mysql",
   custom_postgres: "postgres",
@@ -777,6 +779,7 @@ const dbOptions = [
   { value: "xugu", label: "虚谷 XuguDB" },
   { value: "iotdb", label: "Apache IoTDB" },
   { value: "etcd", label: "etcd" },
+  { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
   { value: "jdbc", label: "JDBC" },
   { value: "custom_mysql", label: "Custom (MySQL)" },
@@ -824,7 +827,7 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "redis", "etcd", "clickhouse", "elasticsearch"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "redis", "etcd", "clickhouse", "elasticsearch", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
 const bareMysqlProfiles = new Set(["doris", "starrocks", "selectdb", "oceanbase"]);

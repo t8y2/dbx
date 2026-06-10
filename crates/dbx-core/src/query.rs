@@ -749,6 +749,15 @@ pub async fn do_execute(
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
+        PoolKind::InfluxDb(client) => {
+            let client = client.clone();
+            let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
+            let max_rows = options.max_rows;
+            drop(connections);
+            wait_for_query_opt(cancel_token, query_timeout, db::influxdb_driver::execute_query(&client, &database, sql))
+                .await
+                .map(|result| truncate_result_with_max_rows(result, max_rows))
+        }
         PoolKind::Agent(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -1297,6 +1306,7 @@ pub async fn execute_statements_in_transaction(
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
+            | PoolKind::InfluxDb(_)
             | PoolKind::ExternalTabular(_)
             | PoolKind::ExternalDriver { .. } => TxPath::None,
         })

@@ -145,7 +145,7 @@ export const TABLE_STRUCTURE_SUPPORTED_TYPES = new Set<DatabaseType>([
   "access",
 ]);
 
-export const CREATE_DATABASE_SUPPORTED_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "clickhouse", "oracle", "gaussdb", "kwdb", "opengauss", "oceanbase-oracle", "doris", "starrocks", "redshift"]);
+export const CREATE_DATABASE_SUPPORTED_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "clickhouse", "oracle", "gaussdb", "kwdb", "opengauss", "oceanbase-oracle", "doris", "starrocks", "redshift", "influxdb"]);
 
 export const FIELD_LINEAGE_SUPPORTED_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlite", "rqlite", "turso", "sqlserver", "oracle", "redshift", "dameng", "gaussdb", "kwdb", "opengauss", "oceanbase-oracle"]);
 

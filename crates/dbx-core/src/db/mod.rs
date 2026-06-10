@@ -4,6 +4,7 @@ pub mod duckdb_driver;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;
+pub mod influxdb_driver;
 pub mod mongo_driver;
 pub mod mysql;
 pub mod ob_oracle;

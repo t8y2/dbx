@@ -165,6 +165,8 @@ pub fn build_drop_table_sql(options: TableAdminSqlOptions) -> String {
     let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
     if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
         return format!("DELETE TIMESERIES {};", iotdb_timeseries_pattern(&table));
+    } else if matches!(options.database_type, Some(DatabaseType::InfluxDb)) {
+        return format!("DROP MEASUREMENT {};", table);
     }
     format!("DROP TABLE {table};")
 }

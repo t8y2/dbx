@@ -48,6 +48,7 @@ pub enum PoolKind {
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
+    InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
     ExternalTabular(Arc<external::ExternalPool>),
     ExternalDriver { driver_id: String, config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
@@ -481,6 +482,19 @@ impl AppState {
                 );
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Elasticsearch(client)
+            }
+            DatabaseType::InfluxDb => {
+                let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
+                let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
+                let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
+                    &url,
+                    username,
+                    password,
+                    Some(&db_config.ca_cert_path),
+                    connect_timeout,
+                )?;
+                db::influxdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::InfluxDb(client)
             }
             DatabaseType::Dameng
             | DatabaseType::Kingbase
@@ -960,6 +974,7 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::ClickHouse(_) => {}
         PoolKind::SqlServer(_) => {}
         PoolKind::Elasticsearch(_) => {}
+        PoolKind::InfluxDb(_) => {}
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let _ = client.disconnect().await;

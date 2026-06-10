@@ -145,6 +145,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "iris":
       return "iris://user:password@host:port/namespace";
 
+    case "influxdb":
+      return "influxdb://user:password@host:port/database";
+
     case "jdbc":
       return "jdbc:mysql://host:3306/database";
 

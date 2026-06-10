@@ -1822,6 +1822,13 @@ pub async fn get_columns_for_transfer(
         let mut client = client.lock().await;
         return db::sqlserver::get_columns(&mut client, &schema, &table).await;
     }
+    if let Some(PoolKind::InfluxDb(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return db::influxdb_driver::get_columns(&client, &database, &table).await;
+    }
     if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
         let client = client.clone();
         let database = database.to_string();

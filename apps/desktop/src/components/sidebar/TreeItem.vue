@@ -184,7 +184,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "column":
-      return { icon: Columns3, colorClass: "text-muted-foreground" };
+      if ((node.meta as ColumnInfo).is_primary_key) {
+        return { icon: Columns3, colorClass: "text-orange-400" };
+      } else {
+        return { icon: Columns3, colorClass: "text-muted-foreground" };
+      }
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":

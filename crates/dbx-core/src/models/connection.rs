@@ -274,6 +274,8 @@ pub enum DatabaseType {
     Iris,
     #[serde(rename = "turso")]
     Turso,
+    #[serde(rename = "influxdb")]
+    InfluxDb,
     Jdbc,
 }
 
@@ -728,6 +730,10 @@ impl ConnectionConfig {
                 format!("etcd://{host}:{port}")
             }
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
+            DatabaseType::InfluxDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
+            }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
         }
     }
@@ -917,6 +923,10 @@ impl ConnectionConfig {
             }
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::InfluxDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Jdbc => {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()

@@ -49,6 +49,7 @@ export type DatabaseType =
   | "iotdb"
   | "etcd"
   | "iris"
+  | "influxdb"
   | "jdbc";
 
 export interface SqlSnippet {

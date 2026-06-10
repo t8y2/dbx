@@ -257,6 +257,7 @@ export const useConnectionStore = defineStore("connection", () => {
       bigquery: "BigQuery",
       kylin: "Kylin",
       sundb: "SunDB",
+      influxdb: "InfluxDB",
     };
 
     const profile = config.driver_profile || config.db_type;
@@ -1201,7 +1202,8 @@ export const useConnectionStore = defineStore("connection", () => {
       },
     ];
 
-    if (node.type === "table") {
+    const config = getConfig(connectionId);
+    if (node.type === "table" && config?.db_type !== "influxdb") {
       children.push(
         {
           id: `${parentId}:__indexes`,

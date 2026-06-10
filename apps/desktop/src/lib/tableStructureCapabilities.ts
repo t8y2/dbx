@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "unsupported";
+export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "influxdb" | "unsupported";
 
 export interface TableStructureCapabilities {
   dialect: TableStructureDialect;
@@ -199,6 +199,20 @@ const accessCapabilities = capabilities({
   createIndex: true,
 });
 
+const influxdbCapabilities = capabilities({
+  dialect: "influxdb",
+  createTable: false,
+  addColumn: false,
+  dropColumn: false,
+  renameColumn: false,
+  alterExistingColumn: false,
+  alterType: false,
+  alterNullability: false,
+  alterDefault: false,
+  reorderColumn: false,
+  comment: false,
+});
+
 const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>> = {
   mysql: mysqlCapabilities,
   doris: mysqlCapabilities,
@@ -225,6 +239,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   h2: h2Capabilities,
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
+  influxdb: influxdbCapabilities,
 };
 
 export function getTableStructureCapabilities(dbType?: DatabaseType): TableStructureCapabilities {

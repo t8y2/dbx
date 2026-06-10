@@ -73,6 +73,7 @@ const assetIcons: Record<string, string> = {
   iotdb: "iotdb",
   etcd: "etcd",
   iris: "iris.png",
+  influxdb: "influxdb",
 };
 
 const letterIcons: Record<string, { letter: string; color: string }> = {};

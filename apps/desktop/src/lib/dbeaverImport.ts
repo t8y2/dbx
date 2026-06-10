@@ -50,6 +50,7 @@ const profileMap: Record<string, ConnectionProfile> = {
   gaussdb: { dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 5432, user: "gaussdb" },
   kwdb: { dbType: "kwdb", profile: "kwdb", label: "KWDB", port: 26257, user: "root" },
   opengauss: { dbType: "gaussdb", profile: "opengauss", label: "openGauss", port: 5432, user: "gaussdb" },
+  influxdb: { dbType: "influxdb", profile: "influxdb", label: "InfluxDB", port: 8086, user: "" },
 };
 
 function normalizeKey(value: unknown) {

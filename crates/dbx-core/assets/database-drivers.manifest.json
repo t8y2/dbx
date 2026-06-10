@@ -527,6 +527,17 @@
       "defaultPort": 1972
     },
     {
+      "dbType": "influxdb",
+      "label": "InfluxDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "influxdb",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8086
+    },
+    {
       "dbType": "jdbc",
       "label": "JDBC",
       "runtimeMode": "external",

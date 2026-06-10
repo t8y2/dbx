@@ -1,40 +1,42 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
-import { useEffect, useRef } from 'react';
+import Link from "next/link";
+import { useEffect, useRef } from "react";
 
 const i18n = {
-  en: { home: 'Home', docs: 'Docs', changelog: 'Changelog', community: 'Community', lang: '中文' },
-  cn: { home: '首页', docs: '文档', changelog: '更新日志', community: '交流群', lang: 'English' },
+  en: {
+    home: "Home",
+    docs: "Docs",
+    changelog: "Changelog",
+    community: "Community",
+    drivers: "Offline Drivers",
+    lang: "中文",
+  },
+  cn: { home: "首页", docs: "文档", changelog: "更新日志", community: "交流群", drivers: "离线驱动", lang: "English" },
 };
 
-export function LandingNav({
-  lang,
-  active,
-}: {
-  lang: 'en' | 'cn';
-  active?: 'home' | 'changelog' | 'community';
-}) {
+export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "changelog" | "community" | "drivers" }) {
   const ref = useRef<HTMLElement>(null);
   const t = i18n[lang];
-  const otherLang = lang === 'cn' ? 'en' : 'cn';
+  const otherLang = lang === "cn" ? "en" : "cn";
   const langHrefMap: Record<string, string> = {
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
+    drivers: `/${otherLang}/drivers`,
   };
-  const langHref = langHrefMap[active ?? ''] ?? `/${otherLang}`;
+  const langHref = langHrefMap[active ?? ""] ?? `/${otherLang}`;
 
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
 
     function onScroll() {
-      node!.classList.toggle('is-scrolled', window.scrollY > 60);
+      node!.classList.toggle("is-scrolled", window.scrollY > 60);
     }
 
     onScroll();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
   return (
@@ -45,41 +47,25 @@ export function LandingNav({
           <span>DBX</span>
         </Link>
         <div className="flex items-center gap-1">
-          <Link
-            href={`/${lang}`}
-            className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'home' ? 'text-landing-ink' : 'text-landing-muted'}`}
-          >
+          <Link href={`/${lang}`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "home" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.home}
           </Link>
-          <Link
-            href={`/${lang}/docs/what-is-dbx`}
-            className="landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden text-landing-muted"
-          >
+          <Link href={`/${lang}/docs/what-is-dbx`} className="landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden text-landing-muted">
             {t.docs}
           </Link>
-          <Link
-            href={`/${lang}/changelog`}
-            className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'changelog' ? 'text-landing-ink' : 'text-landing-muted'}`}
-          >
+          <Link href={`/${lang}/changelog`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "changelog" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.changelog}
           </Link>
-          <Link
-            href={`/${lang}/community`}
-            className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'community' ? 'text-landing-ink' : 'text-landing-muted'}`}
-          >
+          <Link href={`/${lang}/community`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "community" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.community}
           </Link>
-          <Link
-            href="https://github.com/t8y2/dbx"
-            target="_blank"
-            className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium max-[760px]:hidden"
-          >
+          <Link href={`/${lang}/drivers`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "drivers" ? "text-landing-ink" : "text-landing-muted"}`}>
+            {t.drivers}
+          </Link>
+          <Link href="https://github.com/t8y2/dbx" target="_blank" className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium max-[760px]:hidden">
             GitHub
           </Link>
-          <Link
-            href={langHref}
-            className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium ml-1.5 border border-landing-line"
-          >
+          <Link href={langHref} className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium ml-1.5 border border-landing-line">
             {t.lang}
           </Link>
         </div>

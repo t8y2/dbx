@@ -2,7 +2,9 @@ pub mod agent_driver;
 pub mod clickhouse_driver;
 pub mod duckdb_driver;
 pub mod elasticsearch_driver;
+pub mod elasticsearch_sql;
 pub mod file_validator;
+pub mod influxdb_driver;
 pub mod mongo_driver;
 pub mod mysql;
 pub mod ob_oracle;
@@ -14,7 +16,9 @@ pub mod sqlite;
 pub mod sqlserver;
 pub mod ssh_tunnel;
 pub mod transport_layer_tunnel;
+pub mod turso_driver;
 
+use reqwest::ClientBuilder;
 use std::future::Future;
 use std::time::Duration;
 
@@ -27,6 +31,10 @@ pub const TCP_PROBE_TIMEOUT_SECS: u64 = 3;
 
 pub fn connection_timeout() -> Duration {
     Duration::from_secs(CONNECTION_TIMEOUT_SECS)
+}
+
+pub fn http_client_builder(timeout: Duration) -> ClientBuilder {
+    reqwest::Client::builder().connect_timeout(timeout).no_proxy()
 }
 
 const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;

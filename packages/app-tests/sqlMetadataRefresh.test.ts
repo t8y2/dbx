@@ -18,10 +18,7 @@ test("object DDL refreshes the selected database tree", () => {
   assert.equal(sqlMetadataRefreshScope("CREATE MATERIALIZED VIEW daily_users AS SELECT 1;"), "database");
   assert.equal(sqlMetadataRefreshScope("ALTER TABLE users ADD COLUMN name text;"), "database");
   assert.equal(sqlMetadataRefreshScope("DROP VIEW active_users;"), "database");
-  assert.equal(
-    sqlMetadataRefreshScope("CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE SQL;"),
-    "database",
-  );
+  assert.equal(sqlMetadataRefreshScope("CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE SQL;"), "database");
 });
 
 test("qualified object DDL refreshes the matching schema node", () => {
@@ -52,10 +49,7 @@ test("unqualified object DDL can use the active schema as the refresh target", (
 });
 
 test("multiple object DDL schemas fall back to refreshing the database tree", () => {
-  assert.deepEqual(
-    sqlMetadataRefreshTarget("CREATE TABLE public.users (id int); CREATE TABLE audit.events (id int);"),
-    { scope: "database" },
-  );
+  assert.deepEqual(sqlMetadataRefreshTarget("CREATE TABLE public.users (id int); CREATE TABLE audit.events (id int);"), { scope: "database" });
 });
 
 test("data-only SQL does not refresh metadata trees", () => {

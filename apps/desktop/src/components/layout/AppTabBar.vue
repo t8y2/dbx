@@ -1,22 +1,8 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, ref, watch, nextTick } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import {
-  X,
-  Pin,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Table2,
-  Code2,
-  TableProperties,
-  PencilRuler,
-  KeyRound,
-  Pencil,
-  Package,
-  Check,
-} from "@lucide/vue";
+import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Check, Lock, Copy } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -24,12 +10,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
-import {
-  connectionColor,
-  shouldShowTabOverflowControls,
-  tabDisplayTitle,
-  tabTooltipLines,
-} from "@/lib/tabPresentation";
+import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabPresentation";
 import { hexToRgba } from "@/lib/color";
 import type { QueryTab } from "@/types/database";
 
@@ -102,6 +83,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       icon: Pencil,
       visible: canRenameTab(tab),
     },
+    {
+      label: t("contextMenu.duplicateTab"),
+      action: () => queryStore.duplicateTab(tab.id),
+      icon: Copy,
+      visible: canRenameTab(tab),
+    },
     { label: "", separator: true },
     {
       label: tab.pinned ? t("contextMenu.unpin") : t("contextMenu.pin"),
@@ -127,8 +114,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
 }
 
 const tabsContainerRef = ref<HTMLElement | null>(null);
-const { hasTabOverflow, canScrollLeft, canScrollRight, updateScrollButtons, scrollTabs, onTabsWheel } =
-  useTabScroll(tabsContainerRef);
+const { hasTabOverflow, scrollThumbLeftPercent, scrollThumbWidthPercent, isScrollbarDragging, updateScrollButtons, onTabsWheel, startScrollbarDrag } = useTabScroll(tabsContainerRef);
 const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 
 watch(
@@ -176,7 +162,7 @@ function tabColorStyle(tab: QueryTab) {
   const isClassic = settingsStore.editorSettings.appLayout === "classic";
   if (!color) {
     if (isClassic) {
-      return isActive ? { boxShadow: "0 1px 0 0 var(--color-background)" } : undefined;
+      return isActive ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;
     }
     return isActive
       ? {
@@ -199,19 +185,11 @@ function tabColorStyle(tab: QueryTab) {
 }
 
 function tabIconClass(tab: QueryTab) {
-  if (tab.mode === "data" || tab.mode === "objects" || tab.mode === "structure")
-    return "text-emerald-600 dark:text-emerald-400";
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "objects" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
 }
 
-const showTabOverflowControls = computed(() =>
-  shouldShowTabOverflowControls(
-    queryStore.tabs.length,
-    hasTabOverflow.value,
-    canScrollLeft.value,
-    canScrollRight.value,
-  ),
-);
+const showTabOverflowControls = computed(() => queryStore.tabs.length > 0 && hasTabOverflow.value);
 
 const openTabMenuItems = computed(() =>
   queryStore.tabs.map((tab) => ({
@@ -224,7 +202,7 @@ const openTabMenuItems = computed(() =>
 );
 
 function tabMenuIcon(tab: QueryTab) {
-  if (tab.mode === "data") return Table2;
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis") return Table2;
   if (tab.mode === "etcd") return KeyRound;
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
@@ -261,9 +239,12 @@ const tabsContainerStyle = computed<CSSProperties>(() => ({
   WebkitOverflowScrolling: "touch",
 }));
 
-const tabTailDragRegionClass = computed(() =>
-  showTabOverflowControls.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch",
-);
+const tabScrollbarThumbStyle = computed<CSSProperties>(() => ({
+  insetInlineStart: `${scrollThumbLeftPercent.value}%`,
+  width: `${scrollThumbWidthPercent.value}%`,
+}));
+
+const tabTailDragRegionClass = computed(() => (showTabOverflowControls.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
 
 const tabOverflowControlClass = computed(() =>
   settingsStore.editorSettings.appLayout === "classic"
@@ -273,9 +254,7 @@ const tabOverflowControlClass = computed(() =>
 
 function dispatchBeforeTabSwitch(tabId: string) {
   if (tabId === queryStore.activeTabId) return;
-  window.dispatchEvent(
-    new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId: queryStore.activeTabId } }),
-  );
+  window.dispatchEvent(new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId: queryStore.activeTabId } }));
 }
 
 function activateTab(tabId: string) {
@@ -287,168 +266,106 @@ function activateTab(tabId: string) {
 </script>
 
 <template>
-  <div
-    v-if="queryStore.tabs.length > 0 || showDriverStore"
-    class="relative flex border-b shrink-0"
-    :class="
-      settingsStore.editorSettings.appLayout === 'classic'
-        ? 'h-9 items-stretch bg-muted'
-        : 'h-10 items-center bg-background px-2'
-    "
-  >
-    <button
-      v-if="showTabOverflowControls"
-      type="button"
-      class="z-30 shrink-0 inline-flex items-center justify-center"
-      :class="[tabOverflowControlClass, canScrollLeft ? '' : 'opacity-40']"
-      :aria-label="t('tabs.scrollLeft')"
-      :title="t('tabs.scrollLeft')"
-      :disabled="!canScrollLeft"
-      @click="scrollTabs('left')"
-    >
-      <ChevronLeft class="h-4 w-4 stroke-[2.5]" />
-    </button>
-    <div
-      ref="tabsContainerRef"
-      class="flex-1 flex items-center overflow-x-auto min-w-0"
-      :class="settingsStore.editorSettings.appLayout === 'classic' ? '' : 'gap-1.5'"
-      :style="tabsContainerStyle"
-      @scroll="updateScrollButtons"
-      @wheel="onTabsWheel"
-    >
-      <CustomContextMenu
-        v-for="tab in queryStore.tabs"
-        :key="tab.id"
-        :items="getTabMenuItems(tab)"
-        v-slot="{ onContextMenu }"
-      >
-        <div :class="settingsStore.editorSettings.appLayout === 'classic' ? 'h-full' : ''" @contextmenu="onContextMenu">
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <div
-                class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
-                :class="
-                  settingsStore.editorSettings.appLayout === 'classic'
-                    ? [
-                        compactTabTitle ? 'min-w-24' : 'min-w-38',
-                        'h-full border-r border-border/80 dark:border-border/45',
-                        tab.id === queryStore.activeTabId && !showDriverStore
-                          ? 'bg-background text-foreground font-medium'
-                          : 'text-foreground/70 hover:text-foreground/90',
-                      ]
-                    : [
-                        compactTabTitle ? 'min-w-24' : 'min-w-38',
-                        'h-7 rounded-md border',
-                        tab.id === queryStore.activeTabId && !showDriverStore
-                          ? 'text-foreground font-medium'
-                          : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90',
-                      ]
-                "
-                :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
-                :data-active-tab="tab.id === queryStore.activeTabId && !showDriverStore"
-                @click="handleTabClick(tab)"
-                @dblclick.stop="startRenameTab(tab)"
-                @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
-                @mousedown="handleTabMouseDown($event, tab.id)"
-                @mouseenter="tabDrag.updateTarget($event, tab.id)"
-                @mousemove="tabDrag.updateTarget($event, tab.id)"
-                @mouseleave="tabDrag.clearTarget(tab.id)"
-              >
-                <span class="shrink-0" :class="tabIconClass(tab)">
-                  <Table2 v-if="tab.mode === 'data'" class="h-3.5 w-3.5" />
-                  <KeyRound v-else-if="tab.mode === 'etcd'" class="h-3.5 w-3.5" />
-                  <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                  <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                  <Code2 v-else class="h-3.5 w-3.5" />
-                </span>
-                <input
-                  v-if="editingTabId === tab.id"
-                  v-model="editingTitle"
-                  :data-tab-title-input="tab.id"
-                  :aria-label="t('contextMenu.renameTab')"
-                  class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
-                  @click.stop
-                  @mousedown.stop
-                  @keydown.enter.prevent="commitRenameTab(tab)"
-                  @keydown.escape.prevent="cancelRenameTab"
-                  @blur="commitRenameTab(tab)"
-                />
-                <span v-else class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab, t) }}</span>
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <button
-                      class="inline-flex rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100"
-                      :class="tab.pinned ? 'visible text-primary' : 'invisible group-hover:visible'"
-                      @click.stop="queryStore.togglePinnedTab(tab.id)"
-                    >
-                      <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>{{ tab.pinned ? t("contextMenu.unpin") : t("contextMenu.pin") }}</TooltipContent>
-                </Tooltip>
-                <button
-                  class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0"
-                  @click.stop="queryStore.closeTab(tab.id)"
-                >
-                  <X class="h-3 w-3" />
-                </button>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
-              <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
-                <span class="text-muted-foreground">{{ line.label }}</span>
-                <span>{{ line.value }}</span>
-              </template>
-            </TooltipContent>
-          </Tooltip>
-        </div>
-      </CustomContextMenu>
-
-      <!-- Driver Store Tab -->
-      <div
-        v-if="showDriverStore"
-        data-driver-store-tab
-        class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
-        :class="
-          settingsStore.editorSettings.appLayout === 'classic'
-            ? ['h-full border-r border-border/80 dark:border-border/45 bg-background text-foreground font-medium']
-            : ['h-7 rounded-md border text-foreground font-medium', 'border-ring']
-        "
-        :style="
-          settingsStore.editorSettings.appLayout === 'classic' ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}
-        "
-        @click="emit('toggle-driver-store')"
-      >
-        <span class="shrink-0 text-amber-600 dark:text-amber-400">
-          <Package class="h-3.5 w-3.5" />
-        </span>
-        <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
-        <span
-          v-if="(agentDriverUpdateCount ?? 0) > 0"
-          class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white"
-          :aria-label="t('toolbar.updatableDriverCount')"
-        >
-          {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
-        </span>
-        <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
-          <X class="h-3 w-3" />
-        </button>
+  <div v-if="queryStore.tabs.length > 0 || showDriverStore" class="relative flex border-b shrink-0" :class="settingsStore.editorSettings.appLayout === 'classic' ? 'h-9 items-stretch bg-muted' : 'h-10 items-center bg-background px-2'">
+    <div class="relative h-full min-w-0 flex-1">
+      <div v-if="showTabOverflowControls" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
+        <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
       </div>
-      <div :class="tabTailDragRegionClass" data-tauri-drag-region />
+      <div ref="tabsContainerRef" class="app-tab-scroll flex min-w-0 flex-1 items-center overflow-x-auto" :class="settingsStore.editorSettings.appLayout === 'classic' ? 'h-full' : 'h-10 gap-1.5 py-1.5'" :style="tabsContainerStyle" @scroll="updateScrollButtons" @wheel="onTabsWheel">
+        <CustomContextMenu v-for="tab in queryStore.tabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+          <div :class="settingsStore.editorSettings.appLayout === 'classic' ? 'h-full' : ''" @contextmenu="onContextMenu">
+            <Tooltip>
+              <TooltipTrigger as-child>
+                <div
+                  class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                  :class="
+                    settingsStore.editorSettings.appLayout === 'classic'
+                      ? [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-full border-r border-border/80 font-medium dark:border-border/45', tab.id === queryStore.activeTabId && !showDriverStore ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
+                      : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !showDriverStore ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
+                  "
+                  :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
+                  :data-active-tab="tab.id === queryStore.activeTabId && !showDriverStore"
+                  @click="handleTabClick(tab)"
+                  @dblclick.stop="startRenameTab(tab)"
+                  @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
+                  @mousedown="handleTabMouseDown($event, tab.id)"
+                  @mouseenter="tabDrag.updateTarget($event, tab.id)"
+                  @mousemove="tabDrag.updateTarget($event, tab.id)"
+                  @mouseleave="tabDrag.clearTarget(tab.id)"
+                >
+                  <span class="shrink-0" :class="tabIconClass(tab)">
+                    <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                    <KeyRound v-else-if="tab.mode === 'etcd'" class="h-3.5 w-3.5" />
+                    <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                    <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                    <Code2 v-else class="h-3.5 w-3.5" />
+                  </span>
+                  <input
+                    v-if="editingTabId === tab.id"
+                    v-model="editingTitle"
+                    :data-tab-title-input="tab.id"
+                    :aria-label="t('contextMenu.renameTab')"
+                    class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
+                    @click.stop
+                    @mousedown.stop
+                    @keydown.enter.prevent="commitRenameTab(tab)"
+                    @keydown.escape.prevent="cancelRenameTab"
+                    @blur="commitRenameTab(tab)"
+                  />
+                  <span v-else class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab, t) }}</span>
+                  <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
+                    <TooltipTrigger as-child>
+                      <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
+                    </TooltipTrigger>
+                    <TooltipContent>{{ t("connection.readOnlyBadge") }}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <button class="inline-flex rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100" :class="tab.pinned ? 'visible text-primary' : 'invisible group-hover:visible'" @click.stop="queryStore.togglePinnedTab(tab.id)">
+                        <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{{ tab.pinned ? t("contextMenu.unpin") : t("contextMenu.pin") }}</TooltipContent>
+                  </Tooltip>
+                  <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
+                    <X class="h-3 w-3" />
+                  </button>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
+                <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
+                  <span class="text-muted-foreground">{{ line.label }}</span>
+                  <span>{{ line.value }}</span>
+                </template>
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        </CustomContextMenu>
+
+        <!-- Driver Store Tab -->
+        <div
+          v-if="showDriverStore"
+          data-driver-store-tab
+          class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+          :class="settingsStore.editorSettings.appLayout === 'classic' ? ['h-full border-r border-border/80 dark:border-border/45 bg-background text-foreground font-medium'] : ['h-7 rounded-md border text-foreground font-medium', 'border-ring']"
+          :style="settingsStore.editorSettings.appLayout === 'classic' ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+          @click="emit('toggle-driver-store')"
+        >
+          <span class="shrink-0 text-amber-600 dark:text-amber-400">
+            <Package class="h-3.5 w-3.5" />
+          </span>
+          <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
+          <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+            {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
+          </span>
+          <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
+            <X class="h-3 w-3" />
+          </button>
+        </div>
+        <div :class="tabTailDragRegionClass" data-tauri-drag-region />
+      </div>
     </div>
     <div v-if="showTabOverflowControls" class="relative z-30 flex shrink-0 items-center">
-      <button
-        v-if="showTabOverflowControls"
-        type="button"
-        class="inline-flex shrink-0 items-center justify-center"
-        :class="[tabOverflowControlClass, canScrollRight ? '' : 'opacity-40']"
-        :aria-label="t('tabs.scrollRight')"
-        :title="t('tabs.scrollRight')"
-        :disabled="!canScrollRight"
-        @click="scrollTabs('right')"
-      >
-        <ChevronRight class="h-4 w-4 stroke-[2.5]" />
-      </button>
       <LightDropdown
         :model-value="queryStore.activeTabId || ''"
         :items="openTabMenuItems"
@@ -471,3 +388,47 @@ function activateTab(tabId: string) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.app-tab-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.app-tab-scrollbar {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  z-index: 20;
+  height: 6px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.app-tab-scrollbar::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+}
+
+.app-tab-scrollbar__thumb {
+  position: absolute;
+  top: 0;
+  height: 2px;
+  min-width: 20px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  transition:
+    height 120ms ease,
+    background-color 120ms ease;
+}
+
+.app-tab-scrollbar:hover .app-tab-scrollbar__thumb,
+.app-tab-scrollbar--dragging .app-tab-scrollbar__thumb {
+  height: 5px;
+  background: color-mix(in oklch, var(--foreground) 52%, transparent);
+}
+</style>

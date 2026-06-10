@@ -6,24 +6,14 @@ export function selectedTreeNodesInVisibleOrder(visibleNodes: TreeNode[], select
   return visibleNodes.filter((node) => ids.has(node.id));
 }
 
-export function treeSelectionRangeIdsByIndex(
-  visibleNodes: TreeNode[],
-  currentIndex: number,
-  anchorIndex: number,
-  currentId?: string,
-): string[] {
+export function treeSelectionRangeIdsByIndex(visibleNodes: TreeNode[], currentIndex: number, anchorIndex: number, currentId?: string): string[] {
   if (anchorIndex < 0 || currentIndex < 0) return currentId ? [currentId] : [];
   const start = Math.min(anchorIndex, currentIndex);
   const end = Math.max(anchorIndex, currentIndex);
   return visibleNodes.slice(start, end + 1).map((node) => node.id);
 }
 
-export function treeSelectionRangeIds(
-  visibleNodes: TreeNode[],
-  currentId: string,
-  anchorId?: string | null,
-  selectedId?: string | null,
-): string[] {
+export function treeSelectionRangeIds(visibleNodes: TreeNode[], currentId: string, anchorId?: string | null, selectedId?: string | null): string[] {
   const anchor = anchorId || selectedId || currentId;
   const anchorIndex = visibleNodes.findIndex((node) => node.id === anchor);
   const currentIndex = visibleNodes.findIndex((node) => node.id === currentId);

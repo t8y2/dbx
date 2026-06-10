@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  buildSqlParserErrorDiagnostic,
-  buildSqlSemanticDiagnostics,
-  areSqlSemanticDiagnosticsEqual,
-  shouldRunSqlSemanticDiagnostics,
-} from "../../apps/desktop/src/lib/sqlSemanticDiagnostics.ts";
+import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, shouldRunSqlSemanticDiagnostics } from "../../apps/desktop/src/lib/sqlSemanticDiagnostics.ts";
 import type { SqlReferenceAnalysis } from "../../apps/desktop/src/types/database.ts";
 
 const span = (startColumn: number, endColumn: number) => ({
@@ -56,10 +51,7 @@ test("does not flag unqualified columns when multiple tables make ownership ambi
 });
 
 test("builds a syntax diagnostic from parser errors with line and column", () => {
-  const diagnostic = buildSqlParserErrorDiagnostic(
-    "Expected: end of statement, found: FOM at Line: 1, Column: 10",
-    "SELECT * FOM",
-  );
+  const diagnostic = buildSqlParserErrorDiagnostic("Expected: end of statement, found: FOM at Line: 1, Column: 10", "SELECT * FOM");
 
   assert.equal(diagnostic?.message, "Expected: end of statement, found: FOM at Line: 1, Column: 10");
   assert.deepEqual(diagnostic?.span, span(10, 12));
@@ -81,10 +73,7 @@ test("compares diagnostics by severity message and span", () => {
     ),
     true,
   );
-  assert.equal(
-    areSqlSemanticDiagnosticsEqual(diagnostics, [{ ...diagnostics[0], message: "Unknown column u.name" }]),
-    false,
-  );
+  assert.equal(areSqlSemanticDiagnosticsEqual(diagnostics, [{ ...diagnostics[0], message: "Unknown column u.name" }]), false);
 });
 
 test("defers diagnostics while the cursor is in table completion context", () => {
@@ -92,4 +81,16 @@ test("defers diagnostics while the cursor is in table completion context", () =>
   assert.equal(shouldRunSqlSemanticDiagnostics("select * from us", "select * from us".length), false);
   assert.equal(shouldRunSqlSemanticDiagnostics("select u.", "select u.".length), false);
   assert.equal(shouldRunSqlSemanticDiagnostics("select * from users where missing = 1", 42), true);
+});
+
+test("skips diagnostics for MongoDB connections", () => {
+  assert.equal(shouldRunSqlSemanticDiagnostics("db.my_collection.find({})", 0, { databaseType: "mongodb" }), false);
+});
+
+test("skips diagnostics for Elasticsearch connections", () => {
+  assert.equal(shouldRunSqlSemanticDiagnostics("db.my_collection.find({})", 0, { databaseType: "elasticsearch" }), false);
+});
+
+test("still runs diagnostics for SQL connections", () => {
+  assert.equal(shouldRunSqlSemanticDiagnostics("SELECT * FROM users WHERE id = 1", 42, { databaseType: "mysql" }), true);
 });

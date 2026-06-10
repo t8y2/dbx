@@ -11,12 +11,7 @@ function obj(name: string, objectType = "TABLE"): ObjectInfo {
 }
 
 test("SQL Server database tree groups dbo objects and keeps non-default schemas", () => {
-  const nodes = buildSqlServerDatabaseTreeNodes(
-    "conn",
-    "app",
-    ["dbo", "zeta", "sales"],
-    [obj("customers"), obj("customer_view", "VIEW"), obj("get_total", "FUNCTION")],
-  );
+  const nodes = buildSqlServerDatabaseTreeNodes("conn", "app", ["dbo", "zeta", "sales"], [obj("customers"), obj("customer_view", "VIEW"), obj("get_total", "FUNCTION")]);
 
   const topLevel = nodes.map((n) => ({ id: n.id, label: n.label, type: n.type }));
   assert.deepEqual(topLevel, [
@@ -53,12 +48,7 @@ test("SQL Server database tree shows only schemas when dbo has no objects", () =
 });
 
 test("SQL Server database tree groups procedures alongside tables", () => {
-  const nodes = buildSqlServerDatabaseTreeNodes(
-    "conn",
-    "app",
-    ["dbo"],
-    [obj("orders"), obj("sp_refresh", "PROCEDURE")],
-  );
+  const nodes = buildSqlServerDatabaseTreeNodes("conn", "app", ["dbo"], [obj("orders"), obj("sp_refresh", "PROCEDURE")]);
 
   assert.deepEqual(
     nodes.map((n) => ({ label: n.label, type: n.type })),

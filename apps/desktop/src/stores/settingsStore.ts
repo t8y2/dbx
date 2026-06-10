@@ -1,34 +1,24 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import * as api from "@/lib/api";
-import {
-  normalizeColumnFormatter,
-  normalizeCustomColumnFormatter,
-  type ColumnFormatterConfig,
-  type CustomColumnFormatterConfig,
-} from "@/lib/columnFormatter";
+import { normalizeColumnFormatter, normalizeCustomColumnFormatter, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
 import type { SidebarActivation } from "@/lib/treeNodeClick";
 import type { SqlSnippet } from "@/types/database";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
 import { setDebugLoggingEnabled } from "@/lib/debugLog";
 
-export type AiProvider =
-  | "claude"
-  | "openai"
-  | "gemini"
-  | "deepseek"
-  | "qwen"
-  | "ollama"
-  | "openai-compatible"
-  | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "custom";
 export type AiApiStyle = "completions" | "responses";
+export type AiAuthMethod = "api-key" | "bearer";
 
 export interface AiConfig {
   provider: AiProvider;
   apiKey: string;
+  authMethod: AiAuthMethod;
   endpoint: string;
   model: string;
   apiStyle: AiApiStyle;
@@ -41,6 +31,7 @@ export interface DesktopSettings {
   show_tray_icon: boolean;
   icon_theme: DesktopIconTheme;
   debug_logging_enabled: boolean;
+  saved_sql_sync_dir?: string | null;
 }
 
 export type DesktopIconTheme = "default" | "black";
@@ -49,6 +40,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
   icon_theme: "default",
   debug_logging_enabled: false,
+  saved_sql_sync_dir: null,
 };
 
 function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
@@ -57,6 +49,7 @@ function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | un
     show_tray_icon: settings?.show_tray_icon ?? DEFAULT_DESKTOP_SETTINGS.show_tray_icon,
     icon_theme: iconTheme,
     debug_logging_enabled: settings?.debug_logging_enabled ?? DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled,
+    saved_sql_sync_dir: settings?.saved_sql_sync_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.saved_sql_sync_dir,
   };
 }
 
@@ -74,6 +67,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "https://api.anthropic.com/v1/messages",
     model: "claude-sonnet-4-20250514",
     apiStyle: "completions",
+    authMethod: "api-key",
     requiresApiKey: true,
   },
   openai: {
@@ -83,6 +77,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "https://api.openai.com/v1/chat/completions",
     model: "gpt-4o-mini",
     apiStyle: "completions",
+    authMethod: "bearer",
     requiresApiKey: true,
   },
   gemini: {
@@ -92,6 +87,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "https://generativelanguage.googleapis.com",
     model: "gemini-1.5-pro",
     apiStyle: "completions",
+    authMethod: "api-key",
     requiresApiKey: true,
   },
   deepseek: {
@@ -101,6 +97,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "https://api.deepseek.com/v1",
     model: "deepseek-v4-flash",
     apiStyle: "completions",
+    authMethod: "bearer",
     requiresApiKey: true,
   },
   qwen: {
@@ -110,6 +107,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     model: "qwen-plus",
     apiStyle: "completions",
+    authMethod: "bearer",
     requiresApiKey: true,
   },
   ollama: {
@@ -119,6 +117,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "http://localhost:11434/v1",
     model: "llama3.1",
     apiStyle: "completions",
+    authMethod: "bearer",
     requiresApiKey: false,
   },
   "openai-compatible": {
@@ -128,6 +127,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "",
     model: "",
     apiStyle: "completions",
+    authMethod: "bearer",
     requiresApiKey: true,
   },
   custom: {
@@ -136,6 +136,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     endpoint: "",
     model: "",
     apiStyle: "completions",
+    authMethod: "bearer",
     requiresApiKey: true,
   },
 };
@@ -148,14 +149,14 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
 export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined): AiConfig {
-  const provider =
-    config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
+  const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
   return {
     ...defaultConfigs[provider],
     apiKey: config?.apiKey ?? "",
     ...config,
     provider,
     apiStyle: config?.apiStyle ?? defaultConfigs[provider].apiStyle,
+    authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
@@ -173,18 +174,7 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   return "claude";
 }
 
-export type EditorTheme =
-  | "app"
-  | "one-dark"
-  | "vscode-dark"
-  | "vscode-light"
-  | "nord"
-  | "okaidia"
-  | "material"
-  | "duotone-light"
-  | "duotone-dark"
-  | "xcode"
-  | "custom";
+export type EditorTheme = "app" | "one-dark" | "vscode-dark" | "vscode-light" | "nord" | "okaidia" | "material" | "duotone-light" | "duotone-dark" | "xcode" | "custom";
 
 const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
@@ -229,9 +219,7 @@ export interface CustomTheme {
   colors: CustomThemeColors;
 }
 
-export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [
-  { id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS } },
-];
+export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [{ id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS } }];
 
 export interface EditorSettings {
   fontFamily: string;
@@ -258,6 +246,7 @@ export interface EditorSettings {
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
   shortcuts: ShortcutSettings;
+  sqlFormatter: SqlFormatterSettings;
   sidebarActivation: SidebarActivation;
   sidebarObjectDisplay: "grouped" | "simple";
   autoSelectActiveSidebarNode: boolean;
@@ -324,6 +313,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   cellDetailDrawerWidth: 320,
   cellDetailPanelLayout: "bottom",
   shortcuts: normalizeShortcutSettings(),
+  sqlFormatter: { ...DEFAULT_SQL_FORMATTER_SETTINGS },
   sidebarActivation: "single",
   sidebarObjectDisplay: "grouped",
   autoSelectActiveSidebarNode: false,
@@ -355,27 +345,18 @@ function normalizeDrawerWidth(value: unknown, min: number, fallback: number): nu
 }
 
 function normalizeStructureEditorDensity(value: unknown): StructureEditorDensity {
-  return STRUCTURE_EDITOR_DENSITIES.includes(value as StructureEditorDensity)
-    ? (value as StructureEditorDensity)
-    : DEFAULT_EDITOR_SETTINGS.structureEditorDensity;
+  return STRUCTURE_EDITOR_DENSITIES.includes(value as StructureEditorDensity) ? (value as StructureEditorDensity) : DEFAULT_EDITOR_SETTINGS.structureEditorDensity;
 }
 
 function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
-  return CELL_DETAIL_PANEL_LAYOUTS.includes(value as CellDetailPanelLayout)
-    ? (value as CellDetailPanelLayout)
-    : DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout;
+  return CELL_DETAIL_PANEL_LAYOUTS.includes(value as CellDetailPanelLayout) ? (value as CellDetailPanelLayout) : DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout;
 }
 
 function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
-  return DATA_GRID_RENDER_MODES.includes(value as DataGridRenderMode)
-    ? (value as DataGridRenderMode)
-    : DEFAULT_EDITOR_SETTINGS.dataGridRenderMode;
+  return DATA_GRID_RENDER_MODES.includes(value as DataGridRenderMode) ? (value as DataGridRenderMode) : DEFAULT_EDITOR_SETTINGS.dataGridRenderMode;
 }
 
-function normalizeDisconnectTabHandlingMode(
-  value: unknown,
-  legacyCloseTabsOnDisconnect?: unknown,
-): DisconnectTabHandlingMode {
+function normalizeDisconnectTabHandlingMode(value: unknown, legacyCloseTabsOnDisconnect?: unknown): DisconnectTabHandlingMode {
   if (DISCONNECT_TAB_HANDLING_MODES.includes(value as DisconnectTabHandlingMode)) {
     return value as DisconnectTabHandlingMode;
   }
@@ -412,17 +393,7 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
   const valid: SqlSnippet[] = [];
   const seenPrefixes = new Set<string>();
   for (const item of value) {
-    if (
-      !item ||
-      typeof item !== "object" ||
-      typeof item.id !== "string" ||
-      !item.id ||
-      typeof item.label !== "string" ||
-      !item.label ||
-      typeof item.prefix !== "string" ||
-      !item.prefix ||
-      typeof item.body !== "string"
-    ) {
+    if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || typeof item.label !== "string" || !item.label || typeof item.prefix !== "string" || !item.prefix || typeof item.body !== "string") {
       continue;
     }
     if (seenPrefixes.has(item.prefix)) continue;
@@ -463,62 +434,35 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: settings.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
-    confirmDangerousSqlExecution:
-      settings.confirmDangerousSqlExecution ?? DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution,
+    confirmDangerousSqlExecution: settings.confirmDangerousSqlExecution ?? DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     redisScanPageSize: settings.redisScanPageSize ?? DEFAULT_EDITOR_SETTINGS.redisScanPageSize,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
-    showColumnCommentsInHeader:
-      settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
+    showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
-    compactColumnHeaderActions:
-      settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
+    compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
-    tableInfoDrawerWidth: normalizeDrawerWidth(
-      settings.tableInfoDrawerWidth,
-      240,
-      DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth,
-    ),
-    cellDetailDrawerWidth: normalizeDrawerWidth(
-      settings.cellDetailDrawerWidth,
-      260,
-      DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth,
-    ),
+    tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
+    cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
-    sidebarActivation:
-      settings.sidebarActivation === "single" || settings.sidebarActivation === "double"
-        ? settings.sidebarActivation
-        : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
-    sidebarObjectDisplay:
-      settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped"
-        ? settings.sidebarObjectDisplay
-        : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
-    autoSelectActiveSidebarNode:
-      settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
-    disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode(
-      (settings as Partial<EditorSettings>).disconnectTabHandlingMode,
-      (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect,
-    ),
+    sqlFormatter: normalizeSqlFormatterSettings(settings.sqlFormatter),
+    sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
+    sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
+    autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
+    disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
     reuseDataTab: settings.reuseDataTab ?? DEFAULT_EDITOR_SETTINGS.reuseDataTab,
-    updateNotificationsEnabled:
-      settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
+    updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     sidebarHideTableComments: settings.sidebarHideTableComments ?? DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments,
-    sidebarAllowHorizontalScroll:
-      settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
+    sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
     snippets: normalizeSqlSnippets(settings.snippets, existing?.snippets),
-    exportBatchSize:
-      typeof settings.exportBatchSize === "number" &&
-      settings.exportBatchSize >= 100 &&
-      settings.exportBatchSize <= 100000
-        ? Math.round(settings.exportBatchSize)
-        : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
+    exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
   };
 }
 
@@ -540,10 +484,7 @@ function loadEditorSettings(): EditorSettings {
     if (oldSize) {
       const parsed = parseInt(oldSize, 10);
       if (!isNaN(parsed)) {
-        const migrated: EditorSettings = {
-          ...DEFAULT_EDITOR_SETTINGS,
-          fontSize: parsed,
-        };
+        const migrated = normalizeEditorSettings({ fontSize: parsed });
         saveEditorSettings(migrated);
         localStorage.removeItem(OLD_FONT_SIZE_KEY);
         return migrated;
@@ -553,7 +494,7 @@ function loadEditorSettings(): EditorSettings {
     /* ignore */
   }
 
-  return { ...DEFAULT_EDITOR_SETTINGS };
+  return normalizeEditorSettings({});
 }
 
 function saveEditorSettings(settings: EditorSettings) {
@@ -632,9 +573,7 @@ export const useSettingsStore = defineStore("settings", () => {
       };
     }
     if (partial.customThemes !== undefined) {
-      editorSettings.value.customThemes = Array.isArray(partial.customThemes)
-        ? partial.customThemes
-        : editorSettings.value.customThemes;
+      editorSettings.value.customThemes = Array.isArray(partial.customThemes) ? partial.customThemes : editorSettings.value.customThemes;
     }
     if (partial.activeCustomThemeId !== undefined) {
       editorSettings.value.activeCustomThemeId = partial.activeCustomThemeId;
@@ -649,56 +588,35 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
-    if (partial.confirmDangerousSqlExecution !== undefined)
-      editorSettings.value.confirmDangerousSqlExecution = partial.confirmDangerousSqlExecution;
+    if (partial.confirmDangerousSqlExecution !== undefined) editorSettings.value.confirmDangerousSqlExecution = partial.confirmDangerousSqlExecution;
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.redisScanPageSize !== undefined) editorSettings.value.redisScanPageSize = partial.redisScanPageSize;
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
-    if (partial.showColumnCommentsInHeader !== undefined)
-      editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
-    if (partial.showColumnTypesInHeader !== undefined)
-      editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
-    if (partial.compactColumnHeaderActions !== undefined)
-      editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
-    if (partial.dataGridRenderMode !== undefined)
-      editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
-    if (partial.structureEditorDensity !== undefined)
-      editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
-    if (partial.tableInfoDrawerWidth !== undefined)
-      editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, 320);
-    if (partial.cellDetailDrawerWidth !== undefined)
-      editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, 320);
-    if (partial.cellDetailPanelLayout !== undefined)
-      editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
+    if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
+    if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
+    if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
+    if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
+    if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
+    if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, 320);
+    if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, 320);
+    if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);
+    if (partial.sqlFormatter !== undefined) editorSettings.value.sqlFormatter = normalizeSqlFormatterSettings(partial.sqlFormatter);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
-    if (partial.sidebarObjectDisplay !== undefined)
-      editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
-    if (partial.autoSelectActiveSidebarNode !== undefined)
-      editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
-    if (partial.disconnectTabHandlingMode !== undefined)
-      editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(
-        partial.disconnectTabHandlingMode,
-      );
+    if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
+    if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
+    if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
     if (partial.reuseDataTab !== undefined) editorSettings.value.reuseDataTab = partial.reuseDataTab;
-    if (partial.updateNotificationsEnabled !== undefined)
-      editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
-    if (partial.sidebarHiddenTablePrefixes !== undefined)
-      editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(
-        partial.sidebarHiddenTablePrefixes,
-      );
-    if (partial.sidebarHideTableComments !== undefined)
-      editorSettings.value.sidebarHideTableComments = partial.sidebarHideTableComments;
-    if (partial.sidebarAllowHorizontalScroll !== undefined)
-      editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
+    if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
+    if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
+    if (partial.sidebarHideTableComments !== undefined) editorSettings.value.sidebarHideTableComments = partial.sidebarHideTableComments;
+    if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
-    if (partial.customColumnFormatters !== undefined)
-      editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
+    if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
     if (partial.snippets !== undefined) editorSettings.value.snippets = normalizeSqlSnippets(partial.snippets);
-    if (partial.exportBatchSize !== undefined)
-      editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
+    if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
     saveEditorSettings(editorSettings.value);
   }
 
@@ -713,9 +631,7 @@ export const useSettingsStore = defineStore("settings", () => {
     updateEditorSettings({ columnFormatters });
   }
 
-  function upsertCustomColumnFormatter(
-    formatter: CustomColumnFormatterConfig,
-  ): CustomColumnFormatterConfig | undefined {
+  function upsertCustomColumnFormatter(formatter: CustomColumnFormatterConfig): CustomColumnFormatterConfig | undefined {
     const normalized = normalizeCustomColumnFormatter(formatter);
     if (!normalized) return undefined;
     updateEditorSettings({

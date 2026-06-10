@@ -61,12 +61,7 @@ const rowsText = computed(() => {
 
         <!-- Progress bar -->
         <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
-          <div
-            v-if="status === 'Running' || status === 'Writing'"
-            class="h-full bg-primary rounded-full transition-all duration-300"
-            :class="{ 'animate-pulse': !totalRows }"
-            :style="{ width: totalRows ? `${progressPercent}%` : '50%' }"
-          />
+          <div v-if="status === 'Running' || status === 'Writing'" class="h-full bg-primary rounded-full transition-[width] duration-300" :class="{ 'animate-pulse': !totalRows }" :style="{ width: totalRows ? `${progressPercent}%` : '50%' }" />
           <div v-else-if="status === 'Done'" class="h-full bg-green-500 rounded-full" style="width: 100%" />
         </div>
 

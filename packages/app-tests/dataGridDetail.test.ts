@@ -1,17 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import {
-  buildDataGridCellDetail,
-  buildDataGridColumnDetail,
-  dataGridColumnDetailJson,
-  dataGridColumnDetailTsv,
-  buildDataGridRowDetail,
-  dataGridRowDetailJson,
-  dataGridRowDetailTsv,
-  filterDataGridDetailFields,
-  type DataGridCellDetail,
-} from "../../apps/desktop/src/lib/dataGridDetail.ts";
+import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGridDetail.ts";
 import type { CellValue } from "../../apps/desktop/src/lib/cellValue.ts";
 
 test("buildDataGridCellDetail returns null for an invalid column", () => {
@@ -215,10 +205,7 @@ test("dataGridColumnDetailJson and dataGridColumnDetailTsv format copy payloads"
   });
 
   assert.ok(detail);
-  assert.equal(
-    dataGridColumnDetailJson(detail),
-    '[\n  {\n    "row": 1,\n    "value": "Ada"\n  },\n  {\n    "row": 2,\n    "value": null\n  }\n]',
-  );
+  assert.equal(dataGridColumnDetailJson(detail), '[\n  {\n    "row": 1,\n    "value": "Ada"\n  },\n  {\n    "row": 2,\n    "value": null\n  }\n]');
   assert.equal(dataGridColumnDetailTsv(detail), "Ada\nNULL");
 });
 

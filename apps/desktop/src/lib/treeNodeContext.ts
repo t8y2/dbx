@@ -27,10 +27,7 @@ export function treeNodeSchemaCachePrefix(node: TreeNode): string | null {
 
 export function normalizeCataloglessDatabaseNodes(nodes: TreeNode[]): TreeNode[] {
   return nodes.map((node) => {
-    const normalized =
-      node.type === "database" && node.database === "" && !node.label.trim()
-        ? { ...node, label: DEFAULT_DATABASE_TREE_LABEL }
-        : node;
+    const normalized = node.type === "database" && node.database === "" && !node.label.trim() ? { ...node, label: DEFAULT_DATABASE_TREE_LABEL } : node;
 
     return normalized.children
       ? {

@@ -50,10 +50,15 @@ test("parses mysql TLS URL params into the SSL switch state", () => {
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?require_ssl=true").ssl, true);
 });
 
+test("parses TiDB Cloud MySQL URLs as TLS connections", () => {
+  const parsed = parseConnectionUrl("mysql://root:secret@gateway01.us-west-2.prod.aws.tidbcloud.com:4000/test");
+
+  assert.equal(parsed.dbType, "mysql");
+  assert.equal(parsed.ssl, true);
+});
+
 test("parses MySQL JDBC user and password URL params as credentials", () => {
-  const parsed = parseConnectionUrl(
-    "jdbc:mysql://127.0.0.1:1234/example?user=admin&password=pwd&useUnicode=true&characterEncoding=UTF8&useSSL=false",
-  );
+  const parsed = parseConnectionUrl("jdbc:mysql://127.0.0.1:1234/example?user=admin&password=pwd&useUnicode=true&characterEncoding=UTF8&useSSL=false");
 
   assert.equal(parsed.dbType, "mysql");
   assert.equal(parsed.host, "127.0.0.1");
@@ -150,9 +155,7 @@ test("parses Apache IoTDB JDBC URLs", () => {
 });
 
 test("parses GBase 8s JDBC URLs", () => {
-  const parsed = parseConnectionUrl(
-    "jdbc:gbasedbt-sqli://gbasedbt:secret@gbase.example.com:20013/testdb:GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8",
-  );
+  const parsed = parseConnectionUrl("jdbc:gbasedbt-sqli://gbasedbt:secret@gbase.example.com:20013/testdb:GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8");
 
   assert.equal(parsed.dbType, "gbase");
   assert.equal(parsed.driverProfile, "gbase8s");
@@ -163,6 +166,50 @@ test("parses GBase 8s JDBC URLs", () => {
   assert.equal(parsed.password, "secret");
   assert.equal(parsed.database, "testdb");
   assert.equal(parsed.urlParams, "GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8");
+});
+
+test("parses Informix JDBC URLs with INFORMIXSERVER", () => {
+  const parsed = parseConnectionUrl("jdbc:informix-sqli://192.168.1.1:9088/mydb:INFORMIXSERVER=ol_informix");
+
+  assert.equal(parsed.dbType, "informix");
+  assert.equal(parsed.driverProfile, "informix");
+  assert.equal(parsed.driverLabel, "Informix");
+  assert.equal(parsed.host, "192.168.1.1");
+  assert.equal(parsed.port, 9088);
+  assert.equal(parsed.database, "mydb");
+  assert.equal(parsed.urlParams, "INFORMIXSERVER=ol_informix");
+});
+
+test("parses Informix JDBC URLs with multiple parameters", () => {
+  const parsed = parseConnectionUrl("jdbc:informix-sqli://192.168.1.1:9088/mydb:INFORMIXSERVER=ol_informix;DB_LOCALE=en_US.UTF8");
+
+  assert.equal(parsed.dbType, "informix");
+  assert.equal(parsed.host, "192.168.1.1");
+  assert.equal(parsed.port, 9088);
+  assert.equal(parsed.database, "mydb");
+  assert.equal(parsed.urlParams, "INFORMIXSERVER=ol_informix;DB_LOCALE=en_US.UTF8");
+});
+
+test("parses Informix JDBC URLs with credentials", () => {
+  const parsed = parseConnectionUrl("jdbc:informix-sqli://user:p%40ss@db.example.com:1533/testdb:INFORMIXSERVER=myserver");
+
+  assert.equal(parsed.dbType, "informix");
+  assert.equal(parsed.host, "db.example.com");
+  assert.equal(parsed.port, 1533);
+  assert.equal(parsed.username, "user");
+  assert.equal(parsed.password, "p@ss");
+  assert.equal(parsed.database, "testdb");
+  assert.equal(parsed.urlParams, "INFORMIXSERVER=myserver");
+});
+
+test("parses Informix JDBC URLs without extra parameters", () => {
+  const parsed = parseConnectionUrl("jdbc:informix-sqli://192.168.1.1:9088/mydb");
+
+  assert.equal(parsed.dbType, "informix");
+  assert.equal(parsed.host, "192.168.1.1");
+  assert.equal(parsed.port, 9088);
+  assert.equal(parsed.database, "mydb");
+  assert.equal(parsed.urlParams, "");
 });
 
 test("parses UCanAccess JDBC URLs as Access database files", () => {
@@ -178,9 +225,7 @@ test("parses UCanAccess JDBC URLs as Access database files", () => {
 });
 
 test("parses SQL Server JDBC URLs with semicolon properties", () => {
-  const parsed = parseConnectionUrl(
-    "jdbc:sqlserver://sql.example.com:1434;databaseName=erp;user=sa;password=s%40cret;encrypt=true",
-  );
+  const parsed = parseConnectionUrl("jdbc:sqlserver://sql.example.com:1434;databaseName=erp;user=sa;password=s%40cret;encrypt=true");
 
   assert.equal(parsed.dbType, "sqlserver");
   assert.equal(parsed.driverProfile, "sqlserver");
@@ -215,8 +260,7 @@ test("parses Oracle JDBC SID URLs", () => {
 });
 
 test("parses Oracle JDBC descriptors and keeps the original connection string", () => {
-  const source =
-    "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+  const source = "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
   const parsed = parseConnectionUrl(source);
 
   assert.equal(parsed.dbType, "oracle");
@@ -251,10 +295,7 @@ test("normalizes MongoDB URL credentials when reserved characters can be parsed 
 });
 
 test("normalizes invalid percent escapes in MongoDB URL credentials", () => {
-  assert.equal(
-    normalizeMongoConnectionString("mongodb://reader:pa%ss@mongo.example.com/admin"),
-    "mongodb://reader:pa%25ss@mongo.example.com/admin",
-  );
+  assert.equal(normalizeMongoConnectionString("mongodb://reader:pa%ss@mongo.example.com/admin"), "mongodb://reader:pa%25ss@mongo.example.com/admin");
 });
 
 test("uses selected HTTP-compatible profile for HTTP URLs", () => {
@@ -268,10 +309,7 @@ test("uses selected HTTP-compatible profile for HTTP URLs", () => {
 });
 
 test("parses HTTPS ClickHouse URLs with selected profile", () => {
-  const parsed = parseConnectionUrl(
-    "https://default:secret@clickhouse.example.com:8443/default?secure=true",
-    "clickhouse",
-  );
+  const parsed = parseConnectionUrl("https://default:secret@clickhouse.example.com:8443/default?secure=true", "clickhouse");
 
   assert.equal(parsed.dbType, "clickhouse");
   assert.equal(parsed.driverProfile, "clickhouse");
@@ -282,6 +320,64 @@ test("parses HTTPS ClickHouse URLs with selected profile", () => {
   assert.equal(parsed.database, "default");
   assert.equal(parsed.urlParams, "secure=true");
   assert.equal(parsed.ssl, true);
+});
+
+test("parses MongoDB multi-host replica set URL", () => {
+  const source = "mongodb://test:test@1.1.1.1:27017,1.1.1.2:27017,1.1.1.3:27017/admin?authMechanism=SCRAM-SHA-256&authSource=admin&replicaSet=testRS0";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "mongodb");
+  assert.equal(parsed.driverProfile, "mongodb");
+  assert.equal(parsed.host, "1.1.1.1");
+  assert.equal(parsed.port, 27017);
+  assert.equal(parsed.username, "test");
+  assert.equal(parsed.password, "test");
+  assert.equal(parsed.database, "admin");
+  assert.equal(parsed.urlParams, "authMechanism=SCRAM-SHA-256&authSource=admin&replicaSet=testRS0");
+  assert.equal(parsed.connectionString, source);
+  assert.equal(parsed.useMongoUrl, true);
+  assert.equal(parsed.ssl, false);
+});
+
+test("parses MongoDB single-host URL with replicaSet and auth params", () => {
+  const source = "mongodb://test:test@1.1.1.1:27017/?authMechanism=SCRAM-SHA-256&authSource=admin&replicaSet=testRS0";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "mongodb");
+  assert.equal(parsed.host, "1.1.1.1");
+  assert.equal(parsed.port, 27017);
+  assert.equal(parsed.username, "test");
+  assert.equal(parsed.password, "test");
+  assert.equal(parsed.urlParams, "authMechanism=SCRAM-SHA-256&authSource=admin&replicaSet=testRS0");
+  assert.equal(parsed.connectionString, source);
+  assert.equal(parsed.useMongoUrl, true);
+});
+
+test("parses MongoDB multi-host URL without credentials", () => {
+  const source = "mongodb://host1:27017,host2:27017/?replicaSet=rs0";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "mongodb");
+  assert.equal(parsed.host, "host1");
+  assert.equal(parsed.port, 27017);
+  assert.equal(parsed.username, "");
+  assert.equal(parsed.password, "");
+  assert.equal(parsed.urlParams, "replicaSet=rs0");
+  assert.equal(parsed.connectionString, source);
+  assert.equal(parsed.useMongoUrl, true);
+});
+
+test("parses MongoDB URL with simple authSource only", () => {
+  const source = "mongodb://test:test@1.1.1.1:27017/?authSource=admin";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "mongodb");
+  assert.equal(parsed.host, "1.1.1.1");
+  assert.equal(parsed.port, 27017);
+  assert.equal(parsed.username, "test");
+  assert.equal(parsed.password, "test");
+  assert.equal(parsed.urlParams, "authSource=admin");
+  assert.equal(parsed.useMongoUrl, true);
 });
 
 test("rejects unsupported URL schemes", () => {

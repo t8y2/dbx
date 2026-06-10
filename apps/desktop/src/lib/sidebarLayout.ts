@@ -67,11 +67,7 @@ function orderPinnedFirst(nodes: TreeNode[]): TreeNode[] {
   return [...pinned, ...unpinned];
 }
 
-export function buildTreeNodesFromLayout(
-  layout: SidebarLayout,
-  connections: ConnectionConfig[],
-  pinnedIds: Set<string>,
-): TreeNode[] {
+export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: ConnectionConfig[], pinnedIds: Set<string>): TreeNode[] {
   const configMap = new Map(connections.map((c) => [c.id, c]));
   const groupMap = new Map(layout.groups.map((g) => [g.id, g]));
 
@@ -101,10 +97,7 @@ export function buildTreeNodesFromLayout(
   return orderPinnedFirst(nodes);
 }
 
-export function findConnectionLocation(
-  layout: SidebarLayout,
-  connectionId: string,
-): { entryIndex: number; groupId?: string; innerIndex?: number } | null {
+export function findConnectionLocation(layout: SidebarLayout, connectionId: string): { entryIndex: number; groupId?: string; innerIndex?: number } | null {
   for (let i = 0; i < layout.order.length; i++) {
     const entry = layout.order[i];
     if (entry.type === "connection" && entry.id === connectionId) {
@@ -132,11 +125,7 @@ function removeConnectionFromLayout(order: SidebarOrderEntry[], connectionId: st
     .filter(Boolean) as SidebarOrderEntry[];
 }
 
-export function moveConnectionToGroup(
-  layout: SidebarLayout,
-  connectionId: string,
-  targetGroupId: string | null,
-): SidebarLayout {
+export function moveConnectionToGroup(layout: SidebarLayout, connectionId: string, targetGroupId: string | null): SidebarLayout {
   const order = removeConnectionFromLayout([...layout.order], connectionId);
 
   if (targetGroupId) {
@@ -153,12 +142,7 @@ export function moveConnectionToGroup(
 
 export type DropPosition = "before" | "after" | "inside";
 
-export function reorderEntry(
-  layout: SidebarLayout,
-  draggedId: string,
-  targetId: string,
-  position: DropPosition,
-): SidebarLayout {
+export function reorderEntry(layout: SidebarLayout, draggedId: string, targetId: string, position: DropPosition): SidebarLayout {
   if (draggedId === targetId) return layout;
 
   const isDraggedGroup = layout.order.some((e) => e.type === "group" && e.id === draggedId);
@@ -175,21 +159,14 @@ export function reorderEntry(
   return reorderConnection(layout, draggedId, targetId, position);
 }
 
-function reorderGroup(
-  layout: SidebarLayout,
-  draggedId: string,
-  targetId: string,
-  position: DropPosition,
-): SidebarLayout {
+function reorderGroup(layout: SidebarLayout, draggedId: string, targetId: string, position: DropPosition): SidebarLayout {
   const order = [...layout.order];
   const draggedIndex = order.findIndex((e) => e.type === "group" && e.id === draggedId);
   if (draggedIndex < 0) return layout;
 
   const [dragged] = order.splice(draggedIndex, 1);
 
-  let targetIndex = order.findIndex(
-    (e) => (e.type === "group" && e.id === targetId) || (e.type === "connection" && e.id === targetId),
-  );
+  let targetIndex = order.findIndex((e) => (e.type === "group" && e.id === targetId) || (e.type === "connection" && e.id === targetId));
   if (targetIndex < 0) {
     order.push(dragged);
   } else {
@@ -200,12 +177,7 @@ function reorderGroup(
   return { ...layout, order };
 }
 
-function reorderConnection(
-  layout: SidebarLayout,
-  draggedId: string,
-  targetId: string,
-  position: DropPosition,
-): SidebarLayout {
+function reorderConnection(layout: SidebarLayout, draggedId: string, targetId: string, position: DropPosition): SidebarLayout {
   const order = removeConnectionFromLayout([...layout.order], draggedId);
 
   const targetLoc = findConnectionLocation({ ...layout, order }, targetId);
@@ -281,20 +253,12 @@ export function removeConnectionFromSidebarLayout(layout: SidebarLayout, connect
   return { ...layout, order: removeConnectionFromLayout(layout.order, connectionId) };
 }
 
-export function appendConnectionToLayout(
-  layout: SidebarLayout,
-  connectionId: string,
-  groupId?: string | null,
-): SidebarLayout {
+export function appendConnectionToLayout(layout: SidebarLayout, connectionId: string, groupId?: string | null): SidebarLayout {
   if (groupId && layout.groups.some((group) => group.id === groupId)) {
     return {
       ...layout,
       groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: false } : group)),
-      order: layout.order.map((entry) =>
-        entry.type === "group" && entry.id === groupId
-          ? { ...entry, connectionIds: [...entry.connectionIds, connectionId] }
-          : entry,
-      ),
+      order: layout.order.map((entry) => (entry.type === "group" && entry.id === groupId ? { ...entry, connectionIds: [...entry.connectionIds, connectionId] } : entry)),
     };
   }
   return { ...layout, order: [...layout.order, { type: "connection" as const, id: connectionId }] };

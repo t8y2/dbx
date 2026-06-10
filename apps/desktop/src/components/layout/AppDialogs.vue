@@ -106,13 +106,7 @@ watch(
     @connect-failed="emit('connectFailed', $event)"
     @open-driver-store="emit('openDriverStore')"
   />
-  <EditorSettingsDialog
-    v-if="showSettingsDialog"
-    :open="showSettingsDialog"
-    :initial-tab="settingsInitialTab || 'editor'"
-    :app-version="appVersion"
-    @update:open="emit('update:showSettingsDialog', $event)"
-  />
+  <EditorSettingsDialog v-if="showSettingsDialog" :open="showSettingsDialog" :initial-tab="settingsInitialTab || 'editor'" :app-version="appVersion" @update:open="emit('update:showSettingsDialog', $event)" />
   <DangerConfirmDialog
     v-if="showDangerDialog"
     :open="showDangerDialog"
@@ -123,19 +117,8 @@ watch(
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
   />
-  <DataTransferDialog
-    v-if="dialogs.showTransferDialog.value"
-    v-model:open="dialogs.showTransferDialog.value"
-    :prefill-connection-id="dialogs.transferPrefillConnectionId.value"
-    :prefill-database="dialogs.transferPrefillDatabase.value"
-  />
-  <SchemaDiffDialog
-    v-if="dialogs.showSchemaDiffDialog.value"
-    v-model:open="dialogs.showSchemaDiffDialog.value"
-    :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value"
-    :prefill-database="dialogs.schemaDiffPrefillDatabase.value"
-    :prefill-schema="dialogs.schemaDiffPrefillSchema.value"
-  />
+  <DataTransferDialog v-if="dialogs.showTransferDialog.value" v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
+  <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog
     v-if="dialogs.showDataCompareDialog.value"
     v-model:open="dialogs.showDataCompareDialog.value"
@@ -144,12 +127,7 @@ watch(
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
   />
-  <SqlFileExecutionDialog
-    v-if="dialogs.showSqlFileDialog.value"
-    v-model:open="dialogs.showSqlFileDialog.value"
-    :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
-    :prefill-database="dialogs.sqlFilePrefillDatabase.value"
-  />
+  <SqlFileExecutionDialog v-if="dialogs.showSqlFileDialog.value" v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"
@@ -198,11 +176,7 @@ watch(
     v-model:open="dialogs.showConfigPassphraseDialog.value"
     :mode="dialogs.configPassphraseMode.value"
     :external-error="dialogs.configPassphraseError.value"
-    @confirm="
-      dialogs.configPassphraseMode.value === 'export'
-        ? dialogs.onExportConfirm($event)
-        : dialogs.onImportConfirm($event)
-    "
+    @confirm="dialogs.configPassphraseMode.value === 'export' ? dialogs.onExportConfirm($event) : dialogs.onImportConfirm($event)"
   />
   <Dialog v-model:open="dialogs.showImportLayoutConfirm.value">
     <DialogContent class="sm:max-w-[400px]">
@@ -211,9 +185,7 @@ watch(
       </DialogHeader>
       <p class="text-sm text-muted-foreground">{{ t("configExport.importLayoutConfirm") }}</p>
       <DialogFooter>
-        <Button variant="outline" @click="dialogs.showImportLayoutConfirm.value = false">{{
-          t("dangerDialog.cancel")
-        }}</Button>
+        <Button variant="outline" @click="dialogs.showImportLayoutConfirm.value = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button
           @click="
             dialogs.showImportLayoutConfirm.value = false;

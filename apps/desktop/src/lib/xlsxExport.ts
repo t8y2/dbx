@@ -82,9 +82,7 @@ function normalizeSheetName(value?: string): string {
 function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[]): number[] {
   return columns.map((column, colIndex) => {
     const values = rows.slice(0, 100).map((row) => row[colIndex]);
-    const maxLen = [column, ...values.map((value) => (value == null ? "" : String(value)))]
-      .map((value) => Math.min(value.length, 60))
-      .reduce((max, length) => Math.max(max, length), 8);
+    const maxLen = [column, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
     return Math.max(10, Math.min(60, maxLen + 2));
   });
 }
@@ -108,9 +106,7 @@ function worksheetXml(data: XlsxWorksheetData): string {
   const totalRows = rows.length + 1;
   const range = sheetRange(columns.length, totalRows);
   const widths = estimateColumnWidths(columns, rows);
-  const colsXml = widths
-    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
-    .join("");
+  const colsXml = widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("");
   const headerXml = `<row r="1">${columns.map((column, index) => cellXml(column, 0, index, 1)).join("")}</row>`;
   const bodyXml = rows
     .map((row, rowIndex) => {
@@ -210,20 +206,7 @@ function createZip(files: Array<{ path: string; content: string }>): Uint8Array 
     const path = encoder.encode(file.path);
     const data = encoder.encode(file.content);
     const crc = crc32(data);
-    const localHeader = concatBytes([
-      uint32(0x04034b50),
-      uint16(20),
-      uint16(0),
-      uint16(0),
-      uint16(0),
-      uint16(0),
-      uint32(crc),
-      uint32(data.length),
-      uint32(data.length),
-      uint16(path.length),
-      uint16(0),
-      path,
-    ]);
+    const localHeader = concatBytes([uint32(0x04034b50), uint16(20), uint16(0), uint16(0), uint16(0), uint16(0), uint32(crc), uint32(data.length), uint32(data.length), uint16(path.length), uint16(0), path]);
     entries.push({ path: file.path, data, crc, localHeaderOffset: offset });
     localParts.push(localHeader, data);
     offset += localHeader.length + data.length;
@@ -233,40 +216,12 @@ function createZip(files: Array<{ path: string; content: string }>): Uint8Array 
   for (const entry of entries) {
     const path = encoder.encode(entry.path);
     centralParts.push(
-      concatBytes([
-        uint32(0x02014b50),
-        uint16(20),
-        uint16(20),
-        uint16(0),
-        uint16(0),
-        uint16(0),
-        uint16(0),
-        uint32(entry.crc),
-        uint32(entry.data.length),
-        uint32(entry.data.length),
-        uint16(path.length),
-        uint16(0),
-        uint16(0),
-        uint16(0),
-        uint16(0),
-        uint32(0),
-        uint32(entry.localHeaderOffset),
-        path,
-      ]),
+      concatBytes([uint32(0x02014b50), uint16(20), uint16(20), uint16(0), uint16(0), uint16(0), uint16(0), uint32(entry.crc), uint32(entry.data.length), uint32(entry.data.length), uint16(path.length), uint16(0), uint16(0), uint16(0), uint16(0), uint32(0), uint32(entry.localHeaderOffset), path]),
     );
   }
 
   const central = concatBytes(centralParts);
-  const end = concatBytes([
-    uint32(0x06054b50),
-    uint16(0),
-    uint16(0),
-    uint16(entries.length),
-    uint16(entries.length),
-    uint32(central.length),
-    uint32(offset),
-    uint16(0),
-  ]);
+  const end = concatBytes([uint32(0x06054b50), uint16(0), uint16(0), uint16(entries.length), uint16(entries.length), uint32(central.length), uint32(offset), uint16(0)]);
 
   return concatBytes([...localParts, central, end]);
 }

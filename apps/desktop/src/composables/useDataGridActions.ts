@@ -23,23 +23,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return quoteTableIdentifier(effectiveDatabaseTypeForConnection(config), name);
   }
 
-  function buildTableSql(
-    tab: QueryTab,
-    options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {},
-  ): Promise<string> {
+  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
-    const primaryKeys = tab.tableMeta
-      ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns)
-      : (tableMeta?.primaryKeys ?? []);
+    const primaryKeys = tab.tableMeta ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns) : (tableMeta?.primaryKeys ?? []);
     if (tab.tableMeta && primaryKeys.join("\0") !== tab.tableMeta.primaryKeys.join("\0")) {
       tab.tableMeta.primaryKeys = primaryKeys;
     }
-    const fallbackOrderColumns =
-      effectiveDbType === "sqlserver" && !primaryKeys.length
-        ? tableMeta?.columns.slice(0, 1).map((column) => column.name)
-        : undefined;
+    const fallbackOrderColumns = effectiveDbType === "sqlserver" && !primaryKeys.length ? tableMeta?.columns.slice(0, 1).map((column) => column.name) : undefined;
     const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
@@ -61,14 +53,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
   }
 
-  async function onReloadData(
-    sql?: string,
-    _searchText?: string,
-    whereInput?: string,
-    orderBy?: string,
-    limit?: number,
-    offset?: number,
-  ) {
+  async function onReloadData(sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) {
     const tab = activeTab.value;
     if (!tab) return;
     if (tab.mode === "data" && tableMetaForDataTab(tab)) {
@@ -110,10 +95,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const baseSql = tab.resultSortedSql ?? tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
       if (!baseSql.trim()) return;
       const expectedNextOffset = (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
-      const sessionId =
-        tab.result?.has_more && tab.result?.session_id && offset === expectedNextOffset && limit === tab.resultPageLimit
-          ? tab.result.session_id
-          : undefined;
+      const sessionId = tab.result?.has_more && tab.result?.session_id && offset === expectedNextOffset && limit === tab.resultPageLimit ? tab.result.session_id : undefined;
       await queryStore.executeTabSql(tab.id, baseSql, {
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         resultSortedSql: tab.resultSortedSql,
@@ -146,9 +128,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.whereInput = whereInput ?? "";
       const config = connectionStore.getConfig(tab.connectionId);
       const quotedColumn = quoteIdent(tab, column);
-      const orderBy = direction
-        ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}`
-        : undefined;
+      const orderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
       const sql = await buildTableSql(tab, { orderBy, whereInput });
       queryStore.updateSql(tab.id, sql);
       await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });

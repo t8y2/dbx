@@ -1,15 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  canEditRedisMemberDetail,
-  clampRedisMemberDetailSheetWidth,
-  formatRedisCommandResult,
-  formatRedisMemberDetail,
-  formatRedisStringValue,
-  getRedisMemberSelectionKey,
-  highlightRedisJsonDetail,
-  parseRedisJsonDetail,
-} from "../../apps/desktop/src/lib/redisValuePresentation.ts";
+import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisCommandResult, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, highlightRedisJsonDetail, parseRedisJsonDetail } from "../../apps/desktop/src/lib/redisValuePresentation.ts";
 
 test("formats JSON object strings for Redis member details", () => {
   const detail = formatRedisMemberDetail('{"id":1,"name":"Ada","tags":["dbx","redis"]}');

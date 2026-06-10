@@ -31,10 +31,10 @@ function tokenizeCjkText(input: string) {
 
 export function createCjkSearchTokenizer() {
   return {
-    language: 'cjk',
+    language: "cjk",
     normalizationCache: new Map<string, string>(),
     tokenize(raw: string) {
-      if (typeof raw !== 'string') return [raw];
+      if (typeof raw !== "string") return [raw];
       return tokenizeCjkText(raw);
     },
   };

@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import {
-  formatRuntimeBytes,
-  formatRuntimeCpu,
-  formatRuntimeUptime,
-  runtimeHealthClass,
-  runtimeStatusDotClass,
-  runtimeStatusClass,
-} from "../../apps/desktop/src/lib/driverRuntimePresentation.ts";
+import { formatRuntimeBytes, formatRuntimeCpu, formatRuntimeUptime, runtimeHealthClass, runtimeStatusDotClass, runtimeStatusClass } from "../../apps/desktop/src/lib/driverRuntimePresentation.ts";
 
 test("formats runtime byte counts compactly", () => {
   assert.equal(formatRuntimeBytes(null), "-");

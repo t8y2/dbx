@@ -26,9 +26,7 @@ const chartType = ref<ChartType>("bar");
 const xColumn = ref("");
 const yColumns = ref<string[]>([]);
 
-const numericColumns = computed(() =>
-  props.result.columns.filter((_, idx) => props.result.rows.some((row) => typeof row[idx] === "number")),
-);
+const numericColumns = computed(() => props.result.columns.filter((_, idx) => props.result.rows.some((row) => typeof row[idx] === "number")));
 
 const allColumns = computed(() => props.result.columns);
 
@@ -118,14 +116,7 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumns.va
         <div class="flex items-center gap-1.5">
           <span class="text-muted-foreground">{{ t("chart.type") }}</span>
           <div class="flex gap-0.5">
-            <Button
-              v-for="ct in ['bar', 'line', 'pie'] as ChartType[]"
-              :key="ct"
-              size="sm"
-              :variant="chartType === ct ? 'secondary' : 'ghost'"
-              class="h-6 px-2 text-xs"
-              @click="chartType = ct"
-            >
+            <Button v-for="ct in ['bar', 'line', 'pie'] as ChartType[]" :key="ct" size="sm" :variant="chartType === ct ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" @click="chartType = ct">
               {{ t(`chart.${ct}`) }}
             </Button>
           </div>
@@ -146,14 +137,7 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumns.va
         <div class="flex items-center gap-1.5">
           <span class="text-muted-foreground">Y</span>
           <div class="flex gap-0.5">
-            <Button
-              v-for="col in numericColumns"
-              :key="col"
-              size="sm"
-              :variant="yColumns.includes(col) ? 'secondary' : 'ghost'"
-              class="h-6 px-2 text-xs"
-              @click="toggleYColumn(col)"
-            >
+            <Button v-for="col in numericColumns" :key="col" size="sm" :variant="yColumns.includes(col) ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" @click="toggleYColumn(col)">
               {{ col }}
             </Button>
           </div>

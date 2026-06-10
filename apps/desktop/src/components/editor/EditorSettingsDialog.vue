@@ -2,25 +2,7 @@
 import { ref, watch, shallowRef, computed, onMounted } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  CircleHelp,
-  Cloud,
-  Copy,
-  Download,
-  ExternalLink,
-  Loader2,
-  PackageSearch,
-  Pencil,
-  RefreshCw,
-  RotateCcw,
-  Settings,
-  Terminal,
-  Trash2,
-  Upload,
-  X,
-} from "@lucide/vue";
+import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, Loader2, PackageSearch, Pencil, RefreshCw, RotateCcw, Settings, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -42,6 +24,7 @@ import {
   DEFAULT_DESKTOP_SETTINGS,
   type AiProvider,
   type AiApiStyle,
+  type AiAuthMethod,
   type EditorTheme,
   type DesktopIconTheme,
   type DisconnectTabHandlingMode,
@@ -54,34 +37,17 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/debugLog";
-import {
-  aiListModels,
-  aiTestConnection,
-  checkMcpServerStatus,
-  forgetWebdavSavedPassword,
-  listSystemFonts,
-  saveWebdavSavedPassword,
-  webdavPasswordStatus,
-  webdavSyncDownload,
-  webdavSyncTest,
-  webdavSyncUpload,
-  type AiModelInfo,
-  type McpServerStatus,
-  type WebDavConfig,
-} from "@/lib/api";
+import { aiListModels, aiTestConnection, checkMcpServerStatus, forgetWebdavSavedPassword, listSystemFonts, saveWebdavSavedPassword, webdavPasswordStatus, webdavSyncDownload, webdavSyncTest, webdavSyncUpload, type AiModelInfo, type McpServerStatus, type WebDavConfig } from "@/lib/api";
 import { eventToShortcut } from "@/lib/keyboardShortcuts";
-import {
-  SHORTCUT_DEFINITIONS,
-  findShortcutConflict,
-  normalizeShortcutSettings,
-  type ShortcutActionId,
-} from "@/lib/shortcutRegistry";
+import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/shortcutRegistry";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
+import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
 import type { SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/utils";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
+import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import type { AppThemeAppearance } from "@/lib/appTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
@@ -124,14 +90,14 @@ const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnT
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
+const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
+const sqlFormatterConfigValid = ref(true);
 const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
-const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(
-  settingsStore.editorSettings.disconnectTabHandlingMode,
-);
+const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
@@ -152,6 +118,8 @@ const disconnectTabHandlingModeDescriptionKey = computed(() => {
     case "keep-tabs-keep-results":
       return "disconnectTabHandlingModeKeepTabsKeepResultsDescription";
   }
+
+  return "disconnectTabHandlingModeCloseTabsDescription";
 });
 
 // --- Snippet state ---
@@ -283,6 +251,8 @@ watch(
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
       editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+      editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
+      sqlFormatterConfigValid.value = true;
       editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
       editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
       editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
@@ -307,10 +277,10 @@ const shortcutConflicts = computed(() =>
   }),
 );
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
-const shortcutsChanged = computed(
-  () => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts),
-);
+const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts));
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
+const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
+const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value);
 
 function hasChanges(): boolean {
   return (
@@ -332,6 +302,7 @@ function hasChanges(): boolean {
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
     editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
+    JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
     editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
     editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
@@ -341,16 +312,14 @@ function hasChanges(): boolean {
     editSidebarHideTableComments.value !== settingsStore.editorSettings.sidebarHideTableComments ||
     editSidebarAllowHorizontalScroll.value !== settingsStore.editorSettings.sidebarAllowHorizontalScroll ||
     editExportBatchSize.value !== settingsStore.editorSettings.exportBatchSize ||
-    JSON.stringify(normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value)) !==
-      JSON.stringify(settingsStore.editorSettings.sidebarHiddenTablePrefixes) ||
+    JSON.stringify(normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value)) !== JSON.stringify(settingsStore.editorSettings.sidebarHiddenTablePrefixes) ||
     JSON.stringify(editSnippets.value) !== JSON.stringify(settingsStore.editorSettings.snippets)
   );
 }
 
 async function persistSettings() {
-  if (hasBlockingShortcutConflicts.value) return;
-  const sidebarObjectDisplayChanged =
-    editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay;
+  if (hasApplyBlocker.value) return;
+  const sidebarObjectDisplayChanged = editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay;
   settingsStore.updateEditorSettings({
     fontFamily: editFontFamily.value,
     fontSize: editFontSize.value,
@@ -367,6 +336,7 @@ async function persistSettings() {
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
+    sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
@@ -417,6 +387,8 @@ function resetDefaults() {
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
+  editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+  sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
@@ -522,6 +494,7 @@ function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
 }
 
 function formatShortcutPill(shortcut: string): string {
+  if (!shortcut) return "—";
   const isMac = globalThis.navigator?.platform?.toLowerCase().includes("mac") ?? false;
   return shortcut
     .split("+")
@@ -568,6 +541,10 @@ function resetShortcut(actionId: ShortcutActionId) {
   editShortcuts.value = { ...editShortcuts.value, [actionId]: definition.defaultShortcut };
 }
 
+function clearShortcut(actionId: ShortcutActionId) {
+  editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
+}
+
 function setAppLayout(value: "separated" | "classic") {
   editAppLayout.value = value;
 }
@@ -579,21 +556,10 @@ function setSidebarActivation(value: "single" | "double") {
 const activeSettingsTab = ref("editor");
 const isWeb = !isTauriRuntime();
 const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
-type SettingsCategory =
-  | "editor"
-  | "appearance"
-  | "navigation"
-  | "data"
-  | "redis"
-  | "shortcuts"
-  | "snippets"
-  | "sync"
-  | "ai"
-  | "mcp"
-  | "security"
-  | "about";
+type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "redis" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
   { value: "editor", label: t("settings.editorTab") },
+  { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "appearance", label: t("settings.appearanceTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
@@ -606,27 +572,14 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>([
-  "editor",
-  "appearance",
-  "navigation",
-  "data",
-  "redis",
-  "shortcuts",
-  "snippets",
-]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "redis", "shortcuts", "snippets"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
 }
 
 function settingsCategoryButton(value: SettingsCategory): string {
-  return [
-    "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
-    value === activeSettingsTab.value
-      ? "bg-primary text-primary-foreground shadow-sm"
-      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-  ].join(" ");
+  return ["w-full rounded-md px-3 py-2 text-left text-sm transition-colors", value === activeSettingsTab.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"].join(" ");
 }
 
 function openExternalUrl(url: string) {
@@ -770,12 +723,7 @@ const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
 
-const webdavReady = computed(
-  () =>
-    !!webdavEndpoint.value.trim() &&
-    !webdavBusy.value &&
-    (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim()),
-);
+const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim()));
 
 function currentWebDavConfig(): WebDavConfig {
   return {
@@ -854,11 +802,7 @@ async function testWebDav() {
 
 async function uploadWebDavSnapshot() {
   await runWebDavAction("upload", async () => {
-    const summary = await webdavSyncUpload(
-      currentWebDavConfig(),
-      settingsStore.editorSettings,
-      webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined,
-    );
+    const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
     return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
   });
 }
@@ -866,10 +810,7 @@ async function uploadWebDavSnapshot() {
 async function downloadWebDavSnapshot() {
   if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(
-      currentWebDavConfig(),
-      webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined,
-    );
+    const result = await webdavSyncDownload(currentWebDavConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
     if (result.editorSettings && typeof result.editorSettings === "object") {
       settingsStore.updateEditorSettings(result.editorSettings as any);
     }
@@ -975,6 +916,7 @@ const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvid
 
 const aiEditProvider = ref<AiProvider>(settingsStore.aiConfig.provider);
 const aiEditApiKey = ref(settingsStore.aiConfig.apiKey);
+const aiEditAuthMethod = ref<AiAuthMethod>(settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod);
 const aiEditEndpoint = ref(settingsStore.aiConfig.endpoint);
 const aiEditModel = ref(settingsStore.aiConfig.model);
 const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "completions");
@@ -994,19 +936,16 @@ const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
-const aiSupportsApiStyle = computed(
-  () =>
-    aiEditProvider.value === "openai" ||
-    aiEditProvider.value === "openai-compatible" ||
-    aiEditProvider.value === "custom",
-);
+const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude");
+const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
+const aiCredentialPlaceholder = computed(() => {
+  if (!aiRequiresApiKey.value) return "Optional";
+  if (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer") return "ANTHROPIC_AUTH_TOKEN";
+  return "";
+});
+const aiSupportsApiStyle = computed(() => aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom");
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
-const aiCanListModels = computed(
-  () =>
-    aiModelListSupported.value &&
-    !!aiEditEndpoint.value.trim() &&
-    (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()),
-);
+const aiCanListModels = computed(() => aiModelListSupported.value && !!aiEditEndpoint.value.trim() && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
 const aiModelOptionIds = computed(() => aiModelOptions.value.map((model) => model.id));
 const aiModelEmptyText = computed(() => {
   if (aiModelError.value) return aiModelError.value;
@@ -1027,6 +966,7 @@ function aiModelConfigSignature() {
     provider: aiEditProvider.value,
     endpoint: aiEditEndpoint.value.trim(),
     apiKey: aiEditApiKey.value.trim(),
+    authMethod: aiEditAuthMethod.value,
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value.trim(),
   });
@@ -1036,6 +976,7 @@ function currentAiEditConfig() {
   return {
     provider: aiEditProvider.value,
     apiKey: aiEditApiKey.value,
+    authMethod: aiEditAuthMethod.value,
     endpoint: aiEditEndpoint.value,
     model: aiEditModel.value,
     apiStyle: aiEditApiStyle.value,
@@ -1096,12 +1037,7 @@ async function aiRefreshModels() {
 }
 
 function onAiModelListOpen(open: boolean) {
-  if (
-    open &&
-    aiCanListModels.value &&
-    !aiModelLoading.value &&
-    (!aiModelOptions.value.length || aiModelLoadedSignature.value !== aiModelConfigSignature())
-  ) {
+  if (open && aiCanListModels.value && !aiModelLoading.value && (!aiModelOptions.value.length || aiModelLoadedSignature.value !== aiModelConfigSignature())) {
     void aiRefreshModels();
   }
 }
@@ -1113,6 +1049,7 @@ function aiSelectModel(modelId: string) {
 function syncAiEditState() {
   aiEditProvider.value = settingsStore.aiConfig.provider;
   aiEditApiKey.value = settingsStore.aiConfig.apiKey;
+  aiEditAuthMethod.value = settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod;
   aiEditEndpoint.value = settingsStore.aiConfig.endpoint;
   aiEditModel.value = settingsStore.aiConfig.model;
   aiEditApiStyle.value = settingsStore.aiConfig.apiStyle || "completions";
@@ -1129,6 +1066,7 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditEndpoint.value = AI_PROVIDER_PRESETS[provider].endpoint;
   aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;
   aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
+  aiEditAuthMethod.value = AI_PROVIDER_PRESETS[provider].authMethod;
   if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
   clearAiModelOptions();
 }
@@ -1137,6 +1075,7 @@ function aiHasChanges(): boolean {
   return (
     aiEditProvider.value !== settingsStore.aiConfig.provider ||
     aiEditApiKey.value !== settingsStore.aiConfig.apiKey ||
+    aiEditAuthMethod.value !== (settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod) ||
     aiEditEndpoint.value !== settingsStore.aiConfig.endpoint ||
     aiEditModel.value !== settingsStore.aiConfig.model ||
     aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
@@ -1151,12 +1090,7 @@ function aiApplySettings() {
 }
 
 async function aiTestConn() {
-  if (
-    (aiRequiresApiKey.value && !aiEditApiKey.value.trim()) ||
-    !aiEditEndpoint.value.trim() ||
-    !aiEditModel.value.trim()
-  )
-    return;
+  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || !aiEditEndpoint.value.trim() || !aiEditModel.value.trim()) return;
   aiTesting.value = true;
   aiTestResult.value = "";
   aiTestError.value = "";
@@ -1210,10 +1144,7 @@ watch(
 
     const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
     previewView.value.dispatch({
-      effects: [
-        themeComp.reconfigure(themeExt),
-        fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily)),
-      ],
+      effects: [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))],
     });
   },
   { deep: true },
@@ -1237,12 +1168,7 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView }, { EditorState, Compartment }, { sql, MySQL }, { basicSetup }] = await Promise.all([
-    import("@codemirror/view"),
-    import("@codemirror/state"),
-    import("@codemirror/lang-sql"),
-    import("codemirror"),
-  ]);
+  const [{ EditorView }, { EditorState, Compartment }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
   editorViewModule = { EditorView } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
@@ -1253,12 +1179,7 @@ watch(previewRef, async (el) => {
 
   const state = EditorState.create({
     doc: previewSql,
-    extensions: [
-      basicSetup,
-      sql({ dialect: MySQL }),
-      themeComp.of(themeExt),
-      fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
-    ],
+    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily))],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
@@ -1290,16 +1211,8 @@ watch(
       </DialogHeader>
 
       <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
-        <nav
-          class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 sm:w-40 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3"
-        >
-          <button
-            v-for="category in settingsCategoryNav"
-            :key="category.value"
-            type="button"
-            :class="settingsCategoryButton(category.value)"
-            @click="activeSettingsTab = category.value"
-          >
+        <nav class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 sm:w-40 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3">
+          <button v-for="category in settingsCategoryNav" :key="category.value" type="button" :class="settingsCategoryButton(category.value)" @click="activeSettingsTab = category.value">
             {{ category.label }}
           </button>
         </nav>
@@ -1354,26 +1267,14 @@ watch(
                       <SelectContent>
                         <SelectItem v-for="theme in themeSelectOptions" :key="theme.value" :value="theme.value">
                           <div class="flex items-center gap-2">
-                            <span
-                              class="h-3 w-3 rounded-full border"
-                              :class="
-                                theme.dark
-                                  ? 'bg-foreground border-foreground/20'
-                                  : 'bg-muted-foreground/30 border-muted-foreground/40'
-                              "
-                            />
+                            <span class="h-3 w-3 rounded-full border" :class="theme.dark ? 'bg-foreground border-foreground/20' : 'bg-muted-foreground/30 border-muted-foreground/40'" />
                             {{ theme.label }}
                           </div>
                         </SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
-                  <Button
-                    v-if="editTheme === 'custom'"
-                    variant="outline"
-                    class="h-9 w-auto px-4"
-                    @click="showThemeCustomizer = true"
-                  >
+                  <Button v-if="editTheme === 'custom'" variant="outline" class="h-9 w-auto px-4" @click="showThemeCustomizer = true">
                     <Settings class="mr-2 h-4 w-4" />
                     {{ t("settings.customThemeConfigure") }}
                   </Button>
@@ -1386,15 +1287,7 @@ watch(
                   <Label>{{ t("settings.fontSize") }}</Label>
                   <span class="text-xs text-muted-foreground tabular-nums">{{ editFontSize }}px</span>
                 </div>
-                <input
-                  type="range"
-                  min="10"
-                  max="24"
-                  step="1"
-                  :value="editFontSize"
-                  @input="editFontSize = Number(($event.target as HTMLInputElement).value)"
-                  class="w-full accent-primary"
-                />
+                <input type="range" min="10" max="24" step="1" :value="editFontSize" @input="editFontSize = Number(($event.target as HTMLInputElement).value)" class="w-full accent-primary" />
                 <div class="flex items-center gap-2 text-xs text-muted-foreground">
                   <span>10px</span>
                   <span class="flex-1 border-b border-dashed border-muted-foreground/30" />
@@ -1442,17 +1335,14 @@ watch(
               <!-- Live Preview -->
               <div class="space-y-2">
                 <Label>{{ t("settings.preview") }}</Label>
-                <div
-                  class="rounded-md border overflow-auto max-w-full"
-                  :class="
-                    editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode'
-                      ? 'border-border'
-                      : 'border-border/50'
-                  "
-                >
+                <div class="rounded-md border overflow-auto max-w-full" :class="editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode' ? 'border-border' : 'border-border/50'">
                   <div ref="previewRef" style="min-width: 100%" />
                 </div>
               </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'formatter'" class="flex flex-col gap-5 py-2">
+              <SqlFormatterSettingsPanel v-model="editSqlFormatter" @validity-change="(value: boolean) => (sqlFormatterConfigValid = value)" />
             </section>
 
             <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
@@ -1465,9 +1355,7 @@ watch(
                   <SelectContent>
                     <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
                       <div class="flex items-center gap-2">
-                        <span
-                          class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none"
-                        >
+                        <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
                           {{ locale.flag }}
                         </span>
                         <span>{{ locale.label }}</span>
@@ -1494,9 +1382,7 @@ watch(
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)">
-                      {{ Math.round(scale * 100) }}%
-                    </SelectItem>
+                    <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)"> {{ Math.round(scale * 100) }}% </SelectItem>
                   </SelectContent>
                 </Select>
                 <p class="text-xs text-muted-foreground">{{ t("settings.uiScaleDescription") }}</p>
@@ -1507,25 +1393,13 @@ watch(
               <div class="space-y-2">
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setAppLayout('separated')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('separated')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
                       <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutSeparatedDescription") }}</div>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setAppLayout('classic')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('classic')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
                       <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutClassicDescription") }}</div>
@@ -1537,13 +1411,7 @@ watch(
               <div v-if="!isWeb" class="space-y-2">
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setIconTheme('default')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
                     <div class="flex items-center gap-3 text-left">
                       <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
                       <div>
@@ -1552,13 +1420,7 @@ watch(
                       </div>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setIconTheme('black')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
                     <div class="flex items-center gap-3 text-left">
                       <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert" />
                       <div>
@@ -1570,10 +1432,7 @@ watch(
                 </div>
               </div>
 
-              <div
-                v-if="!isWeb"
-                class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2"
-              >
+              <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="show-tray-icon">{{ t("settings.showTrayIcon") }}</Label>
                   <p class="text-xs text-muted-foreground">{{ t("settings.showTrayIconDescription") }}</p>
@@ -1658,13 +1517,7 @@ watch(
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarActivation") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarActivation('single')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('single')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationSingle") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -1672,13 +1525,7 @@ watch(
                       </div>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarActivation('double')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('double')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationDouble") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -1705,68 +1552,34 @@ watch(
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarObjectDisplay") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarObjectDisplay('grouped')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('grouped')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplayGrouped") }}</div>
                         <Tooltip :open="sidebarObjectDisplayHelp === 'grouped'">
                           <TooltipTrigger as-child>
-                            <span
-                              class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground"
-                              @click.stop
-                              @pointerdown.stop
-                              @mouseenter="sidebarObjectDisplayHelp = 'grouped'"
-                              @mouseleave="sidebarObjectDisplayHelp = null"
-                            >
+                            <span class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground" @click.stop @pointerdown.stop @mouseenter="sidebarObjectDisplayHelp = 'grouped'" @mouseleave="sidebarObjectDisplayHelp = null">
                               <CircleHelp class="h-3.5 w-3.5" />
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent
-                            class="max-w-[320px] text-xs leading-relaxed"
-                            side="top"
-                            align="center"
-                            :side-offset="8"
-                          >
+                          <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="center" :side-offset="8">
                             {{ t("settings.sidebarObjectDisplayGroupedDescription") }}
                           </TooltipContent>
                         </Tooltip>
                       </div>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarObjectDisplay('simple')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('simple')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplaySimple") }}</div>
                         <Tooltip :open="sidebarObjectDisplayHelp === 'simple'">
                           <TooltipTrigger as-child>
-                            <span
-                              class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground"
-                              @click.stop
-                              @pointerdown.stop
-                              @mouseenter="sidebarObjectDisplayHelp = 'simple'"
-                              @mouseleave="sidebarObjectDisplayHelp = null"
-                            >
+                            <span class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground" @click.stop @pointerdown.stop @mouseenter="sidebarObjectDisplayHelp = 'simple'" @mouseleave="sidebarObjectDisplayHelp = null">
                               <CircleHelp class="h-3.5 w-3.5" />
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent
-                            class="max-w-[320px] text-xs leading-relaxed"
-                            side="top"
-                            align="center"
-                            :side-offset="8"
-                          >
+                          <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="center" :side-offset="8">
                             {{ t("settings.sidebarObjectDisplaySimpleDescription") }}
                           </TooltipContent>
                         </Tooltip>
@@ -1801,10 +1614,7 @@ watch(
                     </TooltipContent>
                   </Tooltip>
                 </div>
-                <Select
-                  :model-value="editDisconnectTabHandlingMode"
-                  @update:model-value="onDisconnectTabHandlingModeChange"
-                >
+                <Select :model-value="editDisconnectTabHandlingMode" @update:model-value="onDisconnectTabHandlingModeChange">
                   <SelectTrigger id="disconnect-tab-handling-mode" class="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -1873,15 +1683,7 @@ watch(
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
-                    <Input
-                      type="number"
-                      list="export-batch-sizes"
-                      min="100"
-                      max="100000"
-                      step="100"
-                      v-model.number="editExportBatchSize"
-                      class="h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none"
-                    />
+                    <Input type="number" list="export-batch-sizes" min="100" max="100000" step="100" v-model.number="editExportBatchSize" class="h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none" />
                     <datalist id="export-batch-sizes">
                       <option value="500" />
                       <option value="1000" />
@@ -1914,21 +1716,12 @@ watch(
 
             <section v-else-if="activeSettingsTab === 'shortcuts'" class="flex flex-col gap-2 py-2">
               <div class="overflow-hidden rounded-md border border-border/70 bg-background">
-                <div
-                  v-for="definition in SHORTCUT_DEFINITIONS"
-                  :key="definition.id"
-                  class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-                >
+                <div v-for="definition in SHORTCUT_DEFINITIONS" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                   <div class="min-w-0">
                     <div class="flex min-w-0 items-center gap-2">
                       <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
-                      <Badge
-                        variant="outline"
-                        class="h-5 shrink-0 rounded-md border-border/60 px-1.5 text-[11px] font-normal text-muted-foreground"
-                      >
-                        {{
-                          t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`)
-                        }}
+                      <Badge variant="outline" class="h-5 shrink-0 rounded-md border-border/60 px-1.5 text-[11px] font-normal text-muted-foreground">
+                        {{ t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`) }}
                       </Badge>
                     </div>
                   </div>
@@ -1936,24 +1729,15 @@ watch(
                     <div class="flex items-center justify-end gap-1.5">
                       <input
                         :data-shortcut-input="definition.id"
-                        :value="
-                          editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])
-                        "
+                        :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
                         :style="{
-                          width:
-                            editingShortcutId === definition.id
-                              ? shortcutPressShortcutInputWidth
-                              : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 2)}ch`,
+                          width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
                         }"
                         readonly
                         :aria-invalid="shortcutConflicts.includes(definition.id)"
                         :placeholder="t('settings.shortcutPressShortcut')"
                         class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-full border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                        :class="
-                          editingShortcutId === definition.id
-                            ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35'
-                            : ''
-                        "
+                        :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                         @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                       />
                       <Button
@@ -1967,14 +1751,7 @@ watch(
                       >
                         <Pencil class="h-4 w-4" />
                       </Button>
-                      <Button
-                        v-else
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground"
-                        @click="cancelShortcutEdit"
-                      >
+                      <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
                         {{ t("settings.cancel") }}
                       </Button>
                       <Button
@@ -1987,6 +1764,17 @@ watch(
                         @click="resetShortcut(definition.id)"
                       >
                         <RotateCcw class="h-4 w-4" />
+                      </Button>
+                      <Button
+                        v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                        :aria-label="t('settings.shortcutClear')"
+                        @click="clearShortcut(definition.id)"
+                      >
+                        <X class="h-4 w-4" />
                       </Button>
                     </div>
                     <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
@@ -2023,17 +1811,10 @@ watch(
                     </tr>
                   </thead>
                   <tbody>
-                    <tr
-                      v-for="snippet in editSnippets"
-                      :key="snippet.id"
-                      class="border-b last:border-b-0 hover:bg-muted/30"
-                    >
+                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30">
                       <td class="px-3 py-2">{{ snippet.label }}</td>
                       <td class="px-3 py-2">
-                        <Badge
-                          variant="outline"
-                          class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground"
-                        >
+                        <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground">
                           {{ snippet.prefix }}
                         </Badge>
                       </td>
@@ -2068,12 +1849,7 @@ watch(
               <div class="grid gap-4 md:grid-cols-2">
                 <div class="space-y-2 md:col-span-2">
                   <Label for="webdav-endpoint">{{ t("settings.syncEndpoint") }}</Label>
-                  <Input
-                    id="webdav-endpoint"
-                    v-model="webdavEndpoint"
-                    autocomplete="off"
-                    placeholder="https://example.com/remote.php/dav/files/user/"
-                  />
+                  <Input id="webdav-endpoint" v-model="webdavEndpoint" autocomplete="off" placeholder="https://example.com/remote.php/dav/files/user/" />
                 </div>
                 <div class="space-y-2">
                   <Label for="webdav-username">{{ t("settings.syncUsername") }}</Label>
@@ -2082,14 +1858,7 @@ watch(
                 <div class="space-y-2">
                   <Label for="webdav-password">{{ t("settings.syncPassword") }}</Label>
                   <div class="relative">
-                    <Input
-                      id="webdav-password"
-                      v-model="webdavPassword"
-                      type="password"
-                      :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')"
-                      :disabled="webdavHasSavedPassword"
-                      autocomplete="current-password"
-                    />
+                    <Input id="webdav-password" v-model="webdavPassword" type="password" :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')" :disabled="webdavHasSavedPassword" autocomplete="current-password" />
                     <Button
                       v-if="webdavHasSavedPassword"
                       variant="ghost"
@@ -2143,12 +1912,7 @@ watch(
                 </div>
                 <div v-if="webdavSyncSecrets" class="space-y-2">
                   <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
-                  <Input
-                    id="webdav-secrets-passphrase"
-                    v-model="webdavSecretsPassphrase"
-                    type="password"
-                    autocomplete="new-password"
-                  />
+                  <Input id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" type="password" autocomplete="new-password" />
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
                 </div>
               </div>
@@ -2156,8 +1920,6 @@ watch(
 
             <!-- AI Settings Tab -->
             <section v-else-if="activeSettingsTab === 'ai'" class="flex flex-col gap-5 py-2">
-              <p class="text-xs text-muted-foreground">{{ t("ai.settingsHint") }}</p>
-
               <div class="space-y-3">
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
@@ -2165,27 +1927,15 @@ watch(
                     <SelectTrigger class="col-span-2 h-8 text-xs">
                       <SelectValue>
                         <span class="flex items-center gap-2">
-                          <AiProviderLogo
-                            :provider="selectedAiProviderPreset.provider"
-                            :label="selectedAiProviderPreset.label"
-                            :icon-slug="selectedAiProviderPreset.iconSlug"
-                          />
+                          <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" />
                           <span>{{ selectedAiProviderPreset.label }}</span>
                         </span>
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem
-                        v-for="provider in aiProviderOptions"
-                        :key="provider.provider"
-                        :value="provider.provider"
-                      >
+                      <SelectItem v-for="provider in aiProviderOptions" :key="provider.provider" :value="provider.provider">
                         <span class="flex items-center gap-2">
-                          <AiProviderLogo
-                            :provider="provider.provider"
-                            :label="provider.label"
-                            :icon-slug="provider.iconSlug"
-                          />
+                          <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
                           <span>{{ provider.label }}</span>
                         </span>
                       </SelectItem>
@@ -2193,25 +1943,27 @@ watch(
                   </Select>
                 </div>
 
+                <div v-if="aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">Authentication</Label>
+                  <Select v-model="aiEditAuthMethod">
+                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="api-key">API Key</SelectItem>
+                      <SelectItem value="bearer">Auth Token</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div class="grid grid-cols-3 items-center gap-3">
-                  <Label class="text-right text-xs">API Key</Label>
-                  <Input
-                    v-model="aiEditApiKey"
-                    type="password"
-                    autocomplete="off"
-                    class="col-span-2 h-8 text-xs"
-                    :placeholder="aiRequiresApiKey ? '' : 'Optional'"
-                  />
+                  <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
+                  <Input v-model="aiEditApiKey" type="password" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Endpoint</Label>
-                  <Input
-                    v-model="aiEditEndpoint"
-                    placeholder="https://api.openai.com/v1"
-                    autocomplete="off"
-                    class="col-span-2 h-8 text-xs"
-                  />
+                  <Input v-model="aiEditEndpoint" placeholder="https://api.openai.com/v1" autocomplete="off" class="col-span-2 h-8 text-xs" />
                 </div>
 
                 <div class="grid grid-cols-3 items-start gap-3">
@@ -2239,22 +1991,11 @@ watch(
                         <template #option-label="{ option, label }">
                           <span class="flex min-w-0 flex-col">
                             <span class="truncate">{{ label }}</span>
-                            <span v-if="label !== option" class="truncate text-[11px] text-muted-foreground">{{
-                              option
-                            }}</span>
+                            <span v-if="label !== option" class="truncate text-[11px] text-muted-foreground">{{ option }}</span>
                           </span>
                         </template>
                       </SearchableSelect>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="outline"
-                        class="shrink-0"
-                        :disabled="aiModelLoading || !aiModelListSupported"
-                        :title="t('ai.refreshModels')"
-                        :aria-label="t('ai.refreshModels')"
-                        @click="aiRefreshModels"
-                      >
+                      <Button type="button" size="icon" variant="outline" class="shrink-0" :disabled="aiModelLoading || !aiModelListSupported" :title="t('ai.refreshModels')" :aria-label="t('ai.refreshModels')" @click="aiRefreshModels">
                         <Loader2 v-if="aiModelLoading" class="h-3.5 w-3.5 animate-spin" />
                         <RefreshCw v-else class="h-3.5 w-3.5" />
                       </Button>
@@ -2269,22 +2010,8 @@ watch(
                 <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      class="h-8 flex-1 text-xs"
-                      :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }"
-                      @click="aiEditApiStyle = 'completions'"
-                      >/chat/completions</Button
-                    >
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      class="h-8 flex-1 text-xs"
-                      :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }"
-                      @click="aiEditApiStyle = 'responses'"
-                      >/responses</Button
-                    >
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }" @click="aiEditApiStyle = 'completions'">/chat/completions</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }" @click="aiEditApiStyle = 'responses'">/responses</Button>
                   </div>
                 </div>
 
@@ -2292,12 +2019,7 @@ watch(
                   <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
                   <div class="col-span-2 flex items-center gap-2">
                     <label class="flex items-center gap-2 text-xs text-muted-foreground">
-                      <input
-                        v-model="aiEditEnableThinking"
-                        type="checkbox"
-                        class="h-4 w-4 shrink-0 accent-primary"
-                        :disabled="!aiCompletionsMode || aiEditProvider === 'gemini'"
-                      />
+                      <input v-model="aiEditEnableThinking" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" :disabled="!aiCompletionsMode || aiEditProvider === 'gemini'" />
                       {{ aiEditEnableThinking ? t("ai.enableThinkingOn") : t("ai.enableThinkingOff") }}
                     </label>
                     <Popover>
@@ -2321,13 +2043,7 @@ watch(
 
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
-                  <Input
-                    v-model="aiEditProxyUrl"
-                    autocomplete="off"
-                    class="col-span-2 h-8 text-xs"
-                    placeholder="socks5://127.0.0.1:7890"
-                    :disabled="!aiEditProxyEnabled"
-                  />
+                  <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2 h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
               </div>
             </section>
@@ -2349,17 +2065,7 @@ watch(
                       </Tooltip>
                     </div>
                   </div>
-                  <Badge
-                    variant="outline"
-                    class="shrink-0 rounded-md"
-                    :class="
-                      mcpStatusTone === 'ok'
-                        ? 'border-green-500/40 text-green-600 dark:text-green-400'
-                        : mcpStatusTone === 'warning'
-                          ? 'border-amber-500/40 text-amber-600 dark:text-amber-400'
-                          : 'text-muted-foreground'
-                    "
-                  >
+                  <Badge variant="outline" class="shrink-0 rounded-md" :class="mcpStatusTone === 'ok' ? 'border-green-500/40 text-green-600 dark:text-green-400' : mcpStatusTone === 'warning' ? 'border-amber-500/40 text-amber-600 dark:text-amber-400' : 'text-muted-foreground'">
                     <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
                     <CheckCircle2 v-else-if="mcpStatusTone === 'ok'" class="mr-1 h-3 w-3" />
                     <AlertTriangle v-else-if="mcpStatusTone === 'warning'" class="mr-1 h-3 w-3" />
@@ -2403,22 +2109,12 @@ watch(
               </div>
 
               <div class="space-y-2">
-                <Label>{{
-                  mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand")
-                }}</Label>
+                <Label>{{ mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
                 <div class="flex min-w-0 items-center gap-2">
-                  <div
-                    class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap"
-                  >
+                  <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
                     {{ mcpCommand }}
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    :title="t('common.copy')"
-                    @click="copyMcpText('install', mcpCommand)"
-                  >
+                  <Button type="button" variant="outline" size="icon" :title="t('common.copy')" @click="copyMcpText('install', mcpCommand)">
                     <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>
@@ -2455,17 +2151,8 @@ watch(
 
                   <TabsContent value="claude" class="m-0">
                     <div class="relative rounded-md border bg-background p-3">
-                      <pre
-                        class="overflow-x-auto whitespace-pre text-xs leading-relaxed"
-                      ><code>{{ mcpClaudeRecommendedConfig }}</code></pre>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        class="absolute right-2 top-2 h-7 w-7"
-                        :title="t('common.copy')"
-                        @click="copyMcpText('claude-config', mcpClaudeRecommendedConfig)"
-                      >
+                      <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpClaudeRecommendedConfig }}</code></pre>
+                      <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('claude-config', mcpClaudeRecommendedConfig)">
                         <CheckCircle2 v-if="mcpCopied === 'claude-config'" class="h-3.5 w-3.5 text-green-500" />
                         <Copy v-else class="h-3.5 w-3.5" />
                       </Button>
@@ -2478,17 +2165,8 @@ watch(
                         {{ t("settings.mcpCodexConfigPath") }}
                       </div>
                       <div class="relative rounded-md border bg-background p-3">
-                        <pre
-                          class="overflow-x-auto whitespace-pre text-xs leading-relaxed"
-                        ><code>{{ mcpCodexRecommendedConfig }}</code></pre>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="icon"
-                          class="absolute right-2 top-2 h-7 w-7"
-                          :title="t('common.copy')"
-                          @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)"
-                        >
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpCodexRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'codex-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
@@ -2498,10 +2176,7 @@ watch(
                 </Tabs>
               </div>
 
-              <div
-                v-if="mcpStatus?.error || mcpStatusError"
-                class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-              >
+              <div v-if="mcpStatus?.error || mcpStatusError" class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
                 {{ mcpStatusError || mcpStatus?.error }}
               </div>
 
@@ -2515,32 +2190,10 @@ watch(
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
                 <p class="text-sm text-muted-foreground">{{ t("auth.changePasswordDescription") }}</p>
-                <Input
-                  v-model="oldPassword"
-                  type="password"
-                  :placeholder="t('auth.oldPassword')"
-                  class="h-9"
-                  autocomplete="off"
-                />
-                <Input
-                  v-model="newPassword"
-                  type="password"
-                  :placeholder="t('auth.newPassword')"
-                  class="h-9"
-                  autocomplete="off"
-                />
-                <Input
-                  v-model="confirmNewPassword"
-                  type="password"
-                  :placeholder="t('auth.confirmPassword')"
-                  class="h-9"
-                  autocomplete="off"
-                />
-                <p
-                  v-if="passwordMessage"
-                  class="text-xs"
-                  :class="passwordError ? 'text-destructive' : 'text-green-500'"
-                >
+                <Input v-model="oldPassword" type="password" :placeholder="t('auth.oldPassword')" class="h-9" autocomplete="off" />
+                <Input v-model="newPassword" type="password" :placeholder="t('auth.newPassword')" class="h-9" autocomplete="off" />
+                <Input v-model="confirmNewPassword" type="password" :placeholder="t('auth.confirmPassword')" class="h-9" autocomplete="off" />
+                <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>
               </div>
@@ -2553,21 +2206,14 @@ watch(
                     <div class="text-lg font-semibold">DBX</div>
                     <p class="text-sm text-muted-foreground">{{ t("settings.aboutDescription") }}</p>
                   </div>
-                  <div
-                    v-if="displayedAppVersion"
-                    class="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground"
-                  >
+                  <div v-if="displayedAppVersion" class="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground">
                     {{ displayedAppVersion }}
                   </div>
                 </div>
               </div>
 
               <div class="grid gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.community") }}
                   </div>
@@ -2582,30 +2228,18 @@ watch(
                   </div>
                   <div class="mt-1 font-mono text-base">1087880322</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://discord.gg/W7NyVDRt6a')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://discord.gg/W7NyVDRt6a')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.community") }}
                   </div>
                   <div class="mt-3 flex items-center gap-2 text-sm font-medium">
-                    <img
-                      src="https://cdn.simpleicons.org/discord/5865F2"
-                      alt="Discord"
-                      class="h-7 w-7 rounded-md bg-white p-1"
-                    />
+                    <img src="https://cdn.simpleicons.org/discord/5865F2" alt="Discord" class="h-7 w-7 rounded-md bg-white p-1" />
                     Discord
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>
                   <div class="mt-1 text-sm text-primary">discord.gg/W7NyVDRt6a</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.community") }}
                   </div>
@@ -2622,30 +2256,18 @@ watch(
                   </div>
                   <div class="mt-1 text-sm text-primary">{{ t("settings.wechatGroupInvite") }}</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://github.com/t8y2/dbx')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://github.com/t8y2/dbx')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.project") }}
                   </div>
                   <div class="mt-3 flex items-center gap-2 text-sm font-medium">
-                    <img
-                      src="https://cdn.simpleicons.org/github/181717"
-                      alt="GitHub"
-                      class="h-7 w-7 rounded-md bg-white p-1"
-                    />
+                    <img src="https://cdn.simpleicons.org/github/181717" alt="GitHub" class="h-7 w-7 rounded-md bg-white p-1" />
                     {{ t("settings.openSource") }}
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>
                   <div class="mt-1 text-sm text-primary">github.com/t8y2/dbx</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://dbxio.com')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://dbxio.com')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.project") }}
                   </div>
@@ -2660,10 +2282,7 @@ watch(
             </section>
           </div>
 
-          <DialogFooter
-            v-if="hasSettingsApplyFooter(activeSettingsTab as SettingsCategory)"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
-          >
+          <DialogFooter v-if="hasSettingsApplyFooter(activeSettingsTab as SettingsCategory)" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3">
             <Button variant="outline" @click="resetDefaults">
               {{ t("settings.resetDefaults") }}
             </Button>
@@ -2671,41 +2290,24 @@ watch(
             <Button variant="outline" @click="emit('update:open', false)">
               {{ t("common.close") }}
             </Button>
-            <Button :disabled="!hasChanges() || hasBlockingShortcutConflicts" @click="applySettings">
+            <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
               {{ t("settings.apply") }}
             </Button>
-            <Button :disabled="!hasChanges() || hasBlockingShortcutConflicts" @click="applySettingsAndClose">
+            <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
               {{ t("settings.applyAndClose") }}
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'ai'"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
-          >
+          <DialogFooter v-else-if="activeSettingsTab === 'ai'" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3">
             <div class="flex flex-1 items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                :disabled="
-                  aiTesting ||
-                  (aiRequiresApiKey && !aiEditApiKey?.trim()) ||
-                  !aiEditEndpoint?.trim() ||
-                  !aiEditModel?.trim()
-                "
-                @click="aiTestConn"
-              >
+              <Button size="sm" variant="outline" :disabled="aiTesting || (aiRequiresApiKey && !aiEditApiKey?.trim()) || !aiEditEndpoint?.trim() || !aiEditModel?.trim()" @click="aiTestConn">
                 <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                 {{ t("connection.test") }}
               </Button>
               <span v-if="aiTestResult === 'success'" class="text-xs text-green-500">
                 {{ t("connection.testSuccess") }}
               </span>
-              <span
-                v-else-if="aiTestResult === 'error'"
-                class="text-xs text-destructive truncate max-w-[200px]"
-                :title="aiTestError"
-              >
+              <span v-else-if="aiTestResult === 'error'" class="text-xs text-destructive truncate max-w-[200px]" :title="aiTestError">
                 {{ aiTestError }}
               </span>
             </div>
@@ -2713,18 +2315,11 @@ watch(
             <Button :disabled="!aiHasChanges()" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'sync'"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
-          >
+          <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3">
             <Button variant="outline" @click="emit('update:open', false)">
               {{ t("common.close") }}
             </Button>
-            <p
-              v-if="webdavMessage"
-              class="text-xs self-center truncate max-w-[280px]"
-              :class="webdavError ? 'text-destructive' : 'text-green-500'"
-            >
+            <p v-if="webdavMessage" class="text-xs self-center truncate max-w-[280px]" :class="webdavError ? 'text-destructive' : 'text-green-500'">
               {{ webdavMessage }}
             </p>
             <div class="flex-1" />
@@ -2744,10 +2339,7 @@ watch(
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'mcp' && !isWeb"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
-          >
+          <DialogFooter v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3">
             <Button variant="outline" @click="emit('update:open', false)">
               {{ t("common.close") }}
             </Button>
@@ -2763,25 +2355,16 @@ watch(
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'security' && isWeb"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
-          >
+          <DialogFooter v-else-if="activeSettingsTab === 'security' && isWeb" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3">
             <Button variant="outline" @click="emit('update:open', false)">
               {{ t("common.close") }}
             </Button>
-            <Button
-              :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword"
-              @click="changePassword"
-            >
+            <Button :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword" @click="changePassword">
               {{ t("auth.changePassword") }}
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'about'"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
-          >
+          <DialogFooter v-else-if="activeSettingsTab === 'about'" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3">
             <Button variant="outline" @click="emit('update:open', false)">
               {{ t("common.close") }}
             </Button>
@@ -2791,12 +2374,7 @@ watch(
     </DialogContent>
 
     <!-- Theme Customizer Dialog -->
-    <ThemeCustomizerDialog
-      v-model:open="showThemeCustomizer"
-      :themes="editCustomThemes"
-      :active-theme-id="editActiveCustomThemeId"
-      @save="handleThemeSave"
-    />
+    <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
 
     <!-- Snippet Add/Edit Dialog -->
     <Dialog :open="snippetDialogOpen" @update:open="snippetDialogOpen = $event">
@@ -2809,19 +2387,11 @@ watch(
         <div class="flex flex-col gap-4 py-2">
           <div class="flex flex-col gap-1.5">
             <Label for="snippet-label">{{ t("settings.snippetsLabel") }}</Label>
-            <Input
-              id="snippet-label"
-              v-model="snippetForm.label"
-              :placeholder="t('settings.snippetsLabelPlaceholder')"
-            />
+            <Input id="snippet-label" v-model="snippetForm.label" :placeholder="t('settings.snippetsLabelPlaceholder')" />
           </div>
           <div class="flex flex-col gap-1.5">
             <Label for="snippet-prefix">{{ t("settings.snippetsPrefix") }}</Label>
-            <Input
-              id="snippet-prefix"
-              v-model="snippetForm.prefix"
-              :placeholder="t('settings.snippetsPrefixPlaceholder')"
-            />
+            <Input id="snippet-prefix" v-model="snippetForm.prefix" :placeholder="t('settings.snippetsPrefixPlaceholder')" />
             <p v-if="snippetFormPrefixError" class="text-xs text-destructive">{{ snippetFormPrefixError }}</p>
           </div>
           <div class="flex flex-col gap-1.5">

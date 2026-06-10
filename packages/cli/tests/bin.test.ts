@@ -30,8 +30,8 @@ test("prints capabilities when invoked through an npm-style symlink", async () =
     assert.equal(result.status, 0);
     assert.equal(result.stderr, "");
     const payload = JSON.parse(result.stdout) as { directQueryTypes: string[]; bridgeRequiredTypes: string[] };
-  assert.ok(payload.directQueryTypes.includes("postgres"));
-  assert.ok(payload.directQueryTypes.includes("rqlite"));
+    assert.ok(payload.directQueryTypes.includes("postgres"));
+    assert.ok(payload.directQueryTypes.includes("rqlite"));
     assert.ok(payload.bridgeRequiredTypes.includes("oracle"));
   } finally {
     await rm(bin.dir, { recursive: true, force: true });

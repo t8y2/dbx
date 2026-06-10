@@ -1,15 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  buildStructureTargetLabel,
-  combineDataTypeForDatabase,
-  createColumnDrafts,
-  createIndexDrafts,
-  getDataTypeOptions,
-  normalizeDataTypeParams,
-  parseExtraToColumnExtra,
-  toColumnNames,
-} from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
+import { buildStructureTargetLabel, combineDataTypeForDatabase, createColumnDrafts, createIndexDrafts, getDataTypeOptions, normalizeDataTypeParams, parseExtraToColumnExtra, toColumnNames } from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
 import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
 
 const columns: ColumnInfo[] = [
@@ -163,14 +154,8 @@ test("creates editable index drafts and splits pasted column lists", () => {
 });
 
 test("structure editor target label omits duplicate database and schema", () => {
-  assert.equal(
-    buildStructureTargetLabel("online-clickhouse", "testdb", "testdb", "users"),
-    "online-clickhouse / testdb / users",
-  );
-  assert.equal(
-    buildStructureTargetLabel("online-postgres", "app", "public", "users"),
-    "online-postgres / app / public / users",
-  );
+  assert.equal(buildStructureTargetLabel("online-clickhouse", "testdb", "testdb", "users"), "online-clickhouse / testdb / users");
+  assert.equal(buildStructureTargetLabel("online-postgres", "app", "public", "users"), "online-postgres / app / public / users");
 });
 
 test("normalizes temporal precision when combining data types", () => {

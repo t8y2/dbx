@@ -1,17 +1,5 @@
 // Binary column types that should not be edited inline
-export const BINARY_TYPES = new Set([
-  "blob",
-  "clob",
-  "bytea",
-  "varbinary",
-  "binary",
-  "image",
-  "longblob",
-  "mediumblob",
-  "tinyblob",
-  "blob sub_type 2004",
-  "blob sub_type 2005",
-]);
+export const BINARY_TYPES = new Set(["blob", "clob", "bytea", "varbinary", "binary", "image", "longblob", "mediumblob", "tinyblob", "blob sub_type 2004", "blob sub_type 2005"]);
 
 export function isBinaryType(dataType: string): boolean {
   const lower = dataType
@@ -38,23 +26,9 @@ export interface EditableQueryColumn {
   expression: string;
 }
 
-export type QueryEditabilityReason =
-  | "not-select"
-  | "cte"
-  | "set-operation"
-  | "aggregation"
-  | "external-source"
-  | "complex-source"
-  | "computed-columns"
-  | "no-table"
-  | "no-primary-key"
-  | "primary-key-not-returned"
-  | "aliased-columns"
-  | "metadata-unavailable";
+export type QueryEditabilityReason = "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
 
-export type QueryEditability =
-  | { editable: true; analysis: EditableQueryInfo }
-  | { editable: false; reason: QueryEditabilityReason };
+export type QueryEditability = { editable: true; analysis: EditableQueryInfo } | { editable: false; reason: QueryEditabilityReason };
 
 /**
  * Parse a SELECT statement to determine if it's editable.
@@ -214,9 +188,7 @@ function isSelectStar(body: string, alias: string | undefined): boolean {
   return new RegExp(`^${escapeRegExp(alias)}\\s*\\.\\s*\\*$`, "i").test(trimmed);
 }
 
-function parseFromSource(
-  body: string,
-): { schema?: string; schemaQuoted?: boolean; tableName: string; tableNameQuoted?: boolean; alias?: string } | null {
+function parseFromSource(body: string): { schema?: string; schemaQuoted?: boolean; tableName: string; tableNameQuoted?: boolean; alias?: string } | null {
   if (!body || /[,()]/.test(body) || /\bJOIN\b/i.test(body)) return null;
   const ident = parseQualifiedIdentifier(body);
   if (!ident || ident.parts.length < 1 || ident.parts.length > 2) return null;
@@ -240,9 +212,7 @@ function isExternalFromSource(body: string): boolean {
   return /^'(?:''|[^'])*'(?:\s+(?:AS\s+)?[A-Za-z_][\w$]*)?$/i.test(trimmed) || /^[A-Za-z_][\w$]*\s*\(/.test(trimmed);
 }
 
-function parseQualifiedIdentifier(
-  text: string,
-): { parts: string[]; quoted: boolean[]; end: number; rest: string; done: boolean } | null {
+function parseQualifiedIdentifier(text: string): { parts: string[]; quoted: boolean[]; end: number; rest: string; done: boolean } | null {
   const parts: string[] = [];
   const quoted: boolean[] = [];
   let pos = 0;
@@ -341,15 +311,9 @@ function escapeRegExp(value: string): string {
  * Check if all primary key columns are present in the result set columns.
  * Comparison is case-insensitive.
  */
-export function allPrimaryKeysPresent(
-  primaryKeys: string[],
-  resultColumns: string[],
-  analysis?: EditableQueryInfo,
-): boolean {
+export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: string[], analysis?: EditableQueryInfo): boolean {
   if (analysis && !analysis.selectStar) {
-    const sourceColumns = new Set(
-      analysis.columns.flatMap((column) => (column.sourceName ? [column.sourceName.toLowerCase()] : [])),
-    );
+    const sourceColumns = new Set(analysis.columns.flatMap((column) => (column.sourceName ? [column.sourceName.toLowerCase()] : [])));
     return primaryKeys.every((pk) => sourceColumns.has(pk.toLowerCase()));
   }
   const colSet = new Set(resultColumns.map((c) => c.toLowerCase()));
@@ -365,14 +329,9 @@ export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultC
   });
 }
 
-export function sourceColumnsForResult(
-  analysis: EditableQueryInfo,
-  resultColumns: string[],
-): Array<string | undefined> | undefined {
+export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): Array<string | undefined> | undefined {
   if (analysis.selectStar) return undefined;
   const sourceByResult = new Map(analysis.columns.map((column) => [column.resultName.toLowerCase(), column]));
   const sourceColumns = resultColumns.map((resultColumn) => sourceByResult.get(resultColumn.toLowerCase())?.sourceName);
-  return resultColumns.every((resultColumn) => sourceByResult.has(resultColumn.toLowerCase()))
-    ? sourceColumns
-    : undefined;
+  return resultColumns.every((resultColumn) => sourceByResult.has(resultColumn.toLowerCase())) ? sourceColumns : undefined;
 }

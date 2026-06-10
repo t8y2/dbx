@@ -60,18 +60,9 @@ function onConfirm() {
 
       <div class="py-4 min-w-0">
         <p class="text-sm text-muted-foreground mb-3">{{ message || t("dangerDialog.message") }}</p>
-        <pre
-          v-if="code"
-          class="text-xs bg-muted p-3 rounded overflow-auto max-h-40 min-w-0 font-mono whitespace-pre"
-          v-html="highlightedCode"
-        />
-        <div
-          v-if="showSuppressToggle"
-          class="mt-3 flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2"
-        >
-          <Label for="danger-confirm-suppress" class="text-sm leading-5">{{
-            suppressToggleLabel || t("dangerDialog.suppressFuturePrompts")
-          }}</Label>
+        <pre v-if="code" class="text-xs bg-muted p-3 rounded overflow-auto max-h-40 min-w-0 font-mono whitespace-pre" v-html="highlightedCode" />
+        <div v-if="showSuppressToggle" class="mt-3 flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+          <Label for="danger-confirm-suppress" class="text-sm leading-5">{{ suppressToggleLabel || t("dangerDialog.suppressFuturePrompts") }}</Label>
           <Switch id="danger-confirm-suppress" v-model="suppressFuturePrompts" />
         </div>
       </div>

@@ -1,11 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/engineeringDiagram.ts";
-import {
-  buildEngineeringDiagramSvg,
-  buildTableDiagramSvg,
-  diagramSvgFileName,
-} from "../../apps/desktop/src/lib/diagramSvgExport.ts";
+import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "../../apps/desktop/src/lib/diagramSvgExport.ts";
 import { buildDiagramRelationships, type DiagramTable } from "../../apps/desktop/src/lib/erDiagram.ts";
 
 const tables: DiagramTable[] = [
@@ -23,9 +19,7 @@ const tables: DiagramTable[] = [
       { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
       { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
     ],
-    foreignKeys: [
-      { name: "orders_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" },
-    ],
+    foreignKeys: [{ name: "orders_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
   },
 ];
 
@@ -76,12 +70,6 @@ test("exports the engineering ER diagram with Chen-style shapes and cardinalitie
 });
 
 test("builds safe SVG file names from the active diagram context", () => {
-  assert.equal(
-    diagramSvgFileName("prod/main", "billing db", "engineering"),
-    "dbx-prod-main-billing-db-engineering-er.svg",
-  );
-  assert.equal(
-    diagramSvgFileName("", "", "table"),
-    "dbx-diagram-table-structure.svg",
-  );
+  assert.equal(diagramSvgFileName("prod/main", "billing db", "engineering"), "dbx-prod-main-billing-db-engineering-er.svg");
+  assert.equal(diagramSvgFileName("", "", "table"), "dbx-diagram-table-structure.svg");
 });

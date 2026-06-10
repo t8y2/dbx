@@ -13,6 +13,7 @@ import * as api from "@/lib/api";
 import type { TransferProgress, TransferMode } from "@/lib/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { nextTransferTerminalState } from "@/lib/transferProgressState";
 import { ArrowRightLeft, Check, X, Loader2, Square, CheckSquare } from "@lucide/vue";
 
@@ -65,9 +66,7 @@ const filteredTables = computed(() => {
   return q ? sourceTables.value.filter((t) => t.toLowerCase().includes(q)) : sourceTables.value;
 });
 
-const allSelected = computed(
-  () => filteredTables.value.length > 0 && filteredTables.value.every((t) => selectedTables.value.has(t)),
-);
+const allSelected = computed(() => filteredTables.value.length > 0 && filteredTables.value.every((t) => selectedTables.value.has(t)));
 
 function connectionType(id: string): DatabaseType | undefined {
   return store.connections.find((c) => c.id === id)?.db_type;
@@ -77,15 +76,7 @@ function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
 
-const canStart = computed(
-  () =>
-    sourceConnectionId.value &&
-    sourceDatabase.value &&
-    targetConnectionId.value &&
-    targetDatabase.value &&
-    selectedTables.value.size > 0 &&
-    sourceConnectionId.value + sourceDatabase.value !== targetConnectionId.value + targetDatabase.value,
-);
+const canStart = computed(() => sourceConnectionId.value && sourceDatabase.value && targetConnectionId.value && targetDatabase.value && selectedTables.value.size > 0 && sourceConnectionId.value + sourceDatabase.value !== targetConnectionId.value + targetDatabase.value);
 
 function toggleSelectAll() {
   if (allSelected.value) {
@@ -107,9 +98,8 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const names = isMongoConnection(connectionId)
-      ? await api.mongoListDatabases(connectionId)
-      : (await api.listDatabases(connectionId)).map((d) => d.name);
+    const rawNames = isMongoConnection(connectionId) ? await api.mongoListDatabases(connectionId) : (await api.listDatabases(connectionId)).map((d) => d.name);
+    const names = databaseOptionsForConnection(rawNames, store.getConfig(connectionId));
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -137,12 +127,7 @@ async function loadSchemas(connectionId: string, database: string, side: "source
   }
   try {
     const schemas = await api.listSchemas(connectionId, database);
-    const selected =
-      preferredSchema && schemas.includes(preferredSchema)
-        ? preferredSchema
-        : schemas.includes("public")
-          ? "public"
-          : (schemas[0] ?? "");
+    const selected = preferredSchema && schemas.includes(preferredSchema) ? preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
     if (side === "source") {
       sourceSchemas.value = schemas;
       sourceSchema.value = selected;
@@ -177,9 +162,7 @@ async function loadTables() {
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
     const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema);
-    sourceTables.value = tables
-      .filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE")
-      .map((t) => t.name);
+    sourceTables.value = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
     selectedTables.value = new Set(sourceTables.value);
   } catch {
     sourceTables.value = [];
@@ -356,25 +339,15 @@ function formatTableRows(progress: TransferProgress) {
   return formatRowCount(progress.rowsTransferred);
 }
 
-const completedTables = computed(
-  () => [...transferProgress.value.values()].filter((p) => processedStatuses.has(p.status)).length,
-);
+const completedTables = computed(() => [...transferProgress.value.values()].filter((p) => processedStatuses.has(p.status)).length);
 
 const failedTables = computed(() => [...transferProgress.value.values()].filter((p) => p.status === "error").length);
 
-const totalTransferred = computed(() =>
-  [...transferProgress.value.values()].reduce((sum, p) => sum + p.rowsTransferred, 0),
-);
+const totalTransferred = computed(() => [...transferProgress.value.values()].reduce((sum, p) => sum + p.rowsTransferred, 0));
 
-const knownTotalRows = computed(() =>
-  [...transferProgress.value.values()].reduce((sum, p) => sum + (typeof p.totalRows === "number" ? p.totalRows : 0), 0),
-);
+const knownTotalRows = computed(() => [...transferProgress.value.values()].reduce((sum, p) => sum + (typeof p.totalRows === "number" ? p.totalRows : 0), 0));
 
-const overallRowsLabel = computed(() =>
-  knownTotalRows.value > 0
-    ? `${formatRowCount(totalTransferred.value)} / ${formatRowCount(knownTotalRows.value)}`
-    : formatRowCount(totalTransferred.value),
-);
+const overallRowsLabel = computed(() => (knownTotalRows.value > 0 ? `${formatRowCount(totalTransferred.value)} / ${formatRowCount(knownTotalRows.value)}` : formatRowCount(totalTransferred.value)));
 </script>
 
 <template>
@@ -503,48 +476,27 @@ const overallRowsLabel = computed(() =>
             <div class="flex items-center justify-between">
               <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 {{ t("transfer.tables") }}
-                <span v-if="sourceTables.length" class="text-muted-foreground/60"
-                  >({{ selectedTables.size }}/{{ sourceTables.length }})</span
-                >
+                <span v-if="sourceTables.length" class="text-muted-foreground/60">({{ selectedTables.size }}/{{ sourceTables.length }})</span>
               </div>
-              <Button
-                v-if="sourceTables.length"
-                variant="ghost"
-                size="sm"
-                class="h-6 text-xs px-2"
-                @click="toggleSelectAll"
-              >
+              <Button v-if="sourceTables.length" variant="ghost" size="sm" class="h-6 text-xs px-2" @click="toggleSelectAll">
                 {{ allSelected ? t("transfer.deselectAll") : t("transfer.selectAll") }}
               </Button>
             </div>
 
-            <Input
-              v-if="sourceTables.length > 5"
-              v-model="tableSearch"
-              :placeholder="t('transfer.searchTables')"
-              class="h-7 text-xs"
-            />
+            <Input v-if="sourceTables.length > 5" v-model="tableSearch" :placeholder="t('transfer.searchTables')" class="h-7 text-xs" />
 
             <div v-if="loadingTables" class="flex items-center gap-2 text-xs text-muted-foreground py-4 justify-center">
               <Loader2 class="w-3.5 h-3.5 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <div
-              v-else-if="!sourceConnectionId || !sourceDatabase"
-              class="text-xs text-muted-foreground py-4 text-center"
-            >
+            <div v-else-if="!sourceConnectionId || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
               {{ t("transfer.selectSourceFirst") }}
             </div>
             <div v-else-if="sourceTables.length === 0" class="text-xs text-muted-foreground py-4 text-center">
               {{ t("transfer.noTables") }}
             </div>
             <div v-else class="border rounded-md max-h-[200px] overflow-y-auto">
-              <div
-                v-for="table in filteredTables"
-                :key="table"
-                class="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs"
-                @click="toggleTable(table)"
-              >
+              <div v-for="table in filteredTables" :key="table" class="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs" @click="toggleTable(table)">
                 <CheckSquare v-if="selectedTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
                 <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
                 <span class="truncate">{{ table }}</span>
@@ -574,14 +526,7 @@ const overallRowsLabel = computed(() =>
             </div>
             <div class="flex items-center gap-3">
               <Label class="text-xs shrink-0">{{ t("transfer.batchSize") }}</Label>
-              <Input
-                v-model.number="batchSize"
-                type="number"
-                min="100"
-                max="10000"
-                step="100"
-                class="h-7 text-xs w-24"
-              />
+              <Input v-model.number="batchSize" type="number" min="100" max="10000" step="100" class="h-7 text-xs w-24" />
             </div>
           </div>
         </div>
@@ -590,13 +535,10 @@ const overallRowsLabel = computed(() =>
         <div v-else class="py-3 space-y-3">
           <div class="flex items-center justify-between text-xs text-muted-foreground">
             <span>
-              {{ t("transfer.overallProgress") }}: {{ completedTables }} / {{ selectedTables.size }}
-              {{ t("transfer.tables").toLowerCase() }} · {{ overallRowsLabel }}
+              {{ t("transfer.overallProgress") }}: {{ completedTables }} / {{ selectedTables.size }} {{ t("transfer.tables").toLowerCase() }} · {{ overallRowsLabel }}
               {{ t("grid.rows", { count: "" }).trim() }}
             </span>
-            <span v-if="overallDone && !failedTables" class="text-green-600 font-medium">{{
-              t("transfer.completed")
-            }}</span>
+            <span v-if="overallDone && !failedTables" class="text-green-600 font-medium">{{ t("transfer.completed") }}</span>
             <span v-else-if="overallDone && failedTables" class="text-amber-600 font-medium">
               {{ t("transfer.completedWithErrors", { count: failedTables }) }}
             </span>
@@ -606,16 +548,8 @@ const overallRowsLabel = computed(() =>
 
           <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
             <div
-              class="h-full rounded-full transition-all duration-300"
-              :class="
-                overallError
-                  ? 'bg-destructive'
-                  : overallCancelled
-                    ? 'bg-yellow-500'
-                    : overallDone && failedTables
-                      ? 'bg-amber-500'
-                      : 'bg-primary'
-              "
+              class="h-full rounded-full transition-[width] duration-300"
+              :class="overallError ? 'bg-destructive' : overallCancelled ? 'bg-yellow-500' : overallDone && failedTables ? 'bg-amber-500' : 'bg-primary'"
               :style="{
                 width: `${selectedTables.size ? (completedTables / selectedTables.size) * 100 : 0}%`,
               }"
@@ -623,11 +557,7 @@ const overallRowsLabel = computed(() =>
           </div>
 
           <div class="border rounded-md max-h-[280px] overflow-y-auto">
-            <div
-              v-for="table in [...selectedTables]"
-              :key="table"
-              class="flex items-center justify-between px-2.5 py-1.5 text-xs border-b last:border-b-0"
-            >
+            <div v-for="table in [...selectedTables]" :key="table" class="flex items-center justify-between px-2.5 py-1.5 text-xs border-b last:border-b-0">
               <span class="truncate">{{ table }}</span>
               <div class="flex items-center gap-1.5 shrink-0 text-muted-foreground">
                 <template v-if="transferProgress.get(table)">
@@ -635,22 +565,14 @@ const overallRowsLabel = computed(() =>
                     <Loader2 class="w-3 h-3 animate-spin text-primary" />
                     <span>{{ formatTableRows(transferProgress.get(table)!) }}</span>
                   </template>
-                  <template
-                    v-else-if="
-                      transferProgress.get(table)!.status === 'tableDone' ||
-                      transferProgress.get(table)!.status === 'done'
-                    "
-                  >
+                  <template v-else-if="transferProgress.get(table)!.status === 'tableDone' || transferProgress.get(table)!.status === 'done'">
                     <Check class="w-3 h-3 text-green-500" />
                     <span>{{ formatTableRows(transferProgress.get(table)!) }}</span>
                   </template>
                   <template v-else-if="transferProgress.get(table)!.status === 'error'">
                     <X class="w-3 h-3 text-destructive" />
                     <span>{{ formatTableRows(transferProgress.get(table)!) }}</span>
-                    <span
-                      class="max-w-[520px] whitespace-normal break-words text-destructive"
-                      :title="transferProgress.get(table)!.error ?? ''"
-                    >
+                    <span class="max-w-[520px] whitespace-normal break-words text-destructive" :title="transferProgress.get(table)!.error ?? ''">
                       {{ transferProgress.get(table)!.error }}
                     </span>
                   </template>

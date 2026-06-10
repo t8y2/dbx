@@ -3,42 +3,22 @@ title: Config Export/Import
 description: Export database connections with AES-256-GCM encrypted passwords. Migrate securely between machines.
 ---
 
-<Callout type="info">
-Export your database connections with encrypted passwords (AES-256-GCM). Securely migrate between machines.
-</Callout>
+<Callout type="info">Export your database connections with encrypted passwords (AES-256-GCM). Securely migrate between machines.</Callout>
 
 ## Export
 
 <Steps>
-  <Step>
-    ### Start Export
-    Click the **Export** button in the sidebar header.
-  </Step>
-  <Step>
-    ### Set Passphrase
-    Enter a passphrase to encrypt your passwords.
-  </Step>
-  <Step>
-    ### Save File
-    Choose a save location. The exported file contains all connections with passwords, encrypted.
-  </Step>
+  <Step>### Start Export Click the **Export** button in the sidebar header.</Step>
+  <Step>### Set Passphrase Enter a passphrase to encrypt your passwords.</Step>
+  <Step>### Save File Choose a save location. The exported file contains all connections with passwords, encrypted.</Step>
 </Steps>
 
 ## Import
 
 <Steps>
-  <Step>
-    ### Start Import
-    Click the **Import** button in the sidebar header.
-  </Step>
-  <Step>
-    ### Select File and Decrypt
-    Select the exported file and enter the passphrase.
-  </Step>
-  <Step>
-    ### Done
-    Connections are imported with passwords restored. Deduplicated by name + host + port.
-  </Step>
+  <Step>### Start Import Click the **Import** button in the sidebar header.</Step>
+  <Step>### Select File and Decrypt Select the exported file and enter the passphrase.</Step>
+  <Step>### Done Connections are imported with passwords restored. Deduplicated by name + host + port.</Step>
 </Steps>
 
 ## Security
@@ -55,11 +35,11 @@ Import also supports plain JSON files from older versions (without passwords) an
 
 ## What Is Included
 
-| Item | Included |
-|---|---|
-| Connection name, type, host, port, database, color | Yes |
-| URL parameters, SSL, SSH, proxy, visible database settings | Yes |
-| Database password, SSH password, SSH key passphrase, connection string | Yes, encrypted in the export file |
-| Vendor JDBC driver JAR files | No; reinstall or re-import drivers on the target machine |
+| Item                                                                   | Included                                                 |
+| ---------------------------------------------------------------------- | -------------------------------------------------------- |
+| Connection name, type, host, port, database, color                     | Yes                                                      |
+| URL parameters, SSL, SSH, proxy, visible database settings             | Yes                                                      |
+| Database password, SSH password, SSH key passphrase, connection string | Yes, encrypted in the export file                        |
+| Vendor JDBC driver JAR files                                           | No; reinstall or re-import drivers on the target machine |
 
 For JDBC migrations, export the connection settings here, then use [JDBC Plugin](/en/docs/plugins) to install the plugin and import driver JARs on the destination machine.

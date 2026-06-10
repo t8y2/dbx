@@ -19,11 +19,7 @@ export function encodeSchemaTreeCache<T>(children: T, nowMs = Date.now()): Schem
   };
 }
 
-export function decodeSchemaTreeCache<T>(
-  payload: unknown,
-  nowMs = Date.now(),
-  ttlMs = SCHEMA_TREE_CACHE_TTL_MS,
-): DecodedSchemaTreeCache<T> | null {
+export function decodeSchemaTreeCache<T>(payload: unknown, nowMs = Date.now(), ttlMs = SCHEMA_TREE_CACHE_TTL_MS): DecodedSchemaTreeCache<T> | null {
   if (Array.isArray(payload)) {
     return { children: payload as T, isStale: true };
   }

@@ -21,13 +21,13 @@ Expand or collapse nodes to drill down. Click a table to open its data. Column e
 
 ## Database-Specific Trees
 
-| Connection Type | Browser Model |
-|---|---|
+| Connection Type      | Browser Model                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | Relational databases | Connection, database, schema, tables/views, columns, indexes, foreign keys, triggers, and routines where metadata is available |
-| Redis | Redis databases and keys, with value editors for String, Hash, List, Set, Sorted Set, and Stream |
-| MongoDB | Databases, collections, and paginated document browsing |
-| Object browser | Views, procedures, and functions when the database exposes source metadata |
-| Saved SQL | Folders and reusable SQL files in the sidebar library |
+| Redis                | Redis databases and keys, with value editors for String, Hash, List, Set, Sorted Set, and Stream                               |
+| MongoDB              | Databases, collections, and paginated document browsing                                                                        |
+| Object browser       | Views, procedures, and functions when the database exposes source metadata                                                     |
+| Saved SQL            | Folders and reusable SQL files in the sidebar library                                                                          |
 
 ## Search
 
@@ -38,9 +38,7 @@ Sidebar search helps locate objects when a connection contains many tables:
 - Column names
 - Parts of database object paths
 
-<Callout type="info">
-For large schemas, search works best with visible objects and cached metadata. Objects that were just refreshed or not yet expanded may need metadata loading before they are fully matched.
-</Callout>
+<Callout type="info">For large schemas, search works best with visible objects and cached metadata. Objects that were just refreshed or not yet expanded may need metadata loading before they are fully matched.</Callout>
 
 ## Pinning
 
@@ -55,17 +53,15 @@ Pin frequently used connections, databases, or tables to reduce repeated navigat
 
 Different node types expose different actions:
 
-| Node | Common Actions |
-|---|---|
+| Node       | Common Actions                                                      |
+| ---------- | ------------------------------------------------------------------- |
 | Connection | Refresh metadata, duplicate connection, disconnect, edit connection |
-| Database | Create database, drop database, export database |
-| Schema | Create schema, drop schema |
-| Table | Open data, open structure, import data, copy table name, drop table |
-| Column | Copy column name, inspect column details |
+| Database   | Create database, drop database, export database                     |
+| Schema     | Create schema, drop schema                                          |
+| Table      | Open data, open structure, import data, copy table name, drop table |
+| Column     | Copy column name, inspect column details                            |
 
-<Callout type="warn">
-Dropping databases, schemas, or tables may be irreversible. Confirm the active connection and back up data when needed.
-</Callout>
+<Callout type="warn">Dropping databases, schemas, or tables may be irreversible. Confirm the active connection and back up data when needed.</Callout>
 
 ## Column Comments
 
@@ -76,11 +72,11 @@ When the database supports column comments, DBX displays them next to columns. T
 Connection colors help separate environments:
 
 | Environment | Suggested Color |
-|---|---|
-| Local | Gray or green |
-| Test | Blue or purple |
-| Staging | Yellow |
-| Production | Red |
+| ----------- | --------------- |
+| Local       | Gray or green   |
+| Test        | Blue or purple  |
+| Staging     | Yellow          |
+| Production  | Red             |
 
 Colors appear beside connection names in the sidebar and in tabs, reducing the chance of operating on the wrong environment.
 
@@ -97,10 +93,10 @@ For large Redis keyspaces, use search and pagination together instead of expandi
 
 ## Feature Boundaries
 
-| Feature | Supported Types |
-|---|---|
-| Schema-aware tree | PostgreSQL, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, JDBC, H2, Snowflake, Trino, DB2, TDengine |
-| ER diagram | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, DB2 |
-| Database search | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DuckDB, ClickHouse, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, TDengine |
+| Feature           | Supported Types                                                                                                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Schema-aware tree | PostgreSQL, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, JDBC, H2, Snowflake, Trino, DB2, TDengine                                                                                                          |
+| ER diagram        | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, DB2                                                                                                           |
+| Database search   | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DuckDB, ClickHouse, DM, GaussDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, TDengine |
 
 If an action is missing from a node menu, the active database type may not expose the required metadata or safe SQL generation path.

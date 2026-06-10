@@ -11,12 +11,8 @@ export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
 export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
 const EDITOR_SELECTION_BACKGROUND_CSS_VAR = "--dbx-editor-selection-background";
 
-const SUPPORTS_COLOR_MIX =
-  typeof CSS !== "undefined" &&
-  typeof CSS.supports === "function" &&
-  CSS.supports("color", "color-mix(in oklch, black 50%, white)");
-const SUPPORTS_OKLCH =
-  typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "oklch(0.62 0.19 255)");
+const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
+const SUPPORTS_OKLCH = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "oklch(0.62 0.19 255)");
 
 // ==================== 自定义主题配置 ====================
 // 在这里修改你喜欢的颜色！
@@ -54,15 +50,9 @@ const customThemeColors = {
 };
 
 /** 创建自定义 CodeMirror 主题 */
-function createCustomTheme(
-  EditorView: typeof import("@codemirror/view").EditorView,
-  colors?: CustomThemeColors,
-  isDark: boolean = true,
-): Extension {
+function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorView, colors?: CustomThemeColors, isDark: boolean = true): Extension {
   // 根据系统主题设置默认背景色和前景色
-  const defaultColors = isDark
-    ? { background: "#1e1e2e", foreground: "#cdd6f4" }
-    : { background: "#fafafa", foreground: "#242424" };
+  const defaultColors = isDark ? { background: "#1e1e2e", foreground: "#cdd6f4" } : { background: "#fafafa", foreground: "#242424" };
 
   const c = { ...defaultColors, ...customThemeColors, ...(colors || {}) };
 
@@ -91,10 +81,9 @@ function createCustomTheme(
       ".cm-cursor": {
         borderLeftColor: c.cursor,
       },
-      "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
-        {
-          backgroundColor: c.selection,
-        },
+      "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+        backgroundColor: c.selection,
+      },
       ".cm-activeLine": {
         backgroundColor: c.activeLine,
       },
@@ -219,9 +208,7 @@ const FUNCTION_ICON: LucideIconNode = [
   ["path", { d: "M4 4v7a4 4 0 0 0 4 4h12" }],
 ];
 
-const SCHEMA_ICON: LucideIconNode = [
-  ["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }],
-];
+const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
 
 function encodeSvgIcon(iconNode: LucideIconNode): string {
   const body = iconNode
@@ -262,11 +249,7 @@ export function resolveEditorTheme(theme: EditorTheme, appAppearance: AppThemeAp
 }
 
 /** Load a CodeMirror theme extension by theme name. */
-export async function loadEditorTheme(
-  theme: EditorTheme,
-  appAppearance: AppThemeAppearance = "dark",
-  customColors?: CustomThemeColors,
-): Promise<Extension> {
+export async function loadEditorTheme(theme: EditorTheme, appAppearance: AppThemeAppearance = "dark", customColors?: CustomThemeColors): Promise<Extension> {
   const resolvedTheme = resolveEditorTheme(theme, appAppearance);
   switch (resolvedTheme) {
     case "one-dark":
@@ -294,10 +277,7 @@ export async function loadEditorTheme(
   }
 }
 
-export function buildEditorFontThemeRules(
-  opts?: { fixedHeight?: boolean; scrollable?: boolean },
-  defaults?: { size?: number; family?: string },
-): CodeMirrorStyleSpec {
+export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scrollable?: boolean }, defaults?: { size?: number; family?: string }): CodeMirrorStyleSpec {
   return {
     "&": {
       ...(opts?.fixedHeight ? { height: "100%" } : {}),
@@ -362,12 +342,7 @@ export function buildEditorFontThemeRules(
 }
 
 /** Build a CodeMirror theme extension for font size + font family. */
-export function editorFontTheme(
-  EditorView: typeof import("@codemirror/view").EditorView,
-  size: number,
-  family: string,
-  opts?: { fixedHeight?: boolean; scrollable?: boolean },
-): Extension {
+export function editorFontTheme(EditorView: typeof import("@codemirror/view").EditorView, size: number, family: string, opts?: { fixedHeight?: boolean; scrollable?: boolean }): Extension {
   return EditorView.theme(buildEditorFontThemeRules(opts, { size, family }));
 }
 
@@ -375,10 +350,8 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
   return {
     ".cm-tooltip.cm-tooltip-autocomplete": {
       background: "var(--popover)",
-      border: colorMixValue(
-        "1px solid var(--border)",
-        "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)",
-      ),
+      backgroundClip: "padding-box",
+      border: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
       borderRadius: "8px",
       boxShadow: "0 8px 18px rgb(0 0 0 / 0.14)",
       color: "var(--popover-foreground)",
@@ -387,15 +360,17 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       minWidth: "min(280px, calc(100vw - 24px))",
       overflow: "hidden",
       padding: "4px 0",
+      zIndex: "9999",
+    },
+    ".cm-tooltip.cm-tooltip-autocomplete *": {
+      boxSizing: "border-box",
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": {
       maxHeight: "min(280px, calc(100vh - 32px))",
       minWidth: "min(280px, calc(100vw - 24px))",
+      overflowX: "hidden",
       padding: "0 4px 0 !important",
-      scrollbarColor: colorMixValue(
-        "var(--muted-foreground) transparent",
-        "color-mix(in oklch, var(--muted-foreground) 44%, transparent) transparent",
-      ),
+      scrollbarColor: colorMixValue("var(--muted-foreground) transparent", "color-mix(in oklch, var(--muted-foreground) 44%, transparent) transparent"),
       scrollbarWidth: "thin",
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul > li": {
@@ -408,16 +383,16 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       height: "28px",
       letterSpacing: "0",
       lineHeight: "28px",
+      maxWidth: "100%",
+      overflow: "hidden",
       padding: "0 10px !important",
       transition: "background-color 90ms ease, color 90ms ease",
+      whiteSpace: "nowrap",
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]": {
       background: `${colorMixValue("var(--accent)", "color-mix(in oklch, var(--primary) 14%, var(--popover))")} !important`,
       color: "var(--popover-foreground) !important",
-      outline: colorMixValue(
-        "1px solid var(--border)",
-        "1px solid color-mix(in oklch, var(--primary) 22%, transparent)",
-      ),
+      outline: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--primary) 22%, transparent)"),
     },
     ".cm-completionIcon": {
       alignItems: "center",
@@ -456,46 +431,36 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       ...lucideCompletionIconMask(TABLE_ICON),
     },
     ".cm-completionIcon-column": {
-      color: colorMixValue(
-        "var(--blue-500, #3b82f6)",
-        "color-mix(in oklch, var(--blue-500, #3b82f6) 92%, var(--popover-foreground))",
-      ),
+      color: colorMixValue("var(--blue-500, #3b82f6)", "color-mix(in oklch, var(--blue-500, #3b82f6) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(COLUMNS_ICON),
     },
     ".cm-completionIcon-keyword": {
-      color: colorMixValue(
-        "var(--orange-500, #f97316)",
-        "color-mix(in oklch, var(--orange-500, #f97316) 92%, var(--popover-foreground))",
-      ),
+      color: colorMixValue("var(--orange-500, #f97316)", "color-mix(in oklch, var(--orange-500, #f97316) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(KEYWORD_ICON),
     },
     ".cm-completionIcon-snippet": {
-      color: colorMixValue(
-        "var(--violet-500, #8b5cf6)",
-        "color-mix(in oklch, var(--violet-500, #8b5cf6) 92%, var(--popover-foreground))",
-      ),
+      color: colorMixValue("var(--violet-500, #8b5cf6)", "color-mix(in oklch, var(--violet-500, #8b5cf6) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SNIPPET_ICON),
     },
     ".cm-completionIcon-function": {
-      color: colorMixValue(
-        "var(--emerald-500, #10b981)",
-        "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))",
-      ),
+      color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(FUNCTION_ICON),
     },
     ".cm-completionIcon-schema": {
-      color: colorMixValue(
-        "var(--amber-500, #f59e0b)",
-        "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))",
-      ),
+      color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
     },
     ".cm-completionLabel": {
       color: "inherit",
+      flex: "0 1 auto",
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       fontSize: `clamp(12px, var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px), 14px)`,
       fontWeight: "520",
       letterSpacing: "0",
+      minWidth: "0",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
     },
     ".cm-completionMatchedText": {
       color: oklchValue("rgb(29 132 245)", "oklch(0.62 0.19 255)"),
@@ -503,15 +468,17 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       textDecoration: "none",
     },
     ".cm-completionDetail": {
-      color: colorMixValue(
-        "var(--muted-foreground)",
-        "color-mix(in oklch, var(--popover-foreground) 68%, var(--popover))",
-      ),
+      color: colorMixValue("var(--muted-foreground)", "color-mix(in oklch, var(--popover-foreground) 68%, var(--popover))"),
       fontSize: `clamp(11px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px) - 1px), 13px)`,
       fontWeight: "500",
       fontStyle: "normal",
+      flex: "1 1 auto",
       marginLeft: "10px",
+      minWidth: "0",
       opacity: "1",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
     },
   };
 }

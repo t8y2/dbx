@@ -980,6 +980,27 @@ fn redis_value_matches_query(value: &serde_json::Value, query: &str) -> bool {
 fn redis_search_value_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(arr) => {
+            // Hash type: [{field: "f1", value: "v1"}, ...] — extract field names and values
+            if let Some(first) = arr.first() {
+                if first.get("field").is_some() && first.get("value").is_some() {
+                    let parts: Vec<String> = arr
+                        .iter()
+                        .flat_map(|item| {
+                            let f = item.get("field").and_then(|v| v.as_str()).unwrap_or("");
+                            let v = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                            vec![f.to_string(), v.to_string()]
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    return parts.join(" ");
+                }
+            }
+            if arr.is_empty() {
+                return String::new();
+            }
+            serde_json::to_string(&arr).unwrap_or_default()
+        }
         other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
     }
 }
@@ -1183,11 +1204,24 @@ where
     redis::cmd("DEL").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn hash_set<C>(con: &mut C, key: &[u8], field: &str, value: &str) -> Result<(), String>
+async fn apply_expire_if_needed<C>(con: &mut C, key: &[u8], ttl: Option<i64>) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("HSET").arg(key).arg(field).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())
+    if let Some(t) = ttl {
+        if t > 0 {
+            redis::cmd("EXPIRE").arg(key).arg(t).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn hash_set<C>(con: &mut C, key: &[u8], field: &str, value: &str, ttl: Option<i64>) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    redis::cmd("HSET").arg(key).arg(field).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    apply_expire_if_needed(con, key, ttl).await
 }
 
 pub async fn hash_del<C>(con: &mut C, key: &[u8], field: &str) -> Result<(), String>
@@ -1197,11 +1231,12 @@ where
     redis::cmd("HDEL").arg(key).arg(field).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn list_push<C>(con: &mut C, key: &[u8], value: &str) -> Result<(), String>
+pub async fn list_push<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64>) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("RPUSH").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())
+    redis::cmd("RPUSH").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    apply_expire_if_needed(con, key, ttl).await
 }
 
 pub async fn list_set<C>(con: &mut C, key: &[u8], index: i64, value: &str) -> Result<(), String>
@@ -1220,11 +1255,12 @@ where
     redis::cmd("LREM").arg(key).arg(1).arg(placeholder).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn set_add<C>(con: &mut C, key: &[u8], member: &str) -> Result<(), String>
+pub async fn set_add<C>(con: &mut C, key: &[u8], member: &str, ttl: Option<i64>) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("SADD").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
+    redis::cmd("SADD").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    apply_expire_if_needed(con, key, ttl).await
 }
 
 pub async fn set_remove<C>(con: &mut C, key: &[u8], member: &str) -> Result<(), String>
@@ -1234,11 +1270,12 @@ where
     redis::cmd("SREM").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
-pub async fn zadd<C>(con: &mut C, key: &[u8], member: &str, score: f64) -> Result<(), String>
+pub async fn zadd<C>(con: &mut C, key: &[u8], member: &str, score: f64, ttl: Option<i64>) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("ZADD").arg(key).arg(score).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
+    redis::cmd("ZADD").arg(key).arg(score).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    apply_expire_if_needed(con, key, ttl).await
 }
 
 pub async fn zrem<C>(con: &mut C, key: &[u8], member: &str) -> Result<(), String>
@@ -1246,6 +1283,51 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     redis::cmd("ZREM").arg(key).arg(member).query_async::<()>(con).await.map_err(|e| e.to_string())
+}
+
+pub async fn stream_add<C>(
+    con: &mut C,
+    key: &[u8],
+    entry_id: &str,
+    fields: &[(String, String)],
+    ttl: Option<i64>,
+) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut cmd = redis::cmd("XADD");
+    cmd.arg(key).arg(entry_id);
+    for (field, value) in fields {
+        cmd.arg(field.as_str()).arg(value.as_str());
+    }
+    cmd.query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    apply_expire_if_needed(con, key, ttl).await
+}
+
+pub async fn json_set<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64>) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    redis::cmd("JSON.SET").arg(key).arg("$").arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    apply_expire_if_needed(con, key, ttl).await
+}
+
+pub async fn check_json_module<C>(con: &mut C) -> Result<bool, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue = redis::cmd("MODULE").arg("LIST").query_async(con).await.map_err(|e| e.to_string())?;
+    Ok(match raw {
+        RedisRawValue::Array(modules) => modules.iter().any(|module| {
+            if let RedisRawValue::Array(kvs) = module {
+                kvs.get(1)
+                    .is_some_and(|v| matches!(v, RedisRawValue::BulkString(n) if n.eq_ignore_ascii_case(b"ReJSON")))
+            } else {
+                false
+            }
+        }),
+        _ => false,
+    })
 }
 
 pub async fn set_ttl<C>(con: &mut C, key: &[u8], ttl: i64) -> Result<(), String>
@@ -1583,6 +1665,40 @@ mod tests {
         assert!(redis_value_matches_query(&serde_json::json!({"field": "Ada Lovelace"}), "lovelace"));
         assert!(!redis_value_matches_query(&serde_json::json!("Hello Redis"), ""));
         assert!(!redis_value_matches_query(&serde_json::json!("Hello Redis"), "mysql"));
+    }
+
+    #[test]
+    fn matches_hash_field_name_in_value_search() {
+        let hash_value = serde_json::json!([
+            {"field": "name", "value": "Alice"},
+            {"field": "email", "value": "alice@example.com"},
+        ]);
+        assert!(redis_value_matches_query(&hash_value, "name"));
+        assert!(redis_value_matches_query(&hash_value, "email"));
+    }
+
+    #[test]
+    fn matches_hash_field_value_in_value_search() {
+        let hash_value = serde_json::json!([
+            {"field": "name", "value": "Alice"},
+            {"field": "email", "value": "alice@example.com"},
+        ]);
+        assert!(redis_value_matches_query(&hash_value, "alice"));
+        assert!(redis_value_matches_query(&hash_value, "example"));
+    }
+
+    #[test]
+    fn empty_hash_does_not_match() {
+        let empty_hash = serde_json::json!([]);
+        assert!(!redis_value_matches_query(&empty_hash, "anything"));
+    }
+
+    #[test]
+    fn non_hash_array_unaffected() {
+        let set_value = serde_json::json!(["member1", "member2", "hello"]);
+        assert!(redis_value_matches_query(&set_value, "member1"));
+        assert!(redis_value_matches_query(&set_value, "hello"));
+        assert!(!redis_value_matches_query(&set_value, "nonexistent"));
     }
 
     #[test]

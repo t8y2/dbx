@@ -23,12 +23,7 @@ const delegatedProps = reactiveOmit(props, "class", "variant");
 </script>
 
 <template>
-  <TabsList
-    data-slot="tabs-list"
-    :data-variant="variant"
-    v-bind="delegatedProps"
-    :class="cn(tabsListVariants({ variant }), props.class)"
-  >
+  <TabsList data-slot="tabs-list" :data-variant="variant" v-bind="delegatedProps" :class="cn(tabsListVariants({ variant }), props.class)">
     <slot />
   </TabsList>
 </template>

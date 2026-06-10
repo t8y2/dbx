@@ -67,13 +67,7 @@ async function copyText(text: string) {
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1.5">
               <span class="font-semibold text-sm text-foreground">{{ col.name }}</span>
-              <Badge
-                v-if="col.isPrimaryKey"
-                variant="outline"
-                class="h-4 px-1 text-[10px] border-primary/40 text-primary"
-              >
-                PK
-              </Badge>
+              <Badge v-if="col.isPrimaryKey" variant="outline" class="h-4 px-1 text-[10px] border-primary/40 text-primary"> PK </Badge>
             </div>
             <Button variant="ghost" size="sm" class="h-5 w-5 p-0" @click="copyText(col.name)">
               <Copy class="h-3 w-3" />

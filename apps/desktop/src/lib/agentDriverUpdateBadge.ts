@@ -10,9 +10,6 @@ export interface JdbcPluginUpdateBadgeState {
   update_available?: boolean | null;
 }
 
-export function countAvailableDriverUpdates(
-  drivers: readonly AgentDriverUpdateBadgeState[],
-  jdbcPlugin?: JdbcPluginUpdateBadgeState | null,
-): number {
+export function countAvailableDriverUpdates(drivers: readonly AgentDriverUpdateBadgeState[], jdbcPlugin?: JdbcPluginUpdateBadgeState | null): number {
   return countAvailableAgentDriverUpdates(drivers) + (jdbcPlugin?.update_available ? 1 : 0);
 }

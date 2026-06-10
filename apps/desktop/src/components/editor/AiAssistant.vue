@@ -3,34 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import {
-  ArrowUp,
-  ArrowRightLeft,
-  AlertTriangle,
-  Bot,
-  Check,
-  ChevronRight,
-  CircleSlash,
-  Copy,
-  Database,
-  HelpCircle,
-  History,
-  Loader2,
-  MessageSquarePlus,
-  Replace,
-  Server,
-  ShieldCheck,
-  Table2,
-  Play,
-  Square,
-  Trash2,
-  Terminal,
-  Wand2,
-  Wrench,
-  X,
-  Zap,
-  TestTube,
-} from "@lucide/vue";
+import { ArrowUp, ArrowRightLeft, AlertTriangle, Bot, Check, ChevronRight, CircleSlash, Copy, Database, HelpCircle, History, Loader2, MessageSquarePlus, Replace, Server, ShieldCheck, Table2, Play, Square, Trash2, Terminal, Wand2, Wrench, X, Zap, TestTube } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -49,19 +22,11 @@ import { buildAiAgentStepItems, type AiAgentStepItem, type AiAgentStepTone } fro
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/aiMessageRender";
 import { Marked } from "marked";
-import {
-  aiCancelStream,
-  saveAiConversation,
-  loadAiConversations,
-  deleteAiConversation,
-  listSchemas,
-  listTables,
-  type AiConversation,
-} from "@/lib/api";
+import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/api";
 import type { AiMessage } from "@/lib/api";
 import type { ConnectionConfig, QueryTab, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
+import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
@@ -157,9 +122,7 @@ const isWaitingForFirstDelta = computed(() => {
   return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
 });
 
-const activePlaceholder = computed(
-  () => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`,
-);
+const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
 const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
 const assistantModeItems = computed(() => [
   {
@@ -191,6 +154,30 @@ const dbOptions = computed(() => {
   return allDbOptions.value[props.connection.id] || [];
 });
 
+const dbSelectOptions = computed(() => {
+  const connection = props.connection;
+  if (!connection) return [];
+  return dbOptions.value.map((database) => ({
+    database,
+    value: encodeSelectableDatabaseValue(connection.db_type, database),
+    label: formatDatabaseLabel(connection, database, {
+      defaultDatabase: t("editor.defaultDatabase"),
+      noDatabase: t("editor.noDatabase"),
+    }),
+  }));
+});
+
+const selectedDatabaseSelectValue = computed(() => (props.connection ? encodeSelectableDatabaseValue(props.connection.db_type, props.tab?.database || "") : ""));
+
+const selectedDatabaseLabel = computed(() => {
+  if (!props.connection) return t("editor.selectDatabase");
+  if (!props.tab) return t("editor.selectDatabase");
+  return formatDatabaseLabel(props.connection, props.tab.database || "", {
+    defaultDatabase: t("editor.defaultDatabase"),
+    noDatabase: t("editor.noDatabase"),
+  });
+});
+
 async function loadDatabases() {
   if (!props.connection) return;
   await loadDatabaseOptions(props.connection.id);
@@ -217,10 +204,11 @@ async function changeConnection(connectionId: string) {
   }
 }
 
-function changeDatabase(database: string) {
+function changeDatabase(value: string) {
   const tab = props.tab;
-  if (!tab) return;
-  queryStore.updateDatabase(tab.id, database);
+  const connection = props.connection;
+  if (!tab || !connection) return;
+  queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
 }
 
 function appendAssistantDelta(assistantIdx: number, delta: string) {
@@ -341,18 +329,10 @@ async function loadMentionCandidates(query: string) {
     let candidates: AiMentionCandidate[] = [];
     if (isSchemaAware(props.connection.db_type)) {
       const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, props.tab.database));
-      const filteredSchemas = schemaPrefix
-        ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase()))
-        : schemas;
+      const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
       const results = await Promise.all(
         filteredSchemas.slice(0, 8).map(async (schema) => {
-          const tables = await listTables(
-            props.tab!.connectionId,
-            props.tab!.database,
-            schema,
-            tableFilter || undefined,
-            20,
-          );
+          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, 20);
           return filterMentionCandidates(
             tables.map((table) => mentionCandidateFromTable(table, schema)),
             tableFilter,
@@ -400,8 +380,7 @@ function removeMentionChip(mention: AiTableMention) {
 function addSelectedMention(candidate: AiMentionCandidate) {
   const raw = formatAiTableMention(candidate.schema, candidate.name);
   const key = `${candidate.schema || ""}.${candidate.name}`.toLowerCase();
-  if (selectedMentions.value.some((mention) => `${mention.schema || ""}.${mention.table}`.toLowerCase() === key))
-    return;
+  if (selectedMentions.value.some((mention) => `${mention.schema || ""}.${mention.table}`.toLowerCase() === key)) return;
   selectedMentions.value.push({ raw, schema: candidate.schema, table: candidate.name });
 }
 
@@ -413,15 +392,9 @@ function formatMentionTableType(tableType: string) {
   return t("ai.tableMentionTypes.table");
 }
 
-function filterMentionCandidates(
-  candidates: AiMentionCandidate[],
-  tableFilter: string,
-  limit: number,
-): AiMentionCandidate[] {
+function filterMentionCandidates(candidates: AiMentionCandidate[], tableFilter: string, limit: number): AiMentionCandidate[] {
   const normalizedFilter = tableFilter.toLowerCase();
-  return candidates
-    .filter((candidate) => !normalizedFilter || candidate.name.toLowerCase().includes(normalizedFilter))
-    .slice(0, limit);
+  return candidates.filter((candidate) => !normalizedFilter || candidate.name.toLowerCase().includes(normalizedFilter)).slice(0, limit);
 }
 
 function refreshMentionState() {
@@ -460,10 +433,7 @@ function onPromptKeydown(event: KeyboardEvent) {
   if (mentionOpen.value) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      mentionSelectedIndex.value = Math.min(
-        mentionSelectedIndex.value + 1,
-        Math.max(mentionCandidates.value.length - 1, 0),
-      );
+      mentionSelectedIndex.value = Math.min(mentionSelectedIndex.value + 1, Math.max(mentionCandidates.value.length - 1, 0));
       return;
     }
     if (event.key === "ArrowUp") {
@@ -686,10 +656,7 @@ const messageRenderer = computed(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col overflow-hidden">
-    <div
-      class="flex items-center gap-2 border-b px-3 shrink-0"
-      :class="settings.editorSettings.appLayout === 'classic' ? 'h-9' : 'h-10'"
-    >
+    <div class="flex items-center gap-2 border-b px-3 shrink-0" :class="settings.editorSettings.appLayout === 'classic' ? 'h-9' : 'h-10'">
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
       </span>
@@ -698,13 +665,7 @@ const messageRenderer = computed(() => {
       </Button>
       <Popover :open="showConversationList" @update:open="setConversationListOpen">
         <PopoverTrigger as-child>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-6 w-6"
-            :class="{ 'bg-accent': showConversationList }"
-            :title="t('history.title')"
-          >
+          <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': showConversationList }" :title="t('history.title')">
             <History class="h-3.5 w-3.5" />
           </Button>
         </PopoverTrigger>
@@ -719,18 +680,9 @@ const messageRenderer = computed(() => {
             {{ t("history.empty") }}
           </div>
           <div v-else class="max-h-64 overflow-auto p-1">
-            <div
-              v-for="conv in conversations"
-              :key="conv.id"
-              class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted"
-              :class="{ 'bg-muted': conv.id === conversationId }"
-              @click="selectConversation(conv)"
-            >
+            <div v-for="conv in conversations" :key="conv.id" class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted" :class="{ 'bg-muted': conv.id === conversationId }" @click="selectConversation(conv)">
               <span class="min-w-0 flex-1 truncate">{{ conv.title }}</span>
-              <button
-                class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive"
-                @click.stop="deleteConversation(conv.id)"
-              >
+              <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive" @click.stop="deleteConversation(conv.id)">
                 <X class="h-3 w-3" />
               </button>
             </div>
@@ -745,10 +697,7 @@ const messageRenderer = computed(() => {
       </Button>
     </div>
 
-    <div
-      v-if="messages.length === 0"
-      class="flex-1 min-h-0 flex flex-col items-center justify-center text-center text-muted-foreground"
-    >
+    <div v-if="messages.length === 0" class="flex-1 min-h-0 flex flex-col items-center justify-center text-center text-muted-foreground">
       <Bot class="h-10 w-10 mb-3 opacity-30" />
       <p class="text-sm">{{ t("ai.welcome") }}</p>
     </div>
@@ -764,39 +713,25 @@ const messageRenderer = computed(() => {
           <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
             <div class="max-w-[95%] rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
               <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
-                <button
-                  class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-                  @click="toggleReasoning(i)"
-                >
-                  <ChevronRight
-                    class="h-3 w-3 transition-transform duration-200"
-                    :class="{ 'rotate-90': expandedReasoning.has(i) || msg.isThinking }"
-                  />
+                <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning(i)">
+                  <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': expandedReasoning.has(i) || msg.isThinking }" />
                   <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
                   <span>{{ t("ai.reasoningProcess") }}</span>
                 </button>
                 <div
-                  class="overflow-hidden transition-all duration-200 ease-in-out"
+                  class="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
                   :style="{
                     maxHeight: expandedReasoning.has(i) || msg.isThinking ? '20000px' : '0px',
                     opacity: expandedReasoning.has(i) || msg.isThinking ? '1' : '0',
                   }"
                 >
-                  <div
-                    class="mt-1.5 pl-4 border-l-2 border-muted-foreground/20 text-[11px] text-muted-foreground whitespace-pre-wrap"
-                  >
+                  <div class="mt-1.5 pl-4 border-l-2 border-muted-foreground/20 text-[11px] text-muted-foreground whitespace-pre-wrap">
                     {{ msg.reasoning }}
                   </div>
                 </div>
               </div>
               <div v-if="msg.agentSteps?.length" class="mb-2 flex flex-wrap gap-1.5">
-                <span
-                  v-for="step in msg.agentSteps"
-                  :key="step.key"
-                  class="inline-flex h-5 max-w-full items-center gap-1 rounded-full border px-1.5 text-[10px] font-medium"
-                  :class="agentStepClass(step.tone)"
-                  :title="agentStepTitle(step)"
-                >
+                <span v-for="step in msg.agentSteps" :key="step.key" class="inline-flex h-5 max-w-full items-center gap-1 rounded-full border px-1.5 text-[10px] font-medium" :class="agentStepClass(step.tone)" :title="agentStepTitle(step)">
                   <component :is="agentStepIcon(step.tone)" class="h-3 w-3 shrink-0" />
                   <span class="truncate">{{ t(step.labelKey) }}</span>
                 </span>
@@ -805,38 +740,21 @@ const messageRenderer = computed(() => {
                 <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal">
                   <div v-html="seg.html" />
                 </div>
-                <div
-                  v-else
-                  class="my-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900"
-                >
-                  <div
-                    class="flex items-center border-b border-zinc-200 px-3 py-1.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700/50 dark:text-zinc-400"
-                  >
+                <div v-else class="my-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900">
+                  <div class="flex items-center border-b border-zinc-200 px-3 py-1.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700/50 dark:text-zinc-400">
                     <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />
                     <span>{{ seg.lang }}</span>
                     <span class="flex-1" />
                     <div class="flex items-center gap-1.5">
-                      <button
-                        v-if="seg.isSql"
-                        class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-                        :title="t('ai.executeSql')"
-                        @click="executeSql(seg.content)"
-                      >
+                      <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
                         <Play class="h-3.5 w-3.5" />
                       </button>
-                      <button
-                        v-if="seg.isSql"
-                        class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-                        :title="t('ai.apply')"
-                        @click="applySql(seg.content)"
-                      >
+                      <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
                         <Replace class="h-3.5 w-3.5" />
                       </button>
                       <button
                         class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-                        :title="
-                          copiedIndex === `${i}-${j}` ? t('ai.copied') : t(seg.isSql ? 'ai.copySql' : 'ai.copyCode')
-                        "
+                        :title="copiedIndex === `${i}-${j}` ? t('ai.copied') : t(seg.isSql ? 'ai.copySql' : 'ai.copyCode')"
                         @click="copyCode(seg.content, `${i}-${j}`)"
                       >
                         <Check v-if="copiedIndex === `${i}-${j}`" class="h-3.5 w-3.5 text-green-400" />
@@ -844,9 +762,7 @@ const messageRenderer = computed(() => {
                       </button>
                     </div>
                   </div>
-                  <pre
-                    class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"
-                  ><code v-html="seg.html"></code></pre>
+                  <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
                 </div>
               </template>
             </div>
@@ -866,12 +782,8 @@ const messageRenderer = computed(() => {
           <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
           <Server v-else class="h-3 w-3 shrink-0" />
           <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
-            <SelectTrigger
-              class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
-            >
-              <SelectValue :placeholder="t('editor.selectConnection')">{{
-                connection?.name || t("editor.selectConnection")
-              }}</SelectValue>
+            <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+              <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
             </SelectTrigger>
             <SelectContent class="min-w-48">
               <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
@@ -885,7 +797,7 @@ const messageRenderer = computed(() => {
           <template v-if="connection">
             <Database class="h-3 w-3 shrink-0 text-foreground/40" />
             <Select
-              :model-value="tab?.database || ''"
+              :model-value="selectedDatabaseSelectValue"
               @update:model-value="(v: any) => changeDatabase(v)"
               @update:open="
                 (open: boolean) => {
@@ -893,26 +805,17 @@ const messageRenderer = computed(() => {
                 }
               "
             >
-              <SelectTrigger
-                class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
-              >
-                <SelectValue :placeholder="t('editor.selectDatabase')">{{
-                  tab?.database || t("editor.selectDatabase")
-                }}</SelectValue>
+              <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+                <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="db in dbOptions" :key="db" :value="db">{{ db }}</SelectItem>
-                <SelectItem v-if="!dbOptions.length && tab?.database" :value="tab.database">{{
-                  tab.database
-                }}</SelectItem>
+                <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
               </SelectContent>
             </Select>
           </template>
         </div>
-        <div
-          v-if="mentionOpen"
-          class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md"
-        >
+        <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
           <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             <span>{{ t("common.loading") }}</span>
@@ -937,9 +840,7 @@ const messageRenderer = computed(() => {
               <span class="min-w-0 flex-1 truncate">
                 <template v-if="candidate.schema">{{ candidate.schema }}.</template>{{ candidate.name }}
               </span>
-              <span class="shrink-0 text-[10px] text-muted-foreground">{{
-                formatMentionTableType(candidate.tableType)
-              }}</span>
+              <span class="shrink-0 text-[10px] text-muted-foreground">{{ formatMentionTableType(candidate.tableType) }}</span>
             </button>
           </div>
         </div>
@@ -972,34 +873,13 @@ const messageRenderer = computed(() => {
           @keydown="onPromptKeydown"
         />
         <div class="flex items-center gap-1.5">
-          <LightDropdown
-            v-model="assistantMode"
-            :items="assistantModeItems"
-            :aria-label="activeModeHint"
-            item-class="text-xs px-2"
-          />
-          <LightDropdown
-            :model-value="activeAction"
-            :items="actionMenuItems"
-            content-class="w-max min-w-0"
-            item-class="text-xs px-2"
-            @update:model-value="(value) => selectAction(value as AiAction)"
-          />
+          <LightDropdown v-model="assistantMode" :items="assistantModeItems" :aria-label="activeModeHint" item-class="text-xs px-2" />
+          <LightDropdown :model-value="activeAction" :items="actionMenuItems" content-class="w-max min-w-0" item-class="text-xs px-2" @update:model-value="(value) => selectAction(value as AiAction)" />
           <span class="flex-1" />
-          <button
-            v-if="isGenerating"
-            class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center"
-            :title="t('ai.stopGenerating')"
-            @click="cancelStream"
-          >
+          <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
             <Square class="h-3.5 w-3.5" />
           </button>
-          <button
-            v-else
-            class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30"
-            :disabled="!prompt.trim() || !props.tab?.database"
-            @click="send"
-          >
+          <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="!prompt.trim() || !props.tab?.database" @click="send">
             <ArrowUp class="h-4 w-4" />
           </button>
         </div>

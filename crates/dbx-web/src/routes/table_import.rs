@@ -56,6 +56,15 @@ pub async fn execute_import(
     Json(body): Json<ExecuteImportWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
+
+    // Reject import early if the connection is read-only
+    if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.connection_id).await {
+        return Err(AppError(format!(
+            "Read-only mode: connection '{}' has read-only protection enabled. Import blocked.",
+            name
+        )));
+    }
+
     let import_id = req.import_id.clone();
 
     let (tx, _) = tokio::sync::broadcast::channel::<String>(256);

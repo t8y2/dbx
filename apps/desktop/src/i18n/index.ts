@@ -31,12 +31,7 @@ export function localeFromLanguageTag(value: string | null | undefined): Locale 
   if (!value) return null;
   const normalized = value.replace("_", "-").toLowerCase();
   if (normalized === "zh" || normalized.startsWith("zh-")) {
-    if (
-      normalized.includes("hant") ||
-      normalized.startsWith("zh-tw") ||
-      normalized.startsWith("zh-hk") ||
-      normalized.startsWith("zh-mo")
-    ) {
+    if (normalized.includes("hant") || normalized.startsWith("zh-tw") || normalized.startsWith("zh-hk") || normalized.startsWith("zh-mo")) {
       return "zh-TW";
     }
     return "zh-CN";

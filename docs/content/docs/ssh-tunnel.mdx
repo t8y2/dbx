@@ -3,9 +3,7 @@ title: SSH Tunnel
 description: Connect securely to databases behind firewalls via SSH tunnel. Password and key authentication.
 ---
 
-<Callout type="info">
-Built-in SSH tunnel — no manual terminal setup. Supports password and private key authentication, with optional LAN exposure for team sharing.
-</Callout>
+<Callout type="info">Built-in SSH tunnel — no manual terminal setup. Supports password and private key authentication, with optional LAN exposure for team sharing.</Callout>
 
 DBX can connect to databases through an SSH tunnel, allowing secure access to servers behind firewalls or on private networks.
 
@@ -13,11 +11,11 @@ DBX can connect to databases through an SSH tunnel, allowing secure access to se
 
 When creating or editing a connection, enable the SSH tunnel option:
 
-| Field | Description |
-|---|---|
-| SSH Host | Hostname or IP of the SSH server |
-| SSH Port | Port for SSH (default: 22) |
-| SSH User | Username for SSH authentication |
+| Field           | Description                                                                   |
+| --------------- | ----------------------------------------------------------------------------- |
+| SSH Host        | Hostname or IP of the SSH server                                              |
+| SSH Port        | Port for SSH (default: 22)                                                    |
+| SSH User        | Username for SSH authentication                                               |
 | Connect Timeout | Maximum time DBX waits while opening the SSH connection; default is 5 seconds |
 
 ## Authentication Methods
@@ -30,6 +28,7 @@ When creating or editing a connection, enable the SSH tunnel option:
     - **Key Passphrase** — Enter the passphrase if your key is password-protected
 
     Key authentication is more secure than password authentication.
+
   </Tab>
   <Tab value="Password">
     Enter your SSH password directly. Works on servers that allow password authentication.
@@ -38,9 +37,7 @@ When creating or editing a connection, enable the SSH tunnel option:
 
 ## Expose Tunnel to LAN
 
-<Callout type="warn">
-Enabling LAN exposure means any device on the same network can access the tunneled database port. Only enable this on trusted networks.
-</Callout>
+<Callout type="warn">Enabling LAN exposure means any device on the same network can access the tunneled database port. Only enable this on trusted networks.</Callout>
 
 By default, the SSH tunnel listens on `localhost` only. Enable LAN exposure to bind to `0.0.0.0`, making the tunnel accessible to other devices on your network — useful for team collaboration or multi-device access.
 

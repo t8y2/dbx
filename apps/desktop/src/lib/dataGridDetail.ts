@@ -100,8 +100,7 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     rawValuePreview,
     displayValue,
     displayValuePreview,
-    isValuePreviewTruncated:
-      rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
+    isValuePreviewTruncated: rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
     imagePreviewUrl: rawValue.length <= CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH ? cellImagePreviewUrl(value) : null,
     length: value === null ? 0 : String(value).length,
     formattedJson,
@@ -192,13 +191,7 @@ export function dataGridColumnDetailTsv(detail: DataGridColumnDetail): string {
 export function filterDataGridDetailFields<T extends DataGridCellDetail>(fields: readonly T[], keyword: string): T[] {
   if (keyword.trim() === "") return [...fields];
   const kw = keyword.trim().toLowerCase();
-  return fields.filter(
-    (field) =>
-      field.column.toLowerCase().includes(kw) ||
-      field.rawValuePreview.toLowerCase().includes(kw) ||
-      field.displayValuePreview.toLowerCase().includes(kw) ||
-      String(field.rowNumber).includes(kw),
-  );
+  return fields.filter((field) => field.column.toLowerCase().includes(kw) || field.rawValuePreview.toLowerCase().includes(kw) || field.displayValuePreview.toLowerCase().includes(kw) || String(field.rowNumber).includes(kw));
 }
 
 function looksLikeJsonContainer(text: string): boolean {

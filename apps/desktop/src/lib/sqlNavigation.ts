@@ -165,10 +165,7 @@ export function isSqlKeyword(identifier: string): boolean {
 }
 
 /** Match identifier against known table names (case-insensitive). */
-export function matchTable(
-  identifier: string,
-  tables: Array<{ name: string; schema?: string }>,
-): { name: string; schema?: string } | null {
+export function matchTable(identifier: string, tables: Array<{ name: string; schema?: string }>): { name: string; schema?: string } | null {
   const lower = identifier.toLowerCase();
   return tables.find((t) => t.name.toLowerCase() === lower) ?? null;
 }

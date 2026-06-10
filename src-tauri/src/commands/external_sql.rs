@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use dbx_core::sql::decode_sql_file_bytes;
+
 #[tauri::command]
 pub fn pending_open_sql_files(state: tauri::State<'_, ExternalSqlOpenState>) -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -10,8 +12,8 @@ pub fn pending_open_sql_files(state: tauri::State<'_, ExternalSqlOpenState>) -> 
 }
 
 #[tauri::command]
-pub fn read_external_sql_file(path: String) -> Result<String, String> {
-    read_external_sql_file_content(Path::new(&path))
+pub async fn read_external_sql_file(path: String) -> Result<String, String> {
+    read_external_sql_file_content_async(PathBuf::from(path)).await
 }
 
 #[derive(Default)]
@@ -60,11 +62,21 @@ pub fn is_sql_file_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("sql")).unwrap_or(false)
 }
 
-pub fn read_external_sql_file_content(path: &Path) -> Result<String, String> {
+#[cfg(test)]
+fn read_external_sql_file_content(path: &Path) -> Result<String, String> {
     if !is_sql_file_path(path) {
         return Err("Only .sql files can be opened this way".to_string());
     }
-    std::fs::read_to_string(path).map_err(|e| format!("Failed to read SQL file: {e}"))
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read SQL file: {e}"))?;
+    decode_sql_file_bytes(&bytes)
+}
+
+async fn read_external_sql_file_content_async(path: PathBuf) -> Result<String, String> {
+    if !is_sql_file_path(&path) {
+        return Err("Only .sql files can be opened this way".to_string());
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
+    decode_sql_file_bytes(&bytes)
 }
 
 fn dedupe_paths(paths: Vec<String>) -> Vec<String> {
@@ -113,6 +125,17 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         assert_eq!(result.unwrap(), "select 1;");
+    }
+
+    #[test]
+    fn reads_gbk_external_sql_file_content() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"select '\xD6\xD0\xCE\xC4';").unwrap();
+
+        let result = read_external_sql_file_content(&path);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), "select '中文';");
     }
 
     #[test]

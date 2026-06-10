@@ -1,44 +1,44 @@
-'use client';
+"use client";
 
-import { ChevronDown, Download, Server } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { createInstallOptions, type InstallOption } from '@/lib/downloadLinks';
-import { fetchLatestReleaseInfo } from '@/lib/latestRelease';
+import { ChevronDown, Download, Server } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { createInstallOptions, type InstallOption } from "@/lib/downloadLinks";
+import { fetchLatestReleaseInfo } from "@/lib/latestRelease";
 
 type InstallTabsProps = {
-  lang: 'en' | 'cn';
+  lang: "en" | "cn";
   version: string;
 };
 
-const downloadLabel = { en: 'Download DBX', cn: '下载 DBX' };
+const downloadLabel = { en: "Download DBX", cn: "下载 DBX" };
 
 const platformIconPaths = {
   dark: {
-    'linux-arm': '/icons/platform/linux.svg',
-    linux: '/icons/platform/linux.svg',
-    'macos-arm': '/icons/platform/macos.png',
-    'macos-intel': '/icons/platform/macos.png',
-    windows: '/icons/platform/windows.png',
+    "linux-arm": "/icons/platform/linux.svg",
+    linux: "/icons/platform/linux.svg",
+    "macos-arm": "/icons/platform/macos.png",
+    "macos-intel": "/icons/platform/macos.png",
+    windows: "/icons/platform/windows.png",
   },
   light: {
-    'linux-arm': '/icons/platform/linux.svg',
-    linux: '/icons/platform/linux.svg',
-    'macos-arm': '/icons/platform/macos-white.png',
-    'macos-intel': '/icons/platform/macos-white.png',
-    windows: '/icons/platform/windows.png',
+    "linux-arm": "/icons/platform/linux.svg",
+    linux: "/icons/platform/linux.svg",
+    "macos-arm": "/icons/platform/macos-white.png",
+    "macos-intel": "/icons/platform/macos-white.png",
+    windows: "/icons/platform/windows.png",
   },
 };
 
 function detectPlatformId(): string {
-  if (typeof navigator === 'undefined') return 'macos-arm';
+  if (typeof navigator === "undefined") return "macos-arm";
   const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes('win')) return 'windows';
-  if (ua.includes('linux')) return ua.includes('aarch64') || ua.includes('arm') ? 'linux-arm' : 'linux';
-  return 'macos-arm';
+  if (ua.includes("win")) return "windows";
+  if (ua.includes("linux")) return ua.includes("aarch64") || ua.includes("arm") ? "linux-arm" : "linux";
+  return "macos-arm";
 }
 
-function PlatformIcon({ id, size, variant }: { id: string; size: number; variant: 'dark' | 'light' }) {
-  const src = platformIconPaths[variant][id as keyof (typeof platformIconPaths)['dark']];
+function PlatformIcon({ id, size, variant }: { id: string; size: number; variant: "dark" | "light" }) {
+  const src = platformIconPaths[variant][id as keyof (typeof platformIconPaths)["dark"]];
   if (!src) return <Server size={size} />;
   return <img alt="" aria-hidden="true" height={size} src={src} width={size} />;
 }
@@ -47,7 +47,7 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
   const [downloadVersion, setDownloadVersion] = useState(version);
   const options = useMemo(() => createInstallOptions(lang, downloadVersion), [lang, downloadVersion]);
   const [open, setOpen] = useState(false);
-  const [platformId, setPlatformId] = useState('macos-arm');
+  const [platformId, setPlatformId] = useState("macos-arm");
 
   useEffect(() => {
     setPlatformId(detectPlatformId());
@@ -102,16 +102,10 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
         className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid w-[min(300px,calc(100vw-48px))] border border-[rgba(155,176,205,0.17)] rounded-xl py-1.5"
         id="landing-install-menu"
         role="listbox"
-        aria-label={lang === 'cn' ? '下载选项' : 'Download options'}
+        aria-label={lang === "cn" ? "下载选项" : "Download options"}
       >
         {menuOptions.map((item) => (
-          <a
-            aria-selected="false"
-            className="landing-install-option grid grid-cols-[24px_minmax(0,1fr)_18px] gap-3 items-center min-w-0 border-0 px-[18px] py-3 bg-transparent text-left cursor-pointer"
-            href={item.href}
-            key={item.id}
-            role="option"
-          >
+          <a aria-selected="false" className="landing-install-option grid grid-cols-[24px_minmax(0,1fr)_18px] gap-3 items-center min-w-0 border-0 px-[18px] py-3 bg-transparent text-left cursor-pointer" href={item.href} key={item.id} role="option">
             <PlatformIcon id={item.id} size={20} variant="light" />
             <strong className="overflow-hidden text-sm font-[640] leading-[1.2] truncate">{item.label}</strong>
             <Download size={15} aria-hidden="true" />

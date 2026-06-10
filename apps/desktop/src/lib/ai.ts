@@ -1,14 +1,6 @@
 import type { AiConfig } from "@/stores/settingsStore";
 import { uuid } from "@/lib/utils";
-import type {
-  ColumnInfo,
-  ConnectionConfig,
-  DatabaseType,
-  ForeignKeyInfo,
-  IndexInfo,
-  QueryResult,
-  QueryTab,
-} from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
 import * as api from "@/lib/api";
 import { currentLocale, type Locale } from "@/i18n";
 import { aiTableMentionKey, type AiTableMention } from "@/lib/aiTableMentions";
@@ -57,13 +49,7 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
   const skill = aiSkillForAction(input.action);
   const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
   const instruction = isZh ? skill.userInstruction.zh : skill.userInstruction.en;
-  const userPrompt = [
-    `Action: ${input.action}`,
-    instruction,
-    "",
-    "User request:",
-    input.instruction.trim() || "(No extra instruction provided.)",
-  ].join("\n");
+  const userPrompt = [`Action: ${input.action}`, instruction, "", "User request:", input.instruction.trim() || "(No extra instruction provided.)"].join("\n");
 
   const messages: api.AiMessage[] = [...(history || []), { role: "user", content: userPrompt }];
 
@@ -77,24 +63,12 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
   });
 }
 
-export async function runAiStream(
-  input: AiRequestInput,
-  history: api.AiMessage[] | undefined,
-  onDelta: (delta: string) => void,
-  sessionId?: string,
-  onReasoningDelta?: (delta: string) => void,
-): Promise<void> {
+export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void): Promise<void> {
   const isZh = isChineseLocale(currentLocale());
   const skill = aiSkillForAction(input.action);
   const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
   const instruction = isZh ? skill.userInstruction.zh : skill.userInstruction.en;
-  const userPrompt = [
-    `Action: ${input.action}`,
-    instruction,
-    "",
-    "User request:",
-    input.instruction.trim() || "(No extra instruction provided.)",
-  ].join("\n");
+  const userPrompt = [`Action: ${input.action}`, instruction, "", "User request:", input.instruction.trim() || "(No extra instruction provided.)"].join("\n");
 
   const messages: api.AiMessage[] = [...(history || []), { role: "user", content: userPrompt }];
 
@@ -145,11 +119,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
 
   const isZh = isChineseLocale(currentLocale());
 
-  const lines: string[] = [
-    ...buildBasePromptLines(isZh),
-    ...buildModePromptLines(mode, isZh),
-    ...buildActionPromptLines(action, isZh),
-  ];
+  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh), ...buildActionPromptLines(action, isZh)];
 
   if (schemaScope === "focused_table") {
     lines.push(
@@ -166,9 +136,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
   }
 
   lines.push(
-    isZh
-      ? "返回 SQL 时放在 ```sql 代码块中。额外说明简短实用。"
-      : "Put SQL in a fenced ```sql code block. Keep extra explanation short and practical.",
+    isZh ? "返回 SQL 时放在 ```sql 代码块中。额外说明简短实用。" : "Put SQL in a fenced ```sql code block. Keep extra explanation short and practical.",
     "",
     `Database type: ${context.databaseType}`,
     `Connection: ${context.connectionName}`,
@@ -187,81 +155,49 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
 function buildBasePromptLines(isZh: boolean): string[] {
   return [
     isZh ? "你是 DBX 内置的数据库助手。用中文回复。" : "You are DBX's built-in database assistant. Reply in English.",
-    isZh
-      ? "精确、保守，根据当前数据库方言生成 SQL。"
-      : "Be precise, conservative, and adapt SQL to the active database dialect.",
-    isZh
-      ? "严格使用当前数据库方言；标识符引用、分页、日期函数、字符串拼接、LIMIT/TOP/OFFSET 语法必须匹配数据库类型。"
-      : "Strictly use the active database dialect; identifier quoting, pagination, date functions, string concatenation, and LIMIT/TOP/OFFSET syntax must match the database type.",
+    isZh ? "精确、保守，根据当前数据库方言生成 SQL。" : "Be precise, conservative, and adapt SQL to the active database dialect.",
+    isZh ? "严格使用当前数据库方言；标识符引用、分页、日期函数、字符串拼接、LIMIT/TOP/OFFSET 语法必须匹配数据库类型。" : "Strictly use the active database dialect; identifier quoting, pagination, date functions, string concatenation, and LIMIT/TOP/OFFSET syntax must match the database type.",
     isZh
       ? "对于普通数据查询，优先使用下面已加载的 Schema 上下文，不要为了重复确认已给出的结构而查询 information_schema 或系统表。"
       : "For ordinary data queries, prefer the loaded schema context below. Do not query information_schema or system tables merely to rediscover structure already provided.",
     isZh
       ? "例外：当用户明确询问当前有哪些表/Schema、某张表是否存在、或需要盘点数据库对象时，应生成符合当前方言的只读元数据查询（例如 SHOW TABLES、information_schema、sqlite_master 等）。"
       : "Exception: when the user explicitly asks what tables/schemas exist, whether a table exists, or asks for database object inventory, generate a read-only metadata query appropriate for the active dialect (for example SHOW TABLES, information_schema, sqlite_master).",
-    isZh
-      ? "表注释和列注释是语义别名；当用户用中文业务名描述表或字段时，优先根据注释匹配真实表名和字段名。"
-      : "Table and column comments are semantic aliases; when the user describes tables or fields by business names, prefer matching those comments to the real table and column names.",
-    isZh
-      ? "当用户要求分析或查看某个表时，生成 SELECT 查询获取数据，而不是查询元数据。"
-      : "When the user asks to 'analyze' or 'look at' a table, generate a SELECT query to retrieve data, not a metadata query.",
+    isZh ? "表注释和列注释是语义别名；当用户用中文业务名描述表或字段时，优先根据注释匹配真实表名和字段名。" : "Table and column comments are semantic aliases; when the user describes tables or fields by business names, prefer matching those comments to the real table and column names.",
+    isZh ? "当用户要求分析或查看某个表时，生成 SELECT 查询获取数据，而不是查询元数据。" : "When the user asks to 'analyze' or 'look at' a table, generate a SELECT query to retrieve data, not a metadata query.",
     isZh ? "不要编造 Schema 中不存在的表或列。" : "Never invent tables or columns that are not in the schema context.",
-    isZh
-      ? "用户输入中的 @schema.table 或 @table 表示用户明确提到的表；这些表已优先放入 Schema 上下文。"
-      : "User input may contain @schema.table or @table mentions. Treat them as explicit table references; mentioned tables are prioritized in the schema context.",
-    isZh
-      ? "不要生成多语句 SQL，除非用户明确要求。不要在同一个回答里混合 SELECT 和写操作。"
-      : "Do not generate multi-statement SQL unless the user explicitly asks for it. Do not mix SELECT statements and write operations in the same answer.",
-    isZh
-      ? "对于 DROP、DELETE、TRUNCATE、ALTER 或没有 WHERE 的 UPDATE，简要警告并优先提供安全的 SELECT 预览。"
-      : "For destructive statements (DROP, DELETE, TRUNCATE, ALTER, UPDATE without WHERE), warn briefly and prefer a safer SELECT preview.",
-    isZh
-      ? "对于 UPDATE 或 DELETE，必须带 WHERE 并说明影响范围；生产库写操作只给建议，不主动建议执行。"
-      : "For UPDATE or DELETE, require a WHERE clause and explain the affected scope; for production writes, provide guidance but do not proactively suggest execution.",
+    isZh ? "用户输入中的 @schema.table 或 @table 表示用户明确提到的表；这些表已优先放入 Schema 上下文。" : "User input may contain @schema.table or @table mentions. Treat them as explicit table references; mentioned tables are prioritized in the schema context.",
+    isZh ? "不要生成多语句 SQL，除非用户明确要求。不要在同一个回答里混合 SELECT 和写操作。" : "Do not generate multi-statement SQL unless the user explicitly asks for it. Do not mix SELECT statements and write operations in the same answer.",
+    isZh ? "对于 DROP、DELETE、TRUNCATE、ALTER 或没有 WHERE 的 UPDATE，简要警告并优先提供安全的 SELECT 预览。" : "For destructive statements (DROP, DELETE, TRUNCATE, ALTER, UPDATE without WHERE), warn briefly and prefer a safer SELECT preview.",
+    isZh ? "对于 UPDATE 或 DELETE，必须带 WHERE 并说明影响范围；生产库写操作只给建议，不主动建议执行。" : "For UPDATE or DELETE, require a WHERE clause and explain the affected scope; for production writes, provide guidance but do not proactively suggest execution.",
   ];
 }
 
 function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
   if (mode === "agent") {
     return [
-      isZh
-        ? "你处于 Agent 模式。用户表达查询意图时，优先生成一个可直接执行的只读 SQL。"
-        : "You are in Agent mode. When the user expresses query intent, prioritize one directly executable read-only SQL statement.",
-      isZh
-        ? "第一个 ```sql 代码块只能包含最终推荐执行的 SQL；不要把解释性 SQL、备选 SQL、危险 SQL 放在第一个代码块。"
-        : "The first ```sql code block must contain only the final SQL recommended for execution; do not put explanatory SQL, alternatives, or risky SQL in the first code block.",
-      isZh
-        ? "如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。"
-        : "If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question.",
+      isZh ? "你处于 Agent 模式。用户表达查询意图时，优先生成一个可直接执行的只读 SQL。" : "You are in Agent mode. When the user expresses query intent, prioritize one directly executable read-only SQL statement.",
+      isZh ? "第一个 ```sql 代码块只能包含最终推荐执行的 SQL；不要把解释性 SQL、备选 SQL、危险 SQL 放在第一个代码块。" : "The first ```sql code block must contain only the final SQL recommended for execution; do not put explanatory SQL, alternatives, or risky SQL in the first code block.",
+      isZh ? "如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。" : "If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question.",
       isZh
         ? "当用户问“有哪些表”“当前表列表”“表是否存在”这类元数据问题时，优先返回一个可执行的只读元数据 SQL，让系统执行后再基于结果回答。"
         : "When the user asks metadata questions such as what tables exist, the current table list, or whether a table exists, prefer returning one executable read-only metadata SQL so the system can run it before answering from results.",
     ];
   }
 
-  return [
-    isZh
-      ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。"
-      : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run.",
-  ];
+  return [isZh ? "你处于 Ask 模式。只生成 SQL 和说明，不要暗示已经执行或即将自动执行。" : "You are in Ask mode. Generate SQL and explanations only; do not imply that anything has run or will auto-run."];
 }
 
 function schemaCoverageLine(context: AiContext, isZh: boolean): string {
   if (context.schemaScope === "focused_table") {
-    return isZh
-      ? "Schema context scope: focused table only; not a complete database table list."
-      : "Schema context scope: focused table only; not a complete database table list.";
+    return isZh ? "Schema context scope: focused table only; not a complete database table list." : "Schema context scope: focused table only; not a complete database table list.";
   }
-  return context.truncated
-    ? "Schema context is truncated."
-    : "Schema context is complete for the loaded database scope.";
+  return context.truncated ? "Schema context is truncated." : "Schema context is complete for the loaded database scope.";
 }
 
 function buildActionPromptLines(action: AiAction, isZh: boolean): string[] {
   const skill = aiSkillForAction(action);
-  return isZh
-    ? [...skill.systemRules.zh, ...skill.outputContract.zh]
-    : [...skill.systemRules.en, ...skill.outputContract.en];
+  return isZh ? [...skill.systemRules.zh, ...skill.outputContract.zh] : [...skill.systemRules.en, ...skill.outputContract.en];
 }
 
 function formatSchema(context: AiContext): string {
@@ -275,18 +211,9 @@ function formatSchema(context: AiContext): string {
       if (tableComment) lines.push(`  Comment: ${tableComment}`);
 
       for (const column of table.columns) {
-        const flags = [
-          column.is_primary_key ? "PK" : "",
-          column.is_nullable ? "nullable" : "NOT NULL",
-          column.column_default ? `default ${column.column_default}` : "",
-          column.extra || "",
-        ]
-          .filter(Boolean)
-          .join(", ");
+        const flags = [column.is_primary_key ? "PK" : "", column.is_nullable ? "nullable" : "NOT NULL", column.column_default ? `default ${column.column_default}` : "", column.extra || ""].filter(Boolean).join(", ");
         const columnComment = column.comment?.trim();
-        lines.push(
-          `  - ${column.name}: ${column.data_type}${flags ? ` (${flags})` : ""}${columnComment ? ` -- ${columnComment}` : ""}`,
-        );
+        lines.push(`  - ${column.name}: ${column.data_type}${flags ? ` (${flags})` : ""}${columnComment ? ` -- ${columnComment}` : ""}`);
       }
 
       if (table.indexes?.length) {
@@ -308,11 +235,7 @@ function formatSchema(context: AiContext): string {
     .join("\n\n");
 }
 
-export async function buildAiContext(
-  tab: QueryTab,
-  connection: ConnectionConfig,
-  options: { maxTables?: number; maxColumnsPerTable?: number; mentionedTables?: AiTableMention[] } = {},
-): Promise<AiContext> {
+export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig, options: { maxTables?: number; maxColumnsPerTable?: number; mentionedTables?: AiTableMention[] } = {}): Promise<AiContext> {
   const maxTables = options.maxTables ?? 50;
   const maxColumnsPerTable = options.maxColumnsPerTable ?? 40;
   const tables: AiSchemaTable[] = [];
@@ -324,10 +247,7 @@ export async function buildAiContext(
     schemaScope = "focused_table";
     const s = tab.tableMeta.schema ?? "";
     const tName = tab.tableMeta.tableName;
-    const [indexes, foreignKeys] = await Promise.all([
-      api.listIndexes(tab.connectionId, tab.database, s, tName).catch(() => [] as IndexInfo[]),
-      api.listForeignKeys(tab.connectionId, tab.database, s, tName).catch(() => [] as ForeignKeyInfo[]),
-    ]);
+    const [indexes, foreignKeys] = await Promise.all([api.listIndexes(tab.connectionId, tab.database, s, tName).catch(() => [] as IndexInfo[]), api.listForeignKeys(tab.connectionId, tab.database, s, tName).catch(() => [] as ForeignKeyInfo[])]);
     const tableComment = await loadTableComment(tab.connectionId, tab.database, s, tName).catch(() => undefined);
     tables.push({
       schema: tab.tableMeta.schema,
@@ -364,9 +284,7 @@ export async function buildAiContext(
             Promise.all([
               api.getColumns(tab.connectionId, tab.database, schema, table.name),
               api.listIndexes(tab.connectionId, tab.database, schema, table.name).catch(() => [] as IndexInfo[]),
-              api
-                .listForeignKeys(tab.connectionId, tab.database, schema, table.name)
-                .catch(() => [] as ForeignKeyInfo[]),
+              api.listForeignKeys(tab.connectionId, tab.database, schema, table.name).catch(() => [] as ForeignKeyInfo[]),
             ]).then(([columns, indexes, foreignKeys]) => ({
               schema: schema === tab.database && !isSchemaAware(connection.db_type) ? undefined : schema,
               name: table.name,
@@ -408,12 +326,7 @@ export async function buildAiContext(
   };
 }
 
-async function loadMentionedTableContext(
-  tab: QueryTab,
-  connection: ConnectionConfig,
-  mention: AiTableMention,
-  maxColumnsPerTable: number,
-): Promise<AiSchemaTable | undefined> {
+async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number): Promise<AiSchemaTable | undefined> {
   const schema = await resolveMentionedTableSchema(tab, connection, mention);
   const [columns, indexes, foreignKeys, tableComment] = await Promise.all([
     api.getColumns(tab.connectionId, tab.database, schema, mention.table),
@@ -432,21 +345,12 @@ async function loadMentionedTableContext(
   };
 }
 
-async function loadTableComment(
-  connectionId: string,
-  database: string,
-  schema: string,
-  tableName: string,
-): Promise<string | undefined> {
+async function loadTableComment(connectionId: string, database: string, schema: string, tableName: string): Promise<string | undefined> {
   const tables = await api.listTables(connectionId, database, schema, tableName, 10);
   return tables.find((table) => table.name.toLowerCase() === tableName.toLowerCase())?.comment?.trim() || undefined;
 }
 
-async function resolveMentionedTableSchema(
-  tab: QueryTab,
-  connection: ConnectionConfig,
-  mention: AiTableMention,
-): Promise<string> {
+async function resolveMentionedTableSchema(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention): Promise<string> {
   if (mention.schema) return mention.schema;
   if (tab.tableMeta?.tableName.toLowerCase() === mention.table.toLowerCase() && tab.tableMeta.schema) {
     return tab.tableMeta.schema;

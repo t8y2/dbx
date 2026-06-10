@@ -22,16 +22,12 @@ describe("buildSnippetItems", () => {
   });
 
   it("does not keep matching a renamed snippet by its old short label prefix", () => {
-    const items = buildSnippetItemsForTest("sel", [
-      { id: "1", label: "select all", prefix: "fff", body: "SELECT *\nFROM my_table;" },
-    ]);
+    const items = buildSnippetItemsForTest("sel", [{ id: "1", label: "select all", prefix: "fff", body: "SELECT *\nFROM my_table;" }]);
     expect(items).toEqual([]);
   });
 
   it("still matches a renamed snippet by label when typing a longer descriptive query", () => {
-    const items = buildSnippetItemsForTest("select", [
-      { id: "1", label: "select all", prefix: "fff", body: "SELECT *\nFROM my_table;" },
-    ]);
+    const items = buildSnippetItemsForTest("select", [{ id: "1", label: "select all", prefix: "fff", body: "SELECT *\nFROM my_table;" }]);
     expect(items).toHaveLength(1);
     expect(items[0].label).toBe("select all");
   });

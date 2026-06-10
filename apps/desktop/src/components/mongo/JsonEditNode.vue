@@ -116,29 +116,13 @@ function confirmRemoveChild() {
         </template>
         <template v-else>
           <span class="json-edit-quote">"</span>
-          <input
-            v-model="node.keyName"
-            autocapitalize="off"
-            autocorrect="off"
-            spellcheck="false"
-            class="json-edit-key-input"
-            :disabled="node.readonlyKey"
-            :placeholder="t('mongo.fieldPlaceholder')"
-          />
+          <input v-model="node.keyName" autocapitalize="off" autocorrect="off" spellcheck="false" class="json-edit-key-input" :disabled="node.readonlyKey" :placeholder="t('mongo.fieldPlaceholder')" />
           <span class="json-edit-quote">"</span>
         </template>
         <span class="json-edit-colon">:</span>
       </div>
 
-      <textarea
-        v-if="node.kind === 'value'"
-        v-model="node.valueText"
-        class="json-edit-value"
-        :class="[fieldValueTone(node.valueText), { 'is-readonly': node.readonlyValue }]"
-        :disabled="node.readonlyValue"
-        :rows="fieldRows(node.valueText)"
-        wrap="soft"
-      />
+      <textarea v-if="node.kind === 'value'" v-model="node.valueText" class="json-edit-value" :class="[fieldValueTone(node.valueText), { 'is-readonly': node.readonlyValue }]" :disabled="node.readonlyValue" :rows="fieldRows(node.valueText)" wrap="soft" />
       <div v-else class="json-edit-container-open">
         <span>{{ node.kind === "array" ? "[" : "{" }}</span>
         <span class="json-edit-count">{{ node.children.length }}</span>
@@ -146,43 +130,21 @@ function confirmRemoveChild() {
 
       <span class="json-edit-comma">{{ node.kind === "value" ? "," : "" }}</span>
 
-      <Button
-        v-if="removable"
-        variant="ghost"
-        size="icon"
-        class="json-edit-remove"
-        :title="t('mongo.deleteField')"
-        @click="emit('remove')"
-      >
+      <Button v-if="removable" variant="ghost" size="icon" class="json-edit-remove" :title="t('mongo.deleteField')" @click="emit('remove')">
         <Trash2 class="w-3 h-3" />
       </Button>
       <span v-else-if="node.readonlyValue" class="json-edit-lock">{{ t("mongo.readonlyId") }}</span>
     </div>
 
     <div v-if="isContainer" class="json-edit-children" :style="{ '--mongo-key-width': childKeyWidth }">
-      <JsonEditNode
-        v-for="(child, idx) in node.children"
-        :key="child.key"
-        :node="child"
-        :parent-kind="node.kind"
-        :removable="!child.readonlyValue || node.kind === 'array'"
-        @remove="requestRemoveChild(idx)"
-      />
+      <JsonEditNode v-for="(child, idx) in node.children" :key="child.key" :node="child" :parent-kind="node.kind" :removable="!child.readonlyValue || node.kind === 'array'" @remove="requestRemoveChild(idx)" />
 
-      <Button variant="ghost" size="sm" class="json-edit-add" @click="addChild">
-        <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }}
-      </Button>
+      <Button variant="ghost" size="sm" class="json-edit-add" @click="addChild"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
 
       <div class="json-edit-close">{{ node.kind === "array" ? "]" : "}" }}<span class="json-edit-comma">,</span></div>
     </div>
 
-    <DangerConfirmDialog
-      v-model:open="showChildDeleteConfirm"
-      :message="t('dangerDialog.deleteMessage')"
-      :details="childDeleteDetails"
-      :confirm-label="t('mongo.deleteField')"
-      @confirm="confirmRemoveChild"
-    />
+    <DangerConfirmDialog v-model:open="showChildDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="childDeleteDetails" :confirm-label="t('mongo.deleteField')" @confirm="confirmRemoveChild" />
   </div>
 </template>
 

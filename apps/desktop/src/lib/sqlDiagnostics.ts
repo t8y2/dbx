@@ -11,9 +11,7 @@ function toZeroBased(value: string | undefined): number | null {
 }
 
 export function parseSqlErrorLocation(message: string): SqlErrorLocation | null {
-  const lineColumn =
-    /\bline\s+(\d+)\s*[,:\s]\s*column\s+(\d+)\b/i.exec(message) ??
-    /\bline\s+(\d+)\b[\s\S]{0,80}?\bcol(?:umn)?\s+(\d+)\b/i.exec(message);
+  const lineColumn = /\bline\s+(\d+)\s*[,:\s]\s*column\s+(\d+)\b/i.exec(message) ?? /\bline\s+(\d+)\b[\s\S]{0,80}?\bcol(?:umn)?\s+(\d+)\b/i.exec(message);
   if (lineColumn) {
     const line = toZeroBased(lineColumn[1]);
     const column = toZeroBased(lineColumn[2]);

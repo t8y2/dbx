@@ -1,30 +1,26 @@
-import type { ReactNode } from 'react';
-import type { Metadata } from 'next';
-import { RootProvider } from 'fumadocs-ui/provider/next';
-import { StaticSearchDialog } from '@/components/StaticSearchDialog';
-import { i18nUI } from '@/lib/i18n';
-import { SITE_URL, SITE_NAME, DEFAULT_DESCRIPTION } from '@/lib/metadata';
+import type { ReactNode } from "react";
+import type { Metadata } from "next";
+import { RootProvider } from "fumadocs-ui/provider/next";
+import { StaticSearchDialog } from "@/components/StaticSearchDialog";
+import { i18nUI } from "@/lib/i18n";
+import { SITE_URL, SITE_NAME, DEFAULT_DESCRIPTION } from "@/lib/metadata";
 
 const LOCALE_MAP: Record<string, { locale: string; title: string; description: string }> = {
   en: {
-    locale: 'en_US',
-    title: 'DBX - 15 MB to manage 40+ databases',
+    locale: "en_US",
+    title: "DBX - 15 MB to manage 40+ databases",
     description: DEFAULT_DESCRIPTION,
   },
   cn: {
-    locale: 'zh_CN',
-    title: 'DBX - 15MB，管理40+种数据库',
-    description: '25+ 种数据库，仅 15 MB。支持桌面与 Docker 自托管，内置 AI 助手。',
+    locale: "zh_CN",
+    title: "DBX - 15MB，管理40+种数据库",
+    description: "25+ 种数据库，仅 15 MB。支持桌面与 Docker 自托管，内置 AI 助手。",
   },
 };
 
-export async function generateMetadata({
-  params,
-}: {
-  params: Promise<{ lang: string }>;
-}): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === 'cn' ? 'cn' : 'en';
+  const l = lang === "cn" ? "cn" : "en";
   const meta = LOCALE_MAP[l];
 
   return {
@@ -43,19 +39,13 @@ export async function generateMetadata({
       languages: {
         en: `${SITE_URL}/en`,
         zh: `${SITE_URL}/cn`,
-        'x-default': `${SITE_URL}/en`,
+        "x-default": `${SITE_URL}/en`,
       },
     },
   };
 }
 
-export default async function LangLayout({
-  params,
-  children,
-}: {
-  params: Promise<{ lang: string }>;
-  children: ReactNode;
-}) {
+export default async function LangLayout({ params, children }: { params: Promise<{ lang: string }>; children: ReactNode }) {
   const { lang } = await params;
 
   return (
@@ -64,7 +54,7 @@ export default async function LangLayout({
       search={{
         SearchDialog: StaticSearchDialog,
       }}
-      theme={{ defaultTheme: 'system', enableSystem: true }}
+      theme={{ defaultTheme: "system", enableSystem: true }}
     >
       {children}
     </RootProvider>
@@ -72,5 +62,5 @@ export default async function LangLayout({
 }
 
 export function generateStaticParams() {
-  return [{ lang: 'en' }, { lang: 'cn' }];
+  return [{ lang: "en" }, { lang: "cn" }];
 }

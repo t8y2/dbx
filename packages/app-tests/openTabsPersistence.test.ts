@@ -143,10 +143,7 @@ test("ignores legacy table data result cache handles on restore", () => {
 });
 
 test("restores unsaved query tabs and active tab after restart", () => {
-  const raw = JSON.stringify([
-    queryTab({ id: "tab-1", sql: "select 1" }),
-    queryTab({ id: "tab-2", title: "Query 2", sql: "select 2" }),
-  ]);
+  const raw = JSON.stringify([queryTab({ id: "tab-1", sql: "select 1" }), queryTab({ id: "tab-2", title: "Query 2", sql: "select 2" })]);
 
   const restored = restoreOpenTabsState(raw, "tab-2");
 

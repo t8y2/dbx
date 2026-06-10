@@ -9,6 +9,7 @@ type ParsedNode = {
 };
 
 const typeMap: Record<string, { dbType: DatabaseType; profile: string; label: string; port: number; user: string }> = {
+  // String type identifiers (from Navicat ConnType / DatabaseType attributes)
   mysql: { dbType: "mysql", profile: "mysql", label: "MySQL", port: 3306, user: "root" },
   mariadb: { dbType: "mysql", profile: "mariadb", label: "MariaDB", port: 3306, user: "root" },
   postgresql: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
@@ -22,6 +23,21 @@ const typeMap: Record<string, { dbType: DatabaseType; profile: string; label: st
   mongo: { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
   dameng: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
   dm: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
+  clickhouse: { dbType: "clickhouse", profile: "clickhouse", label: "ClickHouse", port: 8123, user: "default" },
+  snowflake: { dbType: "snowflake", profile: "snowflake", label: "Snowflake", port: 443, user: "" },
+  kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
+  kingbasees: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
+  gaussdb: { dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 8000, user: "root" },
+  oceanbase: { dbType: "oceanbase-oracle", profile: "oceanbase", label: "OceanBase", port: 2881, user: "root" },
+  // Numeric type codes (Navicat uses numeric ConnType for some exports)
+  "1": { dbType: "mysql", profile: "mysql", label: "MySQL", port: 3306, user: "root" },
+  "2": { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
+  "3": { dbType: "sqlite", profile: "sqlite", label: "SQLite", port: 0, user: "" },
+  "4": { dbType: "oracle", profile: "oracle", label: "Oracle", port: 1521, user: "system" },
+  "5": { dbType: "mysql", profile: "mariadb", label: "MariaDB", port: 3306, user: "root" },
+  "7": { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
+  "8": { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
+  "9": { dbType: "redis", profile: "redis", label: "Redis", port: 6379, user: "" },
 };
 
 const unsupportedTypes = new Set(["http", "https", "ftp", "sftp", "ssh"]);
@@ -72,13 +88,22 @@ async function decryptNavicatPassword(value: string) {
   }
 }
 
-function inferProfile(rawType: string, tag: string) {
+function inferProfile(rawType: string, tag: string, port?: number) {
   const key = normalizeKey(rawType || tag);
   for (const [needle, profile] of Object.entries(typeMap)) {
     if (key.includes(needle)) return profile;
   }
   if (unsupportedTypes.has(key)) return null;
-  return typeMap.mysql;
+  // Port-based fallback for common default ports
+  if (port) {
+    if (port === 6379) return typeMap.redis;
+    if (port === 27017) return typeMap.mongodb;
+    if (port === 5432) return typeMap.postgresql;
+    if (port === 3306) return typeMap.mysql;
+    if (port === 1433) return typeMap.sqlserver;
+    if (port === 1521) return typeMap.oracle;
+  }
+  return null;
 }
 
 function readNode(element: Element): ParsedNode {
@@ -121,25 +146,19 @@ function isConnectionCandidate(node: ParsedNode) {
 
 async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | null> {
   const rawType = getAny(node.values, ["type", "connType", "connectionType", "databaseType", "driver", "dbType"]);
-  const profile = inferProfile(rawType, node.tag);
-  if (!profile) return null;
-
-  const name =
-    getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) ||
-    getAny(node.values, ["host", "server", "hostname"]) ||
-    profile.label;
-  const host =
-    getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]) ||
-    getAny(node.values, ["databaseFile", "filename", "path", "databasePath"]) ||
-    (profile.dbType === "sqlite" ? "" : "127.0.0.1");
   const portValue = Number(getAny(node.values, ["port", "serverPort"]));
+  const port = Number.isFinite(portValue) && portValue > 0 ? portValue : undefined;
+  const profile = inferProfile(rawType, node.tag, port);
+  if (!profile) {
+    const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || "(unnamed)";
+    console.warn(`[Navicat Import] 跳过无法识别类型的连接: "${name}" (type="${rawType}", tag="${node.tag}", port=${port ?? "N/A"})`);
+    return null;
+  }
+
+  const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || getAny(node.values, ["host", "server", "hostname"]) || profile.label;
+  const host = getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]) || getAny(node.values, ["databaseFile", "filename", "path", "databasePath"]) || (profile.dbType === "sqlite" ? "" : "127.0.0.1");
   const database = getAny(node.values, ["database", "databaseName", "initialDatabase", "serviceName", "sid", "schema"]);
-  const oracleConnectionType =
-    profile.dbType === "oracle" && getAny(node.values, ["sid"])
-      ? "sid"
-      : profile.dbType === "oracle"
-        ? "service_name"
-        : undefined;
+  const oracleConnectionType = profile.dbType === "oracle" && getAny(node.values, ["sid"]) ? "sid" : profile.dbType === "oracle" ? "service_name" : undefined;
   const username = getAny(node.values, ["user", "username", "userName", "uid"]) || profile.user;
   const password = await decryptNavicatPassword(getAny(node.values, ["password"]));
 
@@ -150,7 +169,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     driver_label: profile.label,
     url_params: "",
     host,
-    port: Number.isFinite(portValue) && portValue > 0 ? portValue : profile.port,
+    port: port || profile.port,
     username,
     password,
     database: database || undefined,

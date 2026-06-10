@@ -51,8 +51,5 @@ test("treats blank/whitespace types as absent and falls through", () => {
   });
   assert.equal(type, "text");
 
-  assert.equal(
-    resolveHeaderColumnType({ tableColumnType: "", resultColumnTypes: [""], actualColIdx: 0 }),
-    undefined,
-  );
+  assert.equal(resolveHeaderColumnType({ tableColumnType: "", resultColumnTypes: [""], actualColIdx: 0 }), undefined);
 });

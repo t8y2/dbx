@@ -26,6 +26,7 @@ This guide gets you through three things:
     ```
 
     You can also download a `.dmg` installer from [GitHub Releases](https://github.com/t8y2/dbx/releases).
+
   </Tab>
   <Tab value="Windows">
     Install with Scoop:
@@ -42,6 +43,7 @@ This guide gets you through three things:
     ```
 
     You can also download a `.msi` installer from [GitHub Releases](https://github.com/t8y2/dbx/releases).
+
   </Tab>
   <Tab value="Linux">
     Download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
@@ -56,6 +58,7 @@ This guide gets you through three things:
     ```bash
     chmod +x DBX*.AppImage
     ```
+
   </Tab>
   <Tab value="Docker">
     Docker is for self-hosting DBX on a server and opening it from a browser:
@@ -85,19 +88,18 @@ This guide gets you through three things:
     volumes:
       dbx-data:
     ```
+
   </Tab>
 </Tabs>
 
 ## Desktop Or Docker
 
-| Mode | Best For | Backend Path | Storage |
-|---|---|---|---|
-| Desktop | Daily local work, local files, native windows, DBX UI opened from MCP | Tauri commands calling the Rust core | Local app data directory |
-| Docker / Web | Self-hosted access from a server or browser | HTTP routes calling the same Rust core | Docker volume or server data directory |
+| Mode         | Best For                                                              | Backend Path                           | Storage                                |
+| ------------ | --------------------------------------------------------------------- | -------------------------------------- | -------------------------------------- |
+| Desktop      | Daily local work, local files, native windows, DBX UI opened from MCP | Tauri commands calling the Rust core   | Local app data directory               |
+| Docker / Web | Self-hosted access from a server or browser                           | HTTP routes calling the same Rust core | Docker volume or server data directory |
 
-<Callout type="info">
-The core database features are shared, but desktop-only integrations such as opening DBX windows from MCP require the desktop app to be running.
-</Callout>
+<Callout type="info">The core database features are shared, but desktop-only integrations such as opening DBX windows from MCP require the desktop app to be running.</Callout>
 
 ## Create Your First Connection
 
@@ -106,37 +108,41 @@ The core database features are shared, but desktop-only integrations such as ope
     ### Open New Connection
 
     Click **New Connection** from the sidebar or toolbar.
+
   </Step>
   <Step>
     ### Pick A Database Type
 
     Choose a built-in profile such as MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, or one of the compatibility and Agent/JDBC profiles listed in [Database Support](/en/docs/databases).
+
   </Step>
   <Step>
     ### Fill Connection Details
 
     For network databases, enter host, port, username, password, and default database when needed. For SQLite, DuckDB, and Access, select a local database file instead of host and port.
+
   </Step>
   <Step>
     ### Paste A URL When Available
 
     DBX can parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, DM, GaussDB, openGauss, TDengine, and Access. Review the parsed fields before saving.
+
   </Step>
   <Step>
     ### Add Network Options
 
     Enable [SSH Tunnel](/en/docs/ssh-tunnel) for databases behind private networks or bastion hosts. Use the proxy tab when your environment requires SOCKS5 or HTTP proxy access.
+
   </Step>
   <Step>
     ### Test And Save
 
     Click **Test** to verify credentials, network access, and permissions. After the test passes, save the connection and open it from the sidebar.
+
   </Step>
 </Steps>
 
-<Callout type="info">
-Connection passwords, SSH passwords, SSH key passphrases, and connection strings are stored separately from the regular connection JSON in DBX's local storage. Use [Config Export/Import](/en/docs/config-export) when you need to migrate encrypted connection settings.
-</Callout>
+<Callout type="info">Connection passwords, SSH passwords, SSH key passphrases, and connection strings are stored separately from the regular connection JSON in DBX's local storage. Use [Config Export/Import](/en/docs/config-export) when you need to migrate encrypted connection settings.</Callout>
 
 ## Reduce Production Mistakes
 
@@ -161,13 +167,13 @@ Connection passwords, SSH passwords, SSH key passphrases, and connection strings
 
 ## Common Connection Problems
 
-| Symptom | Check |
-|---|---|
-| Timeout | Host, port, firewall, security group, VPN, Docker host reachability, or private network access |
-| Authentication failed | Username, password, auth mode, SSL requirement, remote login permission |
-| Connected but no tables | Default database, schema, permissions, metadata read access, visible database filter |
-| File database cannot open | File path, file permissions, mounted Docker volume, or unsupported file extension |
-| Private database unreachable | Configure SSH tunnel, proxy, VPN, or run Docker on a machine that can reach the database |
+| Symptom                      | Check                                                                                          |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| Timeout                      | Host, port, firewall, security group, VPN, Docker host reachability, or private network access |
+| Authentication failed        | Username, password, auth mode, SSL requirement, remote login permission                        |
+| Connected but no tables      | Default database, schema, permissions, metadata read access, visible database filter           |
+| File database cannot open    | File path, file permissions, mounted Docker volume, or unsupported file extension              |
+| Private database unreachable | Configure SSH tunnel, proxy, VPN, or run Docker on a machine that can reach the database       |
 
 ## Run From Source
 
@@ -181,20 +187,10 @@ Use source mode when contributing or debugging DBX locally.
 
 ### System Dependencies
 
-<Tabs groupId="dev-platform" items={['macOS', 'Linux', 'Windows']}>
-  <Tab value="macOS">
-    ```bash
-    brew install unixodbc
-    ```
-  </Tab>
-  <Tab value="Linux">
-    ```bash
-    sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev unixodbc-dev
-    ```
-  </Tab>
-  <Tab value="Windows">
-    Windows usually needs no extra system dependency for local DBX development.
-  </Tab>
+<Tabs groupId="dev-platform" items={["macOS", "Linux", "Windows"]}>
+  <Tab value="macOS">```bash brew install unixodbc ```</Tab>
+  <Tab value="Linux">```bash sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev unixodbc-dev ```</Tab>
+  <Tab value="Windows">Windows usually needs no extra system dependency for local DBX development.</Tab>
 </Tabs>
 
 ### Start Development

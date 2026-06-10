@@ -14,19 +14,8 @@ export function nextImagePreviewScale(scale: number, direction: ImagePreviewZoom
   return clampImagePreviewScale(scale + delta);
 }
 
-export function imagePreviewFitScale(options: {
-  imageWidth: number;
-  imageHeight: number;
-  viewportWidth: number;
-  viewportHeight: number;
-  paddingRatio?: number;
-}): number {
-  if (
-    options.imageWidth <= 0 ||
-    options.imageHeight <= 0 ||
-    options.viewportWidth <= 0 ||
-    options.viewportHeight <= 0
-  ) {
+export function imagePreviewFitScale(options: { imageWidth: number; imageHeight: number; viewportWidth: number; viewportHeight: number; paddingRatio?: number }): number {
+  if (options.imageWidth <= 0 || options.imageHeight <= 0 || options.viewportWidth <= 0 || options.viewportHeight <= 0) {
     return 1;
   }
   const paddingRatio = options.paddingRatio ?? 0.9;

@@ -63,12 +63,7 @@ function columnByName(columns: ColumnInfo[], name: string): ColumnInfo | undefin
   return columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
 }
 
-export function findMatchedSearchColumns(
-  resultColumns: string[],
-  row: unknown[],
-  columns: ColumnInfo[],
-  term: string,
-): string[] {
+export function findMatchedSearchColumns(resultColumns: string[], row: unknown[], columns: ColumnInfo[], term: string): string[] {
   const query = cleanTerm(term).toLowerCase();
   const numericTerm = parseNumericTerm(term);
   if (!query) return [];

@@ -1,9 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  autoMapImportColumns,
-  normalizeImportColumnName,
-} from "../../apps/desktop/src/lib/tableImport.ts";
+import { autoMapImportColumns, normalizeImportColumnName } from "../../apps/desktop/src/lib/tableImport.ts";
 
 test("normalizes import column names for matching", () => {
   assert.equal(normalizeImportColumnName(" User ID "), "user id");
@@ -12,10 +9,7 @@ test("normalizes import column names for matching", () => {
 });
 
 test("auto maps source columns to matching target columns and skips unknown columns", () => {
-  const mapping = autoMapImportColumns(
-    ["id", "Name", "created-at", "ignored"],
-    ["user_id", "name", "created_at"],
-  );
+  const mapping = autoMapImportColumns(["id", "Name", "created-at", "ignored"], ["user_id", "name", "created_at"]);
 
   assert.deepEqual(mapping, {
     id: "",

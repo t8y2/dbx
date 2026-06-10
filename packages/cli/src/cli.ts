@@ -1,19 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import {
-  buildSchemaContext,
-  createBackend,
-  DIRECT_QUERY_TYPES,
-  BRIDGE_REQUIRED_TYPES,
-  evaluateSqlSafety,
-  formatSchemaContext,
-  getDbxDiagnostics,
-  isMainModule,
-  postBridge,
-  type Backend,
-  type DbxDiagnostics,
-  type SqlSafetyOptions,
-} from "@dbx-app/node-core";
+import { buildSchemaContext, createBackend, DIRECT_QUERY_TYPES, BRIDGE_REQUIRED_TYPES, evaluateSqlSafety, formatSchemaContext, getDbxDiagnostics, isMainModule, postBridge, type Backend, type DbxDiagnostics, type SqlSafetyOptions } from "@dbx-app/node-core";
 import { connectionSummary, csvTable, errorPayload, formatCell, formatErrorMessage, mdTable } from "./cli-format.js";
 
 export interface CliResult {
@@ -80,20 +67,23 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       if (flags.format === "json") return okJson(diagnostics);
       if (flags.format === "csv") {
         return ok(
-          csvTable(["check", "value"], [
-            { check: "appDataDir", value: diagnostics.appDataDir },
-            { check: "dbPath", value: diagnostics.dbPath },
-            { check: "dbPathExists", value: diagnostics.dbPathExists },
-            { check: "connectionsTableExists", value: diagnostics.connectionsTableExists },
-            { check: "connectionRowCount", value: diagnostics.connectionRowCount },
-            { check: "loadConnectionsOk", value: diagnostics.loadConnectionsOk },
-            { check: "loadedConnectionCount", value: diagnostics.loadedConnectionCount },
-            { check: "loadConnectionsError", value: diagnostics.loadConnectionsError ?? "" },
-            { check: "loadConnectionsHint", value: diagnostics.loadConnectionsHint ?? "" },
-            { check: "bridgePortFile", value: diagnostics.bridgePortFile },
-            { check: "bridgePortFileExists", value: diagnostics.bridgePortFileExists },
-            { check: "bridgeUrl", value: diagnostics.bridgeUrl ?? "" },
-          ]),
+          csvTable(
+            ["check", "value"],
+            [
+              { check: "appDataDir", value: diagnostics.appDataDir },
+              { check: "dbPath", value: diagnostics.dbPath },
+              { check: "dbPathExists", value: diagnostics.dbPathExists },
+              { check: "connectionsTableExists", value: diagnostics.connectionsTableExists },
+              { check: "connectionRowCount", value: diagnostics.connectionRowCount },
+              { check: "loadConnectionsOk", value: diagnostics.loadConnectionsOk },
+              { check: "loadedConnectionCount", value: diagnostics.loadedConnectionCount },
+              { check: "loadConnectionsError", value: diagnostics.loadConnectionsError ?? "" },
+              { check: "loadConnectionsHint", value: diagnostics.loadConnectionsHint ?? "" },
+              { check: "bridgePortFile", value: diagnostics.bridgePortFile },
+              { check: "bridgePortFileExists", value: diagnostics.bridgePortFileExists },
+              { check: "bridgeUrl", value: diagnostics.bridgeUrl ?? "" },
+            ],
+          ),
         );
       }
       return ok(formatDoctor(diagnostics));
@@ -107,17 +97,17 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       };
       if (flags.format === "json") return okJson(payload);
       if (flags.format === "csv") {
-        return ok(
-          csvTable(
-            ["mode", "type"],
-            [
-              ...payload.directQueryTypes.map((type) => ({ mode: "direct", type })),
-              ...payload.bridgeRequiredTypes.map((type) => ({ mode: "bridge", type })),
-            ],
-          ),
-        );
+        return ok(csvTable(["mode", "type"], [...payload.directQueryTypes.map((type) => ({ mode: "direct", type })), ...payload.bridgeRequiredTypes.map((type) => ({ mode: "bridge", type }))]));
       }
-      return ok(`${mdTable(["Mode", "Types"], [["Direct", payload.directQueryTypes.join(", ")], ["Requires DBX Desktop", payload.bridgeRequiredTypes.join(", ")]])}\n`);
+      return ok(
+        `${mdTable(
+          ["Mode", "Types"],
+          [
+            ["Direct", payload.directQueryTypes.join(", ")],
+            ["Requires DBX Desktop", payload.bridgeRequiredTypes.join(", ")],
+          ],
+        )}\n`,
+      );
     }
 
     if (args[0] === "connections" && args[1] === "list") {
@@ -140,7 +130,12 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       const tables = await backend.listTables(config, flags.schema);
       if (flags.format === "json") return okJson({ connection: connectionName, schema: flags.schema, tables });
       if (flags.format === "csv") return ok(csvTable(["name", "type"], tables));
-      return ok(`${mdTable(["Table", "Type"], tables.map((t) => [t.name, t.type]))}\n`);
+      return ok(
+        `${mdTable(
+          ["Table", "Type"],
+          tables.map((t) => [t.name, t.type]),
+        )}\n`,
+      );
     }
 
     if (args[0] === "schema" && args[1] === "describe") {
@@ -156,13 +151,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       return ok(
         `${mdTable(
           ["Column", "Type", "Nullable", "Default", "Comment"],
-          columns.map((c) => [
-            c.is_primary_key ? `${c.name} (PK)` : c.name,
-            c.data_type,
-            c.is_nullable ? "YES" : "NO",
-            c.column_default ?? "",
-            c.comment ?? "",
-          ]),
+          columns.map((c) => [c.is_primary_key ? `${c.name} (PK)` : c.name, c.data_type, c.is_nullable ? "YES" : "NO", c.column_default ?? "", c.comment ?? ""]),
         )}\n`,
       );
     }
@@ -237,12 +226,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
     return fail("USAGE", usage(), flags.json);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const code =
-      error instanceof CliError
-        ? error.code
-        : typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
-          ? error.code
-          : "ERROR";
+    const code = error instanceof CliError ? error.code : typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "ERROR";
     const wantsJson = argv.includes("--json");
     return fail(code, message, wantsJson);
   } finally {
@@ -271,8 +255,7 @@ function parseFlags(argv: string[]): ParsedFlags {
     if (arg === "--json") {
       flags.json = true;
       flags.format = "json";
-    }
-    else if (arg === "--format") flags.format = parseFormat(readOptionValue(argv, ++i, "--format"));
+    } else if (arg === "--format") flags.format = parseFormat(readOptionValue(argv, ++i, "--format"));
     else if (arg === "--help" || arg === "-h") flags.help = true;
     else if (arg === "--version" || arg === "-V") flags.version = true;
     else if (arg === "--schema") flags.schema = readOptionValue(argv, ++i, "--schema");
@@ -396,12 +379,7 @@ function formatDoctor(diagnostics: DbxDiagnostics): string {
     ["App data directory", diagnostics.appDataDir],
     ["DBX database", diagnostics.dbPathExists ? `found (${diagnostics.dbPath})` : `missing (${diagnostics.dbPath})`],
     ["Connections table", diagnostics.connectionsTableExists ? `${diagnostics.connectionRowCount} row(s)` : "missing"],
-    [
-      "Connection loading",
-      diagnostics.loadConnectionsOk
-        ? `ok (${diagnostics.loadedConnectionCount} loaded)`
-        : `failed (${diagnostics.loadConnectionsError ?? "unknown error"})`,
-    ],
+    ["Connection loading", diagnostics.loadConnectionsOk ? `ok (${diagnostics.loadedConnectionCount} loaded)` : `failed (${diagnostics.loadConnectionsError ?? "unknown error"})`],
     ...(diagnostics.loadConnectionsHint ? [["Connection fix", diagnostics.loadConnectionsHint]] : []),
     ["Desktop bridge", diagnostics.bridgePortFileExists ? `available (${diagnostics.bridgeUrl ?? diagnostics.bridgePortFile})` : "not running"],
     ["Direct query types", diagnostics.directQueryTypes.join(", ")],

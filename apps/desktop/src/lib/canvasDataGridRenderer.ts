@@ -1,10 +1,6 @@
 import type { CellValue } from "@/lib/cellValue";
 import type { RowStatus } from "@/lib/gridRowStatus";
-import {
-  DATA_GRID_DARK_SEARCH_COLORS,
-  resolveDataGridPaintTheme,
-  type DataGridPaintTheme,
-} from "@/lib/dataGridPaintTheme";
+import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGridPaintTheme";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 
@@ -124,13 +120,7 @@ function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
   return result;
 }
 
-function canvasFont(style: {
-  family: string;
-  sizePx: number;
-  style?: string;
-  weight?: string | number;
-  lineHeight?: string;
-}): string {
+function canvasFont(style: { family: string; sizePx: number; style?: string; weight?: string | number; lineHeight?: string }): string {
   const fontStyle = style.style && style.style !== "normal" ? `${style.style} ` : "";
   const fontWeight = style.weight && style.weight !== "400" && style.weight !== "normal" ? `${style.weight} ` : "";
   const lineHeight = style.lineHeight && style.lineHeight !== "normal" ? `/${style.lineHeight}` : "";
@@ -171,8 +161,7 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, st
   if (cached?.cacheKey === cacheKey) return cached;
 
   const canvasStyle = getComputedStyle(canvas);
-  const fontFamily =
-    canvasStyle.fontFamily || `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+  const fontFamily = canvasStyle.fontFamily || `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
   const fontSize = Number.parseFloat(canvasStyle.fontSize) || 12;
   const lineHeight = canvasStyle.lineHeight;
   const normalFont = canvasFont({
@@ -259,16 +248,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
-  const {
-    normalFont,
-    tabularFont,
-    semiboldFont,
-    italicFont,
-    theme,
-    searchFill,
-    currentSearchFill,
-    currentSearchBorder,
-  } = resolveCanvasRenderState(canvas, isDark, styleKey);
+  const { normalFont, tabularFont, semiboldFont, italicFont, theme, searchFill, currentSearchFill, currentSearchBorder } = resolveCanvasRenderState(canvas, isDark, styleKey);
 
   const scrollTop = scroller.scrollTop;
   const scrollLeft = scroller.scrollLeft;
@@ -294,37 +274,17 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     if (!item) continue;
     const y = rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop;
     const rowIsActive = isRowActive(item.displayIndex);
-    const rowBase = item.isDeleted
-      ? theme.rowDeleted
-      : item.isNew && !rowIsActive
-        ? theme.rowNew
-        : item.displayIndex % 2 === 1 && !rowIsActive
-          ? theme.rowMuted
-          : theme.background;
+    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
     ctx.fillStyle = rowBase;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
-    let rowNumberFill =
-      item.status === "new"
-        ? theme.rowNumberNew
-        : item.status === "edited"
-          ? theme.rowNumberEdited
-          : item.status === "deleted"
-            ? theme.rowNumberDeleted
-            : theme.rowNumberDefault;
+    let rowNumberFill = item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
     if (rowIsActive && !item.isDeleted) rowNumberFill = theme.rowNumberActive;
     if (isRowSelected(item.id) && item.status === "clean") rowNumberFill = theme.rowNumberSelected;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-    if (
-      hoverCell?.rowIndex === item.displayIndex &&
-      hoverCell.visibleColIdx < 0 &&
-      !isScrolling &&
-      item.status === "clean" &&
-      !rowIsActive &&
-      !isRowSelected(item.id)
-    ) {
+    if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx < 0 && !isScrolling && item.status === "clean" && !rowIsActive && !isRowSelected(item.id)) {
       ctx.fillStyle = theme.cellHover;
       ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     }
@@ -334,22 +294,20 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.lineTo(rowNumberBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.stroke();
 
-    const rowNumberText =
-      item.status === "new"
-        ? theme.rowNumberTextNew
-        : item.status === "edited"
-          ? theme.rowNumberTextEdited
-          : item.status === "deleted"
-            ? theme.rowNumberTextDeleted
-            : isRowSelected(item.id)
-              ? theme.primary
-              : theme.rowNumberTextClean;
+    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : isRowSelected(item.id) ? theme.primary : theme.rowNumberTextClean;
     ctx.fillStyle = rowNumberText;
     ctx.font = item.status === "new" || item.status === "edited" || isRowSelected(item.id) ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
     ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
     ctx.font = normalFont;
+
+    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
+    ctx.strokeStyle = theme.border;
+    ctx.beginPath();
+    ctx.moveTo(0, rowBorderY);
+    ctx.lineTo(width, rowBorderY);
+    ctx.stroke();
 
     let x = rowNumberWidth + columnOffset - scrollLeft;
     for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x < width; visibleColIdx++) {
@@ -362,18 +320,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       if (x + colWidth >= rowNumberWidth) {
         const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
         const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
-        const isSingleSelectedCell =
-          singleSelectedCell?.rowIndex === item.displayIndex && singleSelectedCell.visibleColIdx === visibleColIdx;
+        const isSingleSelectedCell = singleSelectedCell?.rowIndex === item.displayIndex && singleSelectedCell.visibleColIdx === visibleColIdx;
         const isDirtyCell = item.isDirtyCol[actualColIdx];
-        const selectedFillVisual =
-          rowSelectionVisual ||
-          (selectedCell && (!isSingleSelectedCell || isDirtyCell) && (!rowIsActive || isDirtyCell));
+        const selectedFillVisual = rowSelectionVisual || (selectedCell && (!isSingleSelectedCell || isDirtyCell) && (!rowIsActive || isDirtyCell));
         const selectedBorderVisual = rowSelectionVisual || selectedCell;
         const isSearchMatch = paintSearchMatches && searchMatchKeys.has(`${item.displayIndex}:${actualColIdx}`);
-        const isCurrentSearchMatch =
-          paintSearchMatches &&
-          currentSearchMatch?.displayRow === item.displayIndex &&
-          currentSearchMatch.col === actualColIdx;
+        const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
         const clippedX = Math.max(x, rowNumberWidth);
         const cellPaintWidth = colWidth - Math.max(0, clippedX - x);
 
@@ -381,15 +333,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           ctx.fillStyle = theme.cellDirty;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
-        if (
-          hoverCell?.rowIndex === item.displayIndex &&
-          hoverCell.visibleColIdx === visibleColIdx &&
-          !isScrolling &&
-          !isSearchMatch &&
-          !isCurrentSearchMatch &&
-          !isDirtyCell &&
-          cellCanHover(item, actualColIdx)
-        ) {
+        if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx === visibleColIdx && !isScrolling && !isSearchMatch && !isCurrentSearchMatch && !isDirtyCell && cellCanHover(item, actualColIdx)) {
           ctx.fillStyle = theme.cellHover;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
@@ -449,21 +393,20 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         if (selectedBorderVisual && cellPaintWidth >= 2) {
           const selectedLeftX = clippedX + 0.5;
           const selectedRightX = clippedX + cellPaintWidth - 1.5;
-          const selectedTopY = y + 0.5;
-          const selectedBottomY = y + CANVAS_DATA_GRID_ROW_HEIGHT - 1.5;
+          const selectedTopY = Math.max(y + 0.5, 1);
           const drawSelectedLeftBorder = selectedLeftX > rowNumberWidth + 0.5;
           ctx.strokeStyle = theme.cellSelectedBorder;
           ctx.beginPath();
           ctx.moveTo(selectedLeftX, selectedTopY);
           ctx.lineTo(selectedRightX, selectedTopY);
-          ctx.moveTo(selectedLeftX, selectedBottomY);
-          ctx.lineTo(selectedRightX, selectedBottomY);
+          ctx.moveTo(selectedLeftX, rowBorderY);
+          ctx.lineTo(selectedRightX, rowBorderY);
           if (drawSelectedLeftBorder) {
             ctx.moveTo(selectedLeftX, selectedTopY);
-            ctx.lineTo(selectedLeftX, selectedBottomY);
+            ctx.lineTo(selectedLeftX, rowBorderY);
           }
           ctx.moveTo(selectedRightX, selectedTopY);
-          ctx.lineTo(selectedRightX, selectedBottomY);
+          ctx.lineTo(selectedRightX, rowBorderY);
           ctx.stroke();
         }
 
@@ -476,12 +419,6 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       }
       x += colWidth;
     }
-    ctx.strokeStyle = theme.border;
-    ctx.beginPath();
-    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
-    ctx.moveTo(0, rowBorderY);
-    ctx.lineTo(width, rowBorderY);
-    ctx.stroke();
     ctx.globalAlpha = 1;
   }
 }

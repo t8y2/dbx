@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  clampSearchSplitWidth,
-  DEFAULT_SEARCH_SPLIT_RATIO,
-  MIN_SEARCH_SPLIT_PANE_WIDTH,
-} from "../../apps/desktop/src/lib/dataGridSearchSplit.ts";
+import { clampSearchSplitWidth, DEFAULT_SEARCH_SPLIT_RATIO, MIN_SEARCH_SPLIT_PANE_WIDTH } from "../../apps/desktop/src/lib/dataGridSearchSplit.ts";
 
 test("defaults the search split to an even width", () => {
   assert.equal(clampSearchSplitWidth({ containerWidth: 800 }), 400);

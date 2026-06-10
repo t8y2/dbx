@@ -747,13 +747,10 @@ test("grid refreshes can preserve the previous result while loading", async () =
       });
     }
     if (url === "/api/query/execute-multi") {
-      return new Response(
-        JSON.stringify([{ columns: ["id", "name"], rows: [[2, "Grace"]], affected_rows: 0, execution_time_ms: 1 }]),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
+      return new Response(JSON.stringify([{ columns: ["id", "name"], rows: [[2, "Grace"]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     if (url === "/api/query/analyze-editability") {
       return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
@@ -801,13 +798,10 @@ test("data tab execution preserves pagination offset metadata", async () => {
     }
     if (url === "/api/query/execute-multi") {
       executeBody = JSON.parse(String(init?.body ?? "{}"));
-      return new Response(
-        JSON.stringify([{ columns: ["id"], rows: [[101]], affected_rows: 0, execution_time_ms: 1 }]),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[101]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     return new Response("unexpected request", { status: 500 });
   }) as typeof fetch;
@@ -921,9 +915,7 @@ test("query result export fetches every paginated page", async () => {
       const body = JSON.parse(String(init?.body ?? "{}"));
       executedSqls.push(body.sql);
       timeoutSecs.push(body.timeoutSecs);
-      const rows = String(body.sql).includes("offset:0")
-        ? Array.from({ length: 10_000 }, (_, index) => [index + 1])
-        : [[10_001], [10_002]];
+      const rows = String(body.sql).includes("offset:0") ? Array.from({ length: 10_000 }, (_, index) => [index + 1]) : [[10_001], [10_002]];
       return new Response(JSON.stringify([{ columns: ["id"], rows, affected_rows: 0, execution_time_ms: 1 }]), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -999,17 +991,17 @@ test("table data export fetches every filtered page", async () => {
       const body = JSON.parse(String(init?.body ?? "{}"));
       buildRequests.push(body.options);
       const { limit, offset } = body.options;
-      return new Response(
-        JSON.stringify(`SELECT * FROM "public"."users" WHERE (status = 'active') ORDER BY "id" DESC LIMIT ${limit} OFFSET ${offset ?? 0};`),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response(JSON.stringify(`SELECT * FROM "public"."users" WHERE (status = 'active') ORDER BY "id" DESC LIMIT ${limit} OFFSET ${offset ?? 0};`), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/query/execute-multi") {
       const body = JSON.parse(String(init?.body ?? "{}"));
       executedSqls.push(body.sql);
       const rows = String(body.sql).includes("OFFSET 0")
         ? Array.from({ length: 10_000 }, (_, index) => [index + 1, "active"])
-        : [[10_001, "active"], [10_002, "active"]];
+        : [
+            [10_001, "active"],
+            [10_002, "active"],
+          ];
       return new Response(JSON.stringify([{ columns: ["id", "status"], rows, affected_rows: 0, execution_time_ms: 1 }]), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -1052,10 +1044,7 @@ test("table data export fetches every filtered page", async () => {
         },
       ],
     );
-    assert.deepEqual(executedSqls, [
-      'SELECT * FROM "public"."users" WHERE (status = \'active\') ORDER BY "id" DESC LIMIT 10000 OFFSET 0;',
-      'SELECT * FROM "public"."users" WHERE (status = \'active\') ORDER BY "id" DESC LIMIT 10000 OFFSET 10000;',
-    ]);
+    assert.deepEqual(executedSqls, ['SELECT * FROM "public"."users" WHERE (status = \'active\') ORDER BY "id" DESC LIMIT 10000 OFFSET 0;', 'SELECT * FROM "public"."users" WHERE (status = \'active\') ORDER BY "id" DESC LIMIT 10000 OFFSET 10000;']);
     assert.equal(exported?.rows.length, 10_002);
     assert.deepEqual(exported?.rows.at(-1), [10_002, "active"]);
   } finally {
@@ -1380,7 +1369,10 @@ test("multi statement execution shows the first result set by default", async ()
     assert.deepEqual(tab?.result?.rows, [[1]]);
     assert.equal(isReactive(tab?.result?.rows), false);
     assert.equal(isReactive(tab?.result?.rows[0]), false);
-    assert.equal(tab?.results?.every((result) => !isReactive(result.rows)), true);
+    assert.equal(
+      tab?.results?.every((result) => !isReactive(result.rows)),
+      true,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  detectLocaleFromLanguages,
-  localeFromLanguageTag,
-  normalizeLocale,
-} from "../../apps/desktop/src/i18n/index.ts";
+import { detectLocaleFromLanguages, localeFromLanguageTag, normalizeLocale } from "../../apps/desktop/src/i18n/index.ts";
 
 test("normalizes exact supported locales", () => {
   assert.equal(normalizeLocale("en"), "en");

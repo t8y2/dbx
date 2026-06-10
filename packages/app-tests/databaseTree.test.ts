@@ -1,20 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  buildDatabaseTreeNodes,
-  buildDuckDbConnectionTreeNodes,
-  sortSidebarNames,
-  shouldIncludeDefaultDatabaseNode,
-} from "../../apps/desktop/src/lib/databaseTree.ts";
+import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "../../apps/desktop/src/lib/databaseTree.ts";
 
 test("数据库节点按自然名称排序", () => {
-  const nodes = buildDatabaseTreeNodes("conn-1", [
-    { name: "db10" },
-    { name: "db2" },
-    { name: "campaign_data" },
-    { name: "cms" },
-    { name: "mk_campaign" },
-  ]);
+  const nodes = buildDatabaseTreeNodes("conn-1", [{ name: "db10" }, { name: "db2" }, { name: "campaign_data" }, { name: "cms" }, { name: "mk_campaign" }]);
 
   assert.deepEqual(
     nodes.map((node) => node.database),
@@ -54,11 +43,7 @@ test("MySQL-compatible catalogless services can opt into the default database no
 });
 
 test("DuckDB shows primary catalog schemas directly under the connection", () => {
-  const nodes = buildDuckDbConnectionTreeNodes(
-    "conn-1",
-    [{ name: "main" }, { name: "attached_reports" }, { name: "analytics_20" }, { name: "analytics_3" }],
-    ["prod_sales", "main", "mysql"],
-  );
+  const nodes = buildDuckDbConnectionTreeNodes("conn-1", [{ name: "main" }, { name: "attached_reports" }, { name: "analytics_20" }, { name: "analytics_3" }], ["prod_sales", "main", "mysql"]);
 
   assert.deepEqual(
     nodes.map((node) => [node.type, node.label, node.database, node.schema]),

@@ -79,18 +79,9 @@ function toggleShowAll() {
 <template>
   <Popover v-if="tasks.length > 0" v-model:open="open">
     <PopoverTrigger as-child>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="relative h-8 w-8"
-        :title="t('exportProgress.tooltip')"
-        :class="{ 'bg-accent text-primary': hasActive }"
-      >
+      <Button variant="ghost" size="icon" class="relative h-8 w-8" :title="t('exportProgress.tooltip')" :class="{ 'bg-accent text-primary': hasActive }">
         <FileDown class="h-4 w-4" />
-        <span
-          v-if="hasActive"
-          class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-medium leading-none text-primary-foreground"
-        >
+        <span v-if="hasActive" class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-medium leading-none text-primary-foreground">
           {{ activeCount > 9 ? "9+" : activeCount }}
         </span>
       </Button>
@@ -102,28 +93,16 @@ function toggleShowAll() {
       </div>
 
       <div class="max-h-80 overflow-y-auto">
-        <div
-          v-for="task in visibleTasks"
-          :key="task.exportId"
-          class="flex items-center gap-2 border-b px-3 py-2.5 text-xs last:border-b-0"
-        >
+        <div v-for="task in visibleTasks" :key="task.exportId" class="flex items-center gap-2 border-b px-3 py-2.5 text-xs last:border-b-0">
           <div class="flex-1 min-w-0 flex flex-col gap-1">
             <div class="flex items-center gap-1.5">
-              <component
-                :is="statusIcon(task.status)"
-                :class="[statusColor(task.status), isActive(task.status) ? 'animate-spin' : '']"
-                class="h-3.5 w-3.5 shrink-0"
-              />
+              <component :is="statusIcon(task.status)" :class="[statusColor(task.status), isActive(task.status) ? 'animate-spin' : '']" class="h-3.5 w-3.5 shrink-0" />
               <span class="truncate font-medium">{{ task.tableName }}.{{ task.format }}</span>
             </div>
 
             <!-- Progress bar -->
             <div v-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-              <div
-                class="h-full bg-primary rounded-full transition-all duration-300"
-                :class="{ 'animate-pulse': !task.totalRows }"
-                :style="{ width: task.totalRows ? `${progressPercent(task.totalRows, task.rowsExported)}%` : '50%' }"
-              />
+              <div class="h-full bg-primary rounded-full transition-[width] duration-300" :class="{ 'animate-pulse': !task.totalRows }" :style="{ width: task.totalRows ? `${progressPercent(task.totalRows, task.rowsExported)}%` : '50%' }" />
             </div>
             <div v-else-if="task.status === 'Done'" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
               <div class="h-full bg-green-500 rounded-full" style="width: 100%" />
@@ -131,11 +110,7 @@ function toggleShowAll() {
 
             <div class="flex items-center justify-between text-muted-foreground">
               <span class="tabular-nums">{{ rowsText(task) }}</span>
-              <span
-                v-if="task.status === 'Error' && task.errorMessage"
-                class="truncate ml-2 text-destructive"
-                :title="task.errorMessage"
-              >
+              <span v-if="task.status === 'Error' && task.errorMessage" class="truncate ml-2 text-destructive" :title="task.errorMessage">
                 {{ task.errorMessage }}
               </span>
             </div>
@@ -143,20 +118,10 @@ function toggleShowAll() {
 
           <!-- Actions: stop/cancel for active, delete for finished -->
           <div class="flex shrink-0 self-center">
-            <button
-              v-if="isActive(task.status)"
-              class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
-              :title="t('exportProgress.cancel')"
-              @click="cancelTask(task.exportId)"
-            >
+            <button v-if="isActive(task.status)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.cancel')" @click="cancelTask(task.exportId)">
               <X class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>
-            <button
-              v-else
-              class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted"
-              :title="t('exportProgress.delete')"
-              @click="removeTask(task.exportId)"
-            >
+            <button v-else class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
               <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
           </div>
@@ -165,9 +130,7 @@ function toggleShowAll() {
 
       <div v-if="hasMore" class="border-t bg-muted/30 px-3 py-1.5">
         <button class="w-full text-center text-xs text-muted-foreground hover:text-foreground" @click="toggleShowAll">
-          {{
-            showAll ? t("exportProgress.showLess") : t("exportProgress.showMore", { count: tasks.length - MAX_VISIBLE })
-          }}
+          {{ showAll ? t("exportProgress.showLess") : t("exportProgress.showMore", { count: tasks.length - MAX_VISIBLE }) }}
         </button>
       </div>
 

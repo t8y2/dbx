@@ -1,13 +1,6 @@
 import { parseSlashDelimitedRegexQuery } from "@/lib/searchPattern";
 
-export type SidebarSearchMatchKind =
-  | "exact"
-  | "prefix"
-  | "word-prefix"
-  | "substring"
-  | "abbreviation"
-  | "fuzzy"
-  | "regex";
+export type SidebarSearchMatchKind = "exact" | "prefix" | "word-prefix" | "substring" | "abbreviation" | "fuzzy" | "regex";
 
 export interface SidebarSearchMatch {
   kind: SidebarSearchMatchKind;

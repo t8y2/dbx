@@ -17,9 +17,7 @@ test("parses quoted AI table mentions with spaces and dots", () => {
 });
 
 test("deduplicates AI table mentions case-insensitively", () => {
-  assert.deepEqual(parseAiTableMentions("check @public.Users then @PUBLIC.users"), [
-    { raw: "@public.Users", schema: "public", table: "Users" },
-  ]);
+  assert.deepEqual(parseAiTableMentions("check @public.Users then @PUBLIC.users"), [{ raw: "@public.Users", schema: "public", table: "Users" }]);
 });
 
 test("formats AI table mentions with quotes only when needed", () => {

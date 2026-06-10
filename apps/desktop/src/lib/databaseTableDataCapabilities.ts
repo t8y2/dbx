@@ -50,6 +50,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "postgres",
   "sqlite",
   "rqlite",
+  "turso",
   "duckdb",
   "sqlserver",
   "oracle",
@@ -134,6 +135,18 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       deleteRequiresPrimaryKey: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
+    },
+  },
+  influxdb: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
     },
   },
 };

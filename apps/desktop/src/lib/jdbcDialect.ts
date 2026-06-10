@@ -1,5 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/databaseFeatureSupport";
+import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
@@ -17,60 +17,40 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "informix", patterns: [/jdbc:informix/i, /informix/i] },
 ];
 
-export function inferJdbcDialect(
-  connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">,
-): DatabaseType | undefined {
+export function inferJdbcDialect(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
-  const haystack = [connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])]
-    .filter(Boolean)
-    .join("\n");
+  const haystack = [connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])].filter(Boolean).join("\n");
   if (!haystack) return undefined;
   return JDBC_DIALECT_MATCHERS.find((matcher) => matcher.patterns.some((pattern) => pattern.test(haystack)))?.type;
 }
 
-export function effectiveDatabaseTypeForConnection(
-  connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">,
-): DatabaseType | undefined {
+export function effectiveDatabaseTypeForConnection(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): DatabaseType | undefined {
   if (!connection) return undefined;
   if (connection.db_type !== "jdbc") return connection.db_type;
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
-export function connectionUsesDatabaseObjectTreeMode(
-  connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">,
-): boolean {
+export function connectionUsesDatabaseObjectTreeMode(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
   if (!connection) return false;
   if (connection.db_type !== "jdbc") return usesDatabaseObjectTreeMode(connection.db_type);
   const dialect = inferJdbcDialect(connection);
+  if (!dialect) return true;
   if (dialect === "hive" || dialect === "trino") return false;
-  return true;
+  if (dialect === "databend") return true;
+  return !usesTreeSchemaMode(dialect);
 }
 
-export function connectionUsesSchemaExecutionContext(
-  connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">,
-): boolean {
+export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
 }
 
-export function connectionObjectTreeQuerySchema(
-  connection:
-    | Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">
-    | undefined,
-  database: string,
-  schema?: string,
-): string {
+export function connectionObjectTreeQuerySchema(connection: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths"> | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
   return schema || database;
 }
 
-export function connectionObjectTreeNodeSchema(
-  connection:
-    | Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">
-    | undefined,
-  database: string,
-  schema?: string,
-): string | undefined {
+export function connectionObjectTreeNodeSchema(connection: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths"> | undefined, database: string, schema?: string): string | undefined {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;

@@ -10,6 +10,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { TableDiff, TableSchemaDetail } from "@/lib/schemaDiff";
 import type { TableInfo } from "@/types/database";
@@ -66,19 +67,9 @@ function toggleAll() {
   refreshSelectedSyncSql().catch((e) => toast(e?.message || String(e), 5000));
 }
 
-const sqlConnections = computed(() =>
-  store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(c.db_type)),
-);
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(c.db_type)));
 
-const canCompare = computed(
-  () =>
-    sourceConnectionId.value &&
-    sourceDatabase.value &&
-    sourceSchema.value &&
-    targetConnectionId.value &&
-    targetDatabase.value &&
-    targetSchema.value,
-);
+const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && targetConnectionId.value && targetDatabase.value && targetSchema.value);
 
 function connectionIconType(connectionId: string) {
   const config = store.getConfig(connectionId);
@@ -110,7 +101,10 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
   try {
     await store.ensureConnected(connectionId);
     const dbs = await api.listDatabases(connectionId);
-    const names = dbs.map((d) => d.name);
+    const names = databaseOptionsForConnection(
+      dbs.map((d) => d.name),
+      store.getConfig(connectionId),
+    );
     if (side === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -147,12 +141,7 @@ async function loadSchemas(side: "source" | "target", preferredSchema = "") {
   }
 
   const schemas = await api.listSchemas(connectionId, database);
-  const selected =
-    preferredSchema && schemas.includes(preferredSchema)
-      ? preferredSchema
-      : schemas.includes("public")
-        ? "public"
-        : (schemas[0] ?? "");
+  const selected = preferredSchema && schemas.includes(preferredSchema) ? preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
   if (side === "source") {
     sourceSchemas.value = schemas;
     sourceSchema.value = selected;
@@ -173,10 +162,7 @@ async function startCompare() {
     await store.ensureConnected(targetConnectionId.value);
     const targetConfig = store.getConfig(targetConnectionId.value);
 
-    const [srcTables, tgtTables] = await Promise.all([
-      api.listTables(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value),
-      api.listTables(targetConnectionId.value, targetDatabase.value, targetSchema.value),
-    ]);
+    const [srcTables, tgtTables] = await Promise.all([api.listTables(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value), api.listTables(targetConnectionId.value, targetDatabase.value, targetSchema.value)]);
 
     const { sourceDetails, targetDetails } = await loadSchemaDiffDetails(srcTables, tgtTables);
     const result = await api.prepareSchemaDiff({
@@ -375,10 +361,7 @@ watch(
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent
-      class="min-w-[min(720px,calc(100vw-2rem))] resize-x sm:max-w-5xl max-h-[80vh] flex flex-col overflow-hidden"
-      @interact-outside.prevent
-    >
+    <DialogContent class="min-w-[min(720px,calc(100vw-2rem))] resize-x sm:max-w-5xl max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <GitCompareArrows class="w-4 h-4" />
@@ -391,17 +374,10 @@ watch(
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.source") }}</Label>
-            <Select
-              :model-value="sourceConnectionId"
-              @update:model-value="(v: any) => (sourceConnectionId = String(v))"
-            >
+            <Select :model-value="sourceConnectionId" @update:model-value="(v: any) => (sourceConnectionId = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <div class="flex items-center gap-2">
-                  <DatabaseIcon
-                    v-if="sourceConnectionId"
-                    :db-type="connectionIconType(sourceConnectionId)"
-                    class="w-3.5 h-3.5"
-                  />
+                  <DatabaseIcon v-if="sourceConnectionId" :db-type="connectionIconType(sourceConnectionId)" class="w-3.5 h-3.5" />
                   <SelectValue :placeholder="t('diff.selectConnection')" />
                 </div>
               </SelectTrigger>
@@ -414,11 +390,7 @@ watch(
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Select
-              v-if="sourceDatabases.length"
-              :model-value="sourceDatabase"
-              @update:model-value="(v: any) => (sourceDatabase = String(v))"
-            >
+            <Select v-if="sourceDatabases.length" :model-value="sourceDatabase" @update:model-value="(v: any) => (sourceDatabase = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <SelectValue :placeholder="t('diff.selectDatabase')" />
               </SelectTrigger>
@@ -426,11 +398,7 @@ watch(
                 <SelectItem v-for="db in sourceDatabases" :key="db" :value="db">{{ db }}</SelectItem>
               </SelectContent>
             </Select>
-            <Select
-              v-if="sourceSchemas.length"
-              :model-value="sourceSchema"
-              @update:model-value="(v: any) => (sourceSchema = String(v))"
-            >
+            <Select v-if="sourceSchemas.length" :model-value="sourceSchema" @update:model-value="(v: any) => (sourceSchema = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <SelectValue :placeholder="t('diff.selectSchema')" />
               </SelectTrigger>
@@ -448,17 +416,10 @@ watch(
 
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.target") }}</Label>
-            <Select
-              :model-value="targetConnectionId"
-              @update:model-value="(v: any) => (targetConnectionId = String(v))"
-            >
+            <Select :model-value="targetConnectionId" @update:model-value="(v: any) => (targetConnectionId = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <div class="flex items-center gap-2">
-                  <DatabaseIcon
-                    v-if="targetConnectionId"
-                    :db-type="connectionIconType(targetConnectionId)"
-                    class="w-3.5 h-3.5"
-                  />
+                  <DatabaseIcon v-if="targetConnectionId" :db-type="connectionIconType(targetConnectionId)" class="w-3.5 h-3.5" />
                   <SelectValue :placeholder="t('diff.selectConnection')" />
                 </div>
               </SelectTrigger>
@@ -471,11 +432,7 @@ watch(
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Select
-              v-if="targetDatabases.length"
-              :model-value="targetDatabase"
-              @update:model-value="(v: any) => (targetDatabase = String(v))"
-            >
+            <Select v-if="targetDatabases.length" :model-value="targetDatabase" @update:model-value="(v: any) => (targetDatabase = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <SelectValue :placeholder="t('diff.selectDatabase')" />
               </SelectTrigger>
@@ -483,11 +440,7 @@ watch(
                 <SelectItem v-for="db in targetDatabases" :key="db" :value="db">{{ db }}</SelectItem>
               </SelectContent>
             </Select>
-            <Select
-              v-if="targetSchemas.length"
-              :model-value="targetSchema"
-              @update:model-value="(v: any) => (targetSchema = String(v))"
-            >
+            <Select v-if="targetSchemas.length" :model-value="targetSchema" @update:model-value="(v: any) => (targetSchema = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <SelectValue :placeholder="t('diff.selectSchema')" />
               </SelectTrigger>
@@ -525,13 +478,7 @@ watch(
                   <thead class="bg-muted sticky top-0 z-10">
                     <tr>
                       <th class="px-2 py-2 w-8">
-                        <input
-                          type="checkbox"
-                          class="accent-primary"
-                          :checked="allSelected"
-                          :indeterminate="someSelected"
-                          @change="toggleAll"
-                        />
+                        <input type="checkbox" class="accent-primary" :checked="allSelected" :indeterminate="someSelected" @change="toggleAll" />
                       </th>
                       <th class="text-left px-3 py-2 font-medium w-1/4">{{ t("diff.table") }}</th>
                       <th class="text-left px-3 py-2 font-medium w-16">{{ t("diff.status") }}</th>
@@ -541,12 +488,7 @@ watch(
                   <tbody>
                     <tr v-for="d in diffs" :key="d.name" class="border-t border-border/50 hover:bg-accent/30">
                       <td class="px-2 py-1.5">
-                        <input
-                          v-model="d.selected"
-                          type="checkbox"
-                          class="accent-primary"
-                          @change="onDiffSelectionChange"
-                        />
+                        <input v-model="d.selected" type="checkbox" class="accent-primary" @change="onDiffSelectionChange" />
                       </td>
                       <td class="px-3 py-1.5 font-mono truncate">{{ d.name }}</td>
                       <td class="px-3 py-1.5">
@@ -608,17 +550,13 @@ watch(
                                 'text-red-500': trigger.type === 'removed',
                                 'text-yellow-500': trigger.type === 'modified',
                               }"
-                              >{{ trigger.type === "added" ? "+" : trigger.type === "removed" ? "-" : "~"
-                              }}{{ trigger.name }}</span
+                              >{{ trigger.type === "added" ? "+" : trigger.type === "removed" ? "-" : "~" }}{{ trigger.name }}</span
                             >
                             <span v-if="ti < d.triggers!.length - 1">, </span>
                           </span>
                         </template>
                         <template v-if="d.type === 'modified' && d.sourceTableComment !== undefined">
-                          <span
-                            v-if="d.columns?.length || d.indexes?.length || d.foreignKeys?.length || d.triggers?.length"
-                            >;
-                          </span>
+                          <span v-if="d.columns?.length || d.indexes?.length || d.foreignKeys?.length || d.triggers?.length">; </span>
                           <span>{{ t("diff.comments") }}</span>
                         </template>
                         <span v-else-if="d.type === 'added'" class="text-green-500">{{ t("diff.newTable") }}</span>
@@ -633,10 +571,7 @@ watch(
             <!-- SQL Preview -->
             <div class="space-y-1">
               <Label class="text-xs font-medium">{{ t("diff.generatedSql") }}</Label>
-              <pre
-                class="w-full h-48 overflow-auto rounded-lg border bg-muted/20 p-3 font-mono text-xs whitespace-pre"
-                v-html="highlightedSyncSql"
-              ></pre>
+              <pre class="w-full h-48 overflow-auto rounded-lg border bg-muted/20 p-3 font-mono text-xs whitespace-pre" v-html="highlightedSyncSql"></pre>
             </div>
 
             <!-- Sync Errors -->
@@ -647,9 +582,7 @@ watch(
               <div class="max-h-32 overflow-auto border rounded-lg bg-destructive/5 p-2 space-y-1">
                 <div v-for="(err, i) in syncErrors" :key="i" class="text-xs font-mono">
                   <span class="text-destructive">{{ err.error }}</span>
-                  <span class="text-muted-foreground ml-1"
-                    >— {{ err.sql.slice(0, 80) }}{{ err.sql.length > 80 ? "..." : "" }}</span
-                  >
+                  <span class="text-muted-foreground ml-1">— {{ err.sql.slice(0, 80) }}{{ err.sql.length > 80 ? "..." : "" }}</span>
                 </div>
               </div>
             </div>
@@ -670,9 +603,7 @@ watch(
         <span v-if="executing" class="text-xs text-muted-foreground mr-auto">
           {{ t("diff.syncProgress", { current: executedCount, total: executeTotal }) }}
         </span>
-        <Button variant="outline" size="sm" @click="copySql">
-          <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }}
-        </Button>
+        <Button variant="outline" size="sm" @click="copySql"> <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }} </Button>
         <Button size="sm" :disabled="!syncSql.trim() || executing" @click="executeSql">
           <Loader2 v-if="executing" class="w-3 h-3 animate-spin mr-1" />
           <Play v-else class="w-3 h-3 mr-1" />

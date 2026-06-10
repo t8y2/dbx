@@ -39,10 +39,7 @@ test("does not synthesize ROWID for non-Oracle keyless tables", () => {
 });
 
 test("uses tbname and timestamp as TDengine editable keys", () => {
-  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [
-    DBX_TDENGINE_TBNAME_COLUMN,
-    "ts",
-  ]);
+  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
 });
 
 test("allows updateable SQL table data editing even without declared primary keys", () => {
@@ -116,12 +113,7 @@ test("keeps TDengine existing row identity and tag columns read-only", () => {
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "ts", [column("ts", true)]), true);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [column("location")]), false);
   assert.equal(isTdengineExistingRowReadonlyColumn("mysql", "ts", [column("ts", true)]), false);
-  assert.equal(
-    isTdengineExistingRowReadonlyColumn("tdengine", "location", [
-      { ...column("location"), extra: "TAG", comment: "TAG" },
-    ]),
-    true,
-  );
+  assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [{ ...column("location"), extra: "TAG", comment: "TAG" }]), true);
 });
 
 test("detects the synthetic Oracle ROWID key case", () => {

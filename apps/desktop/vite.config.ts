@@ -6,15 +6,7 @@ import path from "path";
 const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
 const manualChunks: Record<string, string[]> = {
-  codemirror: [
-    "codemirror",
-    "@codemirror/lang-sql",
-    "@codemirror/view",
-    "@codemirror/state",
-    "@codemirror/autocomplete",
-    "@codemirror/commands",
-    "@codemirror/theme-one-dark",
-  ],
+  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/theme-one-dark"],
   "vue-echarts": ["vue-echarts"],
   ui: ["reka-ui"],
   marked: ["marked"],

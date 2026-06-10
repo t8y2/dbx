@@ -79,16 +79,16 @@ See the [DBX CLI README](../cli/README.md) for command details.
 
 ## Tools
 
-| Tool | Description |
-|---|---|
-| `dbx_list_connections` | List all database connections configured in DBX |
-| `dbx_add_connection` | Add a new database connection |
-| `dbx_remove_connection` | Remove a database connection |
-| `dbx_list_tables` | List tables and views for a connection |
-| `dbx_describe_table` | Get column definitions for a table |
+| Tool                     | Description                                          |
+| ------------------------ | ---------------------------------------------------- |
+| `dbx_list_connections`   | List all database connections configured in DBX      |
+| `dbx_add_connection`     | Add a new database connection                        |
+| `dbx_remove_connection`  | Remove a database connection                         |
+| `dbx_list_tables`        | List tables and views for a connection               |
+| `dbx_describe_table`     | Get column definitions for a table                   |
 | `dbx_get_schema_context` | Get compact table and column context for writing SQL |
-| `dbx_execute_query` | Execute a SQL query (max 100 rows) |
-| `dbx_open_table` | Open a table in DBX desktop app UI |
+| `dbx_execute_query`      | Execute a SQL query (max 100 rows)                   |
+| `dbx_open_table`         | Open a table in DBX desktop app UI                   |
 
 ## SQL Safety
 
@@ -202,16 +202,16 @@ dbx query local "select 1" --json
 
 ### 工具列表
 
-| 工具 | 说明 |
-|---|---|
-| `dbx_list_connections` | 列出 DBX 中所有已配置的数据库连接 |
-| `dbx_add_connection` | 添加新的数据库连接 |
-| `dbx_remove_connection` | 删除数据库连接 |
-| `dbx_list_tables` | 列出指定连接的表和视图 |
-| `dbx_describe_table` | 获取表的列定义 |
+| 工具                     | 说明                                  |
+| ------------------------ | ------------------------------------- |
+| `dbx_list_connections`   | 列出 DBX 中所有已配置的数据库连接     |
+| `dbx_add_connection`     | 添加新的数据库连接                    |
+| `dbx_remove_connection`  | 删除数据库连接                        |
+| `dbx_list_tables`        | 列出指定连接的表和视图                |
+| `dbx_describe_table`     | 获取表的列定义                        |
 | `dbx_get_schema_context` | 获取适合 AI 写 SQL 的紧凑表结构上下文 |
-| `dbx_execute_query` | 执行 SQL 查询（最多返回 100 行） |
-| `dbx_open_table` | 在 DBX 桌面端打开指定表 |
+| `dbx_execute_query`      | 执行 SQL 查询（最多返回 100 行）      |
+| `dbx_open_table`         | 在 DBX 桌面端打开指定表               |
 
 ### SQL 安全
 

@@ -83,4 +83,3 @@ test("removeConnection prunes pinned ids and persists the pruned set", async () 
     storage.restore();
   }
 });
-

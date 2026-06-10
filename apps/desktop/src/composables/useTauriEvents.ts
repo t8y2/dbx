@@ -2,12 +2,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 
-export function useTauriEvents(deps: {
-  openTableTarget: (target: NavigationTarget) => Promise<void>;
-  openSqlFilePath: (path: string) => Promise<void>;
-  openDbFilePath: (path: string) => Promise<void>;
-  openConnectionDeepLink: (url: string) => Promise<void>;
-}) {
+export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarget) => Promise<void>; openSqlFilePath: (path: string) => Promise<void>; openDbFilePath: (path: string) => Promise<void>; openConnectionDeepLink: (url: string) => Promise<void> }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const unlistenHandles: Array<() => void> = [];
@@ -23,29 +18,26 @@ export function useTauriEvents(deps: {
   function setupTauriListeners() {
     import("@tauri-apps/api/event")
       .then(({ listen }) => {
-        listen<{ connection_id: string; database: string; schema?: string; table: string }>(
-          "mcp-open-table",
-          async (event) => {
-            try {
-              const { connection_id, database, schema, table } = event.payload;
-              if (!connectionStore.connections.length) await connectionStore.initFromDisk();
-              const config = connectionStore.getConfig(connection_id);
-              if (!config) return;
-              connectionStore.activeConnectionId = connection_id;
-              await connectionStore.ensureConnected(connection_id);
-              if (config.db_type === "redis") {
-                queryStore.createTab(connection_id, database || "0", `db${database || "0"}`, "redis");
-              } else if (config.db_type === "mongodb") {
-                queryStore.createTab(connection_id, database, table, "mongo");
-              } else {
-                deps.openTableTarget({ connectionId: connection_id, database, schema, tableName: table });
-              }
-              focusCurrentWindow();
-            } catch (e) {
-              console.error("[DBX] mcp-open-table error:", e);
+        listen<{ connection_id: string; database: string; schema?: string; table: string }>("mcp-open-table", async (event) => {
+          try {
+            const { connection_id, database, schema, table } = event.payload;
+            if (!connectionStore.connections.length) await connectionStore.initFromDisk();
+            const config = connectionStore.getConfig(connection_id);
+            if (!config) return;
+            connectionStore.activeConnectionId = connection_id;
+            await connectionStore.ensureConnected(connection_id);
+            if (config.db_type === "redis") {
+              queryStore.createTab(connection_id, database || "0", `db${database || "0"}`, "redis");
+            } else if (config.db_type === "mongodb") {
+              queryStore.createTab(connection_id, database, table, "mongo");
+            } else {
+              deps.openTableTarget({ connectionId: connection_id, database, schema, tableName: table });
             }
-          },
-        ).then((unlisten) => unlistenHandles.push(unlisten));
+            focusCurrentWindow();
+          } catch (e) {
+            console.error("[DBX] mcp-open-table error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
 
         listen("mcp-reload-connections", async () => {
           try {

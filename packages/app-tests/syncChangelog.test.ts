@@ -27,9 +27,7 @@ test("translateToEnglish reuses cached release translations when source hash is 
   );
   const cachedRelease = {
     ...cnJson.releases[1],
-    sections: [
-      { type: "fixed", title: "Fixed", items: [{ title: "Connection fix", desc: "Avoid duplicate connects" }] },
-    ],
+    sections: [{ type: "fixed", title: "Fixed", items: [{ title: "Connection fix", desc: "Avoid duplicate connects" }] }],
   };
   const cachedEnJson = {
     updatedAt: "2026-05-17T01:00:00.000Z",

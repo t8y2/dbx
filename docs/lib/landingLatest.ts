@@ -1,5 +1,5 @@
-import type { ChangelogRelease } from '@/lib/changelog';
-import type { LatestReleaseInfo } from '@/lib/latestRelease';
+import type { ChangelogRelease } from "@/lib/changelog";
+import type { LatestReleaseInfo } from "@/lib/latestRelease";
 
 type LandingLatestUpdates = {
   version: string;
@@ -11,31 +11,21 @@ type LandingLatestUpdates = {
 
 const text = {
   en: {
-    title: 'Latest updates',
-    desc: 'Mirrored from the latest GitHub release notes.',
-    link: 'Read the changelog',
-    fallbackItems: [
-      'Desktop and Docker release assets',
-      'Database workflow improvements',
-      'Bug fixes and reliability updates',
-      'Documentation and packaging updates',
-    ],
+    title: "Latest updates",
+    desc: "Mirrored from the latest GitHub release notes.",
+    link: "Read the changelog",
+    fallbackItems: ["Desktop and Docker release assets", "Database workflow improvements", "Bug fixes and reliability updates", "Documentation and packaging updates"],
   },
   cn: {
-    title: '最近更新',
-    desc: '同步 GitHub 最新 Release Notes。',
-    link: '查看更新日志',
-    fallbackItems: [
-      '桌面版与 Docker 发布资产',
-      '数据库工作流改进',
-      '问题修复与稳定性更新',
-      '文档与打包流程更新',
-    ],
+    title: "最近更新",
+    desc: "同步 GitHub 最新 Release Notes。",
+    link: "查看更新日志",
+    fallbackItems: ["桌面版与 Docker 发布资产", "数据库工作流改进", "问题修复与稳定性更新", "文档与打包流程更新"],
   },
 };
 
-function releaseItems(release: ChangelogRelease, lang: 'en' | 'cn') {
-  const separator = lang === 'cn' ? '，' : ': ';
+function releaseItems(release: ChangelogRelease, lang: "en" | "cn") {
+  const separator = lang === "cn" ? "，" : ": ";
 
   return release.sections
     .flatMap((section) => section.items)
@@ -43,15 +33,10 @@ function releaseItems(release: ChangelogRelease, lang: 'en' | 'cn') {
     .slice(0, 4);
 }
 
-export function buildLandingLatestUpdates(
-  lang: 'en' | 'cn',
-  release: ChangelogRelease | undefined,
-  appVersion: string,
-  latestRelease?: LatestReleaseInfo | null,
-): LandingLatestUpdates {
+export function buildLandingLatestUpdates(lang: "en" | "cn", release: ChangelogRelease | undefined, appVersion: string, latestRelease?: LatestReleaseInfo | null): LandingLatestUpdates {
   const t = text[lang];
   const items = release ? releaseItems(release, lang) : [];
-  const version = latestRelease?.version ? `v${latestRelease.version}` : release?.tag ?? `v${appVersion}`;
+  const version = latestRelease?.version ? `v${latestRelease.version}` : (release?.tag ?? `v${appVersion}`);
 
   return {
     version,

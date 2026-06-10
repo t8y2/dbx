@@ -1,28 +1,13 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  buildProcedureExecutionSql,
-  buildProcedureExecutionSqlFromValues,
-} from "../../apps/desktop/src/lib/routineExecutionSql.ts";
+import { buildProcedureExecutionSql, buildProcedureExecutionSqlFromValues } from "../../apps/desktop/src/lib/routineExecutionSql.ts";
 import { routineParametersFromResult, routineParametersQuery } from "../../apps/desktop/src/lib/routineParameters.ts";
 
 test("builds procedure execution templates for common dialect families", () => {
-  assert.equal(
-    buildProcedureExecutionSql({ databaseType: "postgres", schema: "public", routineName: "refresh_stats" }),
-    'CALL "public"."refresh_stats"();',
-  );
-  assert.equal(
-    buildProcedureExecutionSql({ databaseType: "mysql", schema: "app", routineName: "refresh_stats" }),
-    "CALL `refresh_stats`();",
-  );
-  assert.equal(
-    buildProcedureExecutionSql({ databaseType: "sqlserver", schema: "dbo", routineName: "refresh_stats" }),
-    "EXEC [dbo].[refresh_stats];",
-  );
-  assert.equal(
-    buildProcedureExecutionSql({ databaseType: "dameng", schema: "SYSDBA", routineName: "refresh_stats" }),
-    'BEGIN\n  "SYSDBA"."refresh_stats"();\nEND;',
-  );
+  assert.equal(buildProcedureExecutionSql({ databaseType: "postgres", schema: "public", routineName: "refresh_stats" }), 'CALL "public"."refresh_stats"();');
+  assert.equal(buildProcedureExecutionSql({ databaseType: "mysql", schema: "app", routineName: "refresh_stats" }), "CALL `refresh_stats`();");
+  assert.equal(buildProcedureExecutionSql({ databaseType: "sqlserver", schema: "dbo", routineName: "refresh_stats" }), "EXEC [dbo].[refresh_stats];");
+  assert.equal(buildProcedureExecutionSql({ databaseType: "dameng", schema: "SYSDBA", routineName: "refresh_stats" }), 'BEGIN\n  "SYSDBA"."refresh_stats"();\nEND;');
 });
 
 test("builds procedure execution templates from parameter values", () => {
@@ -138,24 +123,9 @@ test("maps routine parameter query results into form metadata", () => {
 });
 
 test("builds parameter metadata queries for supported dialects", () => {
-  assert.match(
-    routineParametersQuery({ database: "app", databaseType: "postgres", schema: "public", routineName: "demo" }) ?? "",
-    /pg_proc/,
-  );
-  assert.match(
-    routineParametersQuery({ database: "app", databaseType: "sqlserver", schema: "dbo", routineName: "demo" }) ?? "",
-    /sys\.parameters/,
-  );
-  assert.match(
-    routineParametersQuery({ database: "app", databaseType: "mysql", routineName: "demo" }) ?? "",
-    /SPECIFIC_SCHEMA = 'app'/,
-  );
-  assert.match(
-    routineParametersQuery({ database: "app", databaseType: "postgres", routineName: "demo" }) ?? "",
-    /n\.nspname = 'public'/,
-  );
-  assert.equal(
-    routineParametersQuery({ database: "app", databaseType: "sqlite", schema: "main", routineName: "demo" }),
-    null,
-  );
+  assert.match(routineParametersQuery({ database: "app", databaseType: "postgres", schema: "public", routineName: "demo" }) ?? "", /pg_proc/);
+  assert.match(routineParametersQuery({ database: "app", databaseType: "sqlserver", schema: "dbo", routineName: "demo" }) ?? "", /sys\.parameters/);
+  assert.match(routineParametersQuery({ database: "app", databaseType: "mysql", routineName: "demo" }) ?? "", /SPECIFIC_SCHEMA = 'app'/);
+  assert.match(routineParametersQuery({ database: "app", databaseType: "postgres", routineName: "demo" }) ?? "", /n\.nspname = 'public'/);
+  assert.equal(routineParametersQuery({ database: "app", databaseType: "sqlite", schema: "main", routineName: "demo" }), null);
 });

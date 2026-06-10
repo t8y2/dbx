@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  canEditTableStructure,
-  getTableStructureCapabilities,
-} from "../../apps/desktop/src/lib/tableStructureCapabilities.ts";
+import { canEditTableStructure, getTableStructureCapabilities } from "../../apps/desktop/src/lib/tableStructureCapabilities.ts";
 
 test("sqlite-family and duckdb do not support table comments", () => {
   for (const dbType of ["sqlite", "rqlite", "duckdb"] as const) {

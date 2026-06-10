@@ -23,6 +23,7 @@ pub mod jdbc;
 pub mod models;
 pub mod mongo_ops;
 pub mod object_source_sql;
+pub mod path_utils;
 pub mod plugins;
 pub mod query;
 pub mod query_cancel;

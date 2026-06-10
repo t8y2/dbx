@@ -5,10 +5,7 @@ import { qualifiedTableName, quoteTableIdentifier } from "../../apps/desktop/src
 test("JDBC table identifiers avoid double quotes for Kyuubi-compatible names", () => {
   assert.equal(quoteTableIdentifier("jdbc", "cbsdw_dwd"), "cbsdw_dwd");
   assert.equal(quoteTableIdentifier("jdbc", "dwd_test_df"), "dwd_test_df");
-  assert.equal(
-    qualifiedTableName({ databaseType: "jdbc", schema: "cbsdw_dwd", tableName: "dwd_test_df" }),
-    "dwd_test_df",
-  );
+  assert.equal(qualifiedTableName({ databaseType: "jdbc", schema: "cbsdw_dwd", tableName: "dwd_test_df" }), "dwd_test_df");
 });
 
 test("JDBC table identifiers use backticks only when quoting is needed", () => {
@@ -18,12 +15,6 @@ test("JDBC table identifiers use backticks only when quoting is needed", () => {
 
 test("IoTDB table identifiers use tree paths without SQL quotes", () => {
   assert.equal(quoteTableIdentifier("iotdb", "root.test.device2"), "root.test.device2");
-  assert.equal(
-    qualifiedTableName({ databaseType: "iotdb", schema: "root.test", tableName: "device2" }),
-    "root.test.device2",
-  );
-  assert.equal(
-    qualifiedTableName({ databaseType: "iotdb", schema: "root.test", tableName: "root.test.device2" }),
-    "root.test.device2",
-  );
+  assert.equal(qualifiedTableName({ databaseType: "iotdb", schema: "root.test", tableName: "device2" }), "root.test.device2");
+  assert.equal(qualifiedTableName({ databaseType: "iotdb", schema: "root.test", tableName: "root.test.device2" }), "root.test.device2");
 });

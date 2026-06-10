@@ -73,17 +73,13 @@ class SelectionMatchScrollbar {
   private render(view: EditorView) {
     const markers = buildSelectionMatchMarkers(view.state);
     const lineCount = view.state.doc.lines;
-    const signature = markers
-      .map((marker) => `${marker.lineNumber}:${marker.from}:${marker.to}:${marker.selected}`)
-      .join("|");
+    const signature = markers.map((marker) => `${marker.lineNumber}:${marker.from}:${marker.to}:${marker.selected}`).join("|");
     if (signature === this.signature) return;
     this.signature = signature;
     this.layer.replaceChildren(
       ...markers.map((marker) => {
         const el = document.createElement("div");
-        el.className = marker.selected
-          ? "cm-selectionMatchScrollbarMark cm-selectionMatchScrollbarMark-selected"
-          : "cm-selectionMatchScrollbarMark";
+        el.className = marker.selected ? "cm-selectionMatchScrollbarMark cm-selectionMatchScrollbarMark-selected" : "cm-selectionMatchScrollbarMark";
         const ratio = lineCount <= 1 ? 0 : (marker.lineNumber - 1) / (lineCount - 1);
         el.style.top = `${Math.max(0, Math.min(1, ratio)) * 100}%`;
         return el;

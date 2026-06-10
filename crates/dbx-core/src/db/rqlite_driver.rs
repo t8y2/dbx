@@ -2,7 +2,7 @@ use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use super::with_connection_timeout;
+use super::{http_client_builder, with_connection_timeout};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
@@ -26,12 +26,9 @@ impl RqliteClient {
         tls_enabled: bool,
         timeout: Duration,
     ) -> Result<Self, String> {
-        let mut builder = HttpClient::builder().connect_timeout(timeout);
+        let mut builder = http_client_builder(timeout);
         if rqlite_accept_invalid_certs(tls_enabled, url_params) {
             builder = builder.danger_accept_invalid_certs(true);
-        }
-        if rqlite_should_bypass_system_proxy(url) {
-            builder = builder.no_proxy();
         }
         let http = builder.build().map_err(|e| format!("Failed to configure rqlite HTTP client: {e}"))?;
         let auth = if username.trim().is_empty() { None } else { Some((username.to_string(), password.to_string())) };
@@ -294,6 +291,7 @@ pub async fn execute_query_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -342,6 +340,7 @@ fn query_result_from_rqlite_result(
     QueryResult {
         columns: result.columns,
         column_types: Vec::new(),
+        column_sortables: vec![],
         rows: result.values,
         affected_rows: 0,
         execution_time_ms,
@@ -409,17 +408,6 @@ fn rqlite_accept_invalid_certs(tls_enabled: bool, url_params: Option<&str>) -> b
                 matches!(key.trim().to_ascii_lowercase().as_str(), "insecure" | "tls_insecure" | "accept_invalid_certs")
                     && matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
             })
-}
-
-fn rqlite_should_bypass_system_proxy(base_url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(base_url) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let host = host.trim_matches(['[', ']']);
-    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]

@@ -5,9 +5,7 @@ description: Trace where columns come from, how they are referenced, and which r
 
 Field Lineage helps answer a common question: where does a column's data come from, and what might depend on it? Use it to understand complex schemas, inspect impact, and read legacy structures.
 
-<Callout type="info">
-Field Lineage is enabled for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, and GaussDB. Other engines may not expose enough relationship metadata for DBX to build useful lineage.
-</Callout>
+<Callout type="info">Field Lineage is enabled for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, and GaussDB. Other engines may not expose enough relationship metadata for DBX to build useful lineage.</Callout>
 
 ## What It Helps With
 
@@ -18,16 +16,14 @@ Field Lineage is enabled for MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Reds
 
 ## Relationship Sources
 
-| Source | Confidence | Details |
-|---|---|---|
-| Foreign keys | High | Constraints declared in the database |
-| Views | High | Field mappings analyzed from view definitions |
-| Query history | Medium | Relationships inferred from executed SQL, including `JOIN` and `WHERE` usage |
-| Same-name columns | Low to medium | Possible relationships inferred from similar column names |
+| Source            | Confidence    | Details                                                                      |
+| ----------------- | ------------- | ---------------------------------------------------------------------------- |
+| Foreign keys      | High          | Constraints declared in the database                                         |
+| Views             | High          | Field mappings analyzed from view definitions                                |
+| Query history     | Medium        | Relationships inferred from executed SQL, including `JOIN` and `WHERE` usage |
+| Same-name columns | Low to medium | Possible relationships inferred from similar column names                    |
 
-<Callout type="info">
-Field Lineage is an analysis aid, not a strongly governed lineage platform. For critical decisions, confirm results with database constraints, view definitions, and application code.
-</Callout>
+<Callout type="info">Field Lineage is an analysis aid, not a strongly governed lineage platform. For critical decisions, confirm results with database constraints, view definitions, and application code.</Callout>
 
 ## Navigation
 

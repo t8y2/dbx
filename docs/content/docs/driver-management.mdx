@@ -7,14 +7,12 @@ DBX uses a hybrid driver architecture: built-in native drivers for common databa
 
 ## Driver Architecture
 
-| Driver Type | How It Works | Best For |
-|---|---|---|
-| Native (built-in) | Rust drivers compiled into DBX | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redis, MongoDB, DuckDB, ClickHouse, and more |
-| JDBC Agent | Java subprocess managed by DBX | Databases that provide JDBC drivers: GaussDB, openGauss, DM, KingBase, HighGo, Vastbase, Trino, Hive, DB2, Informix, Neo4j, TDengine, XuguDB, YashanDB, GoldenDB, Kylin, SunDB, and more |
+| Driver Type       | How It Works                   | Best For                                                                                                                                                                                 |
+| ----------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Native (built-in) | Rust drivers compiled into DBX | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redis, MongoDB, DuckDB, ClickHouse, and more                                                                                              |
+| JDBC Agent        | Java subprocess managed by DBX | Databases that provide JDBC drivers: GaussDB, openGauss, DM, KingBase, HighGo, Vastbase, Trino, Hive, DB2, Informix, Neo4j, TDengine, XuguDB, YashanDB, GoldenDB, Kylin, SunDB, and more |
 
-<Callout type="info">
-Native drivers work immediately after installation. Agent drivers require a one-time JDBC driver download and JRE setup, which DBX handles automatically when you first create a connection.
-</Callout>
+<Callout type="info">Native drivers work immediately after installation. Agent drivers require a one-time JDBC driver download and JRE setup, which DBX handles automatically when you first create a connection.</Callout>
 
 ## Driver Store
 
@@ -29,22 +27,10 @@ Open the Driver Store from **Settings → Drivers** or click the driver hint tha
 ## Installing Drivers
 
 <Steps>
-  <Step>
-    ### Open Driver Store
-    Navigate to **Settings → Drivers** or click the driver install hint in the connection dialog.
-  </Step>
-  <Step>
-    ### Choose a Driver
-    Find the database driver you need. Each entry shows the supported database and driver version.
-  </Step>
-  <Step>
-    ### Click Install
-    DBX downloads the JDBC driver JAR and any required dependencies. Progress is shown during download.
-  </Step>
-  <Step>
-    ### Create a Connection
-    Return to the connection dialog. The driver is now ready for use.
-  </Step>
+  <Step>### Open Driver Store Navigate to **Settings → Drivers** or click the driver install hint in the connection dialog.</Step>
+  <Step>### Choose a Driver Find the database driver you need. Each entry shows the supported database and driver version.</Step>
+  <Step>### Click Install DBX downloads the JDBC driver JAR and any required dependencies. Progress is shown during download.</Step>
+  <Step>### Create a Connection Return to the connection dialog. The driver is now ready for use.</Step>
 </Steps>
 
 ## JRE Management
@@ -80,9 +66,9 @@ For databases supported by the [JDBC Plugin](/en/docs/plugins), DBX shows update
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---|---|
-| Driver download fails | Check network connectivity and firewall rules. Try the offline import method. |
-| Agent won't start | Verify JRE installation in Driver Store. Reinstall the managed JRE if needed. |
+| Problem                                    | Solution                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| Driver download fails                      | Check network connectivity and firewall rules. Try the offline import method.               |
+| Agent won't start                          | Verify JRE installation in Driver Store. Reinstall the managed JRE if needed.               |
 | Connection test fails after driver install | Confirm the JDBC URL format matches the driver's expected format. Check SSH/proxy settings. |
-| Wrong driver version | Uninstall the current driver and install the correct version from the store. |
+| Wrong driver version                       | Uninstall the current driver and install the correct version from the store.                |

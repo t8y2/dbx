@@ -57,6 +57,8 @@ export const closeDatabaseConnection = forward("closeDatabaseConnection");
 export const refreshConnections = forward("refreshConnections");
 export const saveConnections = forward("saveConnections");
 export const loadConnections = forward("loadConnections");
+export const readKeychainPassword = forward("readKeychainPassword");
+export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
 export const listPlugins = forward("listPlugins");
 export const listJdbcDrivers = forward("listJdbcDrivers");
@@ -89,6 +91,9 @@ export const saveSavedSqlFolder = forward("saveSavedSqlFolder");
 export const deleteSavedSqlFolder = forward("deleteSavedSqlFolder");
 export const saveSavedSqlFile = forward("saveSavedSqlFile");
 export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
+export const savedSqlStorageDir = forward("savedSqlStorageDir");
+export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
+export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
@@ -234,6 +239,9 @@ export const redisSetAdd = forward("redisSetAdd");
 export const redisSetRemove = forward("redisSetRemove");
 export const redisZadd = forward("redisZadd");
 export const redisZrem = forward("redisZrem");
+export const redisStreamAdd = forward("redisStreamAdd");
+export const redisJsonSet = forward("redisJsonSet");
+export const redisCheckJsonModule = forward("redisCheckJsonModule");
 export const redisSetTtl = forward("redisSetTtl");
 export const redisDeleteKeys = forward("redisDeleteKeys");
 export const redisFlushDb = forward("redisFlushDb");
@@ -261,7 +269,9 @@ export const mongoDeleteDocuments = forward("mongoDeleteDocuments");
 // History
 export const saveHistory = forward("saveHistory");
 export const loadHistory = forward("loadHistory");
+export const loadRedisHistory = forward("loadRedisHistory");
 export const clearHistory = forward("clearHistory");
+export const clearRedisHistory = forward("clearRedisHistory");
 export const deleteHistoryEntry = forward("deleteHistoryEntry");
 
 // Updates

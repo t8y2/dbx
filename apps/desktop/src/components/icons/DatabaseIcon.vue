@@ -12,6 +12,7 @@ const assetIcons: Record<string, string> = {
   postgresql: "postgres",
   sqlite: "sqlite",
   rqlite: "rqlite.png",
+  turso: "turso.png",
   redis: "redis",
   mongodb: "mongodb",
   clickhouse: "clickhouse",
@@ -72,6 +73,7 @@ const assetIcons: Record<string, string> = {
   iotdb: "iotdb",
   etcd: "etcd",
   iris: "iris.png",
+  influxdb: "influxdb",
 };
 
 const letterIcons: Record<string, { letter: string; color: string }> = {};
@@ -80,9 +82,7 @@ const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+
 const assetName = computed(() => assetIcons[normalizedType.value]);
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
-  return assetName.value.includes(".")
-    ? `/icons/database/${assetName.value}`
-    : `/icons/database/${assetName.value}.svg`;
+  return assetName.value.includes(".") ? `/icons/database/${assetName.value}` : `/icons/database/${assetName.value}.svg`;
 });
 const letter = computed(() => letterIcons[normalizedType.value]);
 </script>
@@ -91,15 +91,7 @@ const letter = computed(() => letterIcons[normalizedType.value]);
   <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" aria-hidden="true" />
   <svg v-else-if="letter" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
     <circle cx="12" cy="12" r="12" :fill="letter.color" />
-    <text
-      x="12"
-      y="16.5"
-      text-anchor="middle"
-      fill="white"
-      font-size="14"
-      font-weight="bold"
-      font-family="system-ui, sans-serif"
-    >
+    <text x="12" y="16.5" text-anchor="middle" fill="white" font-size="14" font-weight="bold" font-family="system-ui, sans-serif">
       {{ letter.letter }}
     </text>
   </svg>

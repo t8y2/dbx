@@ -56,26 +56,12 @@ export function filterDiagramTables(tables: DiagramTable[], query: string): Diag
 
   return tables.filter((table) => {
     if (table.name.toLowerCase().includes(q)) return true;
-    if (
-      table.columns.some(
-        (column) => column.name.toLowerCase().includes(q) || column.data_type.toLowerCase().includes(q),
-      )
-    )
-      return true;
-    return table.foreignKeys.some(
-      (fk) =>
-        fk.name.toLowerCase().includes(q) ||
-        fk.column.toLowerCase().includes(q) ||
-        fk.ref_table.toLowerCase().includes(q) ||
-        fk.ref_column.toLowerCase().includes(q),
-    );
+    if (table.columns.some((column) => column.name.toLowerCase().includes(q) || column.data_type.toLowerCase().includes(q))) return true;
+    return table.foreignKeys.some((fk) => fk.name.toLowerCase().includes(q) || fk.column.toLowerCase().includes(q) || fk.ref_table.toLowerCase().includes(q) || fk.ref_column.toLowerCase().includes(q));
   });
 }
 
-export function layoutDiagramTables(
-  tables: Pick<DiagramTable, "name" | "columns">[],
-  options: DiagramLayoutOptions = {},
-): Record<string, DiagramPosition> {
+export function layoutDiagramTables(tables: Pick<DiagramTable, "name" | "columns">[], options: DiagramLayoutOptions = {}): Record<string, DiagramPosition> {
   const columnsPerRow = Math.max(1, options.columnsPerRow ?? Math.ceil(Math.sqrt(Math.max(tables.length, 1))));
   const cardWidth = options.cardWidth ?? 260;
   const rowHeight = options.rowHeight ?? 220;

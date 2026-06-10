@@ -178,6 +178,7 @@ pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpor
 }
 
 pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     let items = match value {
         serde_json::Value::Array(items) => items,
@@ -597,6 +598,15 @@ mod tests {
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada"), serde_json::Value::Null,]);
         assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::Value::Null, serde_json::json!(true),]);
+    }
+
+    #[test]
+    fn parses_json_with_utf8_bom() {
+        let parsed = parse_json_bytes(b"\xEF\xBB\xBF[{\"id\":1,\"name\":\"Ada\"}]", 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.total_rows, 1);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
     }
 
     #[test]

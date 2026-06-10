@@ -3,12 +3,27 @@ import { test } from "vitest";
 import { shouldDeleteHistoryEntry, shouldClearHistory } from "../../apps/desktop/src/lib/historyActions.ts";
 
 test("requires confirmation before deleting history entries", () => {
-  assert.equal(shouldDeleteHistoryEntry(() => false), false);
-  assert.equal(shouldDeleteHistoryEntry(() => true), true);
+  assert.equal(
+    shouldDeleteHistoryEntry(() => false),
+    false,
+  );
+  assert.equal(
+    shouldDeleteHistoryEntry(() => true),
+    true,
+  );
 });
 
 test("requires existing entries and confirmation before clearing history", () => {
-  assert.equal(shouldClearHistory(0, () => true), false);
-  assert.equal(shouldClearHistory(2, () => false), false);
-  assert.equal(shouldClearHistory(2, () => true), true);
+  assert.equal(
+    shouldClearHistory(0, () => true),
+    false,
+  );
+  assert.equal(
+    shouldClearHistory(2, () => false),
+    false,
+  );
+  assert.equal(
+    shouldClearHistory(2, () => true),
+    true,
+  );
 });

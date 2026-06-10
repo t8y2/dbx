@@ -1,10 +1,6 @@
 import { ref, computed, type ComputedRef, type Ref } from "vue";
 import { useElementSize } from "@vueuse/core";
-import {
-  calculateDataGridColumnWidth,
-  DATA_GRID_COL_MIN_WIDTH,
-  DATA_GRID_SAMPLE_ROWS,
-} from "@/lib/dataGridColumnWidth";
+import { calculateDataGridColumnWidth, DATA_GRID_COL_MIN_WIDTH, DATA_GRID_SAMPLE_ROWS } from "@/lib/dataGridColumnWidth";
 
 type CellValue = string | number | boolean | null;
 

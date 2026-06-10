@@ -366,7 +366,9 @@ function resolveTimeoutMs(options?: QueryOptions): number {
 function convertBridgeQueryResult(result: BridgeQueryResult, options?: QueryOptions): QueryResult {
   const rows = result.rows.slice(0, resolveMaxRows(options)).map((row) => {
     const obj: Record<string, unknown> = {};
-    result.columns.forEach((col, i) => { obj[col] = row[i]; });
+    result.columns.forEach((col, i) => {
+      obj[col] = row[i];
+    });
     return obj;
   });
   return { columns: result.columns, rows, row_count: rows.length };
@@ -397,21 +399,29 @@ async function queryWithRetry(config: ConnectionConfig, fn: () => Promise<QueryR
 }
 
 async function pgQuery(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
-  return queryWithRetry(config, async () => {
-    const pool = await getPgPool(config);
-    const result = await pool.query(sql, params);
-    const rows = (result.rows || []).slice(0, resolveMaxRows(options));
-    return { columns: result.fields?.map((f) => f.name) ?? [], rows, row_count: rows.length };
-  }, options);
+  return queryWithRetry(
+    config,
+    async () => {
+      const pool = await getPgPool(config);
+      const result = await pool.query(sql, params);
+      const rows = (result.rows || []).slice(0, resolveMaxRows(options));
+      return { columns: result.fields?.map((f) => f.name) ?? [], rows, row_count: rows.length };
+    },
+    options,
+  );
 }
 
 async function mysqlQuery(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
-  return queryWithRetry(config, async () => {
-    const pool = await getMysqlPool(config);
-    const [results, fields] = await pool.query(sql, params);
-    const rows = (Array.isArray(results) ? results : []).slice(0, resolveMaxRows(options)) as Record<string, unknown>[];
-    return { columns: (fields as Array<{ name: string }>)?.map((f) => f.name) ?? [], rows, row_count: rows.length };
-  }, options);
+  return queryWithRetry(
+    config,
+    async () => {
+      const pool = await getMysqlPool(config);
+      const [results, fields] = await pool.query(sql, params);
+      const rows = (Array.isArray(results) ? results : []).slice(0, resolveMaxRows(options)) as Record<string, unknown>[];
+      return { columns: (fields as Array<{ name: string }>)?.map((f) => f.name) ?? [], rows, row_count: rows.length };
+    },
+    options,
+  );
 }
 
 async function query(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
@@ -507,18 +517,12 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     if (aggregate) {
       const safety = evaluateMongoAggregateSafety(aggregate, sqlSafetyFromEnv());
       if (!safety.allowed) throw new Error(safety.reason);
-      const result = await withTimeout(
-        mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)),
-        resolveTimeoutMs(options),
-      );
+      const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
     const getIndexes = parseMongoGetIndexesCommand(sql);
     if (getIndexes) {
-      const result = await withTimeout(
-        mongoAggregateDocuments(config, getIndexes.collection, '[{"$indexStats":{}}]', resolveMaxRows(options)),
-        resolveTimeoutMs(options),
-      );
+      const result = await withTimeout(mongoAggregateDocuments(config, getIndexes.collection, '[{"$indexStats":{}}]', resolveMaxRows(options)), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
     const write = parseMongoWriteCommand(sql);
@@ -528,18 +532,19 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       const affected = await withTimeout(executeMongoWrite(config, write), resolveTimeoutMs(options));
       return { columns: [], rows: [], row_count: affected };
     }
-    throw new Error(
-      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
-    );
+    throw new Error("Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})");
   }
   if (isDirectQueryType(config.db_type)) {
     return query(config, sql, undefined, options);
   }
-  const result = await withTimeout(bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
-    connection_name: config.name,
-    database: config.database || "",
-    sql,
-  }), resolveTimeoutMs(options));
+  const result = await withTimeout(
+    bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+      connection_name: config.name,
+      database: config.database || "",
+      sql,
+    }),
+    resolveTimeoutMs(options),
+  );
   return convertBridgeQueryResult(result, options);
 }
 
@@ -553,10 +558,7 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
     return collections.map((name) => ({ name, type: "COLLECTION" }));
   }
   if (config.db_type === "sqlite" || config.db_type === "rqlite") {
-    const result = await query(
-      config,
-      `SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name`,
-    );
+    const result = await query(config, `SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name`);
     return result.rows.map((r) => ({ name: String(r.name || ""), type: String(r.type || "table") }));
   }
   if (!isDirectQueryType(config.db_type)) {
@@ -571,11 +573,7 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
   if (isMysqlType(config.db_type)) {
     result = await query(config, `SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`);
   } else {
-    result = await query(
-      config,
-      `SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`,
-      [schema || "public"],
-    );
+    result = await query(config, `SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`, [schema || "public"]);
   }
   return result.rows.map((r) => ({ name: String(r.name || r.NAME), type: String(r.type || r.TYPE || "TABLE") }));
 }
@@ -636,14 +634,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
   }));
 }
 
-async function mongoFindDocuments(
-  config: ConnectionConfig,
-  collection: string,
-  skip: number,
-  limit: number,
-  filter: string,
-  sort?: string,
-): Promise<MongoDocumentResult> {
+async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, sort?: string): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/find-documents", {
     connection_name: config.name,
     database: config.database || "",
@@ -686,12 +677,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
   return result.affected_rows;
 }
 
-async function mongoAggregateDocuments(
-  config: ConnectionConfig,
-  collection: string,
-  pipelineJson: string,
-  maxRows: number,
-): Promise<MongoDocumentResult> {
+async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/aggregate-documents", {
     connection_name: config.name,
     database: config.database || "",
@@ -770,10 +756,7 @@ interface MongoGetIndexesCommand {
   collection: string;
 }
 
-export type MongoWriteCommand =
-  | { kind: "insert"; collection: string; docsJson: string }
-  | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
-  | { kind: "delete"; collection: string; filter: string; many: boolean };
+export type MongoWriteCommand = { kind: "insert"; collection: string; docsJson: string } | { kind: "update"; collection: string; filter: string; update: string; many: boolean } | { kind: "delete"; collection: string; filter: string; many: boolean };
 
 export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
@@ -891,10 +874,7 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
   return null;
 }
 
-export function evaluateMongoWriteSafety(
-  command: MongoWriteCommand,
-  options: { allowWrites?: boolean; allowDangerous?: boolean },
-): { allowed: boolean; reason?: string } {
+export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: { allowWrites?: boolean; allowDangerous?: boolean }): { allowed: boolean; reason?: string } {
   if (!options.allowWrites) {
     return {
       allowed: false,
@@ -910,10 +890,7 @@ export function evaluateMongoWriteSafety(
   return { allowed: true };
 }
 
-export function evaluateMongoAggregateSafety(
-  command: MongoAggregateCommand,
-  options: { allowWrites?: boolean; allowDangerous?: boolean },
-): { allowed: boolean; reason?: string } {
+export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, options: { allowWrites?: boolean; allowDangerous?: boolean }): { allowed: boolean; reason?: string } {
   const writeStage = mongoAggregateWriteStage(command.pipeline);
   if (!writeStage) return { allowed: true };
   if (!options.allowWrites) {
@@ -963,9 +940,7 @@ function readChainedIntegerArgument(chain: string, method: string, fallback: num
 }
 
 function normalizeJsonArgument(arg: string): string | null {
-  const value = quoteUnquotedObjectKeys(
-    convertSingleQuotedStrings((arg.trim() || "{}").replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')),
-  );
+  const value = quoteUnquotedObjectKeys(convertSingleQuotedStrings((arg.trim() || "{}").replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
   try {
     JSON.parse(value);
     return value;

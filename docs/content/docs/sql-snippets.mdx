@@ -15,20 +15,9 @@ SQL Snippets let you define reusable SQL templates that expand automatically whe
 ## Creating A Snippet
 
 <Steps>
-  <Step>
-    ### Open Snippet Settings
-    Go to **Settings → SQL Snippets**.
-  </Step>
-  <Step>
-    ### Add a New Snippet
-    Click **Add Snippet** and fill in:
-    - **Trigger**: a short key you type in the editor (e.g., `selall`, `joinex`)
-    - **Template**: the SQL text that replaces the trigger
-  </Step>
-  <Step>
-    ### Use the Snippet
-    In the SQL editor, type the trigger key and press `Tab` or select it from the autocomplete list. The template expands in place.
-  </Step>
+  <Step>### Open Snippet Settings Go to **Settings → SQL Snippets**.</Step>
+  <Step>### Add a New Snippet Click **Add Snippet** and fill in: - **Trigger**: a short key you type in the editor (e.g., `selall`, `joinex`) - **Template**: the SQL text that replaces the trigger</Step>
+  <Step>### Use the Snippet In the SQL editor, type the trigger key and press `Tab` or select it from the autocomplete list. The template expands in place.</Step>
 </Steps>
 
 ## Example Snippets
@@ -36,6 +25,7 @@ SQL Snippets let you define reusable SQL templates that expand automatically whe
 Here are some useful snippet templates to get started:
 
 **SELECT with common clauses:**
+
 ```sql
 SELECT ${1:columns}
 FROM ${2:table}
@@ -44,11 +34,13 @@ ORDER BY ${4:column}
 ```
 
 **LEFT JOIN pattern:**
+
 ```sql
 LEFT JOIN ${1:table} ON ${2:left_alias}.${3:column} = ${4:right_alias}.${5:column}
 ```
 
 **COUNT with GROUP BY:**
+
 ```sql
 SELECT ${1:column}, COUNT(*) AS cnt
 FROM ${2:table}
@@ -58,6 +50,7 @@ ORDER BY cnt DESC
 ```
 
 **CREATE TABLE template:**
+
 ```sql
 CREATE TABLE ${1:table_name} (
     ${2:id} INTEGER PRIMARY KEY,

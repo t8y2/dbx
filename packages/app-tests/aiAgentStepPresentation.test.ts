@@ -70,12 +70,7 @@ test("presents blocked and confirmation plans with warning tones", () => {
     buildAiAgentStepItems(blocked).map((item) => [item.labelKey, item.tone, item.titleKey, item.titleParams]),
     [
       ["ai.agentSteps.generated", "success", undefined, undefined],
-      [
-        "ai.agentSteps.blocked",
-        "danger",
-        "ai.agentStepTitles.riskCheck",
-        { action: "block", category: "dangerous", environment: "non_production", reasons: "-" },
-      ],
+      ["ai.agentSteps.blocked", "danger", "ai.agentStepTitles.riskCheck", { action: "block", category: "dangerous", environment: "non_production", reasons: "-" }],
       ["ai.agentSteps.skipped", "muted", "ai.agentStepTitles.blocked", undefined],
     ],
   );
@@ -83,12 +78,7 @@ test("presents blocked and confirmation plans with warning tones", () => {
     buildAiAgentStepItems(confirm).map((item) => [item.labelKey, item.tone, item.titleKey, item.titleParams]),
     [
       ["ai.agentSteps.generated", "success", undefined, undefined],
-      [
-        "ai.agentSteps.needsConfirm",
-        "warning",
-        "ai.agentStepTitles.riskCheck",
-        { action: "confirm", category: "low_risk_write", environment: "production", reasons: "-" },
-      ],
+      ["ai.agentSteps.needsConfirm", "warning", "ai.agentStepTitles.riskCheck", { action: "confirm", category: "low_risk_write", environment: "production", reasons: "-" }],
       ["ai.agentSteps.skipped", "muted", "ai.agentStepTitles.requiresConfirmation", undefined],
     ],
   );

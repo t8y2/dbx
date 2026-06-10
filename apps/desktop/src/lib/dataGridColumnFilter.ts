@@ -3,12 +3,7 @@ import type { DataGridColumnInfo, DataGridContextFilterMode, GridCellValue } fro
 import { buildDataGridColumnValueFilterCondition } from "@/lib/dataGridSql";
 import { normalizeWhereInput } from "@/lib/tableSelectSql";
 
-export function buildColumnValueFilterCondition(options: {
-  databaseType?: DatabaseType;
-  columnName: string;
-  columnInfo?: Pick<ColumnInfo, "data_type">;
-  rawValue: string;
-}): Promise<string | undefined> {
+export function buildColumnValueFilterCondition(options: { databaseType?: DatabaseType; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; rawValue: string }): Promise<string | undefined> {
   return buildDataGridColumnValueFilterCondition({
     databaseType: options.databaseType,
     columnName: options.columnName,
@@ -23,10 +18,7 @@ export function buildColumnValueFilterCondition(options: {
   });
 }
 
-export function appendColumnValueFilterCondition(
-  whereInput: string | undefined,
-  condition: string | undefined,
-): string {
+export function appendColumnValueFilterCondition(whereInput: string | undefined, condition: string | undefined): string {
   if (!condition) return normalizeWhereInput(whereInput);
   const existing = normalizeWhereInput(whereInput);
   return existing ? `(${existing}) AND (${condition})` : condition;
@@ -77,22 +69,7 @@ function unwrapMatchingQuotes(text: string): string {
 }
 
 function isNumericType(dataType: string): boolean {
-  return [
-    "int",
-    "integer",
-    "bigint",
-    "smallint",
-    "tinyint",
-    "mediumint",
-    "serial",
-    "number",
-    "numeric",
-    "decimal",
-    "float",
-    "double",
-    "real",
-    "money",
-  ].some((part) => dataType.split(/[^a-z0-9]+/).includes(part));
+  return ["int", "integer", "bigint", "smallint", "tinyint", "mediumint", "serial", "number", "numeric", "decimal", "float", "double", "real", "money"].some((part) => dataType.split(/[^a-z0-9]+/).includes(part));
 }
 
 function isBooleanType(dataType: string): boolean {

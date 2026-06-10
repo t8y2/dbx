@@ -1,11 +1,5 @@
 import { computed, ref } from "vue";
-import {
-  APP_THEME_STORAGE_KEY,
-  getTauriThemeForMode,
-  normalizeAppThemeMode,
-  resolveAppThemeAppearance,
-  type AppThemeMode,
-} from "@/lib/appTheme";
+import { APP_THEME_STORAGE_KEY, getTauriThemeForMode, normalizeAppThemeMode, resolveAppThemeAppearance, type AppThemeMode } from "@/lib/appTheme";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 

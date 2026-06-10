@@ -5,9 +5,7 @@ description: Configure an AI provider to generate SQL, explain queries, suggest 
 
 The AI assistant helps with SQL work. It uses metadata from the active connection to understand tables and columns, then helps generate SQL, explain queries, suggest optimizations, or diagnose errors.
 
-<Callout type="warn">
-AI-generated SQL is not executed automatically. Review table names, columns, filters, and affected rows before running it, especially on production connections.
-</Callout>
+<Callout type="warn">AI-generated SQL is not executed automatically. Review table names, columns, filters, and affected rows before running it, especially on production connections.</Callout>
 
 ## Configuration
 
@@ -16,34 +14,36 @@ AI-generated SQL is not executed automatically. Review table names, columns, fil
     ### Open Settings
 
     Open DBX settings and find the AI configuration section.
+
   </Step>
   <Step>
     ### Choose a Provider
 
     Select Anthropic, OpenAI, or a custom endpoint compatible with the OpenAI API.
+
   </Step>
   <Step>
     ### Enter Credentials
 
     Enter your API key. For custom endpoints, also enter the endpoint URL and model name.
+
   </Step>
   <Step>
     ### Save and Test
 
     Save the configuration, return to the editor, and try generating a simple query from natural language.
+
   </Step>
 </Steps>
 
-<Callout type="info">
-When no API key is configured, AI features should prompt the user to complete setup instead of failing silently.
-</Callout>
+<Callout type="info">When no API key is configured, AI features should prompt the user to complete setup instead of failing silently.</Callout>
 
 ## Ask Mode And Agent Mode
 
-| Mode | Behavior | Execution |
-|---|---|---|
-| Ask | Generates SQL, explanations, fixes, optimizations, dialect conversions, or sample data | Does not imply anything has run |
-| Agent | Prioritizes one executable SQL statement when the user clearly asks DBX to query data | DBX evaluates the generated SQL before attempting execution |
+| Mode  | Behavior                                                                               | Execution                                                   |
+| ----- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Ask   | Generates SQL, explanations, fixes, optimizations, dialect conversions, or sample data | Does not imply anything has run                             |
+| Agent | Prioritizes one executable SQL statement when the user clearly asks DBX to query data  | DBX evaluates the generated SQL before attempting execution |
 
 ## Thinking Mode
 
@@ -73,12 +73,12 @@ When a schema is large, DBX truncates context. Use table mentions to prioritize 
 
 ## SQL Safety Policy
 
-| SQL Category | DBX Behavior |
-|---|---|
-| Read-only statements such as `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN` | Can be auto-executed in Agent mode when the user clearly asks to query |
-| Scoped low-risk writes such as `INSERT` or keyed `UPDATE` | Auto-execute only in clearly non-production environments; otherwise confirm |
-| Multiple statements, `DELETE`, `MERGE`, `REPLACE`, `CREATE`, or unknown SQL | Confirm before execution |
-| Dangerous statements such as `DROP`, `TRUNCATE`, `ALTER`, `RENAME`, or broad `UPDATE` | Blocked by the AI execution policy |
+| SQL Category                                                                          | DBX Behavior                                                                |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Read-only statements such as `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN`  | Can be auto-executed in Agent mode when the user clearly asks to query      |
+| Scoped low-risk writes such as `INSERT` or keyed `UPDATE`                             | Auto-execute only in clearly non-production environments; otherwise confirm |
+| Multiple statements, `DELETE`, `MERGE`, `REPLACE`, `CREATE`, or unknown SQL           | Confirm before execution                                                    |
+| Dangerous statements such as `DROP`, `TRUNCATE`, `ALTER`, `RENAME`, or broad `UPDATE` | Blocked by the AI execution policy                                          |
 
 Production-like connection names, hosts, or database names make DBX more conservative. Generated SQL is still text from an AI model; review it like code before trusting it.
 
@@ -129,9 +129,7 @@ The assistant can suggest optimization directions, such as:
 - Subqueries that may be rewritten as `JOIN`
 - Sorting, deduplication, or aggregation that could be reduced
 
-<Callout type="info">
-AI optimization suggestions are advisory. Confirm performance with the database execution plan, data volume, and index design.
-</Callout>
+<Callout type="info">AI optimization suggestions are advisory. Confirm performance with the database execution plan, data volume, and index design.</Callout>
 
 ### Fix Errors
 
@@ -160,6 +158,7 @@ When SQL fails, send the error and query to the assistant for diagnosis. Common 
     - Endpoint URL
     - API key
     - Model
+
   </Tab>
 </Tabs>
 

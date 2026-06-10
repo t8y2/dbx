@@ -1,9 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  filterSidebarSearchRootsByConnectionState,
-  filterSidebarTree,
-} from "../../apps/desktop/src/lib/sidebarSearchTree.ts";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "../../apps/desktop/src/lib/sidebarSearchTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("preserves loaded table children when the table itself matches search", () => {

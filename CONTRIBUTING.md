@@ -61,7 +61,18 @@ For Docker or deployment changes, run the relevant Docker Compose or Docker buil
 
 ## Database Driver Metadata
 
-When adding or changing a database type, update `crates/dbx-core/assets/database-drivers.manifest.json` first. The manifest is the shared source for driver mode, MCP/CLI routing, agent keys, and core capability expectations. Then run:
+When adding or changing a database type, update `crates/dbx-core/assets/database-drivers.manifest.json` first. The manifest is the shared source for driver mode, MCP/CLI routing, agent keys, support level, and top-level product capabilities.
+
+Choose the support level conservatively:
+
+- `connect` — connection and SQL/command execution only.
+- `browse` — connection plus metadata browsing.
+- `understand` — browsing plus higher-level understanding features such as search, object sources, or diagrams.
+- `operate` — advanced operation surfaces such as table data editing, structure editing, import, transfer, database creation, explain plans, or user administration.
+
+Set `capabilities` explicitly for the product surfaces DBX should expose. Keep detailed feature behavior in the owning feature module, such as table structure sub-capabilities or user administration dialects. Custom JDBC support should remain conservative unless dialect inference or a dedicated profile proves the advanced capability works.
+
+Then run:
 
 ```bash
 cargo test -p dbx-core --test database_capabilities

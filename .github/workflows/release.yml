@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -65,6 +65,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            arch: x64
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            arch: arm64
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -103,7 +107,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './ -> target'
+          workspaces: "./ -> target"
           shared-key: release-${{ matrix.target }}-${{ steps.deps-hash.outputs.hash }}
           add-rust-environment-hash-key: false
           cache-on-failure: true
@@ -169,22 +173,23 @@ jobs:
           APPLE_TEAM_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_TEAM_ID || '' }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'DBX ${{ github.ref_name }}'
+          releaseName: "DBX ${{ github.ref_name }}"
           releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
 
       - name: Upload Windows portable ZIP
-        if: matrix.platform == 'windows-latest'
+        if: matrix.arch == 'x64' || matrix.arch == 'arm64'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
           $portableRoot = "portable"
-          $portableDir = Join-Path $portableRoot "DBX_${version}_x64"
-          $zipName = "DBX_${version}_x64-portable.zip"
+          $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
+          $zipName = "DBX_${version}_${arch}-portable.zip"
           $exePath = "target/${{ matrix.target }}/release/dbx.exe"
 
           if (!(Test-Path $exePath)) {
@@ -241,7 +246,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
           cache: maven
 
       - name: Apply automatic JDBC plugin version bump
@@ -296,7 +301,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
-
 
   docker:
     runs-on: ubuntu-latest

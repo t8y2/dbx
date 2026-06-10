@@ -1,9 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
-type ConnectionPresentationConfig = Pick<
-  ConnectionConfig,
-  "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database"
->;
+type ConnectionPresentationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database">;
 type ConnectionNamePresentationConfig = ConnectionPresentationConfig & Pick<ConnectionConfig, "name">;
 
 const LOCAL_DATABASE_TYPES = new Set(["sqlite", "duckdb", "access"]);
@@ -20,7 +17,7 @@ export function connectionDriverLabel(connection?: Pick<ConnectionConfig, "db_ty
 
 export function connectionEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type)) {
+  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connection.host || connection.database || "local";
   }
   if (connection.host && connection.port) return `${connection.host}:${connection.port}`;
@@ -31,15 +28,12 @@ function redactConnectionHost(host: string): string {
   const normalizedHost = host.trim();
   if (!normalizedHost) return "";
 
-  const unwrappedHost =
-    normalizedHost.startsWith("[") && normalizedHost.endsWith("]") ? normalizedHost.slice(1, -1) : normalizedHost;
+  const unwrappedHost = normalizedHost.startsWith("[") && normalizedHost.endsWith("]") ? normalizedHost.slice(1, -1) : normalizedHost;
   const separator = unwrappedHost.includes(":") ? ":" : ".";
   const segments = unwrappedHost.split(separator).filter(Boolean);
 
   if (segments.length >= 3) {
-    return [segments[0], ...segments.slice(1, -1).map(() => REDACTED_HOST_SEGMENT), segments[segments.length - 1]].join(
-      separator,
-    );
+    return [segments[0], ...segments.slice(1, -1).map(() => REDACTED_HOST_SEGMENT), segments[segments.length - 1]].join(separator);
   }
 
   if (segments.length === 2) {
@@ -51,7 +45,7 @@ function redactConnectionHost(host: string): string {
 
 export function connectionRedactedEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type)) {
+  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connectionEndpointLabel(connection);
   }
 
@@ -66,7 +60,7 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
 
 export function connectionRedactedNameLabel(connection?: ConnectionNamePresentationConfig): string {
   const name = connection?.name.trim() || "";
-  if (!connection || !name || LOCAL_DATABASE_TYPES.has(connection.db_type)) return name;
+  if (!connection || !name || LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) return name;
 
   const host = connection.host.trim();
   if (!host) return name;
@@ -109,6 +103,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "rqlite":
       return "http://user:password@host:4001";
 
+    case "turso":
+      return "https://[your-db]-[org].turso.io";
+
     case "duckdb":
       return "duckdb:///absolute/path/to/database.duckdb";
 
@@ -147,6 +144,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "iris":
       return "iris://user:password@host:port/namespace";
+
+    case "influxdb":
+      return "influxdb://user:password@host:port/database";
 
     case "jdbc":
       return "jdbc:mysql://host:3306/database";

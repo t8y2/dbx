@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  HISTORY_ROW_HEIGHT,
-  HISTORY_SCROLL_BUFFER,
-  shouldVirtualizeHistory,
-} from "../../apps/desktop/src/lib/historyVirtualList.ts";
+import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "../../apps/desktop/src/lib/historyVirtualList.ts";
 
 test("history list virtualizes every non-empty result set", () => {
   assert.equal(shouldVirtualizeHistory(0), false);

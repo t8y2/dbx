@@ -79,15 +79,24 @@ pub async fn get_jdbc_plugin_status(plugins_root: &Path) -> Result<JdbcPluginSta
 pub async fn install_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
     let bytes = download_jdbc_plugin_zip().await?;
     let plugin_dir = plugins_root.join("jdbc");
-    install_jdbc_plugin_zip(&bytes, &plugin_dir)?;
-    jdbc_plugin_status_from_dir(&plugin_dir).await
+    let status_dir = plugin_dir.clone();
+    tokio::task::spawn_blocking(move || install_jdbc_plugin_zip(&bytes, &plugin_dir))
+        .await
+        .map_err(|err| err.to_string())??;
+    jdbc_plugin_status_from_dir(&status_dir).await
 }
 
 pub async fn install_jdbc_plugin_from_file(plugins_root: &Path, file_path: &str) -> Result<JdbcPluginStatus, String> {
-    let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
     let plugin_dir = plugins_root.join("jdbc");
-    install_jdbc_plugin_zip(&bytes, &plugin_dir)?;
-    jdbc_plugin_status_from_dir(&plugin_dir).await
+    let status_dir = plugin_dir.clone();
+    let file_path = file_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+        install_jdbc_plugin_zip(&bytes, &plugin_dir)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+    jdbc_plugin_status_from_dir(&status_dir).await
 }
 
 pub fn uninstall_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {

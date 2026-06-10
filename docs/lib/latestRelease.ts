@@ -1,5 +1,5 @@
-import { requestJson } from '@/lib/httpJson';
-import { browserCacheBuster, createUncachedUrl, releaseMetadataRequestInit } from '@/lib/releaseMetadataRequest';
+import { requestJson } from "@/lib/httpJson";
+import { browserCacheBuster, createUncachedUrl, releaseMetadataRequestInit } from "@/lib/releaseMetadataRequest";
 
 export type LatestReleaseInfo = {
   version: string;
@@ -13,19 +13,16 @@ type GitHubLatestRelease = {
   published_at: string | null;
 };
 
-const LATEST_RELEASE_URL = 'https://dl.dbxio.com/releases/latest/latest.json';
-const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/t8y2/dbx/releases/latest';
+const LATEST_RELEASE_URL = "https://dl.dbxio.com/releases/latest/latest.json";
+const GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/t8y2/dbx/releases/latest";
 
 function normalizeVersion(version: string) {
-  return version.replace(/^v/, '');
+  return version.replace(/^v/, "");
 }
 
 export async function fetchLatestReleaseInfo(): Promise<LatestReleaseInfo | null> {
   try {
-    const release = await requestJson<LatestReleaseInfo>(
-      createUncachedUrl(LATEST_RELEASE_URL, browserCacheBuster()),
-      releaseMetadataRequestInit(),
-    );
+    const release = await requestJson<LatestReleaseInfo>(createUncachedUrl(LATEST_RELEASE_URL, browserCacheBuster()), releaseMetadataRequestInit());
     return release.version ? { ...release, version: normalizeVersion(release.version) } : null;
   } catch {
     return fetchGitHubLatestReleaseInfo();
@@ -34,10 +31,7 @@ export async function fetchLatestReleaseInfo(): Promise<LatestReleaseInfo | null
 
 export async function fetchGitHubLatestReleaseInfo(): Promise<LatestReleaseInfo | null> {
   try {
-    const release = await requestJson<GitHubLatestRelease>(
-      createUncachedUrl(GITHUB_LATEST_RELEASE_URL, browserCacheBuster()),
-      releaseMetadataRequestInit({ headers: { Accept: 'application/vnd.github+json' } }),
-    );
+    const release = await requestJson<GitHubLatestRelease>(createUncachedUrl(GITHUB_LATEST_RELEASE_URL, browserCacheBuster()), releaseMetadataRequestInit({ headers: { Accept: "application/vnd.github+json" } }));
 
     return {
       version: normalizeVersion(release.tag_name),

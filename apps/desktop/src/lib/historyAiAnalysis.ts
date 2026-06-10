@@ -8,7 +8,7 @@ export type HistoryAiAnalysisEntry = {
   execution_time_ms: number;
   success: boolean;
   error?: string | null;
-  activity_kind?: "query" | "data_change" | "schema_change" | "import" | "transfer";
+  activity_kind?: "query" | "data_change" | "schema_change" | "import" | "transfer" | "redis_command";
   operation?: string;
   target?: string;
   affected_rows?: number | null;
@@ -16,9 +16,7 @@ export type HistoryAiAnalysisEntry = {
   details_json?: string | null;
 };
 
-export function canRollbackHistoryEntry(
-  entry: Pick<HistoryAiAnalysisEntry, "connection_id" | "database" | "rollback_sql">,
-) {
+export function canRollbackHistoryEntry(entry: Pick<HistoryAiAnalysisEntry, "connection_id" | "database" | "rollback_sql">) {
   return !!entry.connection_id?.trim() && !!entry.database?.trim() && !!entry.rollback_sql?.trim();
 }
 

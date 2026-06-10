@@ -128,12 +128,7 @@ function renderJsonNode(node: JsonNode): VNodeChild {
   }
 
   if (node.parentKind !== "root") {
-    rowChildren.push(
-      node.parentKind === "array"
-        ? h("span", { class: "redis-json-index" }, `[${node.label}]`)
-        : highlightedJsonSpan("redis-json-key", JSON.stringify(node.label)),
-      h("span", { class: "redis-json-colon" }, ":"),
-    );
+    rowChildren.push(node.parentKind === "array" ? h("span", { class: "redis-json-index" }, `[${node.label}]`) : highlightedJsonSpan("redis-json-key", JSON.stringify(node.label)), h("span", { class: "redis-json-colon" }, ":"));
   }
 
   if (container) {
@@ -146,10 +141,7 @@ function renderJsonNode(node: JsonNode): VNodeChild {
     rowChildren.push(highlightedJsonSpan(scalarClass(node.value), scalarText(node.value)));
   }
 
-  return h("div", { class: "redis-json-node" }, [
-    h("div", { class: "redis-json-row", style: { paddingLeft: indent } }, rowChildren),
-    container && !collapsed ? h("div", { class: "redis-json-children" }, children.map(renderJsonNode)) : null,
-  ]);
+  return h("div", { class: "redis-json-node" }, [h("div", { class: "redis-json-row", style: { paddingLeft: indent } }, rowChildren), container && !collapsed ? h("div", { class: "redis-json-children" }, children.map(renderJsonNode)) : null]);
 }
 
 const JsonTreeNode = defineComponent({

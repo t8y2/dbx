@@ -1,0 +1,47 @@
+name: Project Triage
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled, assigned, unassigned]
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: Sync all open issues into DBX Issue Triage
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  sync-project-triage:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_AUTOMATION_TOKEN }}
+      PROJECT_OWNER: t8y2
+      PROJECT_NUMBER: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+
+      - name: Validate project token
+        run: |
+          if [ -z "$PROJECT_TOKEN" ]; then
+            echo "Missing PROJECT_AUTOMATION_TOKEN secret"
+            exit 1
+          fi
+
+      - name: Sync current issue
+        if: ${{ github.event_name == 'issues' }}
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: node .github/scripts/sync-project-triage.mjs --issue-number "$ISSUE_NUMBER"
+
+      - name: Backfill open issues
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.backfill == 'true' }}
+        run: node .github/scripts/sync-project-triage.mjs --backfill true

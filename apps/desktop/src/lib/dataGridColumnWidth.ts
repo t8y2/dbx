@@ -16,10 +16,7 @@ function displaySampleValue(value: CellValue): string | null {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-export function calculateDataGridColumnWidth(options: {
-  columnName: string;
-  sampleValues: readonly CellValue[];
-}): number {
+export function calculateDataGridColumnWidth(options: { columnName: string; sampleValues: readonly CellValue[] }): number {
   let maxWidth = estimateTextWidth(options.columnName, DATA_GRID_HEADER_CONTROL_WIDTH);
 
   for (const value of options.sampleValues.slice(0, DATA_GRID_SAMPLE_ROWS)) {

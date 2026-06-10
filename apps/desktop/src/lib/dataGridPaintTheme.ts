@@ -89,9 +89,7 @@ function parseRgbColor(value: string): RgbaColor | null {
 
   const rgb = value.match(/^rgba?\((.+)\)$/i)?.[1]?.trim();
   if (!rgb) return null;
-  const parts = rgb.includes(",")
-    ? rgb.split(",").map((part) => part.trim())
-    : rgb.replace(/\s+\/\s+/, " / ").split(/\s+/);
+  const parts = rgb.includes(",") ? rgb.split(",").map((part) => part.trim()) : rgb.replace(/\s+\/\s+/, " / ").split(/\s+/);
   const slashIndex = parts.indexOf("/");
   const channels = slashIndex >= 0 ? parts.slice(0, slashIndex) : parts.slice(0, 3);
   const alpha = slashIndex >= 0 ? parts[slashIndex + 1] : parts[3];
@@ -186,8 +184,7 @@ function toCanvasSafeColor(value: string, fallback: string): string {
   const rgb = parseRgbColor(trimmed);
   if (rgb) return formatRgb(rgb);
   if (CANVAS_SAFE_COLOR_RE.test(trimmed)) return trimmed;
-  if (ADVANCED_COLOR_RE.test(trimmed))
-    return normalizeCssColorWithBrowser(trimmed) ?? parseColorMix(trimmed) ?? fallback;
+  if (ADVANCED_COLOR_RE.test(trimmed)) return normalizeCssColorWithBrowser(trimmed) ?? parseColorMix(trimmed) ?? fallback;
   return `hsl(${trimmed})`;
 }
 
@@ -209,18 +206,11 @@ function paintToken(getVar: (name: string) => string, name: string, fallback: st
   return toCanvasSafeColor(value, fallback);
 }
 
-export function resolveDataGridPaintTheme(options: {
-  getVar: (name: string) => string;
-  isDark: boolean;
-}): DataGridPaintTheme {
+export function resolveDataGridPaintTheme(options: { getVar: (name: string) => string; isDark: boolean }): DataGridPaintTheme {
   const { getVar, isDark } = options;
   const background = cssVarColor(getVar, "--background", isDark ? "rgb(19, 20, 22)" : "rgb(255, 255, 255)");
   const foreground = cssVarColor(getVar, "--foreground", isDark ? "rgb(215, 215, 219)" : "rgb(10, 10, 10)");
-  const mutedForeground = cssVarColor(
-    getVar,
-    "--muted-foreground",
-    isDark ? "rgb(151, 152, 157)" : "rgb(115, 115, 115)",
-  );
+  const mutedForeground = cssVarColor(getVar, "--muted-foreground", isDark ? "rgb(151, 152, 157)" : "rgb(115, 115, 115)");
   const primary = cssVarColor(getVar, "--primary", isDark ? "rgb(208, 208, 214)" : "rgb(23, 23, 23)");
   const destructive = cssVarColor(getVar, "--destructive", isDark ? "rgb(243, 98, 95)" : "rgb(231, 0, 11)");
   const accent = cssVarColor(getVar, "--accent", isDark ? "rgb(46, 47, 51)" : "rgb(245, 245, 245)");
@@ -237,9 +227,7 @@ export function resolveDataGridPaintTheme(options: {
   const cellSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.match : "rgb(253, 245, 184)";
   const cellCurrentSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.current : "rgba(253, 224, 71, 0.52)";
   const cellCurrentSearchBorder = isDark ? DATA_GRID_DARK_SEARCH_COLORS.currentBorder : "rgba(234, 179, 8, 0.82)";
-  const rowNumberDefault = isDark
-    ? DATA_GRID_DARK_ROW_NUMBER_BG
-    : paintToken(getVar, "--data-grid-row-number-default-bg", "rgb(255, 255, 255)");
+  const rowNumberDefault = isDark ? DATA_GRID_DARK_ROW_NUMBER_BG : paintToken(getVar, "--data-grid-row-number-default-bg", "rgb(255, 255, 255)");
   const rowNumberNew = isDark ? DATA_GRID_DARK_ROW_NUMBER_NEW_BG : DATA_GRID_LIGHT_ROW_NUMBER_NEW_BG;
   const rowNumberEdited = isDark ? DATA_GRID_DARK_ROW_NUMBER_EDITED_BG : DATA_GRID_LIGHT_ROW_NUMBER_EDITED_BG;
   const rowNumberDeleted = isDark ? DATA_GRID_DARK_ROW_NUMBER_DELETED_BG : DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG;

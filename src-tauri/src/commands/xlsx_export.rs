@@ -12,11 +12,15 @@ pub struct QueryResultXlsxExportRequest {
 }
 
 #[tauri::command]
-pub fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> Result<(), String> {
-    let workbook = build_xlsx_workbook(&XlsxWorksheetData {
-        sheet_name: request.sheet_name,
-        columns: request.columns,
-        rows: request.rows,
-    })?;
-    std::fs::write(&request.file_path, workbook).map_err(|err| err.to_string())
+pub async fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: request.sheet_name,
+            columns: request.columns,
+            rows: request.rows,
+        })?;
+        std::fs::write(&request.file_path, workbook).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }

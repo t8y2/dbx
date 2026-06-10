@@ -7,17 +7,15 @@ The Object Browser extends the sidebar beyond tables and collections. It surface
 
 ## What the Object Browser Shows
 
-| Object Type | Information Shown |
-|---|---|
-| Views | View definition (DDL), column list, schema |
-| Procedures | Source code, parameters, language |
-| Functions | Return type, parameters, source code |
-| Triggers | Timing, event, table, source |
-| Routines | Combined view of procedures and functions |
+| Object Type | Information Shown                          |
+| ----------- | ------------------------------------------ |
+| Views       | View definition (DDL), column list, schema |
+| Procedures  | Source code, parameters, language          |
+| Functions   | Return type, parameters, source code       |
+| Triggers    | Timing, event, table, source               |
+| Routines    | Combined view of procedures and functions  |
 
-<Callout type="info">
-Object Browser availability depends on the database engine and its metadata support. Not all databases expose source code or routine metadata through standard SQL.
-</Callout>
+<Callout type="info">Object Browser availability depends on the database engine and its metadata support. Not all databases expose source code or routine metadata through standard SQL.</Callout>
 
 ## Opening the Object Browser
 
@@ -43,9 +41,7 @@ For databases that support `CREATE OR REPLACE` semantics, you can edit object so
 - DBX generates the appropriate `CREATE OR REPLACE` or `ALTER` statement
 - Review the generated SQL before applying changes
 
-<Callout type="warn">
-Editing database objects in place may affect running applications. Verify the object's usage before saving changes, especially on production databases.
-</Callout>
+<Callout type="warn">Editing database objects in place may affect running applications. Verify the object's usage before saving changes, especially on production databases.</Callout>
 
 ## Object Timestamps
 

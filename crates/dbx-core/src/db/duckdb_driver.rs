@@ -1,3 +1,5 @@
+#![cfg(feature = "duckdb-bundled")]
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;

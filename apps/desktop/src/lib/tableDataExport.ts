@@ -9,14 +9,7 @@ export interface FetchTableDataForExportOptions {
   tableName: string;
   columns?: string[];
   pageSize?: number;
-  buildPageSql?: (options: {
-    databaseType?: DatabaseType;
-    schema?: string;
-    tableName: string;
-    columns?: string[];
-    limit: number;
-    offset: number;
-  }) => Promise<string> | string;
+  buildPageSql?: (options: { databaseType?: DatabaseType; schema?: string; tableName: string; columns?: string[]; limit: number; offset: number }) => Promise<string> | string;
   executePage: (sql: string) => Promise<QueryResult>;
 }
 

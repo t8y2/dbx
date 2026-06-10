@@ -8,12 +8,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { loadRoutineParameters } from "@/lib/routineParameters";
-import {
-  acceptsRoutineInput,
-  buildProcedureExecutionSql,
-  buildProcedureExecutionSqlFromValues,
-  type RoutineParameterValue,
-} from "@/lib/routineExecutionSql";
+import { acceptsRoutineInput, buildProcedureExecutionSql, buildProcedureExecutionSqlFromValues, type RoutineParameterValue } from "@/lib/routineExecutionSql";
 import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
@@ -143,9 +138,7 @@ function canEditParameter(parameter: RoutineParameterValue): boolean {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent
-      class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[780px]"
-    >
+    <DialogContent class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[780px]">
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.confirmExecuteProcedureTitle") }}</DialogTitle>
       </DialogHeader>
@@ -170,19 +163,14 @@ function canEditParameter(parameter: RoutineParameterValue): boolean {
           </div>
         </div>
 
-        <div
-          v-if="loading"
-          class="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-        >
+        <div v-if="loading" class="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
           <Loader2 class="h-4 w-4 animate-spin" />
           {{ t("contextMenu.loadingProcedureParameters") }}
         </div>
 
         <div v-else-if="parameters.length" class="overflow-x-auto rounded-md border bg-background">
           <div class="min-w-[650px]">
-            <div
-              class="grid grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px] border-b bg-muted px-3 py-2 text-xs font-medium text-muted-foreground"
-            >
+            <div class="grid grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px] border-b bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
               <div>{{ t("contextMenu.parameterName") }}</div>
               <div>{{ t("contextMenu.parameterType") }}</div>
               <div>{{ t("contextMenu.parameterMode") }}</div>
@@ -191,54 +179,24 @@ function canEditParameter(parameter: RoutineParameterValue): boolean {
               <div class="flex items-center gap-1">
                 {{ t("contextMenu.parameterDefault") }}
                 <LightTooltip :text="t('contextMenu.parameterDefaultHint')" side="top" :delay="150">
-                  <button
-                    type="button"
-                    class="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground"
-                    :aria-label="t('contextMenu.parameterDefaultHint')"
-                  >
+                  <button type="button" class="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground" :aria-label="t('contextMenu.parameterDefaultHint')">
                     <CircleHelp class="h-3.5 w-3.5" />
                   </button>
                 </LightTooltip>
               </div>
             </div>
-            <div
-              v-for="parameter in parameters"
-              :key="`${parameter.ordinal}:${parameter.name}`"
-              class="grid grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
-            >
+            <div v-for="parameter in parameters" :key="`${parameter.ordinal}:${parameter.name}`" class="grid grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
               <div class="min-w-0 truncate font-medium">{{ parameter.name }}</div>
               <div class="min-w-0 truncate text-muted-foreground">{{ parameter.dataType || "-" }}</div>
               <div class="text-xs text-muted-foreground">{{ parameter.mode }}</div>
-              <Input
-                v-model="parameter.value"
-                class="h-8 bg-background font-mono text-xs"
-                :disabled="!canEditParameter(parameter) || parameter.useNull || parameter.useDefault"
-                :placeholder="
-                  canEditParameter(parameter) ? t('contextMenu.parameterValuePlaceholder') : t('contextMenu.outputOnly')
-                "
-              />
-              <input
-                type="checkbox"
-                class="h-4 w-4 accent-primary"
-                :checked="!!parameter.useNull"
-                :disabled="!canEditParameter(parameter) || parameter.useDefault"
-                @change="(event: Event) => (parameter.useNull = (event.target as HTMLInputElement).checked)"
-              />
-              <input
-                type="checkbox"
-                class="h-4 w-4 accent-primary"
-                :checked="!!parameter.useDefault"
-                :disabled="!canEditParameter(parameter) || !parameter.hasDefault || parameter.useNull"
-                @change="(event: Event) => (parameter.useDefault = (event.target as HTMLInputElement).checked)"
-              />
+              <Input v-model="parameter.value" class="h-8 bg-background font-mono text-xs" :disabled="!canEditParameter(parameter) || parameter.useNull || parameter.useDefault" :placeholder="canEditParameter(parameter) ? t('contextMenu.parameterValuePlaceholder') : t('contextMenu.outputOnly')" />
+              <input type="checkbox" class="h-4 w-4 accent-primary" :checked="!!parameter.useNull" :disabled="!canEditParameter(parameter) || parameter.useDefault" @change="(event: Event) => (parameter.useNull = (event.target as HTMLInputElement).checked)" />
+              <input type="checkbox" class="h-4 w-4 accent-primary" :checked="!!parameter.useDefault" :disabled="!canEditParameter(parameter) || !parameter.hasDefault || parameter.useNull" @change="(event: Event) => (parameter.useDefault = (event.target as HTMLInputElement).checked)" />
             </div>
           </div>
         </div>
 
-        <p
-          v-else-if="loadError"
-          class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
-        >
+        <p v-else-if="loadError" class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
           {{ t("contextMenu.procedureParametersUnavailable") }}
         </p>
 
@@ -253,12 +211,7 @@ function canEditParameter(parameter: RoutineParameterValue): boolean {
               {{ t("contextMenu.resetSqlPreview") }}
             </Button>
           </div>
-          <textarea
-            :value="sqlDraft"
-            class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40"
-            spellcheck="false"
-            @input="onSqlInput"
-          ></textarea>
+          <textarea :value="sqlDraft" class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40" spellcheck="false" @input="onSqlInput"></textarea>
         </div>
       </div>
 

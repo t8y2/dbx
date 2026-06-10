@@ -8,11 +8,6 @@ export default defineConfig({
     },
   },
   test: {
-    include: [
-      "packages/app-tests/*.test.ts",
-      "packages/node-core/tests/*.test.ts",
-      "apps/desktop/src/**/*.spec.ts",
-      "docs/lib/*.test.ts",
-    ],
+    include: ["packages/app-tests/*.test.ts", "packages/node-core/tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "docs/lib/*.test.ts"],
   },
 });

@@ -1,31 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  connectionObjectTreeNodeSchema,
-  connectionObjectTreeQuerySchema,
-  connectionUsesSchemaExecutionContext,
-  connectionUsesDatabaseObjectTreeMode,
-  effectiveDatabaseTypeForConnection,
-  inferJdbcDialect,
-} from "../../apps/desktop/src/lib/jdbcDialect.ts";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesSchemaExecutionContext, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/jdbcDialect.ts";
 import { supportsTableStructureEditing } from "../../apps/desktop/src/lib/databaseFeatureSupport.ts";
 import { qualifiedTableName } from "../../apps/desktop/src/lib/tableSelectSql.ts";
 
 test("infers JDBC dialect from URL, driver class, and driver jar path", () => {
-  assert.equal(
-    inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:mysql://db.example.com:9030/demo" }),
-    "mysql",
-  );
-  assert.equal(
-    inferJdbcDialect({ db_type: "jdbc", jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver" }),
-    "mysql",
-  );
+  assert.equal(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:mysql://db.example.com:9030/demo" }), "mysql");
+  assert.equal(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver" }), "mysql");
   assert.equal(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_class: "org.apache.hive.jdbc.HiveDriver" }), "hive");
   assert.equal(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/starrocks-jdbc.jar"] }), "starrocks");
-  assert.equal(
-    inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:databend://db.example.com:8000/default" }),
-    "databend",
-  );
+  assert.equal(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:databend://db.example.com:8000/default" }), "databend");
 });
 
 test("effective database type keeps non-JDBC types and enables compatible JDBC structure editing", () => {
@@ -53,11 +37,15 @@ test("effective database type keeps non-JDBC types and enables compatible JDBC s
 test("JDBC tree shape follows the inferred driver dialect", () => {
   const kyuubi = { db_type: "jdbc" as const, jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver" };
   const hive = { db_type: "jdbc" as const, jdbc_driver_class: "org.apache.hive.jdbc.HiveDriver" };
+  const db2 = { db_type: "jdbc" as const, connection_string: "jdbc:db2://db.example.com:50000/SAMPLE" };
 
   assert.equal(connectionUsesDatabaseObjectTreeMode(kyuubi), true);
   assert.equal(connectionObjectTreeQuerySchema(kyuubi, "test", undefined), "");
   assert.equal(connectionUsesDatabaseObjectTreeMode(hive), false);
   assert.equal(connectionObjectTreeQuerySchema(hive, "spark_catalog", "test"), "test");
+  assert.equal(connectionUsesDatabaseObjectTreeMode(db2), false);
+  assert.equal(connectionObjectTreeQuerySchema(db2, "SAMPLE", "APP"), "APP");
+  assert.equal(connectionObjectTreeNodeSchema(db2, "SAMPLE", "APP"), "APP");
   assert.equal(
     qualifiedTableName({
       databaseType: effectiveDatabaseTypeForConnection(hive),

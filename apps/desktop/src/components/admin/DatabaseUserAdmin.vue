@@ -1,20 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import {
-  AlertTriangle,
-  Check,
-  KeyRound,
-  Lock,
-  Loader2,
-  Plus,
-  RefreshCcw,
-  Search,
-  ShieldCheck,
-  Trash2,
-  Unlock,
-  UserRound,
-} from "@lucide/vue";
+import { AlertTriangle, Check, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Unlock, UserRound } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -25,13 +12,7 @@ import { useToast } from "@/composables/useToast";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/api";
-import {
-  grantsFromQueryResult,
-  getDatabaseUserAdminProvider,
-  supportsDatabaseUserAdmin,
-  type DatabaseUserIdentity,
-  type PrivilegeScope,
-} from "@/lib/databaseUserAdmin";
+import { grantsFromQueryResult, getDatabaseUserAdminProvider, supportsDatabaseUserAdmin, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/databaseUserAdmin";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -119,29 +100,15 @@ async function loadUsers() {
     await ensureConnection();
     let nextUsers: DatabaseUserIdentity[] = [];
     try {
-      const result = await api.executeQuery(
-        props.connection.id,
-        "",
-        userProvider.listUsersSql(),
-        undefined,
-        undefined,
-        {
-          maxRows: 5000,
-        },
-      );
+      const result = await api.executeQuery(props.connection.id, "", userProvider.listUsersSql(), undefined, undefined, {
+        maxRows: 5000,
+      });
       nextUsers = userProvider.parseUsers(result);
     } catch (error) {
       if (!userProvider.fallbackListUsersSql || !userProvider.parseFallbackUsers) throw error;
-      const fallback = await api.executeQuery(
-        props.connection.id,
-        "",
-        userProvider.fallbackListUsersSql(),
-        undefined,
-        undefined,
-        {
-          maxRows: 5000,
-        },
-      );
+      const fallback = await api.executeQuery(props.connection.id, "", userProvider.fallbackListUsersSql(), undefined, undefined, {
+        maxRows: 5000,
+      });
       nextUsers = userProvider.parseFallbackUsers(fallback);
     }
     users.value = nextUsers;
@@ -163,16 +130,9 @@ async function loadGrants() {
   loadingGrants.value = true;
   grantError.value = "";
   try {
-    const result = await api.executeQuery(
-      props.connection.id,
-      "",
-      userProvider.showGrantsSql(user),
-      undefined,
-      undefined,
-      {
-        maxRows: 1000,
-      },
-    );
+    const result = await api.executeQuery(props.connection.id, "", userProvider.showGrantsSql(user), undefined, undefined, {
+      maxRows: 1000,
+    });
     grants.value = grantsFromQueryResult(result);
   } catch (error: any) {
     grantError.value = error?.message || String(error);
@@ -364,10 +324,7 @@ onMounted(loadUsers);
       </div>
     </div>
 
-    <div
-      v-if="!supported"
-      class="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground"
-    >
+    <div v-if="!supported" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
       {{ t("userAdmin.unsupported") }}
     </div>
 
@@ -376,11 +333,7 @@ onMounted(loadUsers);
         <div class="flex h-12 items-center border-b px-2">
           <div class="flex h-8 items-center gap-2 rounded-md border bg-background px-2">
             <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <input
-              v-model="search"
-              class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
-              :placeholder="t('userAdmin.searchUser')"
-            />
+            <input v-model="search" class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('userAdmin.searchUser')" />
           </div>
         </div>
         <div class="min-h-0 flex-1 overflow-auto">
@@ -400,18 +353,12 @@ onMounted(loadUsers);
             <UserRound class="h-4 w-4" />
             <span class="min-w-0">
               <span class="block truncate font-medium">{{ userLabel(user) || t("userAdmin.anonymous") }}</span>
-              <span
-                v-if="userDetail(user)"
-                class="mt-1 inline-flex max-w-full rounded-full border bg-muted/40 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground"
-              >
+              <span v-if="userDetail(user)" class="mt-1 inline-flex max-w-full rounded-full border bg-muted/40 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
                 <span class="truncate">{{ userDetail(user) }}</span>
               </span>
             </span>
           </button>
-          <div
-            v-if="!loadingUsers && !loadError && filteredUsers.length === 0"
-            class="px-3 py-8 text-center text-xs text-muted-foreground"
-          >
+          <div v-if="!loadingUsers && !loadError && filteredUsers.length === 0" class="px-3 py-8 text-center text-xs text-muted-foreground">
             {{ t("grid.noSearchResults") }}
           </div>
         </div>
@@ -424,11 +371,7 @@ onMounted(loadUsers);
           </div>
           <div class="flex min-w-0 items-center gap-2">
             <div class="truncate text-sm font-semibold">{{ userLabel(selectedUser) }}</div>
-            <Badge
-              v-if="selectedDetail"
-              variant="outline"
-              class="h-5 max-w-[180px] rounded-full px-2 py-0 text-[10px] font-normal"
-            >
+            <Badge v-if="selectedDetail" variant="outline" class="h-5 max-w-[180px] rounded-full px-2 py-0 text-[10px] font-normal">
               <span class="truncate">{{ selectedDetail }}</span>
             </Badge>
           </div>
@@ -464,11 +407,7 @@ onMounted(loadUsers);
                 {{ t("userAdmin.loadingGrants") }}
               </div>
               <div v-else-if="grantError" class="text-xs text-destructive">{{ grantError }}</div>
-              <pre
-                v-else
-                class="min-h-full whitespace-pre-wrap rounded-md bg-muted/30 p-3 font-mono text-xs leading-5 text-foreground"
-                v-html="highlightedGrantsSql"
-              />
+              <pre v-else class="min-h-full whitespace-pre-wrap rounded-md bg-muted/30 p-3 font-mono text-xs leading-5 text-foreground" v-html="highlightedGrantsSql" />
             </div>
           </section>
 
@@ -501,11 +440,7 @@ onMounted(loadUsers);
                 <label class="mb-2 block text-xs font-medium">
                   {{ isPostgres && privilegeScope !== "database" ? t("userAdmin.schema") : t("userAdmin.database") }}
                 </label>
-                <Input
-                  v-model="privilegeDatabase"
-                  class="mb-3 h-8 text-xs"
-                  :placeholder="isPostgres ? 'public' : '*'"
-                />
+                <Input v-model="privilegeDatabase" class="mb-3 h-8 text-xs" :placeholder="isPostgres ? 'public' : '*'" />
                 <template v-if="!isPostgres || privilegeScope === 'table'">
                   <label class="mb-2 block text-xs font-medium">{{ t("userAdmin.table") }}</label>
                   <Input v-model="privilegeTable" class="mb-3 h-8 text-xs" placeholder="*" />
@@ -519,19 +454,10 @@ onMounted(loadUsers);
                   :key="privilege"
                   type="button"
                   class="flex h-7 items-center gap-1.5 rounded-md border px-2 text-left text-[11px] hover:bg-accent"
-                  :class="
-                    selectedPrivilegeSet.has(privilege) ? 'border-primary bg-primary/10 text-primary' : 'bg-background'
-                  "
+                  :class="selectedPrivilegeSet.has(privilege) ? 'border-primary bg-primary/10 text-primary' : 'bg-background'"
                   @click="togglePrivilege(privilege)"
                 >
-                  <span
-                    class="flex h-3.5 w-3.5 items-center justify-center rounded border"
-                    :class="
-                      selectedPrivilegeSet.has(privilege)
-                        ? 'border-primary bg-primary text-primary-foreground'
-                        : 'border-border'
-                    "
-                  >
+                  <span class="flex h-3.5 w-3.5 items-center justify-center rounded border" :class="selectedPrivilegeSet.has(privilege) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
                     <Check v-if="selectedPrivilegeSet.has(privilege)" class="h-2.5 w-2.5" />
                   </span>
                   <span class="truncate">{{ privilege }}</span>
@@ -608,10 +534,7 @@ onMounted(loadUsers);
             {{ t("userAdmin.sqlPreview") }}
           </DialogTitle>
         </DialogHeader>
-        <pre
-          class="max-h-[50vh] min-h-44 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5"
-          v-html="highlightedPendingSql"
-        />
+        <pre class="max-h-[50vh] min-h-44 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlightedPendingSql" />
         <DialogFooter>
           <Button variant="outline" @click="sqlDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button :variant="pendingDanger ? 'destructive' : 'default'" :disabled="applying" @click="applyPendingSql">

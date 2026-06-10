@@ -76,14 +76,8 @@ test("builds MySQL grant and revoke SQL with normalized privileges", () => {
 
   assert.deepEqual(normalizeMySqlPrivileges(input.privileges), ["SELECT", "SHOW VIEW"]);
   assert.equal(mysqlPrivilegeTargetSql("analytics", "daily`rollup"), "`analytics`.`daily``rollup`");
-  assert.equal(
-    mysqlGrantPrivilegesSql(input),
-    "GRANT SELECT, SHOW VIEW ON `analytics`.`daily``rollup` TO 'reporter'@'localhost' WITH GRANT OPTION;",
-  );
-  assert.equal(
-    mysqlRevokePrivilegesSql(input),
-    "REVOKE SELECT, SHOW VIEW ON `analytics`.`daily``rollup` FROM 'reporter'@'localhost';",
-  );
+  assert.equal(mysqlGrantPrivilegesSql(input), "GRANT SELECT, SHOW VIEW ON `analytics`.`daily``rollup` TO 'reporter'@'localhost' WITH GRANT OPTION;");
+  assert.equal(mysqlRevokePrivilegesSql(input), "REVOKE SELECT, SHOW VIEW ON `analytics`.`daily``rollup` FROM 'reporter'@'localhost';");
   assert.equal(mysqlPrivilegeTargetSql("", ""), "*.*");
 });
 
@@ -104,20 +98,14 @@ test("parses MySQL user result variants", () => {
     ],
   );
 
-  assert.deepEqual(
-    usersFromMySqlGranteeResult(result(["GRANTEE"], [["'app'@'%'"], ["'o''brien'@'localhost'"], ["CURRENT_USER"]])),
-    [
-      { user: "app", host: "%" },
-      { user: "o'brien", host: "localhost" },
-    ],
-  );
+  assert.deepEqual(usersFromMySqlGranteeResult(result(["GRANTEE"], [["'app'@'%'"], ["'o''brien'@'localhost'"], ["CURRENT_USER"]])), [
+    { user: "app", host: "%" },
+    { user: "o'brien", host: "localhost" },
+  ]);
 });
 
 test("extracts grants from show grants result", () => {
-  assert.deepEqual(
-    grantsFromQueryResult(result(["Grants for app@%"], [["GRANT SELECT ON `app`.* TO 'app'@'%'"], [null]])),
-    ["GRANT SELECT ON `app`.* TO 'app'@'%'"],
-  );
+  assert.deepEqual(grantsFromQueryResult(result(["Grants for app@%"], [["GRANT SELECT ON `app`.* TO 'app'@'%'"], [null]])), ["GRANT SELECT ON `app`.* TO 'app'@'%'"]);
 });
 
 test("builds PostgreSQL role lifecycle SQL", () => {
@@ -125,14 +113,8 @@ test("builds PostgreSQL role lifecycle SQL", () => {
 
   assert.equal(quotePostgresIdentifier('report"reader'), '"report""reader"');
   assert.equal(postgresRoleLabel(role), 'report"reader');
-  assert.equal(
-    postgresCreateRoleSql({ ...role, password: "it'works", canLogin: true }),
-    "CREATE ROLE \"report\"\"reader\" LOGIN PASSWORD 'it''works';",
-  );
-  assert.equal(
-    postgresCreateRoleSql({ ...role, password: "secret", canLogin: false }),
-    'CREATE ROLE "report""reader" NOLOGIN PASSWORD \'secret\';',
-  );
+  assert.equal(postgresCreateRoleSql({ ...role, password: "it'works", canLogin: true }), "CREATE ROLE \"report\"\"reader\" LOGIN PASSWORD 'it''works';");
+  assert.equal(postgresCreateRoleSql({ ...role, password: "secret", canLogin: false }), 'CREATE ROLE "report""reader" NOLOGIN PASSWORD \'secret\';');
   assert.equal(postgresAlterRolePasswordSql(role, "next"), 'ALTER ROLE "report""reader" PASSWORD \'next\';');
   assert.equal(postgresAlterRoleLoginSql(role, false), 'ALTER ROLE "report""reader" NOLOGIN;');
   assert.equal(postgresAlterRoleLoginSql(role, true), 'ALTER ROLE "report""reader" LOGIN;');
@@ -144,14 +126,8 @@ test("builds PostgreSQL privilege and membership SQL", () => {
 
   assert.equal(postgresPrivilegeTargetSql({ scope: "database", database: "analytics" }), 'DATABASE "analytics"');
   assert.equal(postgresPrivilegeTargetSql({ scope: "schema", database: "mart" }), 'SCHEMA "mart"');
-  assert.equal(
-    postgresPrivilegeTargetSql({ scope: "table", database: "mart", table: 'daily"rollup' }),
-    'TABLE "mart"."daily""rollup"',
-  );
-  assert.equal(
-    postgresPrivilegeTargetSql({ scope: "table", database: "mart", table: "*" }),
-    'ALL TABLES IN SCHEMA "mart"',
-  );
+  assert.equal(postgresPrivilegeTargetSql({ scope: "table", database: "mart", table: 'daily"rollup' }), 'TABLE "mart"."daily""rollup"');
+  assert.equal(postgresPrivilegeTargetSql({ scope: "table", database: "mart", table: "*" }), 'ALL TABLES IN SCHEMA "mart"');
   assert.equal(
     postgresGrantPrivilegesSql({
       user,
@@ -162,10 +138,7 @@ test("builds PostgreSQL privilege and membership SQL", () => {
     }),
     'GRANT CONNECT, CREATE ON DATABASE "analytics" TO "reporter" WITH GRANT OPTION;',
   );
-  assert.equal(
-    postgresRevokePrivilegesSql({ user, scope: "schema", database: "mart", privileges: ["usage"] }),
-    'REVOKE USAGE ON SCHEMA "mart" FROM "reporter";',
-  );
+  assert.equal(postgresRevokePrivilegesSql({ user, scope: "schema", database: "mart", privileges: ["usage"] }), 'REVOKE USAGE ON SCHEMA "mart" FROM "reporter";');
   assert.equal(
     postgresGrantPrivilegesSql({
       user,
@@ -177,10 +150,7 @@ test("builds PostgreSQL privilege and membership SQL", () => {
     }),
     'GRANT "readonly" TO "reporter" WITH ADMIN OPTION;',
   );
-  assert.equal(
-    postgresRevokePrivilegesSql({ user, scope: "role", database: "", privileges: [], role: "readonly" }),
-    'REVOKE "readonly" FROM "reporter";',
-  );
+  assert.equal(postgresRevokePrivilegesSql({ user, scope: "role", database: "", privileges: [], role: "readonly" }), 'REVOKE "readonly" FROM "reporter";');
 });
 
 test("parses PostgreSQL role rows", () => {

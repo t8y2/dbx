@@ -1,56 +1,41 @@
-'use client';
+"use client";
 
-import { create } from '@orama/orama';
-import { useDocsSearch } from 'fumadocs-core/search/client';
-import {
-  SearchDialog,
-  SearchDialogClose,
-  SearchDialogContent,
-  SearchDialogFooter,
-  SearchDialogHeader,
-  SearchDialogIcon,
-  SearchDialogInput,
-  SearchDialogList,
-  SearchDialogOverlay,
-} from 'fumadocs-ui/components/dialog/search';
-import type { SharedProps } from 'fumadocs-ui/contexts/search';
-import { useI18n } from 'fumadocs-ui/contexts/i18n';
-import { useMemo, useState } from 'react';
-import { createCjkSearchTokenizer } from '@/lib/cjkSearchTokenizer';
+import { create } from "@orama/orama";
+import { useDocsSearch } from "fumadocs-core/search/client";
+import { SearchDialog, SearchDialogClose, SearchDialogContent, SearchDialogFooter, SearchDialogHeader, SearchDialogIcon, SearchDialogInput, SearchDialogList, SearchDialogOverlay } from "fumadocs-ui/components/dialog/search";
+import type { SharedProps } from "fumadocs-ui/contexts/search";
+import { useI18n } from "fumadocs-ui/contexts/i18n";
+import { useMemo, useState } from "react";
+import { createCjkSearchTokenizer } from "@/lib/cjkSearchTokenizer";
 
 export function StaticSearchDialog(props: SharedProps) {
   const { locale } = useI18n();
   const [tag] = useState<string | undefined>();
-  const api = `/${locale ?? 'en'}/api/search`;
+  const api = `/${locale ?? "en"}/api/search`;
   const { search, setSearch, query } = useDocsSearch({
-    type: 'static',
+    type: "static",
     from: api,
     locale,
     tag,
     delayMs: 100,
     initOrama: (dbLocale) => {
-      if (dbLocale === 'cn') {
+      if (dbLocale === "cn") {
         return create({
-          schema: { _: 'string' },
+          schema: { _: "string" },
           components: { tokenizer: createCjkSearchTokenizer() },
         });
       }
 
       return create({
-        schema: { _: 'string' },
-        language: 'english',
+        schema: { _: "string" },
+        language: "english",
       });
     },
   });
   const defaultItems = useMemo(() => null, []);
 
   return (
-    <SearchDialog
-      search={search}
-      onSearchChange={setSearch}
-      isLoading={query.isLoading}
-      {...props}
-    >
+    <SearchDialog search={search} onSearchChange={setSearch} isLoading={query.isLoading} {...props}>
       <SearchDialogOverlay />
       <SearchDialogContent>
         <SearchDialogHeader>
@@ -58,7 +43,7 @@ export function StaticSearchDialog(props: SharedProps) {
           <SearchDialogInput />
           <SearchDialogClose />
         </SearchDialogHeader>
-        <SearchDialogList items={query.data !== 'empty' ? query.data : defaultItems} />
+        <SearchDialogList items={query.data !== "empty" ? query.data : defaultItems} />
       </SearchDialogContent>
       <SearchDialogFooter />
     </SearchDialog>

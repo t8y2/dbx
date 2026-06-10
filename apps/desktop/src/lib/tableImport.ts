@@ -8,10 +8,5 @@ export function autoMapImportColumns(sourceColumns: string[], targetColumns: str
   const exactTargets = new Map(targetColumns.map((column) => [column, column]));
   const normalizedTargets = new Map(targetColumns.map((column) => [normalizeImportColumnName(column), column]));
 
-  return Object.fromEntries(
-    sourceColumns.map((source) => [
-      source,
-      exactTargets.get(source) ?? normalizedTargets.get(normalizeImportColumnName(source)) ?? IMPORT_SKIP_TARGET,
-    ]),
-  );
+  return Object.fromEntries(sourceColumns.map((source) => [source, exactTargets.get(source) ?? normalizedTargets.get(normalizeImportColumnName(source)) ?? IMPORT_SKIP_TARGET]));
 }

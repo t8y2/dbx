@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use crate::commands::connection::AppState;
+use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::mongo_driver::MongoDocumentResult;
 
 #[tauri::command]
@@ -74,6 +74,7 @@ pub async fn mongo_insert_document(
     collection: String,
     doc_json: String,
 ) -> Result<String, String> {
+    ensure_connection_writable(&state, &connection_id, "Insert").await?;
     dbx_core::mongo_ops::mongo_insert_document_core(&state, &connection_id, &database, &collection, &doc_json).await
 }
 
@@ -85,6 +86,7 @@ pub async fn mongo_insert_documents(
     collection: String,
     docs_json: String,
 ) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Insert").await?;
     dbx_core::mongo_ops::mongo_insert_documents_core(&state, &connection_id, &database, &collection, &docs_json).await
 }
 
@@ -97,6 +99,7 @@ pub async fn mongo_update_document(
     id: String,
     doc_json: String,
 ) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Update").await?;
     dbx_core::mongo_ops::mongo_update_document_core(&state, &connection_id, &database, &collection, &id, &doc_json)
         .await
 }
@@ -111,6 +114,7 @@ pub async fn mongo_update_documents(
     update_json: String,
     many: bool,
 ) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Update").await?;
     dbx_core::mongo_ops::mongo_update_documents_core(
         &state,
         &connection_id,
@@ -131,6 +135,7 @@ pub async fn mongo_delete_document(
     collection: String,
     id: String,
 ) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete").await?;
     dbx_core::mongo_ops::mongo_delete_document_core(&state, &connection_id, &database, &collection, &id).await
 }
 
@@ -143,6 +148,7 @@ pub async fn mongo_delete_documents(
     filter_json: String,
     many: bool,
 ) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete").await?;
     dbx_core::mongo_ops::mongo_delete_documents_core(&state, &connection_id, &database, &collection, &filter_json, many)
         .await
 }

@@ -6,7 +6,7 @@ export type ObjectBrowserRow = {
   id: string;
   name: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY";
+  type: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -24,17 +24,13 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   if (value.includes("PACKAGE BODY") || value.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (value.includes("PACKAGE")) return "PACKAGE";
   if (value.includes("VIEW")) return "VIEW";
+  if (value.includes("SEQ")) return "SEQUENCE";
   if (value.includes("PROC")) return "PROCEDURE";
   if (value.includes("FUNC")) return "FUNCTION";
   return "TABLE";
 }
 
-export function buildObjectBrowserRows(options: {
-  objects: ObjectInfo[];
-  database: string;
-  fallbackSchema: string;
-  needsSchema: boolean;
-}): ObjectBrowserRow[] {
+export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; needsSchema: boolean }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
   const rows = options.objects.flatMap((object) => {
     const name = normalizeDatabaseObjectName(object.name);
@@ -76,10 +72,7 @@ function markPartitionRows(rows: ObjectBrowserRow[], fallbackSchema: string) {
     if (row.type !== "TABLE") continue;
     const parentName = row.partitionParentName || partitionParentName(row.name);
     if (!parentName) continue;
-    const parentKey = objectKey(
-      { ...row, schema: row.partitionParentSchema || row.schema, name: parentName },
-      fallbackSchema,
-    );
+    const parentKey = objectKey({ ...row, schema: row.partitionParentSchema || row.schema, name: parentName }, fallbackSchema);
     const parent = tableByKey.get(parentKey);
     if (!parent || parent.id === row.id) continue;
     row.partitionParentId = parent.id;
@@ -105,27 +98,16 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
   if (!q) return rows;
   const regex = parseSlashDelimitedRegexQuery(query.trim());
   if (regex) {
-    return rows.filter((row) =>
-      [row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))),
-    );
+    return rows.filter((row) => [row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) =>
-    [row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)),
-  );
+  return rows.filter((row) => [row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
 }
 
-export function sortObjectBrowserRows(
-  rows: ObjectBrowserRow[],
-  key: ObjectBrowserSortKey,
-  direction: ObjectBrowserSortDirection,
-): ObjectBrowserRow[] {
+export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrowserSortKey, direction: ObjectBrowserSortDirection): ObjectBrowserRow[] {
   const multiplier = direction === "asc" ? 1 : -1;
   const compareNames = createDatabaseObjectNameComparator(rows.map((row) => row.name));
   return [...rows].sort((left, right) => {
-    const compared =
-      key === "name"
-        ? compareNames(left.name, right.name)
-        : compareObjectBrowserValue(left[key], right[key], key, direction);
+    const compared = key === "name" ? compareNames(left.name, right.name) : compareObjectBrowserValue(left[key], right[key], key, direction);
     if (compared !== 0) return compared * multiplier;
     return compareNames(left.name, right.name);
   });
@@ -144,12 +126,7 @@ export function formatObjectBrowserTimestamp(value: string | null | undefined): 
     .replace(/(?:Z|[+-]\d{2}(?::?\d{2})?)$/, "");
 }
 
-function compareObjectBrowserValue(
-  left: string | null | undefined,
-  right: string | null | undefined,
-  key: ObjectBrowserSortKey,
-  direction: ObjectBrowserSortDirection,
-): number {
+function compareObjectBrowserValue(left: string | null | undefined, right: string | null | undefined, key: ObjectBrowserSortKey, direction: ObjectBrowserSortDirection): number {
   const leftText = normalizeSortValue(left);
   const rightText = normalizeSortValue(right);
   if (!leftText && !rightText) return 0;

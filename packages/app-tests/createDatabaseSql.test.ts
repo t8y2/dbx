@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  duckDbAttachedDatabaseNameFromPath,
-  uniqueDuckDbAttachedDatabaseName,
-  supportsCreateDatabaseCharset,
-} from "../../apps/desktop/src/lib/createDatabaseSql.ts";
+import { duckDbAttachedDatabaseNameFromPath, uniqueDuckDbAttachedDatabaseName, supportsCreateDatabaseCharset } from "../../apps/desktop/src/lib/createDatabaseSql.ts";
 
 test("recognizes MySQL-compatible driver profiles", () => {
   assert.equal(supportsCreateDatabaseCharset("mysql", "oceanbase"), true);

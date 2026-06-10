@@ -112,6 +112,9 @@ pub async fn disconnect_db(
     drop(connections);
 
     app.reset_connection_transport(&body.connection_id).await;
+    if body.connection_id.starts_with("__visible_draft_") {
+        app.configs.write().await.remove(&body.connection_id);
+    }
 
     Ok(Json(()))
 }
@@ -179,6 +182,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
+            idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -193,11 +197,13 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
             etcd_endpoints: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -285,6 +291,28 @@ mod tests {
 
         let configs = state.app.configs.read().await;
         assert!(configs.contains_key("conn"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disconnect_db_removes_visible_database_draft_config() {
+        let (state, dir) = test_web_state().await;
+        let conn_path = dir.join("draft.db");
+        let draft_id = "__visible_draft_test";
+        std::fs::File::create(&conn_path).unwrap();
+
+        {
+            let mut configs = state.app.configs.write().await;
+            configs.insert(draft_id.to_string(), sqlite_config(draft_id, &conn_path.to_string_lossy()));
+        }
+
+        let result =
+            disconnect_db(State(state.clone()), Json(DisconnectRequest { connection_id: draft_id.to_string() })).await;
+        assert!(result.is_ok());
+
+        let configs = state.app.configs.read().await;
+        assert!(!configs.contains_key(draft_id));
 
         let _ = std::fs::remove_dir_all(dir);
     }

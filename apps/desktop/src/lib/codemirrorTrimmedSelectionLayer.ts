@@ -1,4 +1,4 @@
-import { layer, RectangleMarker, type BlockInfo, type EditorView } from "@codemirror/view";
+import { layer, RectangleMarker, type EditorView } from "@codemirror/view";
 
 const MIN_EMPTY_LINE_WIDTH = 14;
 const END_OF_LINE_PADDING = 3;
@@ -12,6 +12,19 @@ type TrimmedSelectionRect = {
   height: number;
 };
 
+type PositionRect = ReturnType<EditorView["coordsAtPos"]>;
+
+function visualLineVerticalBounds(view: EditorView, start: NonNullable<PositionRect>, end: NonNullable<PositionRect>): { top: number; bottom: number } {
+  const top = Math.min(start.top, end.top);
+  const bottom = Math.max(start.bottom, end.bottom);
+  const height = Math.max(bottom - top, view.defaultLineHeight);
+  const center = (top + bottom) / 2;
+  return {
+    top: center - height / 2,
+    bottom: center + height / 2,
+  };
+}
+
 function layerBase(view: EditorView) {
   const rect = view.scrollDOM.getBoundingClientRect();
   return {
@@ -20,16 +33,7 @@ function layerBase(view: EditorView) {
   };
 }
 
-function markerForLineRange(
-  view: EditorView,
-  from: number,
-  to: number,
-  lineFrom: number,
-  lineTo: number,
-  lineBlock: BlockInfo,
-  includesLineBreak: boolean,
-  base: { left: number; top: number },
-): TrimmedSelectionRect | null {
+function markerForLineRange(view: EditorView, from: number, to: number, lineFrom: number, lineTo: number, includesLineBreak: boolean, base: { left: number; top: number }): TrimmedSelectionRect | null {
   const start = view.coordsAtPos(from, 1);
   const end = from < to ? view.coordsAtPos(to, -1) : start;
   const lineStart = view.coordsAtPos(lineFrom, 1) ?? start;
@@ -42,8 +46,7 @@ function markerForLineRange(
     right = Math.max(right, lineEnd.right + END_OF_LINE_PADDING);
   }
 
-  const top = view.documentTop + lineBlock.top;
-  const bottom = top + lineBlock.height;
+  const { top, bottom } = visualLineVerticalBounds(view, start, end);
 
   return {
     left: left - base.left,
@@ -51,6 +54,54 @@ function markerForLineRange(
     width: Math.max(1, right - left),
     height: Math.max(1, bottom - top),
   };
+}
+
+function sameVisualLine(a: NonNullable<PositionRect>, b: NonNullable<PositionRect>): boolean {
+  const aMid = (a.top + a.bottom) / 2;
+  const bMid = (b.top + b.bottom) / 2;
+  return Math.abs(aMid - bMid) <= Math.max(2, Math.min(a.bottom - a.top, b.bottom - b.top) / 2);
+}
+
+function lastPositionOnVisualLine(view: EditorView, from: number, to: number, start: NonNullable<PositionRect>): number {
+  let low = from + 1;
+  let high = to;
+  let best = from;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const coords = view.coordsAtPos(mid, -1) ?? view.coordsAtPos(mid, 1);
+    if (coords && sameVisualLine(start, coords)) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return best > from ? best : Math.min(to, from + 1);
+}
+
+function markerRectsForLineRange(view: EditorView, from: number, to: number, lineFrom: number, lineTo: number, includesLineBreak: boolean, base: { left: number; top: number }): TrimmedSelectionRect[] {
+  const start = view.coordsAtPos(from, 1);
+  const end = from < to ? view.coordsAtPos(to, -1) : start;
+  if (!start || !end) return [];
+  if (from >= to || sameVisualLine(start, end)) {
+    const rect = markerForLineRange(view, from, to, lineFrom, lineTo, includesLineBreak, base);
+    return rect ? [rect] : [];
+  }
+
+  const rects: TrimmedSelectionRect[] = [];
+  let segmentFrom = from;
+  while (segmentFrom < to) {
+    const segmentStart = view.coordsAtPos(segmentFrom, 1);
+    if (!segmentStart) break;
+    const segmentTo = lastPositionOnVisualLine(view, segmentFrom, to, segmentStart);
+    const rect = markerForLineRange(view, segmentFrom, segmentTo, lineFrom, lineTo, includesLineBreak && segmentTo >= to, base);
+    if (rect) rects.push(rect);
+    if (segmentTo <= segmentFrom) break;
+    segmentFrom = segmentTo;
+  }
+  return rects;
 }
 
 function coversX(rect: TrimmedSelectionRect | undefined, x: number): boolean {
@@ -96,10 +147,8 @@ export function trimmedSelectionLayer() {
             const line = view.state.doc.lineAt(pos);
             const from = Math.max(pos, line.from);
             const to = Math.min(endPos, line.to);
-            const lineBlock = view.lineBlockAt(line.from);
             const includesLineBreak = endPos > line.to && range.to > line.to;
-            const rect = markerForLineRange(view, from, to, line.from, line.to, lineBlock, includesLineBreak, base);
-            if (rect) rects.push(rect);
+            rects.push(...markerRectsForLineRange(view, from, to, line.from, line.to, includesLineBreak, base));
 
             const next = line.to + 1;
             if (next <= pos) break;

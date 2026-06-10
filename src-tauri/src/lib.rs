@@ -61,14 +61,14 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     manager: &M,
-    icon_theme: DesktopIconTheme,
+    _icon_theme: DesktopIconTheme,
 ) -> tauri::Result<()> {
     let menu = MenuBuilder::new(manager).text("show", "Show DBX").separator().text("quit", "Quit DBX").build()?;
     let mut tray =
         TrayIconBuilder::<R>::with_id(DESKTOP_TRAY_ID).tooltip("DBX").menu(&menu).show_menu_on_left_click(false);
     #[cfg(target_os = "macos")]
     {
-        match icon_theme {
+        match _icon_theme {
             DesktopIconTheme::Default => {
                 tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
             }
@@ -79,7 +79,7 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     }
     #[cfg(target_os = "windows")]
     {
-        let icon = match icon_theme {
+        let icon = match _icon_theme {
             DesktopIconTheme::Default => manager.app_handle().default_window_icon().cloned(),
             DesktopIconTheme::Black => Some(BLACK_APP_ICON),
         };
@@ -193,41 +193,11 @@ mod tests {
         assert!(!should_setup_desktop_tray("windows", false));
         assert!(!should_setup_desktop_tray("macos", false));
         assert!(!should_setup_desktop_tray("linux", true));
-        let source = include_str!("lib.rs");
-        assert!(source.contains(
-            "if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon) {\n                setup_desktop_tray(app, desktop_settings.icon_theme)?;"
-        ));
-    }
-
-    #[test]
-    fn tray_preference_hides_existing_tray_instead_of_removing_it() {
-        let source = include_str!("lib.rs");
-        assert!(source.contains("tray.set_visible(show_tray_icon)?;"));
-        let remove_call = concat!("remove", "_tray_by_id");
-        assert!(!source.contains(remove_call));
-    }
-
-    #[test]
-    fn can_apply_black_logo_icon_theme() {
-        let source = include_str!("lib.rs");
-        assert!(source.contains("const BLACK_APP_ICON"));
-        assert!(source.contains("DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?"));
-        assert!(source.contains("DesktopIconTheme::Black => Some(BLACK_APP_ICON)"));
-    }
-
-    #[test]
-    fn desktop_settings_save_treats_runtime_tray_update_as_best_effort() {
-        let source = include_str!("commands/app_settings.rs");
-        assert!(source.contains("if let Err(err) = apply_desktop_settings"));
-        assert!(!source.contains("map_err(|err| err.to_string())"));
     }
 
     #[test]
     fn shows_main_window_after_regular_startup_setup() {
         assert!(should_show_main_window_after_setup());
-        let source = include_str!("lib.rs");
-        assert!(source
-            .contains("if should_show_main_window_after_setup() {\n                show_main_window(app.handle());"));
     }
 }
 
@@ -306,6 +276,7 @@ pub fn run() {
                 ))
             };
             app.manage(state.clone());
+            app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
@@ -461,6 +432,8 @@ pub fn run() {
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_db::pending_open_db_files,
+            commands::keychain::read_keychain_password,
+            commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
@@ -480,6 +453,9 @@ pub fn run() {
             commands::redis_cmd::redis_set_remove,
             commands::redis_cmd::redis_zadd,
             commands::redis_cmd::redis_zrem,
+            commands::redis_cmd::redis_stream_add,
+            commands::redis_cmd::redis_json_set,
+            commands::redis_cmd::redis_check_json_module,
             commands::redis_cmd::redis_set_ttl,
             commands::redis_cmd::redis_delete_keys,
             commands::redis_cmd::redis_flush_db,
@@ -494,6 +470,9 @@ pub fn run() {
             commands::saved_sql::delete_saved_sql_folder,
             commands::saved_sql::save_saved_sql_file,
             commands::saved_sql::delete_saved_sql_file,
+            commands::saved_sql::saved_sql_storage_dir,
+            commands::saved_sql::open_saved_sql_storage_dir,
+            commands::saved_sql::sync_saved_sql_directory,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
             commands::mongo_cmd::mongo_find_documents,

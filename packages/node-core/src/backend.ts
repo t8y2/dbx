@@ -1,15 +1,5 @@
-import {
-  addConnection as desktopAddConnection,
-  findConnection as desktopFindConnection,
-  loadConnections as desktopLoadConnections,
-  removeConnection as desktopRemoveConnection,
-} from "./connections.js";
-import {
-  closeDatabaseResources as desktopCloseDatabaseResources,
-  describeTable as desktopDescribeTable,
-  executeQuery as desktopExecuteQuery,
-  listTables as desktopListTables,
-} from "./database.js";
+import { addConnection as desktopAddConnection, findConnection as desktopFindConnection, loadConnections as desktopLoadConnections, removeConnection as desktopRemoveConnection } from "./connections.js";
+import { closeDatabaseResources as desktopCloseDatabaseResources, describeTable as desktopDescribeTable, executeQuery as desktopExecuteQuery, listTables as desktopListTables } from "./database.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { ColumnInfo, QueryOptions, QueryResult, TableInfo } from "./database.js";
 

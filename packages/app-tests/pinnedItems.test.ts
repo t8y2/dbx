@@ -4,18 +4,18 @@ import { applyPinnedTreeNodeState, orderPinnedFirst } from "../../apps/desktop/s
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("orders pinned items before unpinned items without changing relative order", () => {
-  const items = [
-    { id: "a" },
-    { id: "b", pinned: true },
-    { id: "c" },
-    { id: "d", pinned: true },
-    { id: "e" },
-  ];
+  const items = [{ id: "a" }, { id: "b", pinned: true }, { id: "c" }, { id: "d", pinned: true }, { id: "e" }];
 
   const ordered = orderPinnedFirst(items, (item) => !!item.pinned);
 
-  assert.deepEqual(ordered.map((item) => item.id), ["b", "d", "a", "c", "e"]);
-  assert.deepEqual(items.map((item) => item.id), ["a", "b", "c", "d", "e"]);
+  assert.deepEqual(
+    ordered.map((item) => item.id),
+    ["b", "d", "a", "c", "e"],
+  );
+  assert.deepEqual(
+    items.map((item) => item.id),
+    ["a", "b", "c", "d", "e"],
+  );
 });
 
 test("applies pinned state recursively to grouped tree nodes", () => {

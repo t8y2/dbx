@@ -230,3 +230,103 @@ jobs:
             exit 0
           fi
           pnpm --filter "${PACKAGE_FILTER}" publish --access public --provenance --no-git-checks
+
+  publish-homebrew-formula:
+    name: Publish Homebrew formula
+    runs-on: ubuntu-latest
+    needs: publish-leaf-packages
+    steps:
+      - name: Download CLI npm tarball and compute SHA256
+        id: cli-hash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          VERSION="${VERSION}"
+          NPM_TARBALL="cli-${VERSION}.tgz"
+          NPM_URL="https://registry.npmjs.org/@dbx-app/cli/-/${NPM_TARBALL}"
+
+          # Poll npm until the package is available (CDN propagation delay)
+          for i in $(seq 1 12); do
+            if curl -fsSLI "${NPM_URL}" >/dev/null 2>&1; then
+              echo "Package found on attempt ${i}"
+              break
+            fi
+            echo "Waiting for npm CDN (attempt ${i}/12)..."
+            sleep 10
+          done
+
+          curl -fsSL -o "${NPM_TARBALL}" "${NPM_URL}"
+          CLI_SHA256=$(sha256sum "${NPM_TARBALL}" | cut -d ' ' -f 1)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${CLI_SHA256}" >> "$GITHUB_OUTPUT"
+          echo "  cli version: ${VERSION}"
+          echo "  sha256: ${CLI_SHA256}"
+
+      - name: Push formula to homebrew-tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          CLI_VERSION: ${{ steps.cli-hash.outputs.version }}
+          CLI_SHA256: ${{ steps.cli-hash.outputs.sha256 }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/t8y2/homebrew-tap.git" \
+            homebrew-tap
+          cd homebrew-tap
+          mkdir -p Formula
+
+          cat > Formula/dbx-cli.rb <<'RUBY_EOF'
+          class DbxCli < Formula
+            desc "Command-line interface for DBX database connections, schema, and safe queries"
+            homepage "https://github.com/t8y2/dbx"
+            url "https://registry.npmjs.org/@dbx-app/cli/-/cli-__CLI_VERSION__.tgz"
+            sha256 "__CLI_SHA256__"
+            license "Apache-2.0"
+
+            depends_on "node"
+
+            on_linux do
+              depends_on "pkgconf" => :build
+              depends_on "libsecret"
+            end
+
+            def install
+              system "npm", "install", *std_npm_args
+              bin.install_symlink libexec.glob("bin/*")
+
+              # Rebuild better-sqlite3 and keytar native bindings for the current platform.
+              # prebuild-install is blocked by the Homebrew sandbox during npm install,
+              # so we must rebuild them explicitly via node-gyp.
+              node_modules = libexec/"lib/node_modules/@dbx-app/cli/node_modules"
+
+              cd node_modules/"better-sqlite3" do
+                system "npm", "run", "build-release"
+              end
+
+              cd node_modules/"keytar" do
+                rm_r "prebuilds" if File.directory?("prebuilds")
+                system "npm", "run", "build"
+              end
+            end
+
+            test do
+              assert_path_exists bin/"dbx"
+              system bin/"dbx", "doctor"
+            end
+          end
+          RUBY_EOF
+
+          sed -i 's/^          //' Formula/dbx-cli.rb
+          sed -i "s/__CLI_VERSION__/${CLI_VERSION}/g" Formula/dbx-cli.rb
+          sed -i "s/__CLI_SHA256__/${CLI_SHA256}/g" Formula/dbx-cli.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/dbx-cli.rb
+
+          if git diff --cached --quiet; then
+            echo "CLI Homebrew formula is already up to date."
+          else
+            git commit -m "dbx-cli ${CLI_VERSION}"
+            git push
+            echo "::notice::CLI Homebrew formula updated to ${CLI_VERSION}"
+          fi

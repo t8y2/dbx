@@ -85,4 +85,3 @@ test("formats schema context as compact markdown", async () => {
   assert.match(markdown, /id integer NOT NULL PK/);
   assert.match(markdown, /email text NOT NULL -- Login email/);
 });
-

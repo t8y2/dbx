@@ -12,11 +12,7 @@ function nowMs(): number {
   return Date.now();
 }
 
-export function shouldSuppressRepeatedActivation(
-  guard: ActionActivationGuard,
-  now = nowMs(),
-  windowMs = DEFAULT_REPEATED_ACTIVATION_WINDOW_MS,
-): boolean {
+export function shouldSuppressRepeatedActivation(guard: ActionActivationGuard, now = nowMs(), windowMs = DEFAULT_REPEATED_ACTIVATION_WINDOW_MS): boolean {
   if (guard.lastActivatedAt !== undefined && now - guard.lastActivatedAt < windowMs) {
     return true;
   }

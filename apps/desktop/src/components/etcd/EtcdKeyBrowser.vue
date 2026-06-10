@@ -1,18 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import {
-  ChevronDown,
-  ChevronRight,
-  FolderClosed,
-  FolderOpen,
-  KeyRound,
-  Loader2,
-  Plus,
-  RefreshCw,
-  Search,
-  Trash2,
-} from "@lucide/vue";
+import { ChevronDown, ChevronRight, FolderClosed, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Search, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -20,12 +9,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import * as api from "@/lib/api";
 import type { KvGetResponse, KvKeySummary, KvValue } from "@/lib/api";
-import {
-  buildEtcdKeyTree,
-  collectEtcdGroupIds,
-  flattenVisibleEtcdKeyTree,
-  type EtcdKeyTreeNode,
-} from "@/lib/etcdKeyTree";
+import { buildEtcdKeyTree, collectEtcdGroupIds, flattenVisibleEtcdKeyTree, type EtcdKeyTreeNode } from "@/lib/etcdKeyTree";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{ connectionId: string }>();
@@ -54,9 +38,7 @@ const pageSize = 200;
 
 const tree = computed(() => buildEtcdKeyTree(keys.value));
 const visibleRows = computed(() => flattenVisibleEtcdKeyTree(tree.value, expandedGroupIds.value));
-const selectedMetadata = computed(
-  () => selectedValue.value?.metadata ?? keys.value.find((key) => key.key === selectedKey.value),
-);
+const selectedMetadata = computed(() => selectedValue.value?.metadata ?? keys.value.find((key) => key.key === selectedKey.value));
 const selectedTextValue = computed(() => {
   const value = selectedValue.value?.value;
   if (!value) return "";
@@ -84,12 +66,7 @@ async function loadKeys(reset = true) {
     loadingMore.value = true;
   }
   try {
-    const result = await api.etcdListPrefix(
-      props.connectionId,
-      prefix.value.trim(),
-      pageSize,
-      reset ? null : continuation.value,
-    );
+    const result = await api.etcdListPrefix(props.connectionId, prefix.value.trim(), pageSize, reset ? null : continuation.value);
     const existing = new Set(keys.value.map((key) => key.key));
     const merged = reset ? result.keys : [...keys.value, ...result.keys.filter((key) => !existing.has(key.key))];
     keys.value = merged;
@@ -204,13 +181,7 @@ defineExpose({ focusSearch });
     <div class="flex shrink-0 items-center gap-2 border-b px-3 py-2">
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          ref="searchInputRef"
-          v-model="prefix"
-          class="h-8 pl-8"
-          :placeholder="t('etcd.prefixPlaceholder')"
-          @keyup.enter="loadKeys(true)"
-        />
+        <Input ref="searchInputRef" v-model="prefix" class="h-8 pl-8" :placeholder="t('etcd.prefixPlaceholder')" @keyup.enter="loadKeys(true)" />
       </div>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadKeys(true)">
         <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
@@ -229,10 +200,7 @@ defineExpose({ focusSearch });
           <Loader2 class="mr-2 h-4 w-4 animate-spin" />
           {{ t("etcd.loadingKeys") }}
         </div>
-        <div
-          v-else-if="visibleRows.length === 0"
-          class="flex h-full items-center justify-center text-sm text-muted-foreground"
-        >
+        <div v-else-if="visibleRows.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
           {{ t("etcd.empty") }}
         </div>
         <div v-else class="h-full overflow-auto py-1 text-sm">
@@ -258,13 +226,7 @@ defineExpose({ focusSearch });
             <span class="truncate">{{ row.node.label }}</span>
           </button>
           <div v-if="continuation" class="border-t p-2">
-            <Button
-              size="sm"
-              variant="outline"
-              class="h-8 w-full gap-1.5"
-              :disabled="loadingMore"
-              @click="loadKeys(false)"
-            >
+            <Button size="sm" variant="outline" class="h-8 w-full gap-1.5" :disabled="loadingMore" @click="loadKeys(false)">
               <Loader2 v-if="loadingMore" class="h-3.5 w-3.5 animate-spin" />
               {{ t("etcd.loadMore") }}
             </Button>
@@ -305,11 +267,7 @@ defineExpose({ focusSearch });
           <div v-else-if="selectedValue && !selectedValue.found" class="p-4 text-sm text-muted-foreground">
             {{ t("etcd.notFound") }}
           </div>
-          <pre
-            v-else
-            class="dbx-editor-font-family m-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 text-sm"
-            >{{ selectedTextValue }}</pre
-          >
+          <pre v-else class="dbx-editor-font-family m-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 text-sm">{{ selectedTextValue }}</pre>
         </div>
       </div>
     </div>
@@ -321,11 +279,7 @@ defineExpose({ focusSearch });
         </DialogHeader>
         <div class="grid gap-3 py-2">
           <Input v-model="editKey" :placeholder="t('etcd.keyPlaceholder')" />
-          <textarea
-            v-model="editValue"
-            class="min-h-52 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            spellcheck="false"
-          />
+          <textarea v-model="editValue" class="min-h-52 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" spellcheck="false" />
           <div v-if="editError" class="text-sm text-destructive">{{ editError }}</div>
         </div>
         <DialogFooter>
@@ -338,12 +292,6 @@ defineExpose({ focusSearch });
       </DialogContent>
     </Dialog>
 
-    <DangerConfirmDialog
-      v-model:open="showDeleteConfirm"
-      :title="t('etcd.deleteTitle')"
-      :details="selectedKey || ''"
-      :confirm-label="t('etcd.delete')"
-      @confirm="deleteSelectedKey"
-    />
+    <DangerConfirmDialog v-model:open="showDeleteConfirm" :title="t('etcd.deleteTitle')" :details="selectedKey || ''" :confirm-label="t('etcd.delete')" @confirm="deleteSelectedKey" />
   </div>
 </template>

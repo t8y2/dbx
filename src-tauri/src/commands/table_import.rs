@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::RwLock;
 
-use crate::commands::connection::AppState;
+use crate::commands::connection::{ensure_connection_writable, AppState};
 use crate::commands::transfer::get_db_type;
 
 // Re-export types for backward compatibility
@@ -40,6 +40,8 @@ pub async fn import_table_file(
     request: TableImportRequest,
 ) -> Result<TableImportSummary, String> {
     clear_cancelled(&request.import_id).await;
+    // Reject import early if the connection is read-only — importing is inherently a write operation
+    ensure_connection_writable(&state, &request.connection_id, "Import").await?;
     let db_type = get_db_type(&state, &request.connection_id).await?;
     let pool_key = if request.database.is_empty() {
         request.connection_id.clone()

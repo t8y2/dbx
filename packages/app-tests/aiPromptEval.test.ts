@@ -86,12 +86,7 @@ const cases: PromptEvalCase[] = [
     name: "agent generate keeps the first SQL block executable and read-oriented",
     action: "generate",
     mode: "agent",
-    mustInclude: [
-      /Agent 模式/,
-      /可直接执行的只读 SQL/,
-      /第一个 ```sql 代码块只能包含最终推荐执行的 SQL/,
-      /不要把解释性 SQL、备选 SQL、危险 SQL 放在第一个代码块/,
-    ],
+    mustInclude: [/Agent 模式/, /可直接执行的只读 SQL/, /第一个 ```sql 代码块只能包含最终推荐执行的 SQL/, /不要把解释性 SQL、备选 SQL、危险 SQL 放在第一个代码块/],
   },
   {
     name: "ask generate never implies auto execution",
@@ -111,12 +106,7 @@ const cases: PromptEvalCase[] = [
     action: "generate",
     mode: "agent",
     context: { schemaScope: "focused_table" },
-    mustInclude: [
-      /focused table only; not a complete database table list/,
-      /不要直接断言不存在/,
-      /只读元数据查询/,
-      /有哪些表/,
-    ],
+    mustInclude: [/focused table only; not a complete database table list/, /不要直接断言不存在/, /只读元数据查询/, /有哪些表/],
     mustNotInclude: [/Schema context is complete\./],
   },
   {

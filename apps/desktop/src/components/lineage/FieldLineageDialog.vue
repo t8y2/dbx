@@ -2,21 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import {
-  ArrowUpRight,
-  Check,
-  Columns3,
-  Copy,
-  Eye,
-  Filter,
-  History,
-  Link,
-  Loader2,
-  RefreshCw,
-  Search,
-  SearchX,
-  X,
-} from "@lucide/vue";
+import { ArrowUpRight, Check, Columns3, Copy, Eye, Filter, History, Link, Loader2, RefreshCw, Search, SearchX, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } from "@/components/ui/dialog";
@@ -24,15 +10,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/api";
-import {
-  analyzeFieldLineage,
-  summarizeLineageCounts,
-  type FieldLineageConfidence,
-  type FieldLineageItem,
-  type FieldLineageResult,
-  type FieldLineageTable,
-  type FieldLineageView,
-} from "@/lib/fieldLineage";
+import { analyzeFieldLineage, summarizeLineageCounts, type FieldLineageConfidence, type FieldLineageItem, type FieldLineageResult, type FieldLineageTable, type FieldLineageView } from "@/lib/fieldLineage";
 import { copyToClipboard } from "@/lib/clipboard";
 
 const props = defineProps<{
@@ -88,14 +66,12 @@ const targetLabel = computed(() => {
 
 const counts = computed(() => summarizeLineageCounts(result.value?.items ?? []));
 
-const confidenceOptions = computed<Array<{ value: "all" | FieldLineageConfidence; label: string; count: number }>>(
-  () => [
-    { value: "all", label: t("lineage.all"), count: result.value?.items.length ?? 0 },
-    { value: "certain", label: t("lineage.certain"), count: counts.value.certain },
-    { value: "likely", label: t("lineage.likely"), count: counts.value.likely },
-    { value: "possible", label: t("lineage.possible"), count: counts.value.possible },
-  ],
-);
+const confidenceOptions = computed<Array<{ value: "all" | FieldLineageConfidence; label: string; count: number }>>(() => [
+  { value: "all", label: t("lineage.all"), count: result.value?.items.length ?? 0 },
+  { value: "certain", label: t("lineage.certain"), count: counts.value.certain },
+  { value: "likely", label: t("lineage.likely"), count: counts.value.likely },
+  { value: "possible", label: t("lineage.possible"), count: counts.value.possible },
+]);
 
 const filteredItems = computed(() => {
   const query = searchText.value.trim().toLowerCase();
@@ -103,15 +79,7 @@ const filteredItems = computed(() => {
     .filter((item) => confidenceFilter.value === "all" || item.confidence === confidenceFilter.value)
     .filter((item) => {
       if (!query) return true;
-      return [
-        item.title,
-        item.schema,
-        item.table,
-        item.column,
-        item.sqlSnippet,
-        itemKindLabel(item),
-        itemDescription(item),
-      ].some((value) =>
+      return [item.title, item.schema, item.table, item.column, item.sqlSnippet, itemKindLabel(item), itemDescription(item)].some((value) =>
         String(value ?? "")
           .toLowerCase()
           .includes(query),
@@ -157,13 +125,8 @@ async function loadLineage() {
     if (isStale(currentRun)) return;
 
     const schema = props.prefillSchema || props.prefillDatabase;
-    const tableInfos = prioritizeTargetTable(
-      await api.listTables(props.prefillConnectionId, props.prefillDatabase, schema),
-      props.prefillTable,
-    ).slice(0, MAX_TABLES);
-    const viewInfos = tableInfos
-      .filter((table) => table.table_type.toUpperCase().includes("VIEW"))
-      .slice(0, MAX_VIEW_DDLS);
+    const tableInfos = prioritizeTargetTable(await api.listTables(props.prefillConnectionId, props.prefillDatabase, schema), props.prefillTable).slice(0, MAX_TABLES);
+    const viewInfos = tableInfos.filter((table) => table.table_type.toUpperCase().includes("VIEW")).slice(0, MAX_VIEW_DDLS);
     progressTotal.value = tableInfos.length + viewInfos.length + 1;
 
     const tables: FieldLineageTable[] = [];
@@ -174,12 +137,7 @@ async function loadLineage() {
         batch.map(async (table) => {
           try {
             const columns = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, schema, table.name);
-            const foreignKeys = await api.listForeignKeys(
-              props.prefillConnectionId,
-              props.prefillDatabase,
-              schema,
-              table.name,
-            );
+            const foreignKeys = await api.listForeignKeys(props.prefillConnectionId, props.prefillDatabase, schema, table.name);
             return {
               schema,
               name: table.name,
@@ -208,9 +166,7 @@ async function loadLineage() {
       }
     }
 
-    const histories = (await api.loadHistory(200, 0))
-      .filter((entry) => !entry.database || entry.database === props.prefillDatabase)
-      .map((entry) => ({ id: entry.id, sql: entry.sql, executed_at: entry.executed_at }));
+    const histories = (await api.loadHistory(200, 0)).filter((entry) => !entry.database || entry.database === props.prefillDatabase).map((entry) => ({ id: entry.id, sql: entry.sql, executed_at: entry.executed_at }));
     progressDone.value++;
     if (isStale(currentRun)) return;
 
@@ -258,8 +214,7 @@ function confidenceTone(confidence: FieldLineageItem["confidence"]) {
 
 function itemRank(item: FieldLineageItem) {
   const confidenceRank = item.confidence === "certain" ? 0 : item.confidence === "likely" ? 10 : 20;
-  const kindRank =
-    item.kind === "foreignKey" ? 0 : item.kind === "viewReference" ? 1 : item.kind === "historyReference" ? 2 : 3;
+  const kindRank = item.kind === "foreignKey" ? 0 : item.kind === "viewReference" ? 1 : item.kind === "historyReference" ? 2 : 3;
   return confidenceRank + kindRank;
 }
 
@@ -287,9 +242,7 @@ function itemDescription(item: FieldLineageItem) {
     return item.confidence === "likely" ? t("lineage.description.viewLikely") : t("lineage.description.viewPossible");
   }
   if (item.kind === "historyReference") {
-    return item.confidence === "likely"
-      ? t("lineage.description.historyLikely")
-      : t("lineage.description.historyPossible");
+    return item.confidence === "likely" ? t("lineage.description.historyLikely") : t("lineage.description.historyPossible");
   }
   return t("lineage.description.sameName");
 }
@@ -322,9 +275,7 @@ function openItemTarget(item: FieldLineageItem) {
 
 <template>
   <Dialog v-model:open="dialogOpen">
-    <DialogScrollContent
-      class="h-[78vh] min-h-[560px] max-h-[780px] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden gap-0 p-0 sm:max-w-[980px]"
-    >
+    <DialogScrollContent class="h-[78vh] min-h-[560px] max-h-[780px] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden gap-0 p-0 sm:max-w-[980px]">
       <DialogHeader class="border-b px-6 py-4 pr-12">
         <DialogTitle class="flex items-center gap-2 text-lg">
           <Link class="h-5 w-5" />
@@ -357,16 +308,7 @@ function openItemTarget(item: FieldLineageItem) {
             </div>
             <div class="flex items-center gap-2 overflow-x-auto">
               <Filter class="h-4 w-4 shrink-0 text-muted-foreground" />
-              <Button
-                v-for="option in confidenceOptions"
-                :key="option.value"
-                size="sm"
-                :variant="confidenceFilter === option.value ? 'default' : 'outline'"
-                class="h-8 shrink-0 px-3"
-                @click="confidenceFilter = option.value"
-              >
-                {{ option.label }} {{ option.count }}
-              </Button>
+              <Button v-for="option in confidenceOptions" :key="option.value" size="sm" :variant="confidenceFilter === option.value ? 'default' : 'outline'" class="h-8 shrink-0 px-3" @click="confidenceFilter = option.value"> {{ option.label }} {{ option.count }} </Button>
             </div>
           </div>
         </div>
@@ -379,17 +321,11 @@ function openItemTarget(item: FieldLineageItem) {
             </div>
           </div>
 
-          <div
-            v-else-if="error"
-            class="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
-          >
+          <div v-else-if="error" class="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
             {{ error }}
           </div>
 
-          <div
-            v-else-if="result && result.items.length === 0"
-            class="flex flex-col items-center justify-center gap-2 rounded-md border py-12 text-sm text-muted-foreground"
-          >
+          <div v-else-if="result && result.items.length === 0" class="flex flex-col items-center justify-center gap-2 rounded-md border py-12 text-sm text-muted-foreground">
             <SearchX class="h-8 w-8" />
             {{ t("lineage.empty") }}
           </div>
@@ -398,33 +334,20 @@ function openItemTarget(item: FieldLineageItem) {
             <div class="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
               <span>{{ t("lineage.showing", { shown: filteredItems.length, total: result.items.length }) }}</span>
               <span v-if="filteredItems.length">
-                {{ t("lineage.certain") }} {{ filteredCounts.certain }} · {{ t("lineage.likely") }}
-                {{ filteredCounts.likely }} · {{ t("lineage.possible") }}
+                {{ t("lineage.certain") }} {{ filteredCounts.certain }} · {{ t("lineage.likely") }} {{ filteredCounts.likely }} · {{ t("lineage.possible") }}
                 {{ filteredCounts.possible }}
               </span>
             </div>
 
-            <div
-              v-if="filteredItems.length === 0"
-              class="flex flex-col items-center justify-center gap-2 rounded-md border py-12 text-sm text-muted-foreground"
-            >
+            <div v-if="filteredItems.length === 0" class="flex flex-col items-center justify-center gap-2 rounded-md border py-12 text-sm text-muted-foreground">
               <SearchX class="h-8 w-8" />
               {{ t("lineage.noFiltered") }}
             </div>
 
             <div v-else class="space-y-2">
-              <div
-                v-for="item in filteredItems"
-                :key="item.id"
-                class="rounded-md border bg-background transition-colors hover:bg-muted/25"
-              >
+              <div v-for="item in filteredItems" :key="item.id" class="rounded-md border bg-background transition-colors hover:bg-muted/25">
                 <div class="flex items-start gap-3 p-3">
-                  <div
-                    :class="[
-                      'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border',
-                      confidenceTone(item.confidence),
-                    ]"
-                  >
+                  <div :class="['mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border', confidenceTone(item.confidence)]">
                     <component :is="itemIcon(item)" class="h-4 w-4" />
                   </div>
                   <div class="min-w-0 flex-1">
@@ -437,33 +360,19 @@ function openItemTarget(item: FieldLineageItem) {
                         @click="openItemTarget(item)"
                       >
                         <span class="truncate">{{ itemPrimaryLabel(item) }}</span>
-                        <ArrowUpRight
-                          class="h-3.5 w-3.5 shrink-0 opacity-70 transition-opacity group-hover:opacity-100"
-                        />
+                        <ArrowUpRight class="h-3.5 w-3.5 shrink-0 opacity-70 transition-opacity group-hover:opacity-100" />
                       </button>
                       <span v-else class="max-w-[560px] truncate font-medium">{{ itemPrimaryLabel(item) }}</span>
                       <Badge v-if="item.schema" variant="outline" class="text-[10px]">{{ item.schema }}</Badge>
                       <Badge variant="outline" class="text-[10px]">{{ itemKindLabel(item) }}</Badge>
-                      <Badge :variant="confidenceVariant(item.confidence)" class="text-[10px]">{{
-                        t(`lineage.${item.confidence}`)
-                      }}</Badge>
+                      <Badge :variant="confidenceVariant(item.confidence)" class="text-[10px]">{{ t(`lineage.${item.confidence}`) }}</Badge>
                     </div>
                     <p class="mt-1 text-xs leading-5 text-muted-foreground">
                       {{ itemDescription(item) }}
                     </p>
-                    <pre
-                      v-if="item.sqlSnippet"
-                      class="mt-2 max-h-20 overflow-auto rounded-md bg-muted/40 p-2 text-xs whitespace-pre-wrap"
-                      v-html="highlight(item.sqlSnippet)"
-                    />
+                    <pre v-if="item.sqlSnippet" class="mt-2 max-h-20 overflow-auto rounded-md bg-muted/40 p-2 text-xs whitespace-pre-wrap" v-html="highlight(item.sqlSnippet)" />
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-8 w-8 shrink-0 p-0"
-                    :title="t('lineage.copy')"
-                    @click="copyItem(item)"
-                  >
+                  <Button variant="ghost" size="sm" class="h-8 w-8 shrink-0 p-0" :title="t('lineage.copy')" @click="copyItem(item)">
                     <Check v-if="copiedId === item.id" class="h-4 w-4 text-emerald-600" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>

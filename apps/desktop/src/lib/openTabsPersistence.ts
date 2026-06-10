@@ -61,29 +61,17 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     objectSource: tab.objectSource,
     tableMeta: tab.tableMeta,
     ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
-    ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined
-      ? { resultCacheKey: tab.resultCacheKey }
-      : {}),
+    ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
   }));
 }
 
 function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   if (!value || typeof value !== "object") return false;
   const tab = value as Record<string, unknown>;
-  return (
-    typeof tab.id === "string" &&
-    typeof tab.title === "string" &&
-    typeof tab.connectionId === "string" &&
-    typeof tab.database === "string" &&
-    typeof tab.sql === "string"
-  );
+  return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && typeof tab.sql === "string";
 }
 
-export function restoreOpenTabsState(
-  rawTabs: string | null,
-  rawActiveTabId: string | null,
-  options: { queryOnly?: boolean } = {},
-): RestoredOpenTabs {
+export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean } = {}): RestoredOpenTabs {
   if (!rawTabs) return { tabs: [], activeTabId: null };
 
   try {
@@ -99,6 +87,9 @@ export function restoreOpenTabsState(
         mode,
         isExecuting: false,
         isCancelling: false,
+        queryExecutionStartedAt: undefined,
+        editorViewport: undefined,
+        editorSelection: undefined,
         isExplaining: false,
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
         resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,

@@ -6,11 +6,7 @@ export interface DataGridSortState {
   direction: DataGridSortDirection;
 }
 
-export function nextDataGridSortState(
-  current: DataGridSortState,
-  column: string,
-  columnIndex: number,
-): DataGridSortState {
+export function nextDataGridSortState(current: DataGridSortState, column: string, columnIndex: number): DataGridSortState {
   if (current.column === column && current.columnIndex === columnIndex) {
     if (current.direction === "asc") {
       return { column, columnIndex, direction: "desc" };

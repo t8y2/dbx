@@ -5,9 +5,7 @@ description: Execute .sql files against a selected connection, monitor progress,
 
 SQL File Execution runs local `.sql` scripts in DBX. Use it for initialization scripts, data patches, database dumps, and migration scripts.
 
-<Callout type="warn">
-SQL files may modify large amounts of data or schema. Confirm the target connection, target database, and script source before running. Back up production databases first.
-</Callout>
+<Callout type="warn">SQL files may modify large amounts of data or schema. Confirm the target connection, target database, and script source before running. Back up production databases first.</Callout>
 
 ## Workflow
 
@@ -16,26 +14,31 @@ SQL files may modify large amounts of data or schema. Confirm the target connect
     ### Open SQL File Execution
 
     Open the SQL file execution panel in DBX.
+
   </Step>
   <Step>
     ### Choose a File
 
     Select a local `.sql` file. Large files may take longer to parse and execute.
+
   </Step>
   <Step>
     ### Select Target Connection
 
     Choose the connection and database where the script should run.
+
   </Step>
   <Step>
     ### Start Execution
 
     DBX executes the script statement by statement and shows progress.
+
   </Step>
   <Step>
     ### Check Results
 
     After execution, review successful statements, failed statements, and error messages.
+
   </Step>
 </Steps>
 
@@ -61,9 +64,7 @@ By default, execution stops when a statement fails. You can enable continue-on-e
 
 You can cancel while execution is running. Cancelling stops later statements from running, but statements already submitted to the database are not rolled back automatically.
 
-<Callout type="info">
-If a script must be atomic, include transaction control in the script itself and confirm the target database supports the required transaction behavior.
-</Callout>
+<Callout type="info">If a script must be atomic, include transaction control in the script itself and confirm the target database supports the required transaction behavior.</Callout>
 
 ## Before Running
 

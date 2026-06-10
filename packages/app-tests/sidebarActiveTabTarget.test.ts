@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  activeTabSidebarTarget,
-  findSidebarNodeForActiveTab,
-  scrollTopForSidebarNode,
-  shouldScrollActiveSidebarSelection,
-} from "../../apps/desktop/src/lib/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebarActiveTabTarget.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 

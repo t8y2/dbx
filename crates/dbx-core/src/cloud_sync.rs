@@ -530,7 +530,9 @@ mod tests {
         decrypt_sensitive_payload, encrypt_sensitive_payload, normalized_remote_path, parent_collection_paths,
         scrub_connection_secrets, ConnectionSecretSnapshot, SensitiveSyncPayload,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
+    use crate::models::connection::{
+        default_redis_key_separator, ConnectionConfig, DatabaseType, TransportLayerConfig,
+    };
 
     #[test]
     fn normalizes_empty_remote_path_to_default() {
@@ -573,9 +575,11 @@ mod tests {
                 key_passphrase: "hop-passphrase".to_string(),
                 connect_timeout_secs: 5,
                 expose_lan: false,
+                use_ssh_agent: false,
             })],
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
+            idle_timeout_secs: 60,
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -590,11 +594,13 @@ mod tests {
             redis_sentinel_password: "sentinel".to_string(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         };
         scrub_connection_secrets(&mut config);
         assert!(config.password.is_empty());

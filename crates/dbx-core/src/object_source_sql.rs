@@ -234,6 +234,7 @@ fn object_type_keyword(object_type: &ObjectSourceKind) -> &'static str {
         ObjectSourceKind::View => "VIEW",
         ObjectSourceKind::Procedure => "PROCEDURE",
         ObjectSourceKind::Function => "FUNCTION",
+        ObjectSourceKind::Sequence => "SEQUENCE",
         ObjectSourceKind::Package => "PACKAGE",
         ObjectSourceKind::PackageBody => "PACKAGE BODY",
     }
@@ -384,6 +385,8 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
         Some(ObjectSourceKind::Procedure)
     } else if value.eq_ignore_ascii_case("FUNCTION") {
         Some(ObjectSourceKind::Function)
+    } else if value.eq_ignore_ascii_case("SEQUENCE") {
+        Some(ObjectSourceKind::Sequence)
     } else if value.eq_ignore_ascii_case("PACKAGE") {
         Some(ObjectSourceKind::Package)
     } else if value.eq_ignore_ascii_case("PACKAGE BODY") || value.eq_ignore_ascii_case("PACKAGE_BODY") {

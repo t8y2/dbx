@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  buildHistoryAiAnalysisPrompt,
-  canRollbackHistoryEntry,
-  type HistoryAiAnalysisEntry,
-} from "../../apps/desktop/src/lib/historyAiAnalysis.ts";
+import { buildHistoryAiAnalysisPrompt, canRollbackHistoryEntry, type HistoryAiAnalysisEntry } from "../../apps/desktop/src/lib/historyAiAnalysis.ts";
 
 const baseEntry: HistoryAiAnalysisEntry = {
   id: "h1",

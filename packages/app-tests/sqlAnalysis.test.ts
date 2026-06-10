@@ -1,13 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  allEditableColumnsWriteable,
-  allPrimaryKeysPresent,
-  analyzeEditableQuery,
-  analyzeEditableQueryEditability,
-  isBinaryType,
-  queryEditabilityMessageKey,
-} from "../../apps/desktop/src/lib/sqlAnalysis.ts";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey } from "../../apps/desktop/src/lib/sqlAnalysis.ts";
 
 test("recognizes a simple single-table SELECT as editable", () => {
   const result = analyzeEditableQueryEditability("select id, name from public.users where active = true order by id");
@@ -87,9 +80,7 @@ test("reports computed result columns as unsafe to edit", () => {
 });
 
 test("keeps single-table expression columns while mapping writable source columns", () => {
-  const result = analyzeEditableQueryEditability(
-    "select iso3, year, country_name, ihli / gdp_pc as score from ihli_data",
-  );
+  const result = analyzeEditableQueryEditability("select iso3, year, country_name, ihli / gdp_pc as score from ihli_data");
 
   assert.equal(result.editable, true);
   assert.deepEqual(result.analysis.columns, [
@@ -98,10 +89,7 @@ test("keeps single-table expression columns while mapping writable source column
     { sourceName: "country_name", sourceNameQuoted: false, resultName: "country_name", expression: "country_name" },
     { sourceName: undefined, sourceNameQuoted: false, resultName: "score", expression: "ihli / gdp_pc" },
   ]);
-  assert.equal(
-    allPrimaryKeysPresent(["iso3", "year"], ["iso3", "year", "country_name", "score"], result.analysis),
-    true,
-  );
+  assert.equal(allPrimaryKeysPresent(["iso3", "year"], ["iso3", "year", "country_name", "score"], result.analysis), true);
   assert.equal(allEditableColumnsWriteable(result.analysis, ["iso3", "year", "country_name", "score"]), true);
 });
 
@@ -111,10 +99,7 @@ test("accepts aliased primary key source columns for row identity", () => {
   assert.ok(analysis);
   assert.equal(allPrimaryKeysPresent(["id"], ["user_id", "name"], analysis), true);
   assert.equal(allEditableColumnsWriteable(analysis, ["user_id", "name"]), true);
-  assert.equal(
-    allPrimaryKeysPresent(["id"], ["id", "name"], analyzeEditableQuery("select id, name from users")!),
-    true,
-  );
+  assert.equal(allPrimaryKeysPresent(["id"], ["id", "name"], analyzeEditableQuery("select id, name from users")!), true);
 });
 
 test("recognizes binary type declarations with lengths", () => {

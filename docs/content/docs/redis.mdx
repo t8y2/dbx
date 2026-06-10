@@ -14,22 +14,20 @@ The Redis key browser displays keys in a table format for easier scanning and fi
 - Use the search bar to filter keys by pattern (e.g., `user:*`, `cache:*`)
 - Key type, TTL, and size are shown inline
 
-<Callout type="info">
-For Redis instances with millions of keys, use specific key patterns in the search bar instead of loading the entire keyspace. Set the scan page size in Settings to control how many keys are fetched per batch.
-</Callout>
+<Callout type="info">For Redis instances with millions of keys, use specific key patterns in the search bar instead of loading the entire keyspace. Set the scan page size in Settings to control how many keys are fetched per batch.</Callout>
 
 ## Value Viewer and Editor
 
 Each Redis data type has a dedicated viewer and editor:
 
-| Type | Viewer | Editing |
-|---|---|---|
-| String | Plain text or JSON viewer | Inline text edit |
-| Hash | Field/value table with resizable columns | Edit individual fields |
-| List | Ordered list with index | Add, remove, reorder elements |
-| Set | Member list with cardinality | Add and remove members |
-| Sorted Set | Member list with scores | Edit members and scores |
-| Stream | Entry list with IDs | View stream entries |
+| Type       | Viewer                                   | Editing                       |
+| ---------- | ---------------------------------------- | ----------------------------- |
+| String     | Plain text or JSON viewer                | Inline text edit              |
+| Hash       | Field/value table with resizable columns | Edit individual fields        |
+| List       | Ordered list with index                  | Add, remove, reorder elements |
+| Set        | Member list with cardinality             | Add and remove members        |
+| Sorted Set | Member list with scores                  | Edit members and scores       |
+| Stream     | Entry list with IDs                      | View stream entries           |
 
 ## JSON Value Viewer
 
@@ -43,9 +41,7 @@ Search Redis values by content, not just keys:
 - Find Hash fields by value
 - Results are streamed progressively for large keyspaces
 
-<Callout type="warn">
-Value search scans all keys that match the current pattern. On large databases this can be resource-intensive. Narrow the key pattern before starting a value search.
-</Callout>
+<Callout type="warn">Value search scans all keys that match the current pattern. On large databases this can be resource-intensive. Narrow the key pattern before starting a value search.</Callout>
 
 ## Bulk Operations
 

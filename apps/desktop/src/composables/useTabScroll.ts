@@ -2,23 +2,31 @@ import { onBeforeUnmount, ref, watch, type Ref } from "vue";
 
 export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
   const hasTabOverflow = ref(false);
-  const canScrollLeft = ref(false);
-  const canScrollRight = ref(false);
+  const scrollThumbLeftPercent = ref(0);
+  const scrollThumbWidthPercent = ref(100);
+  const isScrollbarDragging = ref(false);
   let resizeObserver: ResizeObserver | null = null;
   let updateFrame = 0;
+  let dragState: {
+    trackRect: DOMRect;
+    thumbOffsetPx: number;
+  } | null = null;
 
   function updateScrollButtons() {
     const el = tabsContainerRef.value;
     if (!el) {
       hasTabOverflow.value = false;
-      canScrollLeft.value = false;
-      canScrollRight.value = false;
+      scrollThumbLeftPercent.value = 0;
+      scrollThumbWidthPercent.value = 100;
       return;
     }
     const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
     hasTabOverflow.value = maxScrollLeft > 1;
-    canScrollLeft.value = el.scrollLeft > 1;
-    canScrollRight.value = el.scrollLeft < maxScrollLeft - 1;
+    const rawThumbWidth = el.scrollWidth > 0 ? (el.clientWidth / el.scrollWidth) * 100 : 100;
+    const thumbWidth = Math.min(100, Math.max(8, rawThumbWidth));
+    const thumbTravel = Math.max(0, 100 - thumbWidth);
+    scrollThumbWidthPercent.value = thumbWidth;
+    scrollThumbLeftPercent.value = maxScrollLeft > 0 ? (el.scrollLeft / maxScrollLeft) * thumbTravel : 0;
   }
 
   function scheduleScrollButtonUpdate() {
@@ -32,15 +40,6 @@ export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
     } else {
       window.setTimeout(update, 0);
     }
-  }
-
-  function scrollTabs(direction: "left" | "right") {
-    const el = tabsContainerRef.value;
-    if (!el) return;
-    const scrollAmount = Math.max(160, el.clientWidth * 0.65);
-    el.scrollBy({ left: direction === "left" ? -scrollAmount : scrollAmount, behavior: "smooth" });
-    scheduleScrollButtonUpdate();
-    window.setTimeout(updateScrollButtons, 260);
   }
 
   function onTabsWheel(event: WheelEvent) {
@@ -60,6 +59,60 @@ export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
     }
   }
 
+  function applyScrollbarDrag(clientX: number) {
+    const el = tabsContainerRef.value;
+    if (!el || !dragState) return;
+
+    const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+    if (maxScrollLeft <= 1) return;
+
+    const thumbWidthPx = dragState.trackRect.width * (scrollThumbWidthPercent.value / 100);
+    const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
+    const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
+    el.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * maxScrollLeft;
+    updateScrollButtons();
+  }
+
+  function onScrollbarPointerMove(event: PointerEvent) {
+    if (!dragState) return;
+    event.preventDefault();
+    applyScrollbarDrag(event.clientX);
+  }
+
+  function stopScrollbarDrag() {
+    if (!dragState) return;
+    dragState = null;
+    isScrollbarDragging.value = false;
+    window.removeEventListener("pointermove", onScrollbarPointerMove, true);
+    window.removeEventListener("pointerup", stopScrollbarDrag, true);
+    window.removeEventListener("pointercancel", stopScrollbarDrag, true);
+    document.body.style.userSelect = "";
+  }
+
+  function startScrollbarDrag(event: PointerEvent) {
+    const el = tabsContainerRef.value;
+    const track = event.currentTarget as HTMLElement | null;
+    if (!el || !track || !hasTabOverflow.value) return;
+
+    const trackRect = track.getBoundingClientRect();
+    const thumbLeftPx = trackRect.width * (scrollThumbLeftPercent.value / 100);
+    const thumbWidthPx = trackRect.width * (scrollThumbWidthPercent.value / 100);
+    const pointerX = event.clientX - trackRect.left;
+    const pointerInsideThumb = pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx;
+
+    dragState = {
+      trackRect,
+      thumbOffsetPx: pointerInsideThumb ? pointerX - thumbLeftPx : thumbWidthPx / 2,
+    };
+    isScrollbarDragging.value = true;
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onScrollbarPointerMove, true);
+    window.addEventListener("pointerup", stopScrollbarDrag, true);
+    window.addEventListener("pointercancel", stopScrollbarDrag, true);
+    event.preventDefault();
+    applyScrollbarDrag(event.clientX);
+  }
+
   watch(
     tabsContainerRef,
     (el) => {
@@ -76,10 +129,19 @@ export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
 
   onBeforeUnmount(() => {
     resizeObserver?.disconnect();
+    stopScrollbarDrag();
     if (updateFrame && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(updateFrame);
     }
   });
 
-  return { hasTabOverflow, canScrollLeft, canScrollRight, updateScrollButtons, scrollTabs, onTabsWheel };
+  return {
+    hasTabOverflow,
+    scrollThumbLeftPercent,
+    scrollThumbWidthPercent,
+    isScrollbarDragging,
+    updateScrollButtons,
+    onTabsWheel,
+    startScrollbarDrag,
+  };
 }

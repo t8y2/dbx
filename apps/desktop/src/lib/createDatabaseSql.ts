@@ -1,15 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import * as api from "@/lib/api";
 
-const MYSQL_COMPATIBLE_PROFILES = new Set([
-  "mysql",
-  "mariadb",
-  "tidb",
-  "oceanbase",
-  "doris",
-  "starrocks",
-  "custom_mysql",
-]);
+const MYSQL_COMPATIBLE_PROFILES = new Set(["mysql", "mariadb", "tidb", "oceanbase", "doris", "starrocks", "custom_mysql"]);
 const MYSQL_COMPATIBLE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb"]);
 
 export interface CreateDatabaseSqlOptions {
@@ -21,10 +13,7 @@ export interface CreateDatabaseSqlOptions {
 }
 
 export function supportsCreateDatabaseCharset(databaseType?: DatabaseType, driverProfile?: string | null): boolean {
-  return (
-    MYSQL_COMPATIBLE_TYPES.has(databaseType as DatabaseType) ||
-    (!!driverProfile && MYSQL_COMPATIBLE_PROFILES.has(driverProfile))
-  );
+  return MYSQL_COMPATIBLE_TYPES.has(databaseType as DatabaseType) || (!!driverProfile && MYSQL_COMPATIBLE_PROFILES.has(driverProfile));
 }
 
 export function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions): Promise<string> {

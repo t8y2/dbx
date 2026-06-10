@@ -1,10 +1,24 @@
 {
   "name": "@dbx-app/cli",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Command line interface for DBX database connections, schema, and safe queries",
-  "type": "module",
-  "engines": {
-    "node": ">=22.13.0"
+  "keywords": [
+    "ai-agent",
+    "automation",
+    "cli",
+    "codex",
+    "database",
+    "dbx",
+    "mysql",
+    "postgresql",
+    "terminal"
+  ],
+  "homepage": "https://github.com/t8y2/dbx/tree/main/packages/cli",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/cli"
   },
   "bin": {
     "dbx": "dist/cli.js"
@@ -12,30 +26,13 @@
   "files": [
     "dist"
   ],
+  "type": "module",
   "scripts": {
     "start": "tsx src/cli.ts",
     "test": "pnpm --filter @dbx-app/node-core build && vitest run --config vitest.config.ts",
     "build": "pnpm --filter @dbx-app/node-core build && tsc",
     "prepublishOnly": "tsc"
   },
-  "keywords": [
-    "cli",
-    "database",
-    "dbx",
-    "codex",
-    "terminal",
-    "automation",
-    "postgresql",
-    "mysql",
-    "ai-agent"
-  ],
-  "license": "Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/t8y2/dbx",
-    "directory": "packages/cli"
-  },
-  "homepage": "https://github.com/t8y2/dbx/tree/main/packages/cli",
   "dependencies": {
     "@dbx-app/node-core": "workspace:^"
   },
@@ -43,5 +40,8 @@
     "@types/node": "^22.15.21",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

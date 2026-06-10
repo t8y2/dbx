@@ -37,9 +37,7 @@ export interface ClipboardEnvironment {
   document?: ClipboardDocument;
 }
 
-export async function readTextFromClipboard(
-  env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment,
-): Promise<string> {
+export async function readTextFromClipboard(env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<string> {
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {
       const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
@@ -56,10 +54,7 @@ export async function readTextFromClipboard(
   throw new Error("Clipboard API is not available");
 }
 
-export async function copyToClipboard(
-  text: string,
-  env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment,
-): Promise<void> {
+export async function copyToClipboard(text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {
       const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");

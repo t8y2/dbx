@@ -198,14 +198,7 @@ function buildEngineeringCluster(table: DiagramTable): EngineeringCluster {
   });
 
   groups.right.forEach((item, index) => {
-    attributes.push(
-      localAttributeNode(
-        table,
-        item,
-        centerX + centerWidth + rightGap + (rightSize.width - item.width) / 2,
-        centerY + (centerHeight - rightSize.height) / 2 + index * (ENGINEERING_ATTRIBUTE_HEIGHT + ATTRIBUTE_GAP_Y),
-      ),
-    );
+    attributes.push(localAttributeNode(table, item, centerX + centerWidth + rightGap + (rightSize.width - item.width) / 2, centerY + (centerHeight - rightSize.height) / 2 + index * (ENGINEERING_ATTRIBUTE_HEIGHT + ATTRIBUTE_GAP_Y)));
   });
 
   chunkAttributes(groups.bottom, HORIZONTAL_ATTRIBUTE_COLUMNS).forEach((row, rowIndex) => {
@@ -218,14 +211,7 @@ function buildEngineeringCluster(table: DiagramTable): EngineeringCluster {
   });
 
   groups.left.forEach((item, index) => {
-    attributes.push(
-      localAttributeNode(
-        table,
-        item,
-        (leftSize.width - item.width) / 2,
-        centerY + (centerHeight - leftSize.height) / 2 + index * (ENGINEERING_ATTRIBUTE_HEIGHT + ATTRIBUTE_GAP_Y),
-      ),
-    );
+    attributes.push(localAttributeNode(table, item, (leftSize.width - item.width) / 2, centerY + (centerHeight - leftSize.height) / 2 + index * (ENGINEERING_ATTRIBUTE_HEIGHT + ATTRIBUTE_GAP_Y)));
   });
 
   return {
@@ -251,9 +237,7 @@ function orderedTableRows(tables: DiagramTable[], positions: Record<string, Diag
       y: Math.floor(fallbackIndex / columnsPerRow),
     },
   }));
-  const ys = [...new Set(ordered.map((item) => positionKey(item.position.y)))].sort(
-    (left, right) => Number(left) - Number(right),
-  );
+  const ys = [...new Set(ordered.map((item) => positionKey(item.position.y)))].sort((left, right) => Number(left) - Number(right));
 
   return ys.map((y) =>
     ordered
@@ -299,11 +283,7 @@ function normalizeDiagram(diagram: Omit<EngineeringDiagram, "canvas">): Engineer
   };
 }
 
-export function buildEngineeringDiagram(
-  tables: DiagramTable[],
-  relationships: DiagramRelationship[],
-  positions: Record<string, DiagramPosition>,
-): EngineeringDiagram {
+export function buildEngineeringDiagram(tables: DiagramTable[], relationships: DiagramRelationship[], positions: Record<string, DiagramPosition>): EngineeringDiagram {
   const clusters = new Map(tables.map((table) => [table.name, buildEngineeringCluster(table)]));
   const rows = orderedTableRows(tables, positions);
   const entities: EngineeringEntityNode[] = [];
@@ -311,9 +291,7 @@ export function buildEngineeringDiagram(
   let nextRowY = 0;
 
   rows.forEach((row) => {
-    const rowClusters = row
-      .map((table) => clusters.get(table.name))
-      .filter((cluster): cluster is EngineeringCluster => cluster !== undefined);
+    const rowClusters = row.map((table) => clusters.get(table.name)).filter((cluster): cluster is EngineeringCluster => cluster !== undefined);
     const rowHeight = Math.max(...rowClusters.map((cluster) => cluster.height), ENGINEERING_ENTITY_HEIGHT);
     let nextX = 0;
 
@@ -343,9 +321,7 @@ export function buildEngineeringDiagram(
     nextRowY += rowHeight + ENGINEERING_CLUSTER_GAP_Y;
   });
   const entityMap = new Map(entities.map((entity) => [entity.name, entity]));
-  const orderedEntities = tables
-    .map((table) => entityMap.get(table.name))
-    .filter((entity): entity is EngineeringEntityNode => entity !== undefined);
+  const orderedEntities = tables.map((table) => entityMap.get(table.name)).filter((entity): entity is EngineeringEntityNode => entity !== undefined);
 
   const relationshipNodes: EngineeringRelationshipNode[] = relationships.flatMap((relationship) => {
     const source = entityMap.get(relationship.sourceTable);

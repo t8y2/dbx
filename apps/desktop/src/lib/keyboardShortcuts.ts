@@ -1,9 +1,4 @@
-import {
-  DEFAULT_SHORTCUT_SETTINGS,
-  normalizeShortcutSettings,
-  type ShortcutActionId,
-  type ShortcutSettings,
-} from "@/lib/shortcutRegistry";
+import { normalizeShortcutSettings, type ShortcutActionId, type ShortcutSettings } from "@/lib/shortcutRegistry";
 
 export interface ShortcutLikeEvent {
   key: string;
@@ -44,7 +39,7 @@ export function eventToShortcut(event: ShortcutLikeEvent): string | null {
 }
 
 export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boolean {
-  if (event.isComposing) return false;
+  if (event.isComposing || !shortcut) return false;
   const parts = shortcut.split("+");
   const key = parts[parts.length - 1] ?? "";
   const modifiers = new Set(parts.slice(0, -1));
@@ -65,7 +60,7 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boo
 }
 
 function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>): string {
-  return normalizeShortcutSettings(shortcuts)[actionId] || DEFAULT_SHORTCUT_SETTINGS[actionId];
+  return normalizeShortcutSettings(shortcuts)[actionId];
 }
 
 export function isExecuteSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -78,6 +73,10 @@ export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial
 
 export function isNewQueryShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("newQuery", shortcuts));
+}
+
+export function isOpenSettingsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openSettings", shortcuts));
 }
 
 export function isFocusSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -125,9 +124,7 @@ export function isAcceptCompletionShortcut(event: ShortcutLikeEvent, shortcuts?:
   return matchesShortcut(event, actionShortcut("acceptCompletion", shortcuts));
 }
 
-export function isObjectSourceSaveShortcutTarget(
-  target: { closest(selector: string): unknown } | null | undefined,
-): boolean {
+export function isObjectSourceSaveShortcutTarget(target: { closest(selector: string): unknown } | null | undefined): boolean {
   return !!target?.closest("[data-object-source-editor], [data-object-source-preview]");
 }
 
@@ -141,6 +138,10 @@ export function isDeleteCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?:
 
 export function isCancelSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("cancelSearch", shortcuts));
+}
+
+export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("toggleSidebar", shortcuts));
 }
 
 export function isBrowserReloadShortcut(event: ShortcutLikeEvent): boolean {

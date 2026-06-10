@@ -1,10 +1,5 @@
 export function normalizeSidebarHiddenTablePrefixes(value: unknown): string[] {
-  const rawPrefixes =
-    typeof value === "string"
-      ? value.split(/\r?\n/)
-      : Array.isArray(value)
-        ? value.filter((item) => typeof item === "string")
-        : [];
+  const rawPrefixes = typeof value === "string" ? value.split(/\r?\n/) : Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
   const seen = new Set<string>();
   const prefixes: string[] = [];
 
@@ -19,8 +14,6 @@ export function normalizeSidebarHiddenTablePrefixes(value: unknown): string[] {
 }
 
 export function sidebarDisplayTableName(name: string, prefixes: readonly string[]): string {
-  const prefix = [...prefixes]
-    .sort((a, b) => b.length - a.length)
-    .find((item) => name.startsWith(item) && name.length > item.length);
+  const prefix = [...prefixes].sort((a, b) => b.length - a.length).find((item) => name.startsWith(item) && name.length > item.length);
   return prefix ? `...${name.slice(prefix.length)}` : name;
 }

@@ -34,13 +34,7 @@ export function shouldAutoScrollExpandedTreeNode(type: TreeNodeType): boolean {
   return type !== "connection" && type !== "connection-group";
 }
 
-export function scrollTopForExpandedTreeNode(options: {
-  expandedIndex: number;
-  insertedRowCount: number;
-  currentScrollTop: number;
-  viewportHeight: number;
-  rowHeight?: number;
-}): number {
+export function scrollTopForExpandedTreeNode(options: { expandedIndex: number; insertedRowCount: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number }): number {
   const rowHeight = options.rowHeight ?? SIDEBAR_TREE_ROW_HEIGHT;
   if (options.expandedIndex < 0 || options.insertedRowCount <= 0 || options.viewportHeight <= 0) {
     return options.currentScrollTop;

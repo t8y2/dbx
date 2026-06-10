@@ -1,14 +1,7 @@
 import type { AiAction } from "@/lib/ai";
 
 export type AiSkillRiskPolicy = "readonly" | "readonly_preferred" | "confirmed_write" | "sample_write";
-export type AiSkillContextNeed =
-  | "currentSql"
-  | "schema"
-  | "indexes"
-  | "foreignKeys"
-  | "lastError"
-  | "lastResultPreview"
-  | "databaseDialect";
+export type AiSkillContextNeed = "currentSql" | "schema" | "indexes" | "foreignKeys" | "lastError" | "lastResultPreview" | "databaseDialect";
 
 export interface LocalizedAiSkillText {
   en: string;
@@ -50,9 +43,7 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: ["利用外键关系推断 JOIN 条件。生成操作优先返回 SQL，避免长篇解释。"],
     },
     outputContract: {
-      en: [
-        "Output format: put only the final recommended SQL in the first ```sql code block; add at most 3 practical notes after it. If required information is missing, ask one clarifying question first.",
-      ],
+      en: ["Output format: put only the final recommended SQL in the first ```sql code block; add at most 3 practical notes after it. If required information is missing, ask one clarifying question first."],
       zh: ["输出格式：第一个 ```sql 代码块只放最终推荐 SQL；SQL 后最多 3 条实用说明。信息不足时先提出一个澄清问题。"],
     },
   },
@@ -70,15 +61,11 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: "逐步解释当前 SQL。指出危险操作、隐含假设和潜在性能问题。结合 Schema 中的索引和外键信息分析。",
     },
     systemRules: {
-      en: [
-        "Explain what the SQL does without changing it. Reference schema, indexes, foreign keys, result preview, and risky assumptions when relevant.",
-      ],
+      en: ["Explain what the SQL does without changing it. Reference schema, indexes, foreign keys, result preview, and risky assumptions when relevant."],
       zh: ["解释当前 SQL 的作用，不要改写 SQL。必要时结合 Schema、索引、外键、结果预览和风险假设说明。"],
     },
     outputContract: {
-      en: [
-        "Output format: summarize the SQL purpose first, then explain execution logic, risks, and performance notes step by step.",
-      ],
+      en: ["Output format: summarize the SQL purpose first, then explain execution logic, risks, and performance notes step by step."],
       zh: ["输出格式：先概括 SQL 目的，再按步骤解释执行逻辑、风险点和性能注意事项。"],
     },
   },
@@ -96,9 +83,7 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: "重写或优化当前 SQL。先在 ```sql 代码块中返回优化后的 SQL，然后简要说明改动。利用 Schema 中的索引信息建议索引友好的优化（如避免全表扫描、利用现有索引）。",
     },
     systemRules: {
-      en: [
-        "Use the index information in the schema to suggest optimizations. Point out which conditions hit indexes and which cause full table scans.",
-      ],
+      en: ["Use the index information in the schema to suggest optimizations. Point out which conditions hit indexes and which cause full table scans."],
       zh: ["利用 Schema 中的索引信息建议优化。指出哪些查询条件可以命中索引、哪些会导致全表扫描。"],
     },
     outputContract: {
@@ -120,9 +105,7 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: "根据报错信息和结果上下文修复当前 SQL。先在 ```sql 代码块中返回修正后的 SQL，再简要说明根因。",
     },
     systemRules: {
-      en: [
-        "Carefully analyze the error message to identify the root cause. Return the corrected SQL first, then briefly explain.",
-      ],
+      en: ["Carefully analyze the error message to identify the root cause. Return the corrected SQL first, then briefly explain."],
       zh: ["仔细分析错误信息，定位根因。先返回修正后的 SQL，再简要解释。"],
     },
     outputContract: {
@@ -144,15 +127,11 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: "将当前 SQL 转换为用户指定的目标方言。先在 ```sql 代码块中返回转换后的 SQL，再说明语法差异。",
     },
     systemRules: {
-      en: [
-        "Convert only to the target dialect requested by the user. Preserve the query intent and call out syntax that cannot be converted safely.",
-      ],
+      en: ["Convert only to the target dialect requested by the user. Preserve the query intent and call out syntax that cannot be converted safely."],
       zh: ["只转换到用户指定的目标方言。保持查询意图，并指出无法安全转换的语法。"],
     },
     outputContract: {
-      en: [
-        "Output format: provide the converted SQL first, then note important target-dialect syntax differences or incompatibilities.",
-      ],
+      en: ["Output format: provide the converted SQL first, then note important target-dialect syntax differences or incompatibilities."],
       zh: ["输出格式：先给转换后的 SQL，再说明目标方言下的重要语法差异或不兼容点。"],
     },
   },
@@ -170,9 +149,7 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: "为当前 Schema 生成安全的示例 INSERT 语句或模拟数据。不使用真实生产数据。在 ```sql 代码块中返回 SQL。",
     },
     systemRules: {
-      en: [
-        "Generate mock data only. Do not use or imply real production data, credentials, personal data, or secrets.",
-      ],
+      en: ["Generate mock data only. Do not use or imply real production data, credentials, personal data, or secrets."],
       zh: ["只生成模拟数据。不要使用或暗示真实生产数据、凭据、个人数据或密钥。"],
     },
     outputContract: {

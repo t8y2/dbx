@@ -45,12 +45,40 @@ import java.util.logging.Logger;
 public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_ROWS = 10_000;
-    private static final JdbcDriverQuirks DEFAULT_QUIRKS = new JdbcDriverQuirks(false, false, false, false, false);
-    private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = new JdbcDriverQuirks(false, false, false, true, false);
-    private static final JdbcDriverQuirks KINGBASE_QUIRKS = new JdbcDriverQuirks(false, false, false, false, true);
-    private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(true, true, false, false, false);
-    private static final JdbcDriverQuirks IRIS_QUIRKS = new JdbcDriverQuirks(true, false, true, false, false);
-    private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(false, true, false, false, false);
+    private static final JdbcDriverQuirks DEFAULT_QUIRKS = new JdbcDriverQuirks(
+        false,
+        false,
+        false,
+        false,
+        false,
+        StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
+    );
+    private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
+    private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
+    private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(
+        true,
+        true,
+        false,
+        false,
+        false,
+        StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
+    );
+    private static final JdbcDriverQuirks IRIS_QUIRKS = new JdbcDriverQuirks(
+        true,
+        false,
+        true,
+        false,
+        false,
+        StatementMaxRowsMode.READ_LOOP_ONLY
+    );
+    private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(
+        false,
+        true,
+        false,
+        false,
+        false,
+        StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
+    );
     private static final List<JdbcDriverQuirkRule> DRIVER_QUIRK_RULES = List.of(
         new JdbcDriverQuirkRule("jdbc:mysql:", USE_CATALOG_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:mariadb:", USE_CATALOG_QUIRKS),
@@ -72,8 +100,35 @@ public final class DbxJdbcPlugin {
         boolean useOracleMetadata,
         boolean caseInsensitiveSchemaMetadata,
         boolean useCatalogFallbackSql,
-        boolean ignoreCatalogForSchemaMetadata
+        boolean ignoreCatalogForSchemaMetadata,
+        StatementMaxRowsMode statementMaxRowsMode
     ) {
+        JdbcDriverQuirks withUseCatalogFallbackSql(boolean value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                value,
+                ignoreCatalogForSchemaMetadata,
+                statementMaxRowsMode
+            );
+        }
+
+        JdbcDriverQuirks withIgnoreCatalogForSchemaMetadata(boolean value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                useCatalogFallbackSql,
+                value,
+                statementMaxRowsMode
+            );
+        }
+    }
+
+    enum StatementMaxRowsMode {
+        APPLY_STATEMENT_MAX_ROWS,
+        READ_LOOP_ONLY
     }
 
     private record JdbcDriverQuirkRule(String urlPrefix, JdbcDriverQuirks quirks) {
@@ -282,8 +337,9 @@ public final class DbxJdbcPlugin {
         long start = System.nanoTime();
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
+        JdbcDriverQuirks quirks = driverQuirks(connection);
         try (Statement statement = conn.createStatement()) {
-            applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs);
+            applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             boolean hasResultSet = statement.execute(trimStatementSql(sql));
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
@@ -359,7 +415,7 @@ public final class DbxJdbcPlugin {
             try {
                 try (Statement stmt = conn.createStatement()) {
                     if (timeoutSecs >= 0) {
-                        try { stmt.setQueryTimeout(timeoutSecs); } catch (SQLFeatureNotSupportedException ignored) {}
+                        try { stmt.setQueryTimeout(timeoutSecs); } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {}
                     }
                     boolean hasResultSet = stmt.execute(trimStatementSql(sql));
                     if (hasResultSet) {
@@ -422,19 +478,27 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static void applyStatementOptions(Statement statement, int maxRows, int fetchSize, int timeoutSecs)
+    private static void applyStatementOptions(
+        Statement statement,
+        int maxRows,
+        int fetchSize,
+        int timeoutSecs,
+        JdbcDriverQuirks quirks
+    )
         throws SQLException {
-        statement.setMaxRows((int) Math.min(Integer.MAX_VALUE, (long) maxRows + 1L));
+        if (quirks.statementMaxRowsMode() == StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS) {
+            statement.setMaxRows((int) Math.min(Integer.MAX_VALUE, (long) maxRows + 1L));
+        }
         if (fetchSize > 0) {
             try {
                 statement.setFetchSize(fetchSize);
-            } catch (SQLFeatureNotSupportedException ignored) {
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
             }
         }
         if (timeoutSecs >= 0) {
             try {
                 statement.setQueryTimeout(timeoutSecs);
-            } catch (SQLFeatureNotSupportedException ignored) {
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
             }
         }
     }
@@ -578,7 +642,7 @@ public final class DbxJdbcPlugin {
         if (catalog != null) {
             try {
                 conn.setCatalog(catalog);
-            } catch (SQLFeatureNotSupportedException | AbstractMethodError ignored) {
+            } catch (SQLFeatureNotSupportedException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
             if (driverQuirks(connection).useCatalogFallbackSql()) {
                 applyUseCatalogFallback(conn, catalog);
@@ -587,7 +651,7 @@ public final class DbxJdbcPlugin {
         if (schema != null) {
             try {
                 conn.setSchema(schema);
-            } catch (SQLFeatureNotSupportedException | AbstractMethodError ignored) {
+            } catch (SQLFeatureNotSupportedException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
         }
     }
@@ -595,7 +659,7 @@ public final class DbxJdbcPlugin {
     private static void applyUseCatalogFallback(Connection conn, String catalog) {
         try (Statement statement = conn.createStatement()) {
             statement.execute("USE " + quoteJdbcIdentifier(catalog));
-        } catch (SQLException | AbstractMethodError ignored) {
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
     }
 
@@ -655,7 +719,7 @@ public final class DbxJdbcPlugin {
         addDatabase(result, optionalText(connection, "database"));
         try {
             addDatabase(result, conn.getCatalog());
-        } catch (SQLFeatureNotSupportedException | AbstractMethodError ignored) {
+        } catch (SQLFeatureNotSupportedException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
         return result;
     }
@@ -698,7 +762,7 @@ public final class DbxJdbcPlugin {
         } else {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, false);
-            } catch (SQLFeatureNotSupportedException ignored) {
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
                 }
@@ -706,7 +770,7 @@ public final class DbxJdbcPlugin {
             if (result.isEmpty() && catalog != null) {
                 try (ResultSet rs = meta.getSchemas(null, null)) {
                     appendSchemas(result, rs, false);
-                } catch (SQLFeatureNotSupportedException ignored) {
+                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
                 }
             }
         }
@@ -716,7 +780,7 @@ public final class DbxJdbcPlugin {
                 if (schema != null) {
                     addSchema(result, schema, quirks.caseInsensitiveSchemaMetadata());
                 }
-            } catch (SQLFeatureNotSupportedException | AbstractMethodError ignored) {
+            } catch (SQLFeatureNotSupportedException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
         }
         return result;
@@ -896,7 +960,7 @@ public final class DbxJdbcPlugin {
                 }
             }
             return fallback;
-        } catch (SQLFeatureNotSupportedException ignored) {
+        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
             return null;
         }
     }
@@ -979,7 +1043,7 @@ public final class DbxJdbcPlugin {
                     putNullablePreferValue(columnNode(result, name), "comment", comment);
                 }
             }
-        } catch (SQLException | AbstractMethodError ignored) {
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
     }
 

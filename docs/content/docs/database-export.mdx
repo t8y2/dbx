@@ -7,12 +7,12 @@ Database Export writes table structure and table data into a SQL file. Use it be
 
 ## What Gets Exported
 
-| Content | Details |
-|---|---|
-| Structure | `CREATE TABLE`, columns, primary keys, indexes, constraints, and other DDL |
-| Data | Rows exported as `INSERT` statements |
+| Content         | Details                                                                         |
+| --------------- | ------------------------------------------------------------------------------- |
+| Structure       | `CREATE TABLE`, columns, primary keys, indexes, constraints, and other DDL      |
+| Data            | Rows exported as `INSERT` statements                                            |
 | Batched inserts | Multiple rows grouped into one `INSERT` to reduce file size and import overhead |
-| Objects | Views, procedures, and functions where the database exposes source definitions |
+| Objects         | Views, procedures, and functions where the database exposes source definitions  |
 
 Example:
 
@@ -30,21 +30,25 @@ INSERT INTO users (id, name, email) VALUES
     ### Select Connection and Database
 
     Choose the database to export and verify the environment.
+
   </Step>
   <Step>
     ### Configure Export Options
 
     Choose whether to include structure, data, and database objects. You can export all tables or a selected table subset.
+
   </Step>
   <Step>
     ### Choose Output Location
 
     Select where the `.sql` file should be saved.
+
   </Step>
   <Step>
     ### Start Export
 
     DBX generates a SQL file and reports the current object, progress, row counts, errors, and cancellation state.
+
   </Step>
 </Steps>
 
@@ -54,9 +58,7 @@ DBX reads table data in batches and writes generated `INSERT` statements into th
 
 Selected-table export filters the table list before generating DDL and data. Routine objects such as procedures and functions are included only when object export is enabled and the export is not limited to a table subset.
 
-<Callout type="info">
-For MySQL exports, DBX temporarily writes `SET FOREIGN_KEY_CHECKS = 0` before table content and re-enables it at the end of the file.
-</Callout>
+<Callout type="info">For MySQL exports, DBX temporarily writes `SET FOREIGN_KEY_CHECKS = 0` before table content and re-enables it at the end of the file.</Callout>
 
 ## Cancellation And Errors
 
@@ -66,9 +68,7 @@ You can cancel an export between objects or row batches. If a specific table or 
 
 The generated `.sql` file can be imported with [SQL File Execution](/en/docs/sql-file).
 
-<Callout type="warn">
-Export files may contain sensitive data, account information, business identifiers, or user privacy data. Mask data before sharing when needed.
-</Callout>
+<Callout type="warn">Export files may contain sensitive data, account information, business identifiers, or user privacy data. Mask data before sharing when needed.</Callout>
 
 ## Recommendations
 

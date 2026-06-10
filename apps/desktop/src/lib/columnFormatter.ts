@@ -8,12 +8,7 @@ export interface CustomColumnFormatterConfig {
   template: string;
 }
 
-export type ColumnFormatterConfig =
-  | { kind: "datetime"; unit: DateTimeFormatterUnit }
-  | { kind: "json-path"; path: string }
-  | { kind: "mask"; prefix: number; suffix: number }
-  | { kind: "custom-template"; template: string }
-  | { kind: "custom-ref"; formatterId: string };
+export type ColumnFormatterConfig = { kind: "datetime"; unit: DateTimeFormatterUnit } | { kind: "json-path"; path: string } | { kind: "mask"; prefix: number; suffix: number } | { kind: "custom-template"; template: string } | { kind: "custom-ref"; formatterId: string };
 
 export interface ColumnFormatterKeyParts {
   connectionId: string;
@@ -32,15 +27,11 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
   const config = value as Record<string, unknown>;
 
   if (config.kind === "datetime") {
-    return config.unit === "seconds" || config.unit === "milliseconds" || config.unit === "auto"
-      ? { kind: "datetime", unit: config.unit }
-      : undefined;
+    return config.unit === "seconds" || config.unit === "milliseconds" || config.unit === "auto" ? { kind: "datetime", unit: config.unit } : undefined;
   }
 
   if (config.kind === "json-path") {
-    return typeof config.path === "string" && isSupportedJsonPath(config.path)
-      ? { kind: "json-path", path: config.path }
-      : undefined;
+    return typeof config.path === "string" && isSupportedJsonPath(config.path) ? { kind: "json-path", path: config.path } : undefined;
   }
 
   if (config.kind === "mask") {
@@ -50,15 +41,11 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
   }
 
   if (config.kind === "custom-template") {
-    return typeof config.template === "string" && config.template.trim()
-      ? { kind: "custom-template", template: config.template.slice(0, 500) }
-      : undefined;
+    return typeof config.template === "string" && config.template.trim() ? { kind: "custom-template", template: config.template.slice(0, 500) } : undefined;
   }
 
   if (config.kind === "custom-ref") {
-    return typeof config.formatterId === "string" && config.formatterId.trim()
-      ? { kind: "custom-ref", formatterId: config.formatterId }
-      : undefined;
+    return typeof config.formatterId === "string" && config.formatterId.trim() ? { kind: "custom-ref", formatterId: config.formatterId } : undefined;
   }
 
   return undefined;
@@ -77,10 +64,7 @@ export function normalizeCustomColumnFormatter(value: unknown): CustomColumnForm
   };
 }
 
-export function resolveColumnFormatter(
-  formatter: ColumnFormatterConfig | undefined,
-  customFormatters: Record<string, CustomColumnFormatterConfig>,
-): ColumnFormatterConfig | undefined {
+export function resolveColumnFormatter(formatter: ColumnFormatterConfig | undefined, customFormatters: Record<string, CustomColumnFormatterConfig>): ColumnFormatterConfig | undefined {
   if (!formatter) return undefined;
   if (formatter.kind !== "custom-ref") return formatter;
   const customFormatter = customFormatters[formatter.formatterId];
@@ -106,8 +90,7 @@ function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit): string {
   if (typeof value === "string" && !isTimestampString(value, unit)) return displayCellValue(value);
   const numeric = typeof value === "number" ? value : Number(String(value).trim());
   if (!Number.isFinite(numeric)) return displayCellValue(value);
-  const timestamp =
-    unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
+  const timestamp = unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? displayCellValue(value) : date.toLocaleString();
 }
@@ -150,18 +133,12 @@ function formatMask(value: CellValue, formatter: Extract<ColumnFormatterConfig, 
   const text = displayCellValue(value);
   const visibleCount = formatter.prefix + formatter.suffix;
   if (text.length <= visibleCount) return "*".repeat(text.length);
-  return `${text.slice(0, formatter.prefix)}${"*".repeat(text.length - visibleCount)}${text.slice(
-    text.length - formatter.suffix,
-  )}`;
+  return `${text.slice(0, formatter.prefix)}${"*".repeat(text.length - visibleCount)}${text.slice(text.length - formatter.suffix)}`;
 }
 
 function formatCustomTemplate(value: CellValue, template: string): string {
   const text = displayCellValue(value);
-  return template
-    .replaceAll("${value}", text)
-    .replaceAll("${upper}", text.toUpperCase())
-    .replaceAll("${lower}", text.toLowerCase())
-    .replaceAll("${length}", String(text.length));
+  return template.replaceAll("${value}", text).replaceAll("${upper}", text.toUpperCase()).replaceAll("${lower}", text.toLowerCase()).replaceAll("${length}", String(text.length));
 }
 
 function isSupportedJsonPath(path: string): boolean {

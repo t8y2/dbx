@@ -6,10 +6,7 @@ export async function getBridgeUrl(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-export async function postBridge(
-  path: string,
-  body: Record<string, unknown>,
-): Promise<{ ok: true; text: string } | { ok: false; text: string }> {
+export async function postBridge(path: string, body: Record<string, unknown>): Promise<{ ok: true; text: string } | { ok: false; text: string }> {
   try {
     const bridgeUrl = await getBridgeUrl();
     const res = await fetch(`${bridgeUrl}${path}`, {

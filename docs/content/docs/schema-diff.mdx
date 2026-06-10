@@ -5,9 +5,7 @@ description: Compare two database schemas and generate reviewable sync SQL.
 
 Schema Diff helps compare structure between database environments, such as development and production, staging and QA, or databases before and after a migration.
 
-<Callout type="warn">
-Schema sync may include destructive operations such as dropping tables, dropping columns, or changing column types. Review generated SQL line by line, and back up production databases first.
-</Callout>
+<Callout type="warn">Schema sync may include destructive operations such as dropping tables, dropping columns, or changing column types. Review generated SQL line by line, and back up production databases first.</Callout>
 
 ## Use Cases
 
@@ -23,41 +21,44 @@ Schema sync may include destructive operations such as dropping tables, dropping
     ### Select the Source
 
     The source is usually the database whose structure is newer or considered correct.
+
   </Step>
   <Step>
     ### Select the Target
 
     The target is the database to inspect or sync. It can be on another server or even another database engine.
+
   </Step>
   <Step>
     ### Run the Comparison
 
     DBX reads table, column, and index metadata from both sides. The current comparison handles tables, not views.
+
   </Step>
   <Step>
     ### Review Differences
 
     Check missing tables, extra tables, column type changes, nullable changes, default value changes, added or removed indexes, and data risk.
+
   </Step>
   <Step>
     ### Generate Sync SQL
 
     DBX generates statements such as `CREATE TABLE`, `ALTER TABLE`, and `DROP TABLE`. Review them before execution.
+
   </Step>
 </Steps>
 
 ## Difference Types
 
-| Type | Meaning |
-|---|---|
-| Source only | The object is missing from the target and may need to be created |
-| Target only | The object exists only in the target; confirm usage before dropping it |
-| Column difference | Type, nullable flag, or default value differs |
-| Index difference | Added or removed indexes, matched by index name |
+| Type              | Meaning                                                                |
+| ----------------- | ---------------------------------------------------------------------- |
+| Source only       | The object is missing from the target and may need to be created       |
+| Target only       | The object exists only in the target; confirm usage before dropping it |
+| Column difference | Type, nullable flag, or default value differs                          |
+| Index difference  | Added or removed indexes, matched by index name                        |
 
-<Callout type="info">
-Schema Diff currently does not fully compare foreign keys, triggers, view definitions, column comments, or changed columns/uniqueness inside an index with the same name. Important migrations still need manual SQL review.
-</Callout>
+<Callout type="info">Schema Diff currently does not fully compare foreign keys, triggers, view definitions, column comments, or changed columns/uniqueness inside an index with the same name. Important migrations still need manual SQL review.</Callout>
 
 ## Database Coverage
 

@@ -27,6 +27,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         transport_layers: Vec::new(),
         connect_timeout_secs: 5,
         query_timeout_secs: 30,
+        idle_timeout_secs: 60,
         ssl: false,
         ca_cert_path: String::new(),
         client_cert_path: String::new(),
@@ -41,11 +42,13 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         redis_sentinel_password: String::new(),
         redis_sentinel_tls: false,
         redis_cluster_nodes: String::new(),
+        redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         etcd_endpoints: String::new(),
         external_config: None,
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
+        read_only: false,
     }
 }
 

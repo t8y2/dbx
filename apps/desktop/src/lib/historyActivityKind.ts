@@ -1,4 +1,4 @@
-export type HistoryActivityKind = "query" | "data_change" | "schema_change" | "import" | "transfer";
+export type HistoryActivityKind = "query" | "data_change" | "schema_change" | "import" | "transfer" | "redis_command";
 
 export type HistoryActivitySource = {
   activity_kind?: HistoryActivityKind;

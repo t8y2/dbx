@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, computed, nextTick, watch, onBeforeUnmount, inject } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
@@ -40,7 +40,6 @@ import {
   Scissors,
   CopyPlus,
   Plus,
-  FileText,
   ScrollText,
   Braces,
   Code2,
@@ -48,11 +47,11 @@ import {
   Package,
   Clipboard,
   UsersRound,
+  Lock,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
@@ -62,42 +61,13 @@ import { uuid } from "@/lib/utils";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebarTreeItemLayout";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import {
-  clearActiveTableReferencePayload,
-  createTableReferencePayload,
-  createTableReferenceDropEvent,
-  setActiveTableReferencePayload,
-  type QueryEditorTableReferencePayload,
-} from "@/lib/queryEditorTableDrop";
+import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/queryEditorTableDrop";
 import { editablePrimaryKeys } from "@/lib/tableEditing";
-import {
-  supportsDatabaseCreation,
-  supportsDatabaseSearch,
-  supportsFieldLineage,
-  supportsObjectBrowserTreeNode,
-  supportsSchemaDiagram,
-  supportsSqlFileExecution,
-  supportsTableImport,
-  supportsTableTruncate,
-  supportsTableStructureEditing,
-  usesTreeSchemaMode,
-} from "@/lib/databaseCapabilities";
-import {
-  copyNameForTreeNode,
-  objectSourceKindForTreeNode,
-  sidebarSelectionCopyAction,
-  treeNodeRowAction,
-  treeNodeRowDoubleClickAction,
-} from "@/lib/treeNodeClick";
+import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
+import { copyNameForTreeNode, objectSourceKindForTreeNode, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
-import {
-  buildCreateDatabaseSql,
-  buildDuckDbAttachDatabaseSql,
-  duckDbAttachedDatabaseNameFromPath,
-  supportsCreateDatabaseCharset,
-  uniqueDuckDbAttachedDatabaseName,
-} from "@/lib/createDatabaseSql";
+import { buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, duckDbAttachedDatabaseNameFromPath, supportsCreateDatabaseCharset, uniqueDuckDbAttachedDatabaseName } from "@/lib/createDatabaseSql";
 import {
   buildCreateSchemaSql,
   buildDropDatabaseSql,
@@ -117,21 +87,12 @@ import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType }
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import {
-  connectionObjectTreeNodeSchema,
-  connectionObjectTreeQuerySchema,
-  connectionUsesDatabaseObjectTreeMode,
-  effectiveDatabaseTypeForConnection,
-} from "@/lib/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
 import { sidebarDisplayTableName } from "@/lib/sidebarTableNameDisplay";
-import {
-  selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes,
-  treeSelectionRangeIdsByIndex,
-  treeSelectionRangeIds,
-} from "@/lib/sidebarTreeSelection";
+import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebarTreeSelection";
 import { selectedConnectionDeleteTargets } from "@/lib/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
@@ -164,7 +125,6 @@ function isLabelTruncated(): boolean {
 }
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
-const savedSqlStore = useSavedSqlStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
@@ -189,19 +149,13 @@ const emit = defineEmits<{
   "search-toggle": [node: TreeNode];
 }>();
 
-const usesFullWidthLabel = computed(() =>
-  usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll),
-);
+const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
-const labelWidthClass = computed(() =>
-  usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 flex-1 truncate",
-);
+const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 flex-1 truncate"));
 
 function currentDatabaseType(): DatabaseType | undefined {
-  return props.node.connectionId
-    ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId))
-    : undefined;
+  return props.node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
 }
 
 function rawDatabaseType(): DatabaseType | undefined {
@@ -209,9 +163,7 @@ function rawDatabaseType(): DatabaseType | undefined {
 }
 
 function databaseTypeForNode(node: TreeNode): DatabaseType | undefined {
-  return node.connectionId
-    ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId))
-    : undefined;
+  return node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
 }
 
 function hasNodeDatabaseContext(node: TreeNode): node is TreeNode & { connectionId: string; database: string } {
@@ -233,7 +185,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "column":
-      return { icon: Columns3, colorClass: "text-muted-foreground" };
+      if ((node.meta as ColumnInfo).is_primary_key) {
+        return { icon: Columns3, colorClass: "text-orange-400" };
+      } else {
+        return { icon: Columns3, colorClass: "text-muted-foreground" };
+      }
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":
@@ -246,12 +202,6 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
-    case "saved-sql-root":
-      return { icon: FolderOpen, colorClass: "text-blue-500" };
-    case "saved-sql-folder":
-      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-blue-400" };
-    case "saved-sql-file":
-      return { icon: FileText, colorClass: "text-blue-300" };
     case "index":
       return { icon: Key, colorClass: "text-amber-400" };
     case "fkey":
@@ -270,6 +220,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "function":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "sequence":
+      return { icon: ListTree, colorClass: "text-emerald-500" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -282,6 +234,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "group-sequences":
+      return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-partitions":
@@ -291,30 +245,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set([
-  "group-columns",
-  "group-indexes",
-  "group-fkeys",
-  "group-triggers",
-  "group-tables",
-  "group-views",
-  "group-procedures",
-  "group-functions",
-  "group-packages",
-  "group-partitions",
-  "saved-sql-root",
-  "saved-sql-folder",
-]);
-const pinnableTypes: Set<TreeNodeType> = new Set([
-  "connection-group",
-  "database",
-  "schema",
-  "table",
-  "view",
-  "redis-db",
-  "mongo-db",
-  "mongo-collection",
-]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
+const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "schema", "table", "view", "redis-db", "mongo-db", "mongo-collection"]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -335,7 +267,7 @@ function visibleLabel(node: TreeNode): string {
 }
 
 function isTooltipDisabled(): boolean {
-  return !isLabelTruncated();
+  return isRenamingGroup.value || !isLabelTruncated();
 }
 
 async function toggle() {
@@ -351,24 +283,13 @@ async function toggle() {
     return;
   }
 
-  if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
-    node.isExpanded = !node.isExpanded;
-    emit("node-toggled", node, wasExpanded);
-    return;
-  }
-
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
-  const databaseObjectGroup =
-    node.type === "group-tables" ||
-    node.type === "group-views" ||
-    node.type === "group-procedures" ||
-    node.type === "group-functions" ||
-    node.type === "group-packages";
+  const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
     emit("node-toggled", node, wasExpanded);
@@ -418,34 +339,15 @@ async function toggle() {
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema);
-    } else if (
-      (node.type === "table" || node.type === "view") &&
-      node.connectionId &&
-      hasTreeNodeDatabaseContext(node)
-    ) {
+    } else if ((node.type === "table" || node.type === "view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
-    } else if (
-      node.type === "group-columns" &&
-      node.connectionId &&
-      hasTreeNodeDatabaseContext(node) &&
-      node.tableName
-    ) {
+    } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
-    } else if (
-      node.type === "group-indexes" &&
-      node.connectionId &&
-      hasTreeNodeDatabaseContext(node) &&
-      node.tableName
-    ) {
+    } else if (node.type === "group-indexes" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-fkeys" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
-    } else if (
-      node.type === "group-triggers" &&
-      node.connectionId &&
-      hasTreeNodeDatabaseContext(node) &&
-      node.tableName
-    ) {
+    } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (databaseObjectGroup) {
       await connectionStore.loadObjectGroupChildren(node);
@@ -470,15 +372,8 @@ function runRowClickAction() {
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
   if (action === "open-data") {
     openData();
-  } else if (
-    node.type === "procedure" ||
-    node.type === "function" ||
-    node.type === "package" ||
-    node.type === "package-body"
-  ) {
+  } else if (node.type === "procedure" || node.type === "function" || node.type === "sequence" || node.type === "package" || node.type === "package-body") {
     void viewObjectSource();
-  } else if (node.type === "saved-sql-file") {
-    openSavedSqlFile();
   } else if (action === "toggle") {
     toggle();
   }
@@ -569,12 +464,7 @@ function onTreeItemContextMenu(event: MouseEvent, openContextMenu: (event: Mouse
 
 function isEditableShortcutTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement ||
-    target.isContentEditable ||
-    !!target.closest("[contenteditable='true']")
-  );
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable || !!target.closest("[contenteditable='true']");
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -643,9 +533,7 @@ function canRefreshTreeNodeShortcut(): boolean {
   if (type === "connection" || type === "database" || type === "schema" || type === "table" || type === "view") {
     return true;
   }
-  return (
-    isGroupLabel(props.node) && type !== "saved-sql-root" && type !== "saved-sql-folder" && type !== "group-partitions"
-  );
+  return isGroupLabel(props.node) && type !== "group-partitions";
 }
 
 function requestRenameSelectedNode(): boolean {
@@ -657,14 +545,6 @@ function requestRenameSelectedNode(): boolean {
   }
   if (props.node.type === "connection-group") {
     startRenameGroup();
-    return true;
-  }
-  if (props.node.type === "saved-sql-folder") {
-    openRenameSavedSqlFolder();
-    return true;
-  }
-  if (props.node.type === "saved-sql-file") {
-    openRenameSavedSqlFile();
     return true;
   }
   return false;
@@ -680,14 +560,6 @@ function requestDeleteSelectedNode(): boolean {
     deleteConnectionGroup();
     return true;
   }
-  if (props.node.type === "saved-sql-file") {
-    deleteSavedSqlFile();
-    return true;
-  }
-  if (props.node.type === "saved-sql-folder") {
-    deleteSavedSqlFolder();
-    return true;
-  }
   if (canDropDatabase.value) {
     dropDatabase();
     return true;
@@ -700,12 +572,7 @@ function requestDeleteSelectedNode(): boolean {
 }
 
 function onDoubleClick() {
-  const action = treeNodeRowDoubleClickAction(
-    props.node.type,
-    canOpenObjectBrowser.value,
-    settingsStore.editorSettings.sidebarActivation,
-    canExpand.value,
-  );
+  const action = treeNodeRowDoubleClickAction(props.node.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value);
   if (action === "open-object-browser") {
     void openObjectBrowser();
   } else if (action === "open-object-browser-and-expand") {
@@ -715,8 +582,6 @@ function onDoubleClick() {
     openData();
   } else if (action === "open-source") {
     void viewObjectSource();
-  } else if (action === "open-saved-sql") {
-    openSavedSqlFile();
   } else if (action === "toggle") {
     toggle();
   }
@@ -745,10 +610,7 @@ async function openObjectBrowser() {
     }
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
-    if (
-      e?.message?.includes("driver is not installed") ||
-      (e?.message?.includes("JRE") && e?.message?.includes("not installed"))
-    ) {
+    if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
       window.dispatchEvent(new Event("dbx-open-driver-store"));
     }
   }
@@ -764,15 +626,6 @@ async function openUserAdmin() {
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
-}
-
-function openSavedSqlFile() {
-  const id = props.node.savedSqlId;
-  if (!id) return;
-  const file = savedSqlStore.getFile(id);
-  if (!file) return;
-  queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = file.connectionId;
 }
 
 async function openData() {
@@ -794,9 +647,7 @@ async function openData() {
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   const tabId = (() => {
     if (settingsStore.editorSettings.reuseDataTab) {
-      const existing = queryStore.tabs.find(
-        (tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database,
-      );
+      const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
       if (existing) {
         existing.title = node.label;
         existing.schema = tableSchema;
@@ -896,10 +747,7 @@ async function newQuery() {
     queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query");
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
-    if (
-      e?.message?.includes("driver is not installed") ||
-      (e?.message?.includes("JRE") && e?.message?.includes("not installed"))
-    ) {
+    if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
       window.dispatchEvent(new Event("dbx-open-driver-store"));
     }
   }
@@ -930,10 +778,7 @@ async function refresh() {
     await connectionStore.refreshTreeNode(props.node);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
-    if (
-      e?.message?.includes("driver is not installed") ||
-      (e?.message?.includes("JRE") && e?.message?.includes("not installed"))
-    ) {
+    if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
       window.dispatchEvent(new Event("dbx-open-driver-store"));
     }
   }
@@ -952,9 +797,7 @@ function connectionDeleteMenuLabel(): string {
 
 function connectionDeleteConfirmMessage(): string {
   const targets = connectionDeleteTargets();
-  return targets.length > 1
-    ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length })
-    : t("contextMenu.confirmDeleteMessage", { name: props.node.label });
+  return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length }) : t("contextMenu.confirmDeleteMessage", { name: props.node.label });
 }
 
 function deleteConnection() {
@@ -970,10 +813,7 @@ async function confirmDelete() {
       await connectionStore.disconnect(target.connectionId);
     }
     await connectionStore.removeConnections(targets.map((target) => target.connectionId));
-    toast(
-      targets.length > 1 ? t("connection.deletedSelected", { count: targets.length }) : t("connection.deleted"),
-      2000,
-    );
+    toast(targets.length > 1 ? t("connection.deletedSelected", { count: targets.length }) : t("connection.deleted"), 2000);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1005,8 +845,7 @@ async function copyFinalProxyPort() {
 
 async function copySelectedNames() {
   const selectedNodes = selectedTreeNodesInVisibleOrder();
-  const nodes =
-    selectedNodes.length > 1 && selectedNodes.some((node) => node.id === props.node.id) ? selectedNodes : [props.node];
+  const nodes = selectedNodes.length > 1 && selectedNodes.some((node) => node.id === props.node.id) ? selectedNodes : [props.node];
   updateTreeClipboardForNodes(nodes);
   try {
     await copyToClipboard(nodes.map(copyNameForTreeNode).join("\n"));
@@ -1017,10 +856,7 @@ async function copySelectedNames() {
 }
 
 function updateTreeClipboardForNodes(nodes: TreeNode[]) {
-  const tableNodes = nodes.filter(
-    (node): node is DuplicateStructureSource =>
-      node.type === "table" && !!node.connectionId && !!node.database && typeof node.label === "string",
-  );
+  const tableNodes = nodes.filter((node): node is DuplicateStructureSource => node.type === "table" && !!node.connectionId && !!node.database && typeof node.label === "string");
   if (nodes.length !== 1 || tableNodes.length !== 1) {
     connectionStore.treeClipboard = null;
     return;
@@ -1113,13 +949,10 @@ function tableChildDropObjectType(type: TreeNodeType): TableChildObjectType | nu
 }
 
 function tableChildDropObjectName(node: TreeNode): string {
-  if (node.type === "column")
-    return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
-  if (node.type === "index")
-    return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
+  if (node.type === "column") return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
+  if (node.type === "index") return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
   if (node.type === "fkey") return node.meta && "name" in node.meta ? node.meta.name : node.label;
-  if (node.type === "trigger")
-    return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
+  if (node.type === "trigger") return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
   return node.label;
 }
 
@@ -1225,11 +1058,13 @@ function viewObjectSource() {
     .then(async (result) => {
       const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
       queryStore.updateSql(tabId, result.source);
-      queryStore.setObjectSource(tabId, {
-        schema,
-        name: node.label,
-        objectType,
-      });
+      if (objectType !== "SEQUENCE") {
+        queryStore.setObjectSource(tabId, {
+          schema,
+          name: node.label,
+          objectType,
+        });
+      }
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -1307,11 +1142,7 @@ function selectedBatchDropTargets(): TreeNode[] {
   if (selected.length <= 1 || !selected.some((node) => node.id === props.node.id)) return [];
   const first = selected[0];
   if (!first?.connectionId || !first.database || !selected.every((node) => node.type === first.type)) return [];
-  if (
-    !selected.every(
-      (node) => node.connectionId === first.connectionId && node.database === first.database && canDropTreeNode(node),
-    )
-  ) {
+  if (!selected.every((node) => node.connectionId === first.connectionId && node.database === first.database && canDropTreeNode(node))) {
     return [];
   }
   return selected;
@@ -1396,11 +1227,7 @@ function nodeRenameObjectType(): RenameableObjectType | null {
 
 const canRenameObject = computed(() => {
   const objectType = nodeRenameObjectType();
-  return (
-    !!objectType &&
-    (supportsObjectRename(currentDatabaseType(), objectType) ||
-      supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any))
-  );
+  return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
 });
 
 function openRenameObjectDialog() {
@@ -1438,19 +1265,9 @@ async function refreshRenameObjectPreviewSql() {
   }
 }
 
-watch(
-  [
-    showRenameObjectDialog,
-    renameObjectName,
-    () => props.node.label,
-    () => props.node.schema,
-    () => props.node.type,
-    () => currentDatabaseType(),
-  ],
-  () => {
-    void refreshRenameObjectPreviewSql();
-  },
-);
+watch([showRenameObjectDialog, renameObjectName, () => props.node.label, () => props.node.schema, () => props.node.type, () => currentDatabaseType()], () => {
+  void refreshRenameObjectPreviewSql();
+});
 
 async function confirmRenameObject() {
   const node = props.node;
@@ -1502,12 +1319,7 @@ async function confirmDropObject() {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = dropObjectPreviewSql.value || (await buildDropObjectSql(options));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
-    const msgKey =
-      node.type === "view"
-        ? "contextMenu.dropViewSuccess"
-        : node.type === "procedure"
-          ? "contextMenu.dropProcedureSuccess"
-          : "contextMenu.dropFunctionSuccess";
+    const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
     if (node.type === "view") {
       connectionStore.removeTreeNode(node.id);
@@ -1562,18 +1374,12 @@ const supportsTruncate = computed(() => {
 
 const canCreateTable = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (
-    (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") &&
-    !!props.node.database &&
-    supportsTableStructureEditing(effectiveDatabaseTypeForConnection(config))
-  );
+  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !!props.node.database && supportsTableStructureEditing(effectiveDatabaseTypeForConnection(config));
 });
 
 const canCreateDatabase = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (
-    props.node.type === "connection" && (supportsDatabaseCreation(config?.db_type) || config?.db_type === "duckdb")
-  );
+  return props.node.type === "connection" && (supportsDatabaseCreation(config?.db_type) || config?.db_type === "duckdb");
 });
 
 const isDuckDbConnection = computed(() => {
@@ -1593,18 +1399,12 @@ const canDropDatabase = computed(() => {
 
 const canCreateSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (
-    props.node.type === "database" &&
-    usesTreeSchemaMode(config?.db_type) &&
-    !connectionUsesDatabaseObjectTreeMode(config)
-  );
+  return props.node.type === "database" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canDropSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (
-    props.node.type === "schema" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config)
-  );
+  return props.node.type === "schema" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 function tableAdminSqlOptions(): TableAdminSqlOptions {
@@ -1936,13 +1736,7 @@ function createView() {
   if (!node.connectionId || !node.database) return;
   connectionStore.activeConnectionId = node.connectionId;
   const viewName = node.schema ? `${node.schema}.new_view` : "new_view";
-  const tabId = queryStore.createTab(
-    node.connectionId,
-    node.database,
-    t("contextMenu.createView"),
-    "query",
-    node.schema,
-  );
+  const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema);
   queryStore.updateSql(tabId, `CREATE VIEW ${viewName} AS\nSELECT\n  *\nFROM table_name;\n`);
 }
 
@@ -1972,22 +1766,14 @@ async function exportStructure() {
   isLoadingStructurePreview.value = true;
   structurePreviewError.value = "";
   structurePreviewSql.value = "";
-  structurePreviewTitle.value =
-    targets.length === 1
-      ? t("contextMenu.exportStructurePreviewTitle", { name: targets[0]!.label })
-      : t("contextMenu.exportStructurePreviewTitleMultiple", { count: targets.length });
+  structurePreviewTitle.value = targets.length === 1 ? t("contextMenu.exportStructurePreviewTitle", { name: targets[0]!.label }) : t("contextMenu.exportStructurePreviewTitleMultiple", { count: targets.length });
   structurePreviewDefaultFileName.value = targets.length === 1 ? `${targets[0]!.label}.sql` : "structures.sql";
   showStructurePreviewDialog.value = true;
   try {
     const parts: string[] = [];
     for (const target of targets) {
       await connectionStore.ensureConnected(target.connectionId);
-      const ddl = await api.getTableDdl(
-        target.connectionId,
-        target.database,
-        target.schema || target.database,
-        target.label,
-      );
+      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label);
       parts.push(ddl.trim());
     }
     structurePreviewSql.value = `${parts.filter(Boolean).join("\n\n")}\n`;
@@ -2019,12 +1805,7 @@ function selectedStructureNodes(): TreeNode[] {
 
 function structureExportTargets(): Array<TreeNode & { connectionId: string; database: string }> {
   if (!canExportStructureNode(props.node)) return [];
-  const selected = selectedStructureNodes().filter(
-    (node): node is TreeNode & { connectionId: string; database: string } =>
-      canExportStructureNode(node) &&
-      node.connectionId === props.node.connectionId &&
-      node.database === props.node.database,
-  );
+  const selected = selectedStructureNodes().filter((node): node is TreeNode & { connectionId: string; database: string } => canExportStructureNode(node) && node.connectionId === props.node.connectionId && node.database === props.node.database);
   return selected.some((node) => node.id === props.node.id) ? selected : [props.node];
 }
 
@@ -2045,39 +1826,18 @@ function markdownCell(value: unknown): string {
 }
 
 function columnDocHeaders(includeTable: boolean): string[] {
-  const headers = [
-    t("contextMenu.structureDocColumn"),
-    t("contextMenu.structureDocType"),
-    t("contextMenu.structureDocPrimaryKey"),
-    t("contextMenu.structureDocNullable"),
-    t("contextMenu.structureDocDefault"),
-    t("contextMenu.structureDocComment"),
-  ];
+  const headers = [t("contextMenu.structureDocColumn"), t("contextMenu.structureDocType"), t("contextMenu.structureDocPrimaryKey"), t("contextMenu.structureDocNullable"), t("contextMenu.structureDocDefault"), t("contextMenu.structureDocComment")];
   return includeTable ? [t("contextMenu.structureDocTable"), ...headers] : headers;
 }
 
 function columnDocCells(target: TreeNode, column: ColumnInfo, includeTable: boolean): unknown[] {
-  const cells = [
-    column.name,
-    column.data_type,
-    column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"),
-    column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"),
-    column.column_default,
-    column.comment,
-  ];
+  const cells = [column.name, column.data_type, column.is_primary_key ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.is_nullable ? t("contextMenu.structureDocYes") : t("contextMenu.structureDocNo"), column.column_default, column.comment];
   return includeTable ? [structureTargetName(target), ...cells] : cells;
 }
 
-async function tableColumnsForStructureCopy(
-  target: TreeNode & { connectionId: string; database: string },
-): Promise<ColumnInfo[]> {
+async function tableColumnsForStructureCopy(target: TreeNode & { connectionId: string; database: string }): Promise<ColumnInfo[]> {
   await connectionStore.ensureConnected(target.connectionId);
-  return (await api.getColumns(
-    target.connectionId,
-    target.database,
-    target.schema || target.database,
-    target.label,
-  )) as ColumnInfo[];
+  return (await api.getColumns(target.connectionId, target.database, target.schema || target.database, target.label)) as ColumnInfo[];
 }
 
 async function buildStructureCopyText(format: StructureCopyFormat): Promise<string> {
@@ -2101,13 +1861,7 @@ async function buildStructureCopyText(format: StructureCopyFormat): Promise<stri
   const markdownHeaders = columnDocHeaders(false);
   for (const target of targets) {
     const columns = await tableColumnsForStructureCopy(target);
-    const tableLines = [
-      `### ${markdownCell(structureTargetName(target))}`,
-      "",
-      `| ${markdownHeaders.map(markdownCell).join(" | ")} |`,
-      `| ${markdownHeaders.map(() => "---").join(" | ")} |`,
-      ...columns.map((column) => `| ${columnDocCells(target, column, false).map(markdownCell).join(" | ")} |`),
-    ];
+    const tableLines = [`### ${markdownCell(structureTargetName(target))}`, "", `| ${markdownHeaders.map(markdownCell).join(" | ")} |`, `| ${markdownHeaders.map(() => "---").join(" | ")} |`, ...columns.map((column) => `| ${columnDocCells(target, column, false).map(markdownCell).join(" | ")} |`)];
     tables.push(tableLines.join("\n"));
   }
   return `${tables.join("\n\n")}\n`;
@@ -2123,8 +1877,7 @@ async function copyStructureAs(format: StructureCopyFormat) {
   } catch (e: any) {
     if (text) {
       structureDocCopyText.value = text;
-      structureDocCopyTitle.value =
-        format === "tsv" ? t("contextMenu.copyStructureAsTsv") : t("contextMenu.copyStructureAsMarkdown");
+      structureDocCopyTitle.value = format === "tsv" ? t("contextMenu.copyStructureAsTsv") : t("contextMenu.copyStructureAsMarkdown");
       showStructureDocCopyDialog.value = true;
       return;
     }
@@ -2176,14 +1929,8 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
 
   try {
     await connectionStore.ensureConnected(connectionId);
-    const tableColumns =
-      format === "sql" ? await api.getColumns(connectionId, database, node.schema || database, node.label) : undefined;
-    const queryColumns =
-      config.db_type === "neo4j"
-        ? (tableColumns ?? (await api.getColumns(connectionId, database, node.schema || database, node.label))).map(
-            (column) => column.name,
-          )
-        : undefined;
+    const tableColumns = format === "sql" ? await api.getColumns(connectionId, database, node.schema || database, node.label) : undefined;
+    const queryColumns = config.db_type === "neo4j" ? (tableColumns ?? (await api.getColumns(connectionId, database, node.schema || database, node.label))).map((column) => column.name) : undefined;
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const result = await fetchTableDataForExport({
       databaseType: effectiveDbType,
@@ -2282,10 +2029,7 @@ async function exportTableData(format: "csv" | "xlsx") {
     const currentTask = task;
 
     // Step 3: Get query columns for neo4j
-    const queryColumns =
-      config.db_type === "neo4j"
-        ? (await api.getColumns(connectionId, database, node.schema || database, node.label)).map((c) => c.name)
-        : undefined;
+    const queryColumns = config.db_type === "neo4j" ? (await api.getColumns(connectionId, database, node.schema || database, node.label)).map((c) => c.name) : undefined;
 
     // Step 4: Start streaming export (background, non-blocking)
     const request: api.TableExportRequest = {
@@ -2481,65 +2225,20 @@ const canOpenStructureEditor = computed(() => {
   return props.node.type === "table" && !!props.node.database && supportsTableStructureEditing(currentDatabaseType());
 });
 const canOpenFieldLineage = computed(() => {
-  return (
-    props.node.type === "column" &&
-    !!props.node.database &&
-    !!props.node.tableName &&
-    supportsFieldLineage(currentDatabaseType())
-  );
+  return props.node.type === "column" && !!props.node.database && !!props.node.tableName && supportsFieldLineage(currentDatabaseType());
 });
 const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
-const isNodeDefaultDatabase = computed(
-  () =>
-    (props.node.type === "database" || props.node.type === "redis-db" || props.node.type === "mongo-db") &&
-    !!props.node.connectionId &&
-    !!props.node.database &&
-    connectionStore.isDefaultDatabase(props.node.connectionId, props.node.database),
-);
+const isNodeDefaultDatabase = computed(() => (props.node.type === "database" || props.node.type === "redis-db" || props.node.type === "mongo-db") && !!props.node.connectionId && !!props.node.database && connectionStore.isDefaultDatabase(props.node.connectionId, props.node.database));
 const hasTypeMenu = computed(() => {
   const t = props.node.type;
-  return (
-    t === "connection" ||
-    t === "database" ||
-    t === "schema" ||
-    t === "table" ||
-    t === "view" ||
-    t === "column" ||
-    t === "procedure" ||
-    t === "function" ||
-    t === "package" ||
-    t === "package-body" ||
-    t === "saved-sql-root" ||
-    t === "saved-sql-folder" ||
-    t === "saved-sql-file" ||
-    isGroupLabel(props.node)
-  );
+  return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "package" || t === "package-body" || isGroupLabel(props.node);
 });
-const columnComment = computed(() =>
-  props.node.type === "column" && props.node.meta && "comment" in props.node.meta
-    ? (props.node.meta as any).comment
-    : null,
-);
-const tableComment = computed(() =>
-  (props.node.type === "table" || props.node.type === "view" || props.node.type === "mongo-collection") &&
-  props.node.comment
-    ? props.node.comment
-    : null,
-);
+const columnComment = computed(() => (props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null));
+const tableComment = computed(() => ((props.node.type === "table" || props.node.type === "view" || props.node.type === "mongo-collection") && props.node.comment ? props.node.comment : null));
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
-const isConnected = computed(
-  () =>
-    props.node.type === "connection" &&
-    !!props.node.connectionId &&
-    connectionStore.connectedIds.has(props.node.connectionId),
-);
-const canCloseDatabaseConnection = computed(
-  () =>
-    props.node.type === "database" &&
-    !!props.node.connectionId &&
-    props.node.database != null &&
-    connectionStore.connectedIds.has(props.node.connectionId),
-);
+const isConnected = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId));
+const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
+const canCloseDatabaseConnection = computed(() => props.node.type === "database" && !!props.node.connectionId && props.node.database != null && connectionStore.connectedIds.has(props.node.connectionId));
 const nodeIconClass = computed(() => {
   const infoClass = getIconInfo(props.node)?.colorClass;
   if (props.node.type !== "database") return infoClass;
@@ -2547,7 +2246,8 @@ const nodeIconClass = computed(() => {
 });
 const canConfigureVisibleDatabases = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;
-  return connectionStore.getConfig(props.node.connectionId)?.db_type !== "elasticsearch";
+  const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
+  return dbType !== "elasticsearch" && dbType !== "etcd";
 });
 const canCopyFinalProxyPort = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;
@@ -2563,9 +2263,7 @@ const connectionColor = computed(() => {
   const connectionId = props.node.connectionId;
   return connectionId ? connectionStore.getConfig(connectionId)?.color || "" : "";
 });
-const isActiveConnectionScope = computed(
-  () => !!props.node.connectionId && connectionStore.activeConnectionId === props.node.connectionId,
-);
+const isActiveConnectionScope = computed(() => !!props.node.connectionId && connectionStore.activeConnectionId === props.node.connectionId);
 const isSelected = computed(() => connectionStore.selectedTreeNodeId === props.node.id);
 const isMultiSelected = computed(() => connectionStore.selectedTreeNodeIds.includes(props.node.id));
 const rowStyle = computed(() => {
@@ -2678,70 +2376,6 @@ const currentGroupId = computed(() => {
   return null;
 });
 
-// --- Saved SQL Library ---
-const showSavedSqlNameDialog = ref(false);
-const savedSqlNameMode = ref<"folder-create" | "folder-rename" | "file-rename" | null>(null);
-const savedSqlNameInput = ref("");
-const showDeleteSavedSqlFileConfirm = ref(false);
-const showDeleteSavedSqlFolderConfirm = ref(false);
-
-function openCreateSavedSqlFolder() {
-  savedSqlNameMode.value = "folder-create";
-  savedSqlNameInput.value = t("savedSql.newFolderDefault");
-  showSavedSqlNameDialog.value = true;
-}
-
-function openRenameSavedSqlFolder() {
-  savedSqlNameMode.value = "folder-rename";
-  savedSqlNameInput.value = props.node.label;
-  showSavedSqlNameDialog.value = true;
-}
-
-function openRenameSavedSqlFile() {
-  savedSqlNameMode.value = "file-rename";
-  savedSqlNameInput.value = props.node.label.replace(/\.sql$/i, "");
-  showSavedSqlNameDialog.value = true;
-}
-
-async function confirmSavedSqlName() {
-  const name = savedSqlNameInput.value.trim();
-  if (!name || !props.node.connectionId || !savedSqlNameMode.value) return;
-
-  if (savedSqlNameMode.value === "folder-create") {
-    await savedSqlStore.createFolder(props.node.connectionId, name);
-  } else if (savedSqlNameMode.value === "folder-rename" && props.node.savedSqlFolderId) {
-    await savedSqlStore.renameFolder(props.node.savedSqlFolderId, name);
-  } else if (savedSqlNameMode.value === "file-rename" && props.node.savedSqlId) {
-    await savedSqlStore.renameFile(props.node.savedSqlId, name.endsWith(".sql") ? name : `${name}.sql`);
-  }
-
-  connectionStore.refreshSavedSqlTree(props.node.connectionId);
-  showSavedSqlNameDialog.value = false;
-  savedSqlNameMode.value = null;
-}
-
-function deleteSavedSqlFile() {
-  showDeleteSavedSqlFileConfirm.value = true;
-}
-
-async function confirmDeleteSavedSqlFile() {
-  if (!props.node.savedSqlId) return;
-  await savedSqlStore.deleteFile(props.node.savedSqlId);
-  connectionStore.refreshSavedSqlTree(props.node.connectionId);
-  showDeleteSavedSqlFileConfirm.value = false;
-}
-
-function deleteSavedSqlFolder() {
-  showDeleteSavedSqlFolderConfirm.value = true;
-}
-
-async function confirmDeleteSavedSqlFolder() {
-  if (!props.node.savedSqlFolderId) return;
-  await savedSqlStore.deleteFolder(props.node.savedSqlFolderId);
-  connectionStore.refreshSavedSqlTree(props.node.connectionId);
-  showDeleteSavedSqlFolderConfirm.value = false;
-}
-
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
 
@@ -2765,25 +2399,13 @@ const isDraggable = computed(() => {
 
 const isDropTarget = computed(() => props.node.type === "connection" || props.node.type === "connection-group");
 
-const showDropBefore = computed(
-  () => dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "before",
-);
-const showDropAfter = computed(
-  () => dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "after",
-);
-const showDropInside = computed(
-  () => dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "inside",
-);
+const showDropBefore = computed(() => dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "before");
+const showDropAfter = computed(() => dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "after");
+const showDropInside = computed(() => dragState.active && dragState.targetId === props.node.id && dragState.dropPosition === "inside");
 const isDragging = computed(() => dragState.active && dragState.draggedId === props.node.id);
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
-const canDragTableReference = computed(
-  () =>
-    !props.dragDisabled &&
-    (props.node.type === "table" || props.node.type === "view") &&
-    !!props.node.connectionId &&
-    props.node.database != null,
-);
+const canDragTableReference = computed(() => !props.dragDisabled && (props.node.type === "table" || props.node.type === "view") && !!props.node.connectionId && props.node.database != null);
 
 let pendingTableReferenceDrag: {
   payload: QueryEditorTableReferencePayload;
@@ -3237,14 +2859,19 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     items.push({ label: "", separator: true });
     items.push({
-      label: deleteMenuLabel(
-        node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction"),
-      ),
+      label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
       action: deleteMenuAction(requestDropObject),
       icon: Trash2,
       shortcut: shortcutDelete,
       variant: "destructive" as const,
     });
+    return items;
+  }
+
+  if (node.type === "sequence") {
+    items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     return items;
   }
 
@@ -3255,30 +2882,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
-  // 9. Group Labels (saved-sql-root, saved-sql-folder, group-columns, etc.)
+  // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
-    if (node.type === "saved-sql-root") {
-      items.push({ label: t("savedSql.newFolder"), action: openCreateSavedSqlFolder, icon: FolderPlus });
-    }
-    if (node.type === "saved-sql-folder") {
-      items.push({
-        label: t("savedSql.renameFolder"),
-        action: openRenameSavedSqlFolder,
-        icon: Pencil,
-        shortcut: shortcutRename,
-      });
-      items.push({
-        label: t("savedSql.deleteFolder"),
-        action: deleteSavedSqlFolder,
-        icon: Trash2,
-        shortcut: shortcutDelete,
-        variant: "destructive" as const,
-      });
-      items.push({ label: "", separator: true });
-    }
-    const hasGroupCreateAction =
-      (node.type === "group-tables" && canCreateTable.value) ||
-      (node.type === "group-views" && !!node.connectionId && !!node.database);
+    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database);
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
@@ -3288,7 +2894,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (hasGroupCreateAction) {
       items.push({ label: "", separator: true });
     }
-    if (node.type !== "saved-sql-root" && node.type !== "saved-sql-folder" && node.type !== "group-partitions") {
+    if (node.type !== "group-partitions") {
       items.push({
         label: t("contextMenu.refreshChildren"),
         action: refresh,
@@ -3299,27 +2905,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
-  // 10. Saved SQL File
-  if (node.type === "saved-sql-file") {
-    items.push({ label: t("savedSql.open"), action: openSavedSqlFile, icon: FileText });
-    items.push({
-      label: t("savedSql.renameFile"),
-      action: openRenameSavedSqlFile,
-      icon: Pencil,
-      shortcut: shortcutRename,
-    });
-    items.push({ label: "", separator: true });
-    items.push({
-      label: t("savedSql.deleteFile"),
-      action: deleteSavedSqlFile,
-      icon: Trash2,
-      shortcut: shortcutDelete,
-      variant: "destructive" as const,
-    });
-    return items;
-  }
-
-  // 11. Universal Copy Name (for all types except connection)
+  // 10. Universal Copy Name (for all types except connection)
   if (hasTypeMenu.value) {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
@@ -3332,130 +2918,82 @@ function treeItemMenuItems(): ContextMenuItem[] {
 <template>
   <CustomContextMenu :items="treeItemMenuItems()" v-slot="{ onContextMenu }">
     <div @contextmenu="onTreeItemContextMenu($event, onContextMenu)">
-      <div
-        ref="rowRef"
-        class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent transition-colors relative outline-none"
-        style="contain: layout style"
-        :class="[
-          rowWidthClass,
-          {
-            'ring-1 ring-primary/50 bg-primary/5': showDropInside,
-            'opacity-50': isDragging,
-            'tree-item-connection-tint': connectionColor,
-            'rounded-none': connectionColor && !isSelected && !isMultiSelected,
-            'rounded-sm': !connectionColor && !isSelected && !isMultiSelected,
-            'tree-item-active rounded-none': connectionColor && (isSelected || isMultiSelected),
-            'tree-item-active rounded-md': !connectionColor && (isSelected || isMultiSelected),
-            'tree-item-highlight': highlighted,
-          },
-        ]"
-        :tabindex="isSelected || isMultiSelected ? 0 : -1"
-        :style="rowStyle"
-        @click="onClick"
-        @dblclick="onDoubleClick"
-        @keydown="onKeydown"
-        @mousedown="onRowMouseDown"
-        @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
-        @mouseleave="clearTarget(node.id)"
-      >
+      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled" side="right" :side-offset="8" :delay="0">
         <div
-          v-if="showDropBefore"
-          class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none"
-          :style="{ left: paddingLeft }"
-        />
-        <div
-          v-if="showDropAfter"
-          class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none"
-          :style="{ left: paddingLeft }"
-        />
-        <template v-if="canExpand">
-          <button
-            type="button"
-            class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-            @click.stop="toggle"
+          ref="rowRef"
+          class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent relative outline-none"
+          style="contain: layout style"
+          :class="[
+            rowWidthClass,
+            {
+              'ring-1 ring-primary/50 bg-primary/5': showDropInside,
+              'opacity-50': isDragging,
+              'tree-item-connection-tint': connectionColor,
+              rounded: !isSelected && !isMultiSelected,
+              'tree-item-active rounded-none': connectionColor && (isSelected || isMultiSelected),
+              'tree-item-active rounded-md': !connectionColor && (isSelected || isMultiSelected),
+              'tree-item-highlight': highlighted,
+            },
+          ]"
+          :tabindex="isSelected || isMultiSelected ? 0 : -1"
+          :style="rowStyle"
+          @click="onClick"
+          @dblclick="onDoubleClick"
+          @keydown="onKeydown"
+          @mousedown="onRowMouseDown"
+          @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
+          @mouseleave="clearTarget(node.id)"
+        >
+          <div v-if="showDropBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+          <div v-if="showDropAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+          <template v-if="canExpand">
+            <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @click.stop="toggle">
+              <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
+              <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5" />
+              <ChevronRight v-else class="w-3.5 h-3.5" />
+            </button>
+          </template>
+          <span v-else class="w-3.5 h-3.5 shrink-0" />
+          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
+          <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="nodeIconClass" />
+          <input
+            v-if="isRenamingGroup"
+            ref="renameInputRef"
+            v-model="renameInput"
+            class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
+            @blur="finishRenameGroup"
+            @keydown.enter.prevent="finishRenameGroup"
+            @keydown.escape.prevent="isRenamingGroup = false"
+            @click.stop
+          />
+          <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+          <span
+            v-if="(node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') && node.objectCount != null"
+            class="text-muted-foreground text-[10px] shrink-0"
+            >{{ node.objectCount }}</span
           >
-            <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
-            <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5" />
-            <ChevronRight v-else class="w-3.5 h-3.5" />
+          <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
+            {{ t("editor.defaultDatabase") }}
+          </Badge>
+          <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{ columnComment }}</span>
+          <span v-if="tableComment && !settingsStore.editorSettings.sidebarHideTableComments" class="truncate text-muted-foreground/60 text-[10px] max-w-[25%] group-hover:hidden" :title="tableComment">{{ tableComment }}</span>
+          <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+          <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
+          <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
+          <button
+            v-if="canPin"
+            class="rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/15 hover:text-foreground focus:opacity-100"
+            :class="isPinned ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'"
+            :title="isPinned ? t('contextMenu.unpin') : t('contextMenu.pin')"
+            @click.stop="togglePin"
+          >
+            <Pin class="w-3 h-3" :class="{ 'fill-current': isPinned }" />
           </button>
-        </template>
-        <span v-else class="w-3.5 h-3.5 shrink-0" />
-        <DatabaseIcon
-          v-if="node.type === 'connection'"
-          :db-type="connectionIconType(node.connectionId)"
-          class="w-3.5 h-3.5 shrink-0"
-        />
-        <component
-          v-else
-          :is="getIconInfo(node)?.icon || Database"
-          class="w-3.5 h-3.5 shrink-0 transition-colors"
-          :class="nodeIconClass"
-        />
-        <input
-          v-if="isRenamingGroup"
-          ref="renameInputRef"
-          v-model="renameInput"
-          class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
-          @blur="finishRenameGroup"
-          @keydown.enter.prevent="finishRenameGroup"
-          @keydown.escape.prevent="isRenamingGroup = false"
-          @click.stop
-        />
-        <LightTooltip v-else :text="displayLabel(node)" :disabled="isTooltipDisabled" side="right" :side-offset="8">
-          <span ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
-        </LightTooltip>
-        <span
-          v-if="
-            (node.type === 'group-tables' ||
-              node.type === 'group-views' ||
-              node.type === 'group-procedures' ||
-              node.type === 'group-functions' ||
-              node.type === 'group-packages' ||
-              node.type === 'group-partitions') &&
-            node.objectCount != null
-          "
-          class="text-muted-foreground text-[10px] shrink-0"
-          >{{ node.objectCount }}</span
-        >
-        <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
-          {{ t("editor.defaultDatabase") }}
-        </Badge>
-        <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{
-          columnComment
-        }}</span>
-        <span
-          v-if="tableComment && !settingsStore.editorSettings.sidebarHideTableComments"
-          class="truncate text-muted-foreground/60 text-[10px] max-w-[25%] group-hover:hidden"
-          :title="tableComment"
-          >{{ tableComment }}</span
-        >
-        <span
-          v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)"
-          class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0"
-        />
-        <ConnectionErrorIndicator
-          v-if="node.type === 'connection'"
-          :connection-id="node.connectionId"
-          trigger-class="h-4 w-4"
-        />
-        <button
-          v-if="canPin"
-          class="rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/15 hover:text-foreground focus:opacity-100"
-          :class="isPinned ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'"
-          :title="isPinned ? t('contextMenu.unpin') : t('contextMenu.pin')"
-          @click.stop="togglePin"
-        >
-          <Pin class="w-3 h-3" :class="{ 'fill-current': isPinned }" />
-        </button>
-      </div>
+        </div>
+      </LightTooltip>
     </div>
   </CustomContextMenu>
-  <VisibleDatabasesDialog
-    v-if="node.type === 'connection' && node.connectionId"
-    v-model:open="showVisibleDatabasesDialog"
-    :connection-id="node.connectionId"
-    :connection-name="node.label"
-  />
+  <VisibleDatabasesDialog v-if="node.type === 'connection' && node.connectionId" v-model:open="showVisibleDatabasesDialog" :connection-id="node.connectionId" :connection-name="node.label" />
 
   <Dialog v-model:open="showDeleteConfirm">
     <DialogContent class="sm:max-w-[400px]">
@@ -3484,16 +3022,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
       <DialogHeader>
         <DialogTitle>{{ t("connectionGroup.createGroup") }}</DialogTitle>
       </DialogHeader>
-      <Input
-        v-model="moveToNewGroupName"
-        :placeholder="t('connectionGroup.groupNamePlaceholder')"
-        @keydown.enter.prevent="confirmMoveToNewGroup"
-      />
+      <Input v-model="moveToNewGroupName" :placeholder="t('connectionGroup.groupNamePlaceholder')" @keydown.enter.prevent="confirmMoveToNewGroup" />
       <DialogFooter>
         <Button variant="outline" @click="showMoveToNewGroupDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!moveToNewGroupName.trim()" @click="confirmMoveToNewGroup">{{
-          t("connectionGroup.createGroup")
-        }}</Button>
+        <Button :disabled="!moveToNewGroupName.trim()" @click="confirmMoveToNewGroup">{{ t("connectionGroup.createGroup") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -3513,53 +3045,19 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <Dialog v-model:open="showSavedSqlNameDialog">
-    <DialogContent class="sm:max-w-[380px]">
-      <DialogHeader>
-        <DialogTitle>
-          {{
-            savedSqlNameMode === "folder-create"
-              ? t("savedSql.newFolder")
-              : savedSqlNameMode === "folder-rename"
-                ? t("savedSql.renameFolder")
-                : t("savedSql.renameFile")
-          }}
-        </DialogTitle>
-      </DialogHeader>
-      <Input v-model="savedSqlNameInput" @keydown.enter.prevent="confirmSavedSqlName" />
-      <DialogFooter>
-        <Button variant="outline" @click="showSavedSqlNameDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!savedSqlNameInput.trim()" @click="confirmSavedSqlName">{{
-          t("dangerDialog.confirm")
-        }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
   <Dialog v-model:open="showRenameObjectDialog">
     <DialogContent class="sm:max-w-[420px]">
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.renameObjectTitle") }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">
-        <Input
-          v-model="renameObjectName"
-          :placeholder="t('contextMenu.renameObjectNamePlaceholder')"
-          @keydown.enter.prevent="confirmRenameObject"
-        />
-        <pre
-          v-if="renameObjectPreviewSql"
-          class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap"
-          v-html="highlight(renameObjectPreviewSql)"
-        ></pre>
+        <Input v-model="renameObjectName" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRenameObject" />
+        <pre v-if="renameObjectPreviewSql" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renameObjectPreviewSql)"></pre>
         <p v-if="renameObjectError" class="text-sm text-destructive">{{ renameObjectError }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showRenameObjectDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button
-          :disabled="!renameObjectName.trim() || renameObjectName.trim() === node.label"
-          @click="confirmRenameObject"
-        >
+        <Button :disabled="!renameObjectName.trim() || renameObjectName.trim() === node.label" @click="confirmRenameObject">
           {{ t("contextMenu.renameObject") }}
         </Button>
       </DialogFooter>
@@ -3577,19 +3075,11 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <span>{{ t("contextMenu.exportStructureLoading") }}</span>
         </div>
         <p v-else-if="structurePreviewError" class="text-sm text-destructive">{{ structurePreviewError }}</p>
-        <pre
-          v-else
-          class="max-h-[56vh] min-h-64 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap"
-          v-html="highlight(structurePreviewSql)"
-        ></pre>
+        <pre v-else class="max-h-[56vh] min-h-64 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(structurePreviewSql)"></pre>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showStructurePreviewDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button
-          variant="outline"
-          :disabled="isLoadingStructurePreview || !structurePreviewSql"
-          @click="copyStructurePreview"
-        >
+        <Button variant="outline" :disabled="isLoadingStructurePreview || !structurePreviewSql" @click="copyStructurePreview">
           <Clipboard class="h-4 w-4" />
           {{ t("contextMenu.copyStructure") }}
         </Button>
@@ -3608,12 +3098,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
       </DialogHeader>
       <div class="grid gap-3">
         <p class="text-sm text-muted-foreground">{{ t("contextMenu.structureDocCopyFallbackHint") }}</p>
-        <textarea
-          readonly
-          class="max-h-[56vh] min-h-64 resize-y overflow-auto rounded bg-muted p-3 font-mono text-xs whitespace-pre"
-          :value="structureDocCopyText"
-          @focus="selectTextareaContent"
-        ></textarea>
+        <textarea readonly class="max-h-[56vh] min-h-64 resize-y overflow-auto rounded bg-muted p-3 font-mono text-xs whitespace-pre" :value="structureDocCopyText" @focus="selectTextareaContent"></textarea>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showStructureDocCopyDialog = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -3625,55 +3110,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <Dialog v-model:open="showDeleteSavedSqlFileConfirm">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("savedSql.deleteFile") }}</DialogTitle>
-      </DialogHeader>
-      <p class="text-sm text-muted-foreground">
-        {{ t("savedSql.deleteFileConfirm", { name: node.label }) }}
-      </p>
-      <DialogFooter>
-        <Button variant="outline" @click="showDeleteSavedSqlFileConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteSavedSqlFile">{{ t("savedSql.deleteFile") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+  <DangerConfirmDialog v-model:open="showDropTableConfirm" :title="t('contextMenu.confirmDropTableTitle')" :message="t('contextMenu.confirmDropTableMessage', { name: node.label })" :sql="dropTablePreviewSql" :confirm-label="t('contextMenu.dropTable')" @confirm="confirmDropTable" />
 
-  <Dialog v-model:open="showDeleteSavedSqlFolderConfirm">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("savedSql.deleteFolder") }}</DialogTitle>
-      </DialogHeader>
-      <p class="text-sm text-muted-foreground">
-        {{ t("savedSql.deleteFolderConfirm", { name: node.label }) }}
-      </p>
-      <DialogFooter>
-        <Button variant="outline" @click="showDeleteSavedSqlFolderConfirm = false">{{
-          t("dangerDialog.cancel")
-        }}</Button>
-        <Button variant="destructive" @click="confirmDeleteSavedSqlFolder">{{ t("savedSql.deleteFolder") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <DangerConfirmDialog
-    v-model:open="showDropTableConfirm"
-    :title="t('contextMenu.confirmDropTableTitle')"
-    :message="t('contextMenu.confirmDropTableMessage', { name: node.label })"
-    :sql="dropTablePreviewSql"
-    :confirm-label="t('contextMenu.dropTable')"
-    @confirm="confirmDropTable"
-  />
-
-  <DangerConfirmDialog
-    v-model:open="showEmptyTableConfirm"
-    :title="t('contextMenu.confirmEmptyTableTitle')"
-    :message="t('contextMenu.confirmEmptyTableMessage', { name: node.label })"
-    :sql="emptyTablePreviewSql"
-    :confirm-label="t('contextMenu.emptyTable')"
-    @confirm="confirmEmptyTable"
-  />
+  <DangerConfirmDialog v-model:open="showEmptyTableConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: node.label })" :sql="emptyTablePreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 
   <DangerConfirmDialog
     v-model:open="showTruncateTableConfirm"
@@ -3684,32 +3123,11 @@ function treeItemMenuItems(): ContextMenuItem[] {
     @confirm="confirmTruncateTable"
   />
 
-  <DangerConfirmDialog
-    v-model:open="showDropObjectConfirm"
-    :title="dropObjectConfirmTitle()"
-    :message="dropObjectConfirmMessage()"
-    :sql="dropObjectPreviewSql"
-    :confirm-label="dropObjectMenuLabel()"
-    @confirm="confirmDropObject"
-  />
+  <DangerConfirmDialog v-model:open="showDropObjectConfirm" :title="dropObjectConfirmTitle()" :message="dropObjectConfirmMessage()" :sql="dropObjectPreviewSql" :confirm-label="dropObjectMenuLabel()" @confirm="confirmDropObject" />
 
-  <DangerConfirmDialog
-    v-model:open="showDropTableChildObjectConfirm"
-    :title="dropTableChildObjectConfirmTitle()"
-    :message="dropTableChildObjectConfirmMessage()"
-    :sql="dropTableChildObjectPreviewSql"
-    :confirm-label="dropTableChildObjectMenuLabel()"
-    @confirm="confirmDropTableChildObject"
-  />
+  <DangerConfirmDialog v-model:open="showDropTableChildObjectConfirm" :title="dropTableChildObjectConfirmTitle()" :message="dropTableChildObjectConfirmMessage()" :sql="dropTableChildObjectPreviewSql" :confirm-label="dropTableChildObjectMenuLabel()" @confirm="confirmDropTableChildObject" />
 
-  <DangerConfirmDialog
-    v-model:open="showBatchDropConfirm"
-    :title="batchDropConfirmTitle()"
-    :message="batchDropConfirmMessage()"
-    :sql="batchDropPreviewSql"
-    :confirm-label="batchDropMenuLabel()"
-    @confirm="confirmBatchDrop"
-  />
+  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="batchDropConfirmTitle()" :message="batchDropConfirmMessage()" :sql="batchDropPreviewSql" :confirm-label="batchDropMenuLabel()" @confirm="confirmBatchDrop" />
 
   <ProcedureExecutionDialog
     v-if="node.type === 'procedure' && node.connectionId && node.database"
@@ -3728,16 +3146,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
-      <Input
-        v-model="duplicateTableName"
-        :placeholder="t('contextMenu.duplicateNamePlaceholder')"
-        @keydown.enter.prevent="confirmDuplicateStructure"
-      />
+      <Input v-model="duplicateTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" @keydown.enter.prevent="confirmDuplicateStructure" />
       <DialogFooter>
         <Button variant="outline" @click="showDuplicateDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!duplicateTableName.trim()" @click="confirmDuplicateStructure">{{
-          t("dangerDialog.confirm")
-        }}</Button>
+        <Button :disabled="!duplicateTableName.trim()" @click="confirmDuplicateStructure">{{ t("dangerDialog.confirm") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -3747,85 +3159,42 @@ function treeItemMenuItems(): ContextMenuItem[] {
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.createDatabase") }}</DialogTitle>
       </DialogHeader>
-      <Input
-        v-model="createDatabaseName"
-        :placeholder="t('contextMenu.createDatabaseNamePlaceholder')"
-        @keydown.enter.prevent="confirmCreateDatabase"
-      />
+      <Input v-model="createDatabaseName" :placeholder="t('contextMenu.createDatabaseNamePlaceholder')" @keydown.enter.prevent="confirmCreateDatabase" />
       <div v-if="canSetCreateDatabaseCharset" class="grid gap-2">
         <div class="grid gap-1.5">
           <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCharset") }}</label>
-          <Input
-            v-model="createDatabaseCharset"
-            :placeholder="t('contextMenu.createDatabaseCharsetPlaceholder')"
-            @keydown.enter.prevent="confirmCreateDatabase"
-          />
+          <Input v-model="createDatabaseCharset" :placeholder="t('contextMenu.createDatabaseCharsetPlaceholder')" @keydown.enter.prevent="confirmCreateDatabase" />
         </div>
         <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{
-            t("contextMenu.createDatabaseCollation")
-          }}</label>
-          <Input
-            v-model="createDatabaseCollation"
-            :placeholder="t('contextMenu.createDatabaseCollationPlaceholder')"
-            @keydown.enter.prevent="confirmCreateDatabase"
-          />
+          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCollation") }}</label>
+          <Input v-model="createDatabaseCollation" :placeholder="t('contextMenu.createDatabaseCollationPlaceholder')" @keydown.enter.prevent="confirmCreateDatabase" />
         </div>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showCreateDatabaseDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!createDatabaseName.trim()" @click="confirmCreateDatabase">{{
-          t("dangerDialog.confirm")
-        }}</Button>
+        <Button :disabled="!createDatabaseName.trim()" @click="confirmCreateDatabase">{{ t("dangerDialog.confirm") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog
-    v-model:open="showDropDatabaseConfirm"
-    :title="t('contextMenu.confirmDropDatabaseTitle')"
-    :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })"
-    :sql="dropDatabasePreviewSql"
-    :confirm-label="t('contextMenu.dropDatabase')"
-    @confirm="confirmDropDatabase"
-  />
+  <DangerConfirmDialog v-model:open="showDropDatabaseConfirm" :title="t('contextMenu.confirmDropDatabaseTitle')" :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })" :sql="dropDatabasePreviewSql" :confirm-label="t('contextMenu.dropDatabase')" @confirm="confirmDropDatabase" />
 
-  <DangerConfirmDialog
-    v-model:open="showFlushRedisDbConfirm"
-    :title="t('redis.flushDb')"
-    :message="t('redis.flushDbMessage')"
-    :details="t('redis.flushDbDetails', { db: node.database })"
-    :confirm-label="t('redis.flushDbConfirm')"
-    @confirm="confirmFlushRedisDb"
-  />
+  <DangerConfirmDialog v-model:open="showFlushRedisDbConfirm" :title="t('redis.flushDb')" :message="t('redis.flushDbMessage')" :details="t('redis.flushDbDetails', { db: node.database })" :confirm-label="t('redis.flushDbConfirm')" @confirm="confirmFlushRedisDb" />
 
   <Dialog v-model:open="showCreateSchemaDialog">
     <DialogContent class="sm:max-w-[400px]">
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.createSchema") }}</DialogTitle>
       </DialogHeader>
-      <Input
-        v-model="createSchemaName"
-        :placeholder="t('contextMenu.createSchemaNamePlaceholder')"
-        @keydown.enter.prevent="confirmCreateSchema"
-      />
+      <Input v-model="createSchemaName" :placeholder="t('contextMenu.createSchemaNamePlaceholder')" @keydown.enter.prevent="confirmCreateSchema" />
       <DialogFooter>
         <Button variant="outline" @click="showCreateSchemaDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!createSchemaName.trim()" @click="confirmCreateSchema">{{
-          t("dangerDialog.confirm")
-        }}</Button>
+        <Button :disabled="!createSchemaName.trim()" @click="confirmCreateSchema">{{ t("dangerDialog.confirm") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog
-    v-model:open="showDropSchemaConfirm"
-    :title="t('contextMenu.confirmDropSchemaTitle')"
-    :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })"
-    :sql="dropSchemaPreviewSql"
-    :confirm-label="t('contextMenu.dropSchema')"
-    @confirm="confirmDropSchema"
-  />
+  <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
 </template>
 
 <style>

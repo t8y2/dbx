@@ -47,41 +47,19 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
         <GitBranch class="h-3.5 w-3.5" />
         {{ t("explain.title") }}
       </span>
-      <span v-if="plan" class="text-muted-foreground"
-        >{{ plan.databaseType.toUpperCase() }} · {{ t("explain.nodeCount", { count: nodeCount }) }}</span
-      >
-      <span
-        v-if="plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')"
-        class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300"
-        style="font-size: 10px"
-        >A-TRACE</span
-      >
+      <span v-if="plan" class="text-muted-foreground">{{ plan.databaseType.toUpperCase() }} · {{ t("explain.nodeCount", { count: nodeCount }) }}</span>
+      <span v-if="plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')" class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size: 10px">A-TRACE</span>
       <span class="flex-1" />
       <div v-if="plan" class="inline-flex rounded-md border bg-muted/40 p-0.5">
-        <Button
-          size="sm"
-          :variant="activeView === 'tree' ? 'secondary' : 'ghost'"
-          class="h-6 px-2 text-xs gap-1"
-          @click="activeView = 'tree'"
-        >
+        <Button size="sm" :variant="activeView === 'tree' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'tree'">
           <GitBranch class="h-3.5 w-3.5" />
           {{ t("explain.tree") }}
         </Button>
-        <Button
-          size="sm"
-          :variant="activeView === 'summary' ? 'secondary' : 'ghost'"
-          class="h-6 px-2 text-xs gap-1"
-          @click="activeView = 'summary'"
-        >
+        <Button size="sm" :variant="activeView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'summary'">
           <Table2 class="h-3.5 w-3.5" />
           {{ t("explain.summary") }}
         </Button>
-        <Button
-          size="sm"
-          :variant="activeView === 'raw' ? 'secondary' : 'ghost'"
-          class="h-6 px-2 text-xs gap-1"
-          @click="activeView = 'raw'"
-        >
+        <Button size="sm" :variant="activeView === 'raw' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'raw'">
           <FileText v-if="isRawString" class="h-3.5 w-3.5" />
           <Braces v-else class="h-3.5 w-3.5" />
           {{ isRawString ? "TEXT" : "JSON" }}
@@ -94,9 +72,7 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
     </div>
 
     <div v-else-if="error" class="flex-1 min-h-0 flex items-center justify-center">
-      <div
-        class="flex max-w-xl items-start gap-2 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-      >
+      <div class="flex max-w-xl items-start gap-2 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
         <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
         <span>{{ error }}</span>
       </div>
@@ -142,11 +118,7 @@ const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.pla
         </div>
       </div>
 
-      <pre
-        v-else
-        class="m-3 overflow-auto whitespace-pre rounded border bg-muted/30 p-3 font-mono text-xs leading-relaxed"
-        >{{ rawContent }}</pre
-      >
+      <pre v-else class="m-3 overflow-auto whitespace-pre rounded border bg-muted/30 p-3 font-mono text-xs leading-relaxed">{{ rawContent }}</pre>
     </div>
   </div>
 </template>

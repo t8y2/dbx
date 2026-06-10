@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  mongoUrlParam,
-  setMongoUrlParam,
-  mongodbAuthFailureHint,
-} from "../../apps/desktop/src/lib/mongoConnectionOptions.ts";
+import { mongoUrlParam, setMongoUrlParam, mongodbAuthFailureHint } from "../../apps/desktop/src/lib/mongoConnectionOptions.ts";
 
 test("reads MongoDB authSource from URL params", () => {
   assert.equal(mongoUrlParam("?replicaSet=rs0&authSource=admin", "authSource"), "admin");
@@ -19,8 +15,7 @@ test("removes empty MongoDB authSource from URL params", () => {
 });
 
 test("adds a MongoDB authSource hint for legacy authentication failures", () => {
-  const message =
-    "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}";
+  const message = "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}";
 
   assert.equal(
     mongodbAuthFailureHint(message),
@@ -35,8 +30,7 @@ test("adds a MongoDB URL encoding hint for reserved password characters", () => 
 });
 
 test("adds a MongoDB listDatabases permission hint", () => {
-  const message =
-    "Command failed with error 13 (Unauthorized): not authorized on admin to execute command { listDatabases: 1 }";
+  const message = "Command failed with error 13 (Unauthorized): not authorized on admin to execute command { listDatabases: 1 }";
 
   assert.match(mongodbAuthFailureHint(message), /does not have permission to run listDatabases/);
 });

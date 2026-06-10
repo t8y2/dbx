@@ -1,17 +1,12 @@
 export type SqlMetadataRefreshScope = "none" | "connection" | "database";
-export type SqlMetadataRefreshTarget =
-  | { scope: "none" }
-  | { scope: "connection" }
-  | { scope: "database"; schema?: string };
+export type SqlMetadataRefreshTarget = { scope: "none" } | { scope: "connection" } | { scope: "database"; schema?: string };
 
 const DATABASE_DDL_RE = /\b(CREATE|DROP)\s+DATABASE\b/i;
 const SCHEMA_DDL_RE = /\b(CREATE|DROP)\s+SCHEMA\b/i;
-const OBJECT_DDL_RE =
-  /\b(CREATE|ALTER|DROP|RENAME)\s+(OR\s+REPLACE\s+)?(((GLOBAL|LOCAL)\s+)?TEMP(ORARY)?\s+)?(MATERIALIZED\s+)?(TABLE|VIEW|INDEX|SEQUENCE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i;
+const OBJECT_DDL_RE = /\b(CREATE|ALTER|DROP|RENAME)\s+(OR\s+REPLACE\s+)?(((GLOBAL|LOCAL)\s+)?TEMP(ORARY)?\s+)?(MATERIALIZED\s+)?(TABLE|VIEW|INDEX|SEQUENCE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i;
 const OBJECT_NAME_DDL_RE =
   /\b(?:CREATE|ALTER|DROP|RENAME)\s+(?:OR\s+REPLACE\s+)?(?:(?:(?:GLOBAL|LOCAL)\s+)?TEMP(?:ORARY)?\s+)?(?:MATERIALIZED\s+)?(?:TABLE|VIEW|SEQUENCE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s*\.\s*(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*))/i;
-const INDEX_TABLE_DDL_RE =
-  /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s*\.\s*(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*))/i;
+const INDEX_TABLE_DDL_RE = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s*\.\s*(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*))/i;
 
 function stripSqlMetadataComments(sql: string): string {
   return sql
@@ -33,11 +28,7 @@ function splitSqlMetadataStatements(sql: string): string[] {
 
 function unquoteIdentifier(identifier: string): string {
   const trimmed = identifier.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("`") && trimmed.endsWith("`")) ||
-    (trimmed.startsWith("[") && trimmed.endsWith("]"))
-  ) {
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("`") && trimmed.endsWith("`")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
     return trimmed.slice(1, -1);
   }
   return trimmed;

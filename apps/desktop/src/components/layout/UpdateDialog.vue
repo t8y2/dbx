@@ -99,17 +99,12 @@ watch(
           <code class="bg-muted px-1 py-0.5 rounded text-[11px]">docker compose pull && docker compose up -d</code>
           {{ t("updates.toUpdate") }}
         </p>
-        <p
-          v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode"
-          class="text-xs text-muted-foreground"
-        >
+        <p v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode" class="text-xs text-muted-foreground">
           {{ t("updates.portableManualUpdate") }}
         </p>
       </div>
       <DialogFooter>
-        <Button v-if="!isDownloadingUpdate && !updateReady" variant="outline" @click="open = false">{{
-          t("dangerDialog.cancel")
-        }}</Button>
+        <Button v-if="!isDownloadingUpdate && !updateReady" variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
@@ -124,9 +119,7 @@ watch(
             <Button v-else @click="emit('download-and-install')">{{ t("updates.downloadAndInstall") }}</Button>
           </template>
         </template>
-        <Button v-else-if="updateCheckMessage" @click="emit('open-latest-release')">{{
-          t("updates.openRelease")
-        }}</Button>
+        <Button v-else-if="updateCheckMessage" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

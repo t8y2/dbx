@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS,
-  MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS,
-  connectionAttemptTimeoutMessage,
-  connectionAttemptTimeoutMs,
-} from "../../apps/desktop/src/lib/connectionAttemptTimeout.ts";
+import { CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS, MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "../../apps/desktop/src/lib/connectionAttemptTimeout.ts";
 
 test("uses connection timeout with a small UI buffer", () => {
   assert.equal(connectionAttemptTimeoutMs({ connect_timeout_secs: 8 }), 8_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
@@ -27,10 +22,7 @@ test("honors slower SSH tunnel connection timeouts", () => {
 });
 
 test("allows MongoDB legacy agent fallback after native driver timeout", () => {
-  assert.equal(
-    connectionAttemptTimeoutMs({ db_type: "mongodb", connect_timeout_secs: 5 }),
-    5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS,
-  );
+  assert.equal(connectionAttemptTimeoutMs({ db_type: "mongodb", connect_timeout_secs: 5 }), 5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS);
 });
 
 test("formats connection attempt timeout messages", () => {

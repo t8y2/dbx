@@ -2,10 +2,7 @@ import type { DatabaseType } from "@/types/database";
 
 export type TemporalCellEditorKind = "date" | "time" | "datetime";
 
-export function temporalCellEditorKind(
-  dataType: string | undefined,
-  _databaseType?: DatabaseType,
-): TemporalCellEditorKind | undefined {
+export function temporalCellEditorKind(dataType: string | undefined, _databaseType?: DatabaseType): TemporalCellEditorKind | undefined {
   const normalized = normalizeTemporalType(dataType);
   if (!normalized) return undefined;
   if (/\b(?:datetime|datetime2|datetime64|smalldatetime|datetimeoffset|timestamp|timestamptz)\b/.test(normalized)) {
@@ -16,10 +13,7 @@ export function temporalCellEditorKind(
   return undefined;
 }
 
-export function formatTemporalInputValue(
-  value: string | number | boolean | null,
-  kind: TemporalCellEditorKind,
-): string {
+export function formatTemporalInputValue(value: string | number | boolean | null, kind: TemporalCellEditorKind): string {
   if (value === null || value === undefined) return "";
   const text = String(value).trim();
   if (!text) return "";

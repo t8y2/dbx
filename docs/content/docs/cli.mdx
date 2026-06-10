@@ -3,14 +3,21 @@ title: DBX CLI
 description: Use DBX connections from terminals, scripts, CI, and Codex.
 ---
 
-<Callout type="info">
-DBX CLI is a dedicated command line package for terminal, script, and coding-agent workflows. It shares DBX connection storage and SQL safety rules with the MCP server.
-</Callout>
+<Callout type="info">DBX CLI is a dedicated command line package for terminal, script, and coding-agent workflows. It shares DBX connection storage and SQL safety rules with the MCP server.</Callout>
 
 ## Install
 
+### npm
+
 ```bash
 npm install -g @dbx-app/cli
+```
+
+### Homebrew
+
+```bash
+brew tap t8y2/dbx
+brew install dbx-cli
 ```
 
 Requires Node.js 22.13.0 or newer.
@@ -119,16 +126,16 @@ select 1"
 
 CLI JSON errors use stable codes:
 
-| Code | Meaning |
-|---|---|
-| `UNKNOWN_OPTION` | An unsupported flag was provided |
-| `INVALID_OPTION` | A flag is missing a value or has an invalid value |
-| `INVALID_ARGUMENT` | Positional arguments are missing or conflicting |
+| Code                     | Meaning                                             |
+| ------------------------ | --------------------------------------------------- |
+| `UNKNOWN_OPTION`         | An unsupported flag was provided                    |
+| `INVALID_OPTION`         | A flag is missing a value or has an invalid value   |
+| `INVALID_ARGUMENT`       | Positional arguments are missing or conflicting     |
 | `CONNECTION_STORE_ERROR` | DBX connection storage exists but could not be read |
-| `CONNECTION_NOT_FOUND` | No DBX connection matched the requested name |
-| `SQL_BLOCKED` | SQL safety rules blocked execution |
-| `DBX_NOT_RUNNING` | DBX Desktop bridge is unavailable |
-| `ERROR` | Unexpected runtime failure |
+| `CONNECTION_NOT_FOUND`   | No DBX connection matched the requested name        |
+| `SQL_BLOCKED`            | SQL safety rules blocked execution                  |
+| `DBX_NOT_RUNNING`        | DBX Desktop bridge is unavailable                   |
+| `ERROR`                  | Unexpected runtime failure                          |
 
 ## Desktop Deep Links
 
@@ -148,19 +155,19 @@ open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&passwor
 
 Supported fields:
 
-| Field | Meaning |
-|---|---|
-| `type` | Database type, such as `mysql`, `postgres`, `redis`, or `mongodb` |
-| `url` | Database DSN; URL encoding is recommended |
-| `name` | Display name in DBX; when omitted, DBX uses `database`, then `host` |
-| `host` | Hostname or IP address |
-| `port` | Port |
-| `user` | Username |
-| `password` | Password |
-| `database` | Database name; for Redis this can be a DB index such as `0` |
-| `url_params` | Extra connection parameters, such as `sslmode=require` |
-| `ssl` | Enable SSL when set to `true` |
-| `one_time` | Automatically connect when set to `true`, then delete the connection after disconnecting |
+| Field        | Meaning                                                                                  |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `type`       | Database type, such as `mysql`, `postgres`, `redis`, or `mongodb`                        |
+| `url`        | Database DSN; URL encoding is recommended                                                |
+| `name`       | Display name in DBX; when omitted, DBX uses `database`, then `host`                      |
+| `host`       | Hostname or IP address                                                                   |
+| `port`       | Port                                                                                     |
+| `user`       | Username                                                                                 |
+| `password`   | Password                                                                                 |
+| `database`   | Database name; for Redis this can be a DB index such as `0`                              |
+| `url_params` | Extra connection parameters, such as `sslmode=require`                                   |
+| `ssl`        | Enable SSL when set to `true`                                                            |
+| `one_time`   | Automatically connect when set to `true`, then delete the connection after disconnecting |
 
 One-time connection example:
 
@@ -168,9 +175,7 @@ One-time connection example:
 open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
 ```
 
-<Callout type="info">
-Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://connection/new?...'` to test it.
-</Callout>
+<Callout type="info">Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://connection/new?...'` to test it.</Callout>
 
 ## Codex
 

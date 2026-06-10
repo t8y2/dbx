@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  formatTemporalInputValue,
-  parseTemporalInputValue,
-  temporalCellEditorKind,
-} from "../../apps/desktop/src/lib/dataGridTemporalEditor.ts";
+import { formatTemporalInputValue, parseTemporalInputValue, temporalCellEditorKind } from "../../apps/desktop/src/lib/dataGridTemporalEditor.ts";
 
 test("detects explicit date time column types for grid editing", () => {
   assert.equal(temporalCellEditorKind("date"), "date");

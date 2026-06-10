@@ -17,9 +17,7 @@ const taskMap = reactive<Map<string, ExportTask>>(new Map());
 export function useExportTracker() {
   const tasks = computed(() => Array.from(taskMap.values()));
 
-  const activeCount = computed(
-    () => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing").length,
-  );
+  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing").length);
 
   const hasActive = computed(() => activeCount.value > 0);
 

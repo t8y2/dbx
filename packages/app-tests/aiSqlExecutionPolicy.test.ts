@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  classifyAiSqlExecution,
-  classifyConnectionEnvironment,
-  shouldAttemptAiAutoExecute,
-} from "../../apps/desktop/src/lib/aiSqlExecutionPolicy.ts";
+import { classifyAiSqlExecution, classifyConnectionEnvironment, shouldAttemptAiAutoExecute } from "../../apps/desktop/src/lib/aiSqlExecutionPolicy.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function conn(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -28,10 +24,7 @@ test("classifyConnectionEnvironment treats local and dev targets as non-producti
 
 test("classifyConnectionEnvironment treats production signals and unknown targets as production-like", () => {
   assert.equal(classifyConnectionEnvironment(conn({ name: "prod-db", host: "10.0.0.9" })), "production");
-  assert.equal(
-    classifyConnectionEnvironment(conn({ name: "analytics", host: "10.0.0.9", database: "warehouse" })),
-    "unknown",
-  );
+  assert.equal(classifyConnectionEnvironment(conn({ name: "analytics", host: "10.0.0.9", database: "warehouse" })), "unknown");
 });
 
 test("read SQL auto-executes on production and non-production", () => {
@@ -41,10 +34,7 @@ test("read SQL auto-executes on production and non-production", () => {
 
 test("single insert auto-executes only on non-production targets", () => {
   assert.equal(classifyAiSqlExecution("INSERT INTO users(name) VALUES ('a')", conn()).action, "auto_execute");
-  assert.equal(
-    classifyAiSqlExecution("INSERT INTO users(name) VALUES ('a')", conn({ name: "prod-db" })).action,
-    "confirm",
-  );
+  assert.equal(classifyAiSqlExecution("INSERT INTO users(name) VALUES ('a')", conn({ name: "prod-db" })).action, "confirm");
 });
 
 test("scoped single update auto-executes only on non-production targets", () => {
@@ -62,10 +52,7 @@ test("broad or destructive writes do not auto-execute", () => {
 
 test("comments and multi-statement writes do not bypass policy", () => {
   assert.equal(classifyAiSqlExecution("-- SELECT\nDROP TABLE users", conn()).action, "block");
-  assert.equal(
-    classifyAiSqlExecution("INSERT INTO users(name) VALUES ('a'); UPDATE users SET name='b' WHERE id=1", conn()).action,
-    "confirm",
-  );
+  assert.equal(classifyAiSqlExecution("INSERT INTO users(name) VALUES ('a'); UPDATE users SET name='b' WHERE id=1", conn()).action, "confirm");
 });
 
 test("AI auto-execution trusts generated SQL in agent generate mode unless the user opts out", () => {

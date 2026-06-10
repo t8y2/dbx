@@ -17,6 +17,8 @@ struct DriverManifestEntry {
     db_type: DatabaseType,
     label: String,
     runtime_mode: String,
+    support_level: String,
+    capabilities: DriverProductCapabilities,
     #[serde(default)]
     agent_key: Option<String>,
     #[serde(default)]
@@ -27,6 +29,52 @@ struct DriverManifestEntry {
     skip_tcp_probe: bool,
     #[serde(default)]
     driver_profiles: Vec<DriverProfileEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DriverProductCapabilities {
+    query_execution: bool,
+    metadata_browse: bool,
+    object_browser: bool,
+    object_source: bool,
+    schema_search: bool,
+    diagram: bool,
+    table_data_edit: bool,
+    table_structure_edit: bool,
+    table_import: bool,
+    data_transfer: bool,
+    sql_file_execution: bool,
+    database_create: bool,
+    field_lineage: bool,
+    sql_explain: bool,
+    user_admin: bool,
+    driver_management: bool,
+}
+
+impl DriverProductCapabilities {
+    fn any_enabled(&self) -> bool {
+        [
+            self.metadata_browse,
+            self.query_execution,
+            self.object_browser,
+            self.object_source,
+            self.schema_search,
+            self.diagram,
+            self.table_data_edit,
+            self.table_structure_edit,
+            self.table_import,
+            self.data_transfer,
+            self.sql_file_execution,
+            self.database_create,
+            self.field_lineage,
+            self.sql_explain,
+            self.user_admin,
+            self.driver_management,
+        ]
+        .into_iter()
+        .any(|enabled| enabled)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +111,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Access, None), Some("access"));
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
+    assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle-legacy"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle-10g"));
     assert_eq!(agent_key(&DatabaseType::Postgres, None), None);
@@ -86,6 +135,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Gbase));
     assert!(is_agent_type(&DatabaseType::Access));
     assert!(is_agent_type(&DatabaseType::Databend));
+    assert!(is_agent_type(&DatabaseType::InfluxDb));
     assert!(!is_agent_type(&DatabaseType::Mysql));
     assert!(!is_agent_type(&DatabaseType::Jdbc));
     assert!(!is_agent_type(&DatabaseType::Gaussdb));
@@ -126,6 +176,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::DuckDb));
     assert!(skips_tcp_probe(&DatabaseType::Jdbc));
     assert!(skips_tcp_probe(&DatabaseType::Access));
+    assert!(skips_tcp_probe(&DatabaseType::H2));
     assert!(skips_tcp_probe(&DatabaseType::Trino));
     assert!(skips_tcp_probe(&DatabaseType::Oracle));
     assert!(skips_tcp_probe(&DatabaseType::Tdengine));
@@ -135,6 +186,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::OceanbaseOracle));
     assert!(skips_tcp_probe(&DatabaseType::Gbase));
     assert!(skips_tcp_probe(&DatabaseType::Databend));
+    assert!(skips_tcp_probe(&DatabaseType::InfluxDb));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
@@ -145,8 +197,19 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
 #[test]
 fn driver_manifest_matches_core_database_capabilities() {
     let manifest = driver_manifest();
+    let support_levels = ["connect", "browse", "understand", "operate"];
 
     for driver in &manifest.drivers {
+        assert!(
+            support_levels.contains(&driver.support_level.as_str()),
+            "invalid support level for {:?}",
+            driver.db_type
+        );
+        assert!(
+            driver.capabilities.any_enabled(),
+            "database {:?} should declare at least one product capability",
+            driver.db_type
+        );
         assert_eq!(
             is_agent_type(&driver.db_type),
             driver.runtime_mode == "agent",
@@ -188,6 +251,38 @@ fn driver_manifest_matches_core_database_capabilities() {
             );
         }
     }
+}
+
+#[test]
+fn driver_manifest_declares_expected_product_capabilities() {
+    let manifest = driver_manifest();
+    let find_driver = |db_type: DatabaseType| {
+        manifest
+            .drivers
+            .iter()
+            .find(|driver| driver.db_type == db_type)
+            .unwrap_or_else(|| panic!("{db_type:?} manifest entry"))
+    };
+
+    let mysql = find_driver(DatabaseType::Mysql);
+    assert_eq!(mysql.support_level, "operate");
+    assert!(mysql.capabilities.schema_search);
+    assert!(mysql.capabilities.table_structure_edit);
+    assert!(mysql.capabilities.sql_explain);
+    assert!(!mysql.capabilities.driver_management);
+
+    let jdbc = find_driver(DatabaseType::Jdbc);
+    assert_eq!(jdbc.support_level, "browse");
+    assert!(jdbc.capabilities.metadata_browse);
+    assert!(jdbc.capabilities.object_browser);
+    assert!(jdbc.capabilities.sql_file_execution);
+    assert!(!jdbc.capabilities.table_structure_edit);
+    assert!(!jdbc.capabilities.user_admin);
+
+    let redis = find_driver(DatabaseType::Redis);
+    assert_eq!(redis.support_level, "connect");
+    assert!(!redis.capabilities.object_browser);
+    assert!(!redis.capabilities.sql_file_execution);
 }
 
 #[test]

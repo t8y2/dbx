@@ -6,6 +6,8 @@ pub struct SavedSqlFolder {
     pub id: String,
     pub connection_id: String,
     pub name: String,
+    #[serde(default)]
+    pub order_index: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -20,6 +22,8 @@ pub struct SavedSqlFile {
     pub database: String,
     pub schema: Option<String>,
     pub sql: String,
+    #[serde(default)]
+    pub order_index: i64,
     pub created_at: String,
     pub updated_at: String,
 }

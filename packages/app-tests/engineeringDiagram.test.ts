@@ -11,9 +11,7 @@ const tables: DiagramTable[] = [
       { name: "user_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       { name: "status", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
     ],
-    foreignKeys: [
-      { name: "orders_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" },
-    ],
+    foreignKeys: [{ name: "orders_user_id_fk", column: "user_id", ref_table: "users", ref_column: "id" }],
   },
   {
     name: "users",
@@ -42,7 +40,10 @@ test("builds engineering ER nodes from tables, columns, and relationships", () =
     users: { x: 40, y: 200 },
   });
 
-  assert.deepEqual(diagram.entities.map((entity) => entity.name), ["orders", "users"]);
+  assert.deepEqual(
+    diagram.entities.map((entity) => entity.name),
+    ["orders", "users"],
+  );
   assert.equal(diagram.attributes.filter((attr) => attr.tableName === "orders").length, 3);
   assert.equal(diagram.relationships[0]?.sourceCardinality, "N");
   assert.equal(diagram.relationships[0]?.targetCardinality, "1");
@@ -59,35 +60,31 @@ test("sizes the engineering canvas around attributes and relationship diamonds",
 });
 
 test("keeps dense attribute clouds from overlapping", () => {
-  const denseTables: DiagramTable[] = [{
-    name: "roles",
-    columns: Array.from({ length: 36 }, (_, index) => ({
-      name: `column_${index + 1}`,
-      data_type: "varchar",
-      is_nullable: true,
-      column_default: null,
-      is_primary_key: index === 0,
-      extra: null,
-    })),
-    foreignKeys: [],
-  }];
+  const denseTables: DiagramTable[] = [
+    {
+      name: "roles",
+      columns: Array.from({ length: 36 }, (_, index) => ({
+        name: `column_${index + 1}`,
+        data_type: "varchar",
+        is_nullable: true,
+        column_default: null,
+        is_primary_key: index === 0,
+        extra: null,
+      })),
+      foreignKeys: [],
+    },
+  ];
 
   const diagram = buildEngineeringDiagram(denseTables, [], {
     roles: { x: 40, y: 40 },
   });
-  const rects = [
-    ...diagram.entities,
-    ...diagram.attributes,
-  ];
+  const rects = [...diagram.entities, ...diagram.attributes];
 
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
       const left = rects[i];
       const right = rects[j];
-      const overlaps = left.x < right.x + right.width &&
-        left.x + left.width > right.x &&
-        left.y < right.y + right.height &&
-        left.y + left.height > right.y;
+      const overlaps = left.x < right.x + right.width && left.x + left.width > right.x && left.y < right.y + right.height && left.y + left.height > right.y;
       assert.equal(overlaps, false, `${left.id} overlaps ${right.id}`);
     }
   }

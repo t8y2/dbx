@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import type { CSSProperties, ReactNode } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type RevealSectionProps = {
   children: ReactNode;
@@ -9,7 +9,7 @@ type RevealSectionProps = {
   delay?: number;
 };
 
-export function RevealSection({ children, className = '', delay = 0 }: RevealSectionProps) {
+export function RevealSection({ children, className = "", delay = 0 }: RevealSectionProps) {
   const ref = useRef<HTMLElement | null>(null);
   const [visible, setVisible] = useState(false);
 
@@ -24,7 +24,7 @@ export function RevealSection({ children, className = '', delay = 0 }: RevealSec
           observer.unobserve(entry.target);
         }
       },
-      { rootMargin: '0px 0px -14% 0px', threshold: 0.18 },
+      { rootMargin: "0px 0px -14% 0px", threshold: 0.18 },
     );
 
     observer.observe(node);
@@ -32,11 +32,7 @@ export function RevealSection({ children, className = '', delay = 0 }: RevealSec
   }, []);
 
   return (
-    <section
-      ref={ref}
-      className={`${className} landing-reveal${visible ? ' is-visible' : ''}`}
-      style={{ '--reveal-delay': `${delay}ms` } as CSSProperties}
-    >
+    <section ref={ref} className={`${className} landing-reveal${visible ? " is-visible" : ""}`} style={{ "--reveal-delay": `${delay}ms` } as CSSProperties}>
       {children}
     </section>
   );

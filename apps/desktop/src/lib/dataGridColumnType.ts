@@ -20,11 +20,7 @@ export interface HeaderColumnTypeSources {
   actualColIdx: number;
 }
 
-export function resolveHeaderColumnType({
-  tableColumnType,
-  resultColumnTypes,
-  actualColIdx,
-}: HeaderColumnTypeSources): string | undefined {
+export function resolveHeaderColumnType({ tableColumnType, resultColumnTypes, actualColIdx }: HeaderColumnTypeSources): string | undefined {
   const fromMeta = tableColumnType?.trim();
   if (fromMeta) return fromMeta;
 

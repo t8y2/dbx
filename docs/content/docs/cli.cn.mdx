@@ -3,14 +3,19 @@ title: DBX CLI
 description: 在终端、脚本、CI 和 Codex 中使用 DBX 连接。
 ---
 
-<Callout type="info">
-DBX CLI 是独立命令行包，适合终端、脚本和 AI 编程助手工作流。它与 MCP Server 共享 DBX 连接存储和 SQL 安全规则。
-</Callout>
+<Callout type="info">DBX CLI 是独立命令行包，适合终端、脚本和 AI 编程助手工作流。它与 MCP Server 共享 DBX 连接存储和 SQL 安全规则。</Callout>
 
 ## 安装
 
 ```bash
 npm install -g @dbx-app/cli
+```
+
+### Homebrew
+
+```bash
+brew tap t8y2/dbx
+brew install dbx-cli
 ```
 
 需要 Node.js 22.13.0 或更高版本。
@@ -119,16 +124,16 @@ select 1"
 
 CLI JSON 错误使用稳定错误码：
 
-| 错误码 | 含义 |
-|---|---|
-| `UNKNOWN_OPTION` | 使用了不支持的参数 |
-| `INVALID_OPTION` | 参数缺少值或值不合法 |
-| `INVALID_ARGUMENT` | 位置参数缺失或冲突 |
+| 错误码                   | 含义                         |
+| ------------------------ | ---------------------------- |
+| `UNKNOWN_OPTION`         | 使用了不支持的参数           |
+| `INVALID_OPTION`         | 参数缺少值或值不合法         |
+| `INVALID_ARGUMENT`       | 位置参数缺失或冲突           |
 | `CONNECTION_STORE_ERROR` | DBX 连接存储存在，但无法读取 |
-| `CONNECTION_NOT_FOUND` | 找不到指定的 DBX 连接 |
-| `SQL_BLOCKED` | SQL 被安全规则拦截 |
-| `DBX_NOT_RUNNING` | DBX 桌面端 bridge 不可用 |
-| `ERROR` | 未预期的运行时错误 |
+| `CONNECTION_NOT_FOUND`   | 找不到指定的 DBX 连接        |
+| `SQL_BLOCKED`            | SQL 被安全规则拦截           |
+| `DBX_NOT_RUNNING`        | DBX 桌面端 bridge 不可用     |
+| `ERROR`                  | 未预期的运行时错误           |
 
 ## 桌面端 Deep Link
 
@@ -148,19 +153,19 @@ open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&passwor
 
 支持的字段：
 
-| 字段 | 含义 |
-|---|---|
-| `type` | 数据库类型，例如 `mysql`、`postgres`、`redis`、`mongodb` |
-| `url` | 数据库 DSN，建议 URL encode |
-| `name` | DBX 中显示的连接名；未传时优先使用 `database`，其次使用 `host` |
-| `host` | 主机地址 |
-| `port` | 端口 |
-| `user` | 用户名 |
-| `password` | 密码 |
-| `database` | 数据库名；Redis 可传 DB index，例如 `0` |
-| `url_params` | 额外连接参数，例如 `sslmode=require` |
-| `ssl` | 是否启用 SSL，`true` 表示启用 |
-| `one_time` | `true` 时自动连接，断开后自动删除连接信息 |
+| 字段         | 含义                                                           |
+| ------------ | -------------------------------------------------------------- |
+| `type`       | 数据库类型，例如 `mysql`、`postgres`、`redis`、`mongodb`       |
+| `url`        | 数据库 DSN，建议 URL encode                                    |
+| `name`       | DBX 中显示的连接名；未传时优先使用 `database`，其次使用 `host` |
+| `host`       | 主机地址                                                       |
+| `port`       | 端口                                                           |
+| `user`       | 用户名                                                         |
+| `password`   | 密码                                                           |
+| `database`   | 数据库名；Redis 可传 DB index，例如 `0`                        |
+| `url_params` | 额外连接参数，例如 `sslmode=require`                           |
+| `ssl`        | 是否启用 SSL，`true` 表示启用                                  |
+| `one_time`   | `true` 时自动连接，断开后自动删除连接信息                      |
 
 一次性连接示例：
 
@@ -168,9 +173,7 @@ open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&passwor
 open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
 ```
 
-<Callout type="info">
-测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://connection/new?...'` 测试。
-</Callout>
+<Callout type="info">测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://connection/new?...'` 测试。</Callout>
 
 ## Codex
 

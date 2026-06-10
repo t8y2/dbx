@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{is_schema_aware, quote_table_identifier};
+use crate::sql_dialect::{is_schema_aware, qualified_table_name, quote_table_identifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -49,6 +49,7 @@ pub struct CreateDatabaseSqlOptions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "duckdb-bundled")]
 pub struct DuckDbAttachDatabaseSqlOptions {
     pub path: String,
     pub name: String,
@@ -136,6 +137,7 @@ pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> String {
     format!("CREATE DATABASE {name} CHARACTER SET {charset}{collate_clause};")
 }
 
+#[cfg(feature = "duckdb-bundled")]
 pub fn build_duckdb_attach_database_sql(options: DuckDbAttachDatabaseSqlOptions) -> String {
     format!(
         "ATTACH {} AS {};",
@@ -162,7 +164,13 @@ pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
 }
 
 pub fn build_drop_table_sql(options: TableAdminSqlOptions) -> String {
-    format!("DROP TABLE {};", qualified_name(options.database_type, options.schema.as_deref(), &options.table_name))
+    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
+        return format!("DELETE TIMESERIES {};", iotdb_timeseries_pattern(&table));
+    } else if matches!(options.database_type, Some(DatabaseType::InfluxDb)) {
+        return format!("DROP MEASUREMENT {};", table);
+    }
+    format!("DROP TABLE {table};")
 }
 
 pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions) -> Result<String, String> {
@@ -242,13 +250,16 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
         Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
         Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin) => format!("TRUNCATE TABLE {table};"),
+        Some(DatabaseType::Iotdb) => format!("DELETE FROM {};", iotdb_timeseries_pattern(&table)),
         _ => format!("DELETE FROM {table};"),
     }
 }
 
 pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
     let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
-    if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
+    if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
+        format!("DELETE FROM {};", iotdb_timeseries_pattern(&table))
+    } else if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
         format!("DELETE FROM {table};")
     } else {
         format!("TRUNCATE TABLE {table};")
@@ -409,6 +420,9 @@ fn quote_rename_identifier(database_type: Option<DatabaseType>, name: &str) -> S
 }
 
 fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
+    if matches!(database_type, Some(DatabaseType::Iotdb)) {
+        return qualified_table_name(database_type, schema, name);
+    }
     if database_type.is_some_and(is_schema_aware) && schema.is_some_and(|schema| !schema.is_empty()) {
         format!(
             "{}.{}",
@@ -417,6 +431,15 @@ fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, nam
         )
     } else {
         quote_rename_identifier(database_type, name)
+    }
+}
+
+fn iotdb_timeseries_pattern(path: &str) -> String {
+    let path = path.trim().trim_end_matches(';');
+    if path.ends_with(".*") || path.ends_with(".**") {
+        path.to_string()
+    } else {
+        format!("{path}.*")
     }
 }
 
@@ -490,6 +513,7 @@ mod tests {
         assert!(!supports_create_database_charset(Some(DatabaseType::Postgres), None));
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     #[test]
     fn builds_duckdb_attach_sql() {
         assert_eq!(
@@ -558,6 +582,30 @@ mod tests {
                 table_name: "events".to_string(),
             }),
             "DELETE FROM \"events\";"
+        );
+        assert_eq!(
+            build_drop_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                schema: Some("root.test".to_string()),
+                table_name: "DCU_101".to_string(),
+            }),
+            "DELETE TIMESERIES root.test.DCU_101.*;"
+        );
+        assert_eq!(
+            build_empty_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                schema: Some("root.test".to_string()),
+                table_name: "root.test.DCU_101".to_string(),
+            }),
+            "DELETE FROM root.test.DCU_101.*;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                schema: Some("root.test".to_string()),
+                table_name: "DCU_101".to_string(),
+            }),
+            "DELETE FROM root.test.DCU_101.*;"
         );
     }
 

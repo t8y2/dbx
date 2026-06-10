@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  buildDiagramRelationships,
-  filterDiagramTables,
-  layoutDiagramTables,
-} from "../../apps/desktop/src/lib/erDiagram.ts";
+import { buildDiagramRelationships, filterDiagramTables, layoutDiagramTables } from "../../apps/desktop/src/lib/erDiagram.ts";
 
 test("builds relationships only between tables in the diagram", () => {
   const relationships = buildDiagramRelationships([
@@ -49,9 +45,18 @@ test("filters diagram tables by table, column, and foreign key names", () => {
     },
   ];
 
-  assert.deepEqual(filterDiagramTables(tables, "payload").map((table) => table.name), ["audit_log"]);
-  assert.deepEqual(filterDiagramTables(tables, "orders_user").map((table) => table.name), ["orders"]);
-  assert.deepEqual(filterDiagramTables(tables, "").map((table) => table.name), ["orders", "audit_log"]);
+  assert.deepEqual(
+    filterDiagramTables(tables, "payload").map((table) => table.name),
+    ["audit_log"],
+  );
+  assert.deepEqual(
+    filterDiagramTables(tables, "orders_user").map((table) => table.name),
+    ["orders"],
+  );
+  assert.deepEqual(
+    filterDiagramTables(tables, "").map((table) => table.name),
+    ["orders", "audit_log"],
+  );
 });
 
 test("lays out diagram tables in stable rows", () => {

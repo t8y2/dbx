@@ -1,12 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  filterDatabaseNamesForConnection,
-  filterVisibleDatabaseNames,
-  isSystemDatabaseName,
-  normalizeVisibleDatabaseSelection,
-  visibleDatabaseFilterIsEnabled,
-} from "../../apps/desktop/src/lib/visibleDatabases.ts";
+import { filterDatabaseNamesForConnection, filterVisibleDatabaseNames, isSystemDatabaseName, canSaveVisibleDatabaseSelection, normalizeVisibleDatabaseSelection, visibleDatabaseFilterIsEnabled } from "../../apps/desktop/src/lib/visibleDatabases.ts";
 
 test("undefined visible database filter keeps every database", () => {
   assert.deepEqual(filterVisibleDatabaseNames(["app", "analytics"], undefined), ["app", "analytics"]);
@@ -23,20 +17,19 @@ test("empty configured visible database filter hides every database", () => {
   assert.equal(visibleDatabaseFilterIsEnabled([]), true);
 });
 
+test("empty visible database selection cannot be saved", () => {
+  assert.equal(canSaveVisibleDatabaseSelection(["app"]), true);
+  assert.equal(canSaveVisibleDatabaseSelection([]), false);
+});
+
 test("normalizes selected database names against fresh database names", () => {
-  assert.deepEqual(normalizeVisibleDatabaseSelection(["billing", "missing", "app", "app"], ["app", "billing"]), [
-    "billing",
-    "app",
-  ]);
+  assert.deepEqual(normalizeVisibleDatabaseSelection(["billing", "missing", "app", "app"], ["app", "billing"]), ["billing", "app"]);
 });
 
 test("mysql system databases are hidden by default but can be explicitly selected", () => {
   const databases = ["app", "information_schema", "mysql", "performance_schema", "sys"];
   assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "mysql" }), ["app"]);
-  assert.deepEqual(
-    filterDatabaseNamesForConnection(databases, { db_type: "mysql", visible_databases: ["app", "sys"] }),
-    ["app", "sys"],
-  );
+  assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "mysql", visible_databases: ["app", "sys"] }), ["app", "sys"]);
   assert.equal(isSystemDatabaseName("mysql", "performance_schema"), true);
   assert.equal(isSystemDatabaseName("postgres", "information_schema"), false);
 });
@@ -44,10 +37,7 @@ test("mysql system databases are hidden by default but can be explicitly selecte
 test("gbase8s does not inherit base gbase system database filtering", () => {
   const databases = ["app", "information_schema", "mysql", "performance_schema", "sys"];
   assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "gbase" }), ["app"]);
-  assert.deepEqual(
-    filterDatabaseNamesForConnection(databases, { db_type: "gbase", driver_profile: "gbase8s" }),
-    databases,
-  );
+  assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "gbase", driver_profile: "gbase8s" }), databases);
 });
 
 test("system database detection is registered per database type", () => {
@@ -64,7 +54,5 @@ test("system database registry covers common database families", () => {
   assert.deepEqual(filterDatabaseNamesForConnection(["_SYS_BIC", "SALES"], { db_type: "saphana" }), ["SALES"]);
   assert.deepEqual(filterDatabaseNamesForConnection(["system_schema", "app"], { db_type: "cassandra" }), ["app"]);
   assert.deepEqual(filterDatabaseNamesForConnection(["system", "neo4j"], { db_type: "neo4j" }), ["neo4j"]);
-  assert.deepEqual(filterDatabaseNamesForConnection(["SNOWFLAKE", "ANALYTICS"], { db_type: "snowflake" }), [
-    "ANALYTICS",
-  ]);
+  assert.deepEqual(filterDatabaseNamesForConnection(["SNOWFLAKE", "ANALYTICS"], { db_type: "snowflake" }), ["ANALYTICS"]);
 });

@@ -47,7 +47,17 @@ test("executes rqlite query through the HTTP API", async () => {
     assert.equal(req.url, "/db/query");
     assert.equal(req.headers.authorization, "Basic ZGJ4OnNlY3JldA==");
     assert.deepEqual(JSON.parse(body), ["select id, name from users"]);
-    json(res, { results: [{ columns: ["id", "name"], values: [[1, "Ada"], [2, "Linus"]] }] });
+    json(res, {
+      results: [
+        {
+          columns: ["id", "name"],
+          values: [
+            [1, "Ada"],
+            [2, "Linus"],
+          ],
+        },
+      ],
+    });
   });
 
   try {
@@ -62,7 +72,17 @@ test("lists rqlite tables and describes columns", async () => {
   const server = await withRqliteServer((_req, res, body) => {
     const sql = JSON.parse(body)[0] as string;
     if (sql.includes("sqlite_master")) {
-      json(res, { results: [{ columns: ["name", "type"], values: [["users", "table"], ["active_users", "view"]] }] });
+      json(res, {
+        results: [
+          {
+            columns: ["name", "type"],
+            values: [
+              ["users", "table"],
+              ["active_users", "view"],
+            ],
+          },
+        ],
+      });
       return;
     }
     if (sql.includes("PRAGMA table_info")) {

@@ -7,8 +7,9 @@ use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
 
 use crate::agent_connection::{
-    agent_connect_params, mongo_legacy_error_with_auth_hint, oracle_alternate_connect_config,
-    oracle_auth_fallback_profiles, should_retry_oracle_with_10g_driver,
+    agent_connect_params, h2_file_path_from_jdbc_url, is_h2_file_connection, mongo_legacy_error_with_auth_hint,
+    oracle_alternate_connect_config, oracle_auth_fallback_profiles, oracle_error_with_driver_hint,
+    should_retry_oracle_with_10g_driver,
 };
 use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::database_capabilities;
@@ -16,10 +17,10 @@ use crate::db;
 use crate::db::agent_driver::AgentMethod;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
-use crate::external;
 use crate::models::connection::{
     parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host, ConnectionConfig, DatabaseType,
 };
+use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
 use crate::storage::Storage;
@@ -27,14 +28,19 @@ use crate::storage::Storage;
 pub const JDBC_PLUGIN_NOT_INSTALLED: &str =
     "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.";
 
-pub fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Ok(home) = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-    path.to_string()
+#[cfg(feature = "duckdb-bundled")]
+mod duckdb_types {
+    use std::sync::Arc;
+    pub type DuckDbHandle = Arc<std::sync::Mutex<duckdb::Connection>>;
+    pub type ExternalTabularHandle = Arc<crate::external::ExternalPool>;
 }
+#[cfg(not(feature = "duckdb-bundled"))]
+mod duckdb_types {
+    pub type DuckDbHandle = ();
+    pub type ExternalTabularHandle = ();
+}
+
+use duckdb_types::{DuckDbHandle, ExternalTabularHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MysqlMode {
@@ -48,14 +54,16 @@ pub enum PoolKind {
     Postgres(deadpool_postgres::Pool),
     Sqlite(db::sqlite::SqliteHandle),
     Rqlite(db::rqlite_driver::RqliteClient),
+    Turso(db::turso_driver::TursoClient),
     Redis(db::redis_driver::RedisConnection),
-    DuckDb(Arc<std::sync::Mutex<duckdb::Connection>>),
+    DuckDb(DuckDbHandle),
     MongoDb(mongodb::Client),
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
+    InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
-    ExternalTabular(Arc<external::ExternalPool>),
+    ExternalTabular(ExternalTabularHandle),
     ExternalDriver { driver_id: String, config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
 }
 
@@ -327,10 +335,12 @@ impl AppState {
 
         let db_config = database_connection_config(&config, database);
 
+        validate_h2_file_connection(&db_config)?;
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
         probe_connection_endpoint(&db_config, &host, port).await?;
         let url = connection_url_for_endpoint(&db_config, &host, port);
         let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
+        let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
         let mysql_pool_max_connections = if normalize_client_session_id(client_session_id).is_some() { 1 } else { 3 };
         let pool = match db_config.db_type {
             DatabaseType::Mysql => {
@@ -383,6 +393,16 @@ impl AppState {
                 db::rqlite_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::Rqlite(client)
             }
+            DatabaseType::Turso => {
+                let auth_token = if !db_config.password.is_empty() {
+                    db_config.password.clone()
+                } else {
+                    db_config.url_params.as_deref().and_then(extract_auth_token_from_params).unwrap_or_default()
+                };
+                let client = db::turso_driver::TursoClient::new(&url, &auth_token, db_config.ssl, connect_timeout)?;
+                db::turso_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::Turso(client)
+            }
             DatabaseType::Redis => {
                 let con = if db_config.uses_redis_cluster() {
                     db::redis_driver::RedisConnection::Cluster(db::redis_driver::connect_cluster(&db_config).await?)
@@ -397,6 +417,7 @@ impl AppState {
                 };
                 PoolKind::Redis(con)
             }
+            #[cfg(feature = "duckdb-bundled")]
             DatabaseType::DuckDb => {
                 let con = db::duckdb_driver::connect_path(&expand_tilde(&db_config.host))?;
                 {
@@ -407,8 +428,12 @@ impl AppState {
                 }
                 PoolKind::DuckDb(con)
             }
+            #[cfg(not(feature = "duckdb-bundled"))]
+            DatabaseType::DuckDb => {
+                return Err("DuckDB support is not compiled in this build. Rebuild with default features.".to_string());
+            }
             DatabaseType::MongoDb => {
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => match db::mongo_driver::test_connection(
                         &client,
                         connect_timeout,
@@ -417,7 +442,12 @@ impl AppState {
                     .await
                     {
                         Ok(()) => {
-                            self.connections.write().await.insert(pool_key.clone(), PoolKind::MongoDb(client));
+                            let mut conns = self.connections.write().await;
+                            // Re-check: another task may have created the pool while we were connecting.
+                            if conns.contains_key(&pool_key) {
+                                return Ok(pool_key);
+                            }
+                            conns.insert(pool_key.clone(), PoolKind::MongoDb(client));
                             return Ok(pool_key);
                         }
                         Err(e) => e,
@@ -470,6 +500,19 @@ impl AppState {
                 );
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Elasticsearch(client)
+            }
+            DatabaseType::InfluxDb => {
+                let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
+                let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
+                let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
+                    &url,
+                    username,
+                    password,
+                    Some(&db_config.ca_cert_path),
+                    connect_timeout,
+                )?;
+                db::influxdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::InfluxDb(client)
             }
             DatabaseType::Dameng
             | DatabaseType::Kingbase
@@ -567,7 +610,7 @@ impl AppState {
                             )
                         })?;
                     } else {
-                        return Err(err);
+                        return Err(oracle_error_with_driver_hint(&db_config, &err));
                     }
                 }
                 PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
@@ -721,6 +764,7 @@ impl AppState {
         keys
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     pub async fn duckdb_existing_pool_is_usable_for_config(&self, config: &ConnectionConfig) -> Result<bool, String> {
         if config.db_type != DatabaseType::DuckDb {
             return Ok(false);
@@ -940,14 +984,19 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::Postgres(p) => p.close(),
         PoolKind::Sqlite(_) => {}
         PoolKind::Rqlite(_) => {}
+        PoolKind::Turso(_) => {}
         PoolKind::Redis(_) => {}
+        #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             crate::db::duckdb_driver::close_connection(con);
         }
+        #[cfg(not(feature = "duckdb-bundled"))]
+        PoolKind::DuckDb(_) => {}
         PoolKind::MongoDb(_) => {}
         PoolKind::ClickHouse(_) => {}
         PoolKind::SqlServer(_) => {}
         PoolKind::Elasticsearch(_) => {}
+        PoolKind::InfluxDb(_) => {}
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let _ = client.disconnect().await;
@@ -955,6 +1004,19 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::ExternalTabular(_) => {}
         PoolKind::ExternalDriver { .. } => {}
     }
+}
+
+fn extract_auth_token_from_params(params: &str) -> Option<String> {
+    params
+        .trim()
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| {
+            let k = key.trim().to_ascii_lowercase();
+            k == "auth_token" || k == "authtoken" || k == "auth-token"
+        })
+        .map(|(_, value)| value.trim().to_string())
 }
 
 fn base_pool_key_for(
@@ -1043,6 +1105,7 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
     }
 }
 
+#[cfg(feature = "duckdb-bundled")]
 fn duckdb_paths_match(left: &str, right: &str) -> bool {
     let left = expand_tilde(left);
     let right = expand_tilde(right);
@@ -1068,6 +1131,38 @@ pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, po
     }
     let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
     db::probe_tcp_endpoint(&format!("{:?}", config.db_type), host, port, timeout).await
+}
+
+fn validate_h2_file_connection(config: &ConnectionConfig) -> Result<(), String> {
+    if !is_h2_file_connection(config) {
+        return Ok(());
+    }
+    let path = config
+        .connection_string
+        .as_deref()
+        .and_then(h2_file_path_from_jdbc_url)
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| config.host.clone());
+    validate_h2_database_path(&path)
+}
+
+fn validate_h2_database_path(path: &str) -> Result<(), String> {
+    let first_err = match db::validate_file_path(path, |_| false) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
+
+    for suffix in [".mv.db", ".h2.db"] {
+        if path.ends_with(suffix) {
+            continue;
+        }
+        let candidate = format!("{path}{suffix}");
+        if db::validate_file_path(&candidate, |_| false).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(first_err)
 }
 
 fn uses_tcp_probe(config: &ConnectionConfig, host: &str, port: u16) -> bool {
@@ -1123,7 +1218,8 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         connection_url_for_endpoint, database_connection_config, metadata_connection_config,
-        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe, AppState, PoolKind,
+        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe, validate_h2_database_path,
+        AppState, PoolKind,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, oracle_alternate_connect_config,
@@ -1132,8 +1228,8 @@ mod tests {
     use crate::agent_manager::{AgentState, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
     use crate::db;
     use crate::models::connection::{
-        default_connect_timeout_secs, ConnectionConfig, DatabaseType, ProxyTunnelConfig, ProxyType,
-        TransportLayerConfig,
+        default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, ProxyTunnelConfig,
+        ProxyType, TransportLayerConfig,
     };
     use crate::query;
     use crate::schema;
@@ -1158,6 +1254,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
+            idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -1172,11 +1269,13 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -1195,6 +1294,30 @@ mod tests {
         assert_eq!(params["username"], "informix");
         assert_eq!(params["password"], "in4mix");
         assert_eq!(params["url_params"], "INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8");
+    }
+
+    #[test]
+    fn validates_h2_database_base_path_when_mv_db_file_exists() {
+        let dir = std::env::temp_dir().join(format!("dbx-h2-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("app.mv.db");
+        std::fs::write(&file_path, b"h2").unwrap();
+        let base_path = dir.join("app");
+
+        validate_h2_database_path(base_path.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_h2_database_path() {
+        let dir = std::env::temp_dir().join(format!("dbx-h2-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing_path = dir.join("missing");
+
+        let err = validate_h2_database_path(missing_path.to_str().unwrap()).unwrap_err();
+
+        assert!(err.contains("File does not exist"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1784,6 +1907,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn h2_agent_connections_skip_tcp_probe_for_file_and_tcp_modes() {
+        let mut file_config = mysql_config(None);
+        file_config.db_type = DatabaseType::H2;
+        file_config.host = "/tmp/app.mv.db".to_string();
+        file_config.port = 0;
+
+        assert!(!uses_tcp_probe(&file_config, "/tmp/app.mv.db", 0));
+
+        let mut tcp_config = mysql_config(Some("test"));
+        tcp_config.db_type = DatabaseType::H2;
+        tcp_config.host = "127.0.0.1".to_string();
+        tcp_config.port = 9092;
+
+        assert!(!uses_tcp_probe(&tcp_config, "127.0.0.1", 9092));
+    }
+
     #[tokio::test]
     async fn sqlite_get_or_create_pool_initializes_connection_for_web_route() {
         let (state, dir) = test_app_state().await;
@@ -1808,6 +1948,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     #[tokio::test]
     async fn duckdb_existing_pool_can_be_used_for_connection_test() {
         let (state, dir) = test_app_state().await;
@@ -1854,6 +1995,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     #[tokio::test]
     async fn duckdb_client_session_reuses_base_pool_to_avoid_file_locks() {
         let (state, dir) = test_app_state().await;

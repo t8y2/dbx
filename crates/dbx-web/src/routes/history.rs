@@ -12,6 +12,7 @@ use crate::state::WebState;
 pub struct HistoryQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub activity_kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,7 +35,7 @@ pub async fn load_history(
 ) -> Result<Json<Vec<HistoryEntry>>, AppError> {
     let limit = q.limit.unwrap_or(100);
     let offset = q.offset.unwrap_or(0);
-    let entries = state.app.storage.load_history_entries(limit, offset).await.map_err(AppError)?;
+    let entries = state.app.storage.load_history_entries(limit, offset, q.activity_kind).await.map_err(AppError)?;
     Ok(Json(entries))
 }
 

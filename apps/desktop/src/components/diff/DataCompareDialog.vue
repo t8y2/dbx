@@ -8,30 +8,14 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { copyToClipboard } from "@/lib/clipboard";
-import type {
-  DataCompareCellValue,
-  DataCompareModifiedRow,
-  DataCompareResult,
-  DataCompareRow,
-  DataCompareSyncPlan,
-  DataCompareSyncPlanTableOptions,
-} from "@/lib/dataCompare";
+import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/api";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import {
-  ArrowLeftRight,
-  CheckSquare,
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  GitCompareArrows,
-  Loader2,
-  Play,
-  Square,
-} from "@lucide/vue";
+import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
 
 type CompareColumn = ColumnInfo;
 
@@ -130,23 +114,15 @@ const showModified = ref(true);
 
 let syncPlanRequestId = 0;
 
-const sqlConnections = computed(() =>
-  store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(connection.db_type)),
-);
-const selectedSourceTableNames = computed(() =>
-  sourceTables.value.filter((table) => selectedSourceTables.value.has(table)),
-);
+const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(connection.db_type)));
+const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
 const isBatchCompare = computed(() => selectedSourceTableNames.value.length > 1);
 const filteredSourceTables = computed(() => {
   const query = sourceTableSearch.value.trim().toLowerCase();
   if (!query) return sourceTables.value;
   return sourceTables.value.filter((table) => table.toLowerCase().includes(query));
 });
-const allFilteredTablesSelected = computed(
-  () =>
-    filteredSourceTables.value.length > 0 &&
-    filteredSourceTables.value.every((table) => selectedSourceTables.value.has(table)),
-);
+const allFilteredTablesSelected = computed(() => filteredSourceTables.value.length > 0 && filteredSourceTables.value.every((table) => selectedSourceTables.value.has(table)));
 const compareTasksPreview = computed(() =>
   selectedSourceTableNames.value.map((table) => {
     const target = isBatchCompare.value ? table : targetTable.value || table;
@@ -159,19 +135,8 @@ const compareTasksPreview = computed(() =>
   }),
 );
 const matchedTaskCount = computed(() => compareTasksPreview.value.filter((task) => task.matched).length);
-const missingTargetTables = computed(() =>
-  compareTasksPreview.value.filter((task) => !task.matched).map((task) => task.targetTable || task.sourceTable),
-);
-const canCompare = computed(
-  () =>
-    sourceConnectionId.value &&
-    sourceDatabase.value &&
-    sourceSchema.value &&
-    selectedSourceTableNames.value.length > 0 &&
-    targetConnectionId.value &&
-    targetDatabase.value &&
-    targetSchema.value,
-);
+const missingTargetTables = computed(() => compareTasksPreview.value.filter((task) => !task.matched).map((task) => task.targetTable || task.sourceTable));
+const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && selectedSourceTableNames.value.length > 0 && targetConnectionId.value && targetDatabase.value && targetSchema.value);
 const keyColumns = computed(() =>
   keyColumnsText.value
     .split(",")
@@ -187,11 +152,7 @@ const totalAdded = computed(() => batchResults.value.reduce((sum, item) => sum +
 const totalRemoved = computed(() => batchResults.value.reduce((sum, item) => sum + item.removed, 0));
 const totalModified = computed(() => batchResults.value.reduce((sum, item) => sum + item.modified, 0));
 const hasResults = computed(() => batchResults.value.length > 0);
-const visibleKinds = computed(() => [
-  ...(showAdded.value ? (["added"] as DiffKind[]) : []),
-  ...(showRemoved.value ? (["removed"] as DiffKind[]) : []),
-  ...(showModified.value ? (["modified"] as DiffKind[]) : []),
-]);
+const visibleKinds = computed(() => [...(showAdded.value ? (["added"] as DiffKind[]) : []), ...(showRemoved.value ? (["removed"] as DiffKind[]) : []), ...(showModified.value ? (["modified"] as DiffKind[]) : [])]);
 const selectedAddedCount = computed(() => selectedDiffCount("added"));
 const selectedRemovedCount = computed(() => selectedDiffCount("removed"));
 const selectedModifiedCount = computed(() => selectedDiffCount("modified"));
@@ -299,8 +260,7 @@ function clearResult() {
 function swapSourceTarget() {
   const previousSelectedTables = [...selectedSourceTableNames.value];
   const nextSingleTarget = previousSelectedTables.length === 1 ? (previousSelectedTables[0] ?? "") : "";
-  const nextSourceSelection =
-    previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
+  const nextSourceSelection = previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
 
   const tmpConnId = sourceConnectionId.value;
   const tmpDb = sourceDatabase.value;
@@ -357,12 +317,7 @@ async function loadSchemas(side: "source" | "target", preferredSchema = "") {
   }
 
   const schemas = await api.listSchemas(connectionId, database);
-  const schema =
-    preferredSchema && schemas.includes(preferredSchema)
-      ? preferredSchema
-      : schemas.includes("public")
-        ? "public"
-        : (schemas[0] ?? "");
+  const schema = preferredSchema && schemas.includes(preferredSchema) ? preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
   if (side === "source") {
     sourceSchemas.value = schemas;
     sourceSchema.value = schema;
@@ -375,7 +330,10 @@ async function loadSchemas(side: "source" | "target", preferredSchema = "") {
 async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   await store.ensureConnected(connectionId);
-  const names = (await api.listDatabases(connectionId)).map((database) => database.name);
+  const names = databaseOptionsForConnection(
+    (await api.listDatabases(connectionId)).map((database) => database.name),
+    store.getConfig(connectionId),
+  );
   if (side === "source") {
     sourceDatabases.value = names;
     sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -398,19 +356,11 @@ async function loadTables(side: "source" | "target") {
   const connectionId = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
   const database = side === "source" ? sourceDatabase.value : targetDatabase.value;
   if (!connectionId || !database) return;
-  const schema =
-    side === "source"
-      ? sourceSchema.value || (await resolveSchema(connectionId, database, props.prefillSchema))
-      : targetSchema.value || (await resolveSchema(connectionId, database));
-  const tables = (await api.listTables(connectionId, database, schema))
-    .filter((table) => table.table_type !== "VIEW")
-    .map((table) => table.name);
+  const schema = side === "source" ? sourceSchema.value || (await resolveSchema(connectionId, database, props.prefillSchema)) : targetSchema.value || (await resolveSchema(connectionId, database));
+  const tables = (await api.listTables(connectionId, database, schema)).filter((table) => table.table_type !== "VIEW").map((table) => table.name);
 
   if (side === "source") {
-    const preferredSelection =
-      props.prefillTable && tables.includes(props.prefillTable)
-        ? [props.prefillTable]
-        : [...selectedSourceTables.value].filter((table) => tables.includes(table));
+    const preferredSelection = props.prefillTable && tables.includes(props.prefillTable) ? [props.prefillTable] : [...selectedSourceTables.value].filter((table) => tables.includes(table));
     sourceSchema.value = schema;
     sourceTables.value = tables;
     resetSelectedSourceTables(preferredSelection);
@@ -419,23 +369,12 @@ async function loadTables(side: "source" | "target") {
     targetSchema.value = schema;
     targetTables.value = tables;
     const singleSourceTable = selectedSourceTableNames.value.length === 1 ? selectedSourceTableNames.value[0] : "";
-    const preferred =
-      targetTable.value && tables.includes(targetTable.value)
-        ? targetTable.value
-        : singleSourceTable && tables.includes(singleSourceTable)
-          ? singleSourceTable
-          : "";
+    const preferred = targetTable.value && tables.includes(targetTable.value) ? targetTable.value : singleSourceTable && tables.includes(singleSourceTable) ? singleSourceTable : "";
     targetTable.value = preferred;
   }
 }
 
-async function loadColumnsWithCache(
-  cache: Map<string, CompareColumn[]>,
-  connectionId: string,
-  database: string,
-  schema: string,
-  table: string,
-): Promise<CompareColumn[]> {
+async function loadColumnsWithCache(cache: Map<string, CompareColumn[]>, connectionId: string, database: string, schema: string, table: string): Promise<CompareColumn[]> {
   const key = `${connectionId}:${database}:${schema}:${table}`;
   const cached = cache.get(key);
   if (cached) return cached;
@@ -444,25 +383,9 @@ async function loadColumnsWithCache(
   return columns;
 }
 
-async function inferKeyColumnsForTable(
-  table: string,
-  sourceColumnCache?: Map<string, CompareColumn[]>,
-): Promise<string[]> {
+async function inferKeyColumnsForTable(table: string, sourceColumnCache?: Map<string, CompareColumn[]>): Promise<string[]> {
   if (!sourceConnectionId.value || !sourceDatabase.value || !sourceSchema.value || !table) return [];
-  const columns = sourceColumnCache
-    ? await loadColumnsWithCache(
-        sourceColumnCache,
-        sourceConnectionId.value,
-        sourceDatabase.value,
-        sourceSchema.value,
-        table,
-      )
-    : (((await api.getColumns(
-        sourceConnectionId.value,
-        sourceDatabase.value,
-        sourceSchema.value,
-        table,
-      )) as CompareColumn[]) ?? []);
+  const columns = sourceColumnCache ? await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table) : (((await api.getColumns(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table)) as CompareColumn[]) ?? []);
   const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
   if (primaryKeys.length > 0) return primaryKeys;
   return columns.slice(0, 1).map((column) => column.name);
@@ -587,13 +510,7 @@ function buildSyncPlanTables(): DataCompareSyncPlanTableOptions[] {
       databaseType: table.databaseType,
       preSyncStatements: table.preSyncStatements ?? [],
     }))
-    .filter(
-      (table) =>
-        table.preSyncStatements.length > 0 ||
-        table.diff.added.length > 0 ||
-        table.diff.removed.length > 0 ||
-        table.diff.modified.length > 0,
-    );
+    .filter((table) => table.preSyncStatements.length > 0 || table.diff.added.length > 0 || table.diff.removed.length > 0 || table.diff.modified.length > 0);
 }
 
 async function rebuildSyncPlan() {
@@ -636,10 +553,7 @@ async function startCompare() {
   const currentTargetDatabaseType = targetDatabaseType();
 
   try {
-    await Promise.all([
-      store.ensureConnected(sourceConnectionId.value),
-      store.ensureConnected(targetConnectionId.value),
-    ]);
+    await Promise.all([store.ensureConnected(sourceConnectionId.value), store.ensureConnected(targetConnectionId.value)]);
 
     for (const [index, task] of tasks.entries()) {
       compareProgressCurrent.value = index + 1;
@@ -647,13 +561,7 @@ async function startCompare() {
 
       try {
         if (!targetTables.value.includes(task.targetTable)) {
-          const sourceColumns = await loadColumnsWithCache(
-            sourceColumnCache,
-            sourceConnectionId.value,
-            sourceDatabase.value,
-            sourceSchema.value,
-            task.sourceTable,
-          );
+          const sourceColumns = await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, task.sourceTable);
           const resolvedKeys = keyColumns.value.length > 0 ? keyColumns.value : [];
           const preparation = await api.prepareDataCompareMissingTarget({
             sourceConnectionId: sourceConnectionId.value,
@@ -693,34 +601,15 @@ async function startCompare() {
           continue;
         }
 
-        const resolvedKeys =
-          keyColumns.value.length > 0
-            ? keyColumns.value
-            : await inferKeyColumnsForTable(task.sourceTable, sourceColumnCache);
+        const resolvedKeys = keyColumns.value.length > 0 ? keyColumns.value : await inferKeyColumnsForTable(task.sourceTable, sourceColumnCache);
         if (resolvedKeys.length === 0) {
           throw new Error(t("dataCompare.noKeyColumns"));
         }
 
-        const sourceColumns = await loadColumnsWithCache(
-          sourceColumnCache,
-          sourceConnectionId.value,
-          sourceDatabase.value,
-          sourceSchema.value,
-          task.sourceTable,
-        );
-        const targetColumns = await loadColumnsWithCache(
-          targetColumnCache,
-          targetConnectionId.value,
-          targetDatabase.value,
-          targetSchema.value,
-          task.targetTable,
-        );
-        const columns = sourceColumns
-          .map((column) => column.name)
-          .filter((column) => targetColumns.some((target) => target.name === column));
-        const columnInfo = columns
-          .map((column) => targetColumns.find((target) => target.name === column))
-          .filter((column): column is CompareColumn => !!column);
+        const sourceColumns = await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, task.sourceTable);
+        const targetColumns = await loadColumnsWithCache(targetColumnCache, targetConnectionId.value, targetDatabase.value, targetSchema.value, task.targetTable);
+        const columns = sourceColumns.map((column) => column.name).filter((column) => targetColumns.some((target) => target.name === column));
+        const columnInfo = columns.map((column) => targetColumns.find((target) => target.name === column)).filter((column): column is CompareColumn => !!column);
         const missingKeys = resolvedKeys.filter((column) => !columns.includes(column));
         if (missingKeys.length > 0) {
           throw new Error(t("dataCompare.missingKeyColumns", { columns: missingKeys.join(", ") }));
@@ -879,12 +768,7 @@ function formatRowValues(values: Record<string, DataCompareCellValue>): string {
 }
 
 function formatModifiedSummary(row: SelectableDataCompareModifiedRow): string {
-  return truncateText(
-    row.changes
-      .map((change) => `${change.column}: ${formatValue(change.target)} -> ${formatValue(change.source)}`)
-      .join(", "),
-    220,
-  );
+  return truncateText(row.changes.map((change) => `${change.column}: ${formatValue(change.target)} -> ${formatValue(change.source)}`).join(", "), 220);
 }
 
 watch(sourceConnectionId, (id) => {
@@ -995,17 +879,10 @@ watch(
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.source") }}</Label>
-            <Select
-              :model-value="sourceConnectionId"
-              @update:model-value="(v: any) => (sourceConnectionId = String(v))"
-            >
+            <Select :model-value="sourceConnectionId" @update:model-value="(v: any) => (sourceConnectionId = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <div class="flex items-center gap-2">
-                  <DatabaseIcon
-                    v-if="sourceConnectionId"
-                    :db-type="connectionIconType(sourceConnectionId)"
-                    class="w-3.5 h-3.5"
-                  />
+                  <DatabaseIcon v-if="sourceConnectionId" :db-type="connectionIconType(sourceConnectionId)" class="w-3.5 h-3.5" />
                   <SelectValue :placeholder="t('diff.selectConnection')" />
                 </div>
               </SelectTrigger>
@@ -1018,16 +895,10 @@ watch(
             <Select :model-value="sourceDatabase" @update:model-value="(v: any) => (sourceDatabase = String(v))">
               <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectDatabase')" /></SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="database in sourceDatabases" :key="database" :value="database">{{
-                  database
-                }}</SelectItem>
+                <SelectItem v-for="database in sourceDatabases" :key="database" :value="database">{{ database }}</SelectItem>
               </SelectContent>
             </Select>
-            <Select
-              v-if="sourceSchemas.length"
-              :model-value="sourceSchema"
-              @update:model-value="(v: any) => (sourceSchema = String(v))"
-            >
+            <Select v-if="sourceSchemas.length" :model-value="sourceSchema" @update:model-value="(v: any) => (sourceSchema = String(v))">
               <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectSchema')" /></SelectTrigger>
               <SelectContent>
                 <SelectItem v-for="schema in sourceSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
@@ -1047,24 +918,11 @@ watch(
                 </div>
               </div>
 
-              <Input
-                v-if="sourceTables.length > 5"
-                v-model="sourceTableSearch"
-                class="h-7 text-xs"
-                :placeholder="t('dataCompare.searchTables')"
-              />
+              <Input v-if="sourceTables.length > 5" v-model="sourceTableSearch" class="h-7 text-xs" :placeholder="t('dataCompare.searchTables')" />
 
               <div class="flex items-center gap-2">
-                <Button
-                  v-if="sourceTables.length"
-                  variant="outline"
-                  size="sm"
-                  class="h-7 px-2 text-xs"
-                  @click="toggleSelectAllSourceTables"
-                >
-                  {{
-                    allFilteredTablesSelected ? t("dataCompare.deselectAllTables") : t("dataCompare.selectAllTables")
-                  }}
+                <Button v-if="sourceTables.length" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="toggleSelectAllSourceTables">
+                  {{ allFilteredTablesSelected ? t("dataCompare.deselectAllTables") : t("dataCompare.selectAllTables") }}
                 </Button>
               </div>
 
@@ -1075,13 +933,7 @@ watch(
                 {{ t("dataCompare.noTables") }}
               </div>
               <div v-else class="max-h-40 overflow-auto rounded border">
-                <button
-                  v-for="table in filteredSourceTables"
-                  :key="table"
-                  type="button"
-                  class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50"
-                  @click="toggleSourceTable(table)"
-                >
+                <button v-for="table in filteredSourceTables" :key="table" type="button" class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50" @click="toggleSourceTable(table)">
                   <CheckSquare v-if="selectedSourceTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
                   <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
                   <span class="truncate">{{ table }}</span>
@@ -1098,17 +950,10 @@ watch(
 
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.target") }}</Label>
-            <Select
-              :model-value="targetConnectionId"
-              @update:model-value="(v: any) => (targetConnectionId = String(v))"
-            >
+            <Select :model-value="targetConnectionId" @update:model-value="(v: any) => (targetConnectionId = String(v))">
               <SelectTrigger class="h-8 text-xs">
                 <div class="flex items-center gap-2">
-                  <DatabaseIcon
-                    v-if="targetConnectionId"
-                    :db-type="connectionIconType(targetConnectionId)"
-                    class="w-3.5 h-3.5"
-                  />
+                  <DatabaseIcon v-if="targetConnectionId" :db-type="connectionIconType(targetConnectionId)" class="w-3.5 h-3.5" />
                   <SelectValue :placeholder="t('diff.selectConnection')" />
                 </div>
               </SelectTrigger>
@@ -1121,16 +966,10 @@ watch(
             <Select :model-value="targetDatabase" @update:model-value="(v: any) => (targetDatabase = String(v))">
               <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectDatabase')" /></SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="database in targetDatabases" :key="database" :value="database">{{
-                  database
-                }}</SelectItem>
+                <SelectItem v-for="database in targetDatabases" :key="database" :value="database">{{ database }}</SelectItem>
               </SelectContent>
             </Select>
-            <Select
-              v-if="targetSchemas.length"
-              :model-value="targetSchema"
-              @update:model-value="(v: any) => (targetSchema = String(v))"
-            >
+            <Select v-if="targetSchemas.length" :model-value="targetSchema" @update:model-value="(v: any) => (targetSchema = String(v))">
               <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectSchema')" /></SelectTrigger>
               <SelectContent>
                 <SelectItem v-for="schema in targetSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
@@ -1151,19 +990,13 @@ watch(
             <div v-else class="space-y-2 rounded-lg border p-3 text-xs">
               <div class="font-medium">{{ t("dataCompare.autoMatchHint") }}</div>
               <div class="text-muted-foreground">
-                {{
-                  t("dataCompare.matchedTables", { matched: matchedTaskCount, total: selectedSourceTableNames.length })
-                }}
+                {{ t("dataCompare.matchedTables", { matched: matchedTaskCount, total: selectedSourceTableNames.length }) }}
               </div>
               <div v-if="missingTargetTables.length" class="text-destructive">
                 {{ t("dataCompare.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
               </div>
               <div v-if="compareTasksPreview.length" class="max-h-36 overflow-auto rounded border bg-muted/20">
-                <div
-                  v-for="task in compareTasksPreview"
-                  :key="`${task.sourceTable}:${task.targetTable}`"
-                  class="flex items-center justify-between gap-2 border-b px-2 py-1 last:border-b-0"
-                >
+                <div v-for="task in compareTasksPreview" :key="`${task.sourceTable}:${task.targetTable}`" class="flex items-center justify-between gap-2 border-b px-2 py-1 last:border-b-0">
                   <span class="truncate font-mono">{{ task.sourceTable }}</span>
                   <span class="text-muted-foreground">→</span>
                   <span class="truncate font-mono" :class="task.matched ? '' : 'text-destructive'">
@@ -1191,33 +1024,9 @@ watch(
 
           <div class="rounded-lg border p-3 space-y-3">
             <div class="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                class="h-7 text-xs"
-                :class="showAdded ? 'border-primary' : ''"
-                @click="showAdded = !showAdded"
-              >
-                {{ t("diff.added") }} · {{ totalAdded }}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                class="h-7 text-xs"
-                :class="showRemoved ? 'border-primary' : ''"
-                @click="showRemoved = !showRemoved"
-              >
-                {{ t("diff.removed") }} · {{ totalRemoved }}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                class="h-7 text-xs"
-                :class="showModified ? 'border-primary' : ''"
-                @click="showModified = !showModified"
-              >
-                {{ t("diff.modified") }} · {{ totalModified }}
-              </Button>
+              <Button size="sm" variant="outline" class="h-7 text-xs" :class="showAdded ? 'border-primary' : ''" @click="showAdded = !showAdded"> {{ t("diff.added") }} · {{ totalAdded }} </Button>
+              <Button size="sm" variant="outline" class="h-7 text-xs" :class="showRemoved ? 'border-primary' : ''" @click="showRemoved = !showRemoved"> {{ t("diff.removed") }} · {{ totalRemoved }} </Button>
+              <Button size="sm" variant="outline" class="h-7 text-xs" :class="showModified ? 'border-primary' : ''" @click="showModified = !showModified"> {{ t("diff.modified") }} · {{ totalModified }} </Button>
               <span class="flex-1" />
               <Select v-model="detailPreviewLimit">
                 <SelectTrigger class="h-7 w-32 text-xs">
@@ -1293,10 +1102,7 @@ watch(
                         <div v-if="item.status === 'different'" class="mt-1">
                           {{
                             t("dataCompare.selectedInline", {
-                              selected:
-                                selectedRows(item, "added") +
-                                selectedRows(item, "removed") +
-                                selectedRows(item, "modified"),
+                              selected: selectedRows(item, "added") + selectedRows(item, "removed") + selectedRows(item, "modified"),
                               total: item.added + item.removed + item.modified,
                             })
                           }}
@@ -1310,16 +1116,8 @@ watch(
           </div>
 
           <div class="space-y-3">
-            <div
-              v-for="item in batchResults.filter((entry) => entry.status === 'different')"
-              :key="`details-${item.sourceTable}:${item.targetTable}`"
-              class="rounded-lg border overflow-hidden"
-            >
-              <button
-                type="button"
-                class="flex w-full items-center gap-2 border-b bg-muted/30 px-3 py-2 text-left text-sm font-medium"
-                @click="toggleTableExpanded(item)"
-              >
+            <div v-for="item in batchResults.filter((entry) => entry.status === 'different')" :key="`details-${item.sourceTable}:${item.targetTable}`" class="rounded-lg border overflow-hidden">
+              <button type="button" class="flex w-full items-center gap-2 border-b bg-muted/30 px-3 py-2 text-left text-sm font-medium" @click="toggleTableExpanded(item)">
                 <ChevronDown v-if="item.expanded" class="h-4 w-4 shrink-0" />
                 <ChevronRight v-else class="h-4 w-4 shrink-0" />
                 <span class="font-mono">{{ item.sourceTable }}</span>
@@ -1328,76 +1126,36 @@ watch(
               </button>
 
               <div v-if="item.expanded" class="space-y-3 p-3">
-                <div
-                  v-for="kind in visibleKinds"
-                  :key="`${item.sourceTable}:${kind}`"
-                  class="rounded-lg border"
-                  v-show="hasDiffRows(item, kind)"
-                >
+                <div v-for="kind in visibleKinds" :key="`${item.sourceTable}:${kind}`" class="rounded-lg border" v-show="hasDiffRows(item, kind)">
                   <div class="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-2 text-xs">
                     <span class="font-medium">{{ t(`diff.${kind}`) }}</span>
-                    <span class="text-muted-foreground"
-                      >{{ selectedRows(item, kind) }}/{{ item.diff[kind].length }}</span
-                    >
+                    <span class="text-muted-foreground">{{ selectedRows(item, kind) }}/{{ item.diff[kind].length }}</span>
                     <span class="flex-1" />
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      class="h-6 px-2 text-xs"
-                      @click="setTableDiffSelection(item, kind, true)"
-                    >
+                    <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, true)">
                       {{ t("dataCompare.selectAllKind", { kind: t(`diff.${kind}`) }) }}
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      class="h-6 px-2 text-xs"
-                      @click="setTableDiffSelection(item, kind, false)"
-                    >
+                    <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="setTableDiffSelection(item, kind, false)">
                       {{ t("dataCompare.clearKind", { kind: t(`diff.${kind}`) }) }}
                     </Button>
-                    <Button
-                      v-if="item.diff[kind].length > detailPreviewLimitNumber"
-                      size="sm"
-                      variant="ghost"
-                      class="h-6 px-2 text-xs"
-                      @click="toggleShowAll(item, kind)"
-                    >
-                      {{
-                        item.showAll[kind]
-                          ? t("dataCompare.showLessRows")
-                          : t("dataCompare.showAllRows", { count: item.diff[kind].length })
-                      }}
+                    <Button v-if="item.diff[kind].length > detailPreviewLimitNumber" size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="toggleShowAll(item, kind)">
+                      {{ item.showAll[kind] ? t("dataCompare.showLessRows") : t("dataCompare.showAllRows", { count: item.diff[kind].length }) }}
                     </Button>
                   </div>
 
                   <div class="max-h-72 overflow-auto divide-y">
-                    <button
-                      v-for="row in rowsForDisplay(item, kind)"
-                      :key="`${item.sourceTable}:${kind}:${row.key}`"
-                      type="button"
-                      class="flex w-full items-start gap-3 px-3 py-2 text-left text-xs hover:bg-muted/40"
-                      @click="toggleRowSelection(row)"
-                    >
+                    <button v-for="row in rowsForDisplay(item, kind)" :key="`${item.sourceTable}:${kind}:${row.key}`" type="button" class="flex w-full items-start gap-3 px-3 py-2 text-left text-xs hover:bg-muted/40" @click="toggleRowSelection(row)">
                       <CheckSquare v-if="row.selected" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                       <Square v-else class="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
                       <div class="min-w-0 flex-1">
                         <div class="font-mono">{{ formatKeyValues(row.keyValues) }}</div>
                         <div class="mt-1 text-muted-foreground break-words">
-                          {{
-                            kind === "modified"
-                              ? formatModifiedSummary(row as SelectableDataCompareModifiedRow)
-                              : formatRowValues((row as SelectableDataCompareRow).values)
-                          }}
+                          {{ kind === "modified" ? formatModifiedSummary(row as SelectableDataCompareModifiedRow) : formatRowValues((row as SelectableDataCompareRow).values) }}
                         </div>
                       </div>
                     </button>
                   </div>
 
-                  <div
-                    v-if="remainingRows(item, kind) > 0 && !item.showAll[kind]"
-                    class="border-t px-3 py-2 text-xs text-muted-foreground"
-                  >
+                  <div v-if="remainingRows(item, kind) > 0 && !item.showAll[kind]" class="border-t px-3 py-2 text-xs text-muted-foreground">
                     {{ t("dataCompare.remainingRows", { count: remainingRows(item, kind) }) }}
                   </div>
                 </div>
@@ -1410,11 +1168,7 @@ watch(
           </div>
           <div v-else-if="syncPlan.syncSql.trim()" class="space-y-1">
             <Label class="text-xs font-medium">{{ t("diff.generatedSql") }}</Label>
-            <textarea
-              :value="syncPlan.syncSql"
-              readonly
-              class="w-full h-48 rounded-lg border bg-muted/20 p-3 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring"
-            />
+            <textarea :value="syncPlan.syncSql" readonly class="w-full h-48 rounded-lg border bg-muted/20 p-3 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring" />
           </div>
           <div v-else-if="differentTableCount === 0 && failedTableCount === 0" class="text-sm text-muted-foreground">
             {{ t("dataCompare.noDifferences") }}
@@ -1431,9 +1185,7 @@ watch(
           <div class="max-h-32 overflow-auto border rounded-lg bg-destructive/5 p-2 space-y-1">
             <div v-for="(err, i) in syncErrors" :key="i" class="text-xs font-mono">
               <span class="text-destructive">{{ err.error }}</span>
-              <span class="text-muted-foreground ml-1"
-                >— {{ err.sql.slice(0, 80) }}{{ err.sql.length > 80 ? "..." : "" }}</span
-              >
+              <span class="text-muted-foreground ml-1">— {{ err.sql.slice(0, 80) }}{{ err.sql.length > 80 ? "..." : "" }}</span>
             </div>
           </div>
         </div>
@@ -1441,9 +1193,7 @@ watch(
 
       <DialogFooter v-if="!hasResults">
         <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
-        <span v-if="compareProgressLabel" class="text-xs text-muted-foreground self-center">{{
-          compareProgressLabel
-        }}</span>
+        <span v-if="compareProgressLabel" class="text-xs text-muted-foreground self-center">{{ compareProgressLabel }}</span>
         <Button size="sm" :disabled="!canCompare || comparing" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3.5 h-3.5 animate-spin mr-1" />
           <GitCompareArrows v-else class="w-3.5 h-3.5 mr-1" />
@@ -1469,9 +1219,7 @@ watch(
             })
           }}
         </span>
-        <Button variant="outline" size="sm" :disabled="!syncPlan.syncSql.trim()" @click="copySql">
-          <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }}
-        </Button>
+        <Button variant="outline" size="sm" :disabled="!syncPlan.syncSql.trim()" @click="copySql"> <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }} </Button>
         <Button size="sm" :disabled="planningSync || executing || syncPlan.statementCount === 0" @click="executeSql">
           <Loader2 v-if="executing" class="w-3 h-3 animate-spin mr-1" />
           <Play v-else class="w-3 h-3 mr-1" />

@@ -1,27 +1,23 @@
-import { LandingNav } from '@/components/landing/LandingNav';
-import { ChangelogRuntime } from '@/components/landing/ChangelogRuntime';
-import { fetchChangelog } from '@/lib/changelog';
-import { buildMetadata } from '@/lib/metadata';
-import type { Metadata } from 'next';
+import { LandingNav } from "@/components/landing/LandingNav";
+import { ChangelogRuntime } from "@/components/landing/ChangelogRuntime";
+import { fetchChangelog } from "@/lib/changelog";
+import { buildMetadata } from "@/lib/metadata";
+import type { Metadata } from "next";
 
 const i18n = {
   en: {
-    title: 'Changelog',
-    desc: 'Track every release — features, improvements, and fixes.',
+    title: "Changelog",
+    desc: "Track every release — features, improvements, and fixes.",
   },
   cn: {
-    title: '更新日志',
-    desc: '追踪每次发布 — 新功能、改进和修复。',
+    title: "更新日志",
+    desc: "追踪每次发布 — 新功能、改进和修复。",
   },
 };
 
-export async function generateMetadata({
-  params,
-}: {
-  params: Promise<{ lang: string }>;
-}): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === 'cn' ? 'cn' : 'en';
+  const l = lang === "cn" ? "cn" : "en";
   const t = i18n[l];
 
   return buildMetadata({
@@ -34,7 +30,7 @@ export async function generateMetadata({
 
 export default async function ChangelogPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const l = lang === 'cn' ? 'cn' : 'en';
+  const l = lang === "cn" ? "cn" : "en";
   const t = i18n[l];
   const initialData = await fetchChangelog(l);
 

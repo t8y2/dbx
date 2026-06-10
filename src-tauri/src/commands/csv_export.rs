@@ -15,9 +15,13 @@ pub struct QueryResultCsvExportRequest {
 }
 
 #[tauri::command]
-pub fn export_query_result_csv(request: QueryResultCsvExportRequest) -> Result<(), String> {
-    let csv = format_csv(&request.columns, &request.rows);
-    std::fs::write(&request.file_path, format!("\u{FEFF}{csv}")).map_err(|err| err.to_string())
+pub async fn export_query_result_csv(request: QueryResultCsvExportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let csv = format_csv(&request.columns, &request.rows);
+        std::fs::write(&request.file_path, format!("\u{FEFF}{csv}")).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]

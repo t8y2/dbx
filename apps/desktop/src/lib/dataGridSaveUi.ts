@@ -4,10 +4,7 @@ export interface DataGridSaveActionMode {
   secondaryActionKey: "grid.rollback" | "grid.discard";
 }
 
-export function dataGridSaveActionMode(options: {
-  pendingChangeCount: number;
-  useTransaction: boolean;
-}): DataGridSaveActionMode {
+export function dataGridSaveActionMode(options: { pendingChangeCount: number; useTransaction: boolean }): DataGridSaveActionMode {
   return {
     labelKey: options.useTransaction ? "grid.commit" : "grid.save",
     tooltipKey: options.useTransaction ? "grid.transactionSaveHint" : "grid.nonTransactionalSaveHint",
@@ -20,12 +17,7 @@ export interface DataGridSaveToolbarState {
   actionsDisabled: boolean;
 }
 
-export function dataGridSaveToolbarState(options: {
-  editable: boolean;
-  hasSaveTarget: boolean;
-  hasPendingChanges: boolean;
-  isSaving: boolean;
-}): DataGridSaveToolbarState {
+export function dataGridSaveToolbarState(options: { editable: boolean; hasSaveTarget: boolean; hasPendingChanges: boolean; isSaving: boolean }): DataGridSaveToolbarState {
   const showActions = options.editable && options.hasSaveTarget;
   return {
     showActions,

@@ -21,28 +21,12 @@ export async function loadRoutineParameters(options: LoadRoutineParametersOption
 }
 
 export function supportsRoutineParameterMetadata(databaseType?: DatabaseType): boolean {
-  return (
-    databaseType === "postgres" ||
-    databaseType === "mysql" ||
-    databaseType === "doris" ||
-    databaseType === "starrocks" ||
-    databaseType === "sqlserver" ||
-    databaseType === "oracle" ||
-    databaseType === "dameng" ||
-    databaseType === "oceanbase-oracle"
-  );
+  return databaseType === "postgres" || databaseType === "mysql" || databaseType === "doris" || databaseType === "starrocks" || databaseType === "sqlserver" || databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle";
 }
 
-export function routineParametersQuery(
-  options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName">,
-): string | null {
+export function routineParametersQuery(options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName">): string | null {
   if (!supportsRoutineParameterMetadata(options.databaseType)) return null;
-  const effectiveSchema =
-    options.schema ||
-    (options.databaseType === "postgres" ? "public" : "") ||
-    (options.databaseType === "mysql" || options.databaseType === "doris" || options.databaseType === "starrocks"
-      ? options.database
-      : "");
+  const effectiveSchema = options.schema || (options.databaseType === "postgres" ? "public" : "") || (options.databaseType === "mysql" || options.databaseType === "doris" || options.databaseType === "starrocks" ? options.database : "");
   const schema = quoteSqlLiteral(effectiveSchema);
   const name = quoteSqlLiteral(options.routineName);
   if (options.databaseType === "postgres") {
@@ -112,11 +96,7 @@ WHERE o.type IN ('P', 'PC')
   AND o.name = ${name}
 ORDER BY p.parameter_id;`.trim();
   }
-  if (
-    options.databaseType === "oracle" ||
-    options.databaseType === "dameng" ||
-    options.databaseType === "oceanbase-oracle"
-  ) {
+  if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
     return `
 SELECT
   ARGUMENT_NAME AS name,

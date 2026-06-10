@@ -32,13 +32,7 @@ function primarySqlOperation(sql: string): string {
   return statement?.match(/^([a-z]+)/i)?.[1]?.toUpperCase() || "SQL";
 }
 
-export function useSqlExecution(deps: {
-  activeTab: ComputedRef<QueryTab | undefined>;
-  activeConnection: ComputedRef<ConnectionConfig | undefined>;
-  executableSql: ComputedRef<string>;
-  resolveExecutableSql?: () => Promise<string>;
-  activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
-}) {
+export function useSqlExecution(deps: { activeTab: ComputedRef<QueryTab | undefined>; activeConnection: ComputedRef<ConnectionConfig | undefined>; executableSql: ComputedRef<string>; resolveExecutableSql?: () => Promise<string>; activeOutputView: Ref<"result" | "summary" | "explain" | "chart"> }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
   const historyStore = useHistoryStore();

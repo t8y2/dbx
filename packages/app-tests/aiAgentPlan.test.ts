@@ -172,18 +172,7 @@ test("agent plan ignores comment-only SQL blocks and executes the first real SQL
   const plan = buildAiAgentPlan(
     planInput({
       instruction: "查一下当前数据库里有哪些表",
-      assistantContent: [
-        "当前数据库中的表：",
-        "```sql",
-        "-- 当前数据库中的表（仅从已加载的 Schema 上下文得知）：",
-        "-- public.ihli_data",
-        "```",
-        "若需查看该表数据，可执行：",
-        "```sql",
-        "SELECT * FROM ihli_data",
-        "LIMIT 10;",
-        "```",
-      ].join("\n"),
+      assistantContent: ["当前数据库中的表：", "```sql", "-- 当前数据库中的表（仅从已加载的 Schema 上下文得知）：", "-- public.ihli_data", "```", "若需查看该表数据，可执行：", "```sql", "SELECT * FROM ihli_data", "LIMIT 10;", "```"].join("\n"),
     }),
   );
 

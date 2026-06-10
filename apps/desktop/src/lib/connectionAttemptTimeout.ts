@@ -8,10 +8,7 @@ function positiveSeconds(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-export function connectionAttemptTimeoutMs(
-  config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> &
-    Partial<Pick<ConnectionConfig, "db_type">>,
-): number {
+export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> & Partial<Pick<ConnectionConfig, "db_type">>): number {
   const timeouts = [positiveSeconds(config.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS)];
   for (const layer of config.transport_layers ?? []) {
     if (layer.type === "ssh") {

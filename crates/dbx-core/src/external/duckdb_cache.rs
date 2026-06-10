@@ -1,3 +1,5 @@
+#![cfg(feature = "duckdb-bundled")]
+
 use std::sync::Arc;
 
 use super::types::{CacheState, ExternalTableRef, ExternalTableSnapshot};

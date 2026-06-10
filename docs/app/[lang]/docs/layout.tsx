@@ -1,15 +1,9 @@
-import type { ReactNode } from 'react';
-import { DocsLayout } from 'fumadocs-ui/layouts/docs';
-import { DocsSidebarFooter, DocsSidebarLanguageButton } from '@/components/DocsSidebarFooter';
-import { source } from '@/lib/source';
+import type { ReactNode } from "react";
+import { DocsLayout } from "fumadocs-ui/layouts/docs";
+import { DocsSidebarFooter, DocsSidebarLanguageButton } from "@/components/DocsSidebarFooter";
+import { source } from "@/lib/source";
 
-export default async function Layout({
-  params,
-  children,
-}: {
-  params: Promise<{ lang: string }>;
-  children: ReactNode;
-}) {
+export default async function Layout({ params, children }: { params: Promise<{ lang: string }>; children: ReactNode }) {
   const { lang } = await params;
 
   return (

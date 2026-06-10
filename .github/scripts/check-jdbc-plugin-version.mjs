@@ -13,10 +13,7 @@ function manifestVersion(manifestJson) {
   return JSON.parse(manifestJson).version ?? "";
 }
 
-export function evaluateJdbcPluginVersionChange({
-  headPomVersion,
-  headManifestVersion,
-}) {
+export function evaluateJdbcPluginVersionChange({ headPomVersion, headManifestVersion }) {
   const errors = [];
   if (headPomVersion !== headManifestVersion) {
     errors.push(`JDBC plugin version mismatch: pom.xml is ${headPomVersion} but manifest.json is ${headManifestVersion}.`);

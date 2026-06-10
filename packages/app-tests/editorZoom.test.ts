@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  clampEditorFontSize,
-  createEditorZoomCommitScheduler,
-  fontSizeFromGestureScale,
-  fontSizeFromWheelDelta,
-} from "../../apps/desktop/src/lib/editorZoom.ts";
+import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "../../apps/desktop/src/lib/editorZoom.ts";
 
 test("clamps editor font size to supported bounds", () => {
   assert.equal(clampEditorFontSize(8), 10);

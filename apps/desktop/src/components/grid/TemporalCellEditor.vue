@@ -37,10 +37,7 @@ const displayValue = computed(() => props.modelValue || "NULL");
 const triggerClass = computed(() =>
   props.variant === "inline"
     ? "cell-edit-input flex h-9 w-full items-center gap-2 rounded border bg-background px-2 text-left text-xs outline-none hover:border-primary/60 focus:border-primary"
-    : [
-        "cell-edit-input absolute inset-0 z-10 flex items-center gap-1 border-2 border-primary bg-background py-0 text-left text-xs outline-none",
-        props.cellLayout === "transpose" ? "px-1.5" : "px-2.5",
-      ],
+    : ["cell-edit-input absolute inset-0 z-10 flex items-center gap-1 border-2 border-primary bg-background py-0 text-left text-xs outline-none", props.cellLayout === "transpose" ? "px-1.5" : "px-2.5"],
 );
 const dateParts = computed(() => {
   const text = formatTemporalInputValue(props.modelValue, "date");
@@ -131,16 +128,8 @@ function setNull() {
 
 function setNow() {
   const now = new Date();
-  const dateText = [
-    String(now.getFullYear()).padStart(4, "0"),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("-");
-  const nextTime = [
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-    String(now.getSeconds()).padStart(2, "0"),
-  ].join(":");
+  const dateText = [String(now.getFullYear()).padStart(4, "0"), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
+  const nextTime = [String(now.getHours()).padStart(2, "0"), String(now.getMinutes()).padStart(2, "0"), String(now.getSeconds()).padStart(2, "0")].join(":");
   if (props.kind === "date") setModelValue(dateText);
   else if (props.kind === "time") setModelValue(nextTime);
   else setModelValue(`${dateText} ${nextTime}`);
@@ -186,9 +175,7 @@ function normalizeTimePart(value: string | number, max: number): string {
 }
 
 function setDateTimeValue(year: number, month: number, day: number, time: string) {
-  const dateText = [String(year).padStart(4, "0"), String(month).padStart(2, "0"), String(day).padStart(2, "0")].join(
-    "-",
-  );
+  const dateText = [String(year).padStart(4, "0"), String(month).padStart(2, "0"), String(day).padStart(2, "0")].join("-");
   if (props.kind === "date") setModelValue(dateText);
   else setModelValue(`${dateText} ${time}`);
 }
@@ -210,82 +197,39 @@ function twoDigit(value: string | number): string {
         <span class="min-w-0 flex-1 truncate">{{ displayValue }}</span>
       </button>
     </PopoverTrigger>
-    <PopoverContent
-      align="start"
-      side="bottom"
-      class="w-auto gap-1.5 rounded-md p-1.5"
-      @click.stop
-      @keydown.stop="onKeydown"
-      @interact-outside="onPopoverInteractOutside"
-    >
+    <PopoverContent align="start" side="bottom" class="w-auto gap-1.5 rounded-md p-1.5" @click.stop @keydown.stop="onKeydown" @interact-outside="onPopoverInteractOutside">
       <div v-if="hasDate" class="grid grid-cols-[4.5rem_4.5rem_4.5rem] gap-1.5">
-        <div
-          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
-        >
-          <input
-            :value="dateParts.year"
-            data-temporal-part="year"
-            inputmode="numeric"
-            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
-            @change="updateDateFromInput('year', $event)"
-          />
+        <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
+          <input :value="dateParts.year" data-temporal-part="year" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateDateFromInput('year', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('year', 1)">
               <ChevronUp class="h-3 w-3" />
             </button>
-            <button
-              type="button"
-              class="flex items-center justify-center border-t hover:bg-muted"
-              @click="stepDate('year', -1)"
-            >
+            <button type="button" class="flex items-center justify-center border-t hover:bg-muted" @click="stepDate('year', -1)">
               <ChevronDown class="h-3 w-3" />
             </button>
           </div>
         </div>
 
-        <div
-          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
-        >
-          <input
-            :value="twoDigit(dateParts.month)"
-            data-temporal-part="month"
-            inputmode="numeric"
-            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
-            @change="updateDateFromInput('month', $event)"
-          />
+        <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
+          <input :value="twoDigit(dateParts.month)" data-temporal-part="month" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateDateFromInput('month', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('month', 1)">
               <ChevronUp class="h-3 w-3" />
             </button>
-            <button
-              type="button"
-              class="flex items-center justify-center border-t hover:bg-muted"
-              @click="stepDate('month', -1)"
-            >
+            <button type="button" class="flex items-center justify-center border-t hover:bg-muted" @click="stepDate('month', -1)">
               <ChevronDown class="h-3 w-3" />
             </button>
           </div>
         </div>
 
-        <div
-          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
-        >
-          <input
-            :value="twoDigit(dateParts.day)"
-            data-temporal-part="day"
-            inputmode="numeric"
-            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
-            @change="updateDateFromInput('day', $event)"
-          />
+        <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
+          <input :value="twoDigit(dateParts.day)" data-temporal-part="day" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateDateFromInput('day', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('day', 1)">
               <ChevronUp class="h-3 w-3" />
             </button>
-            <button
-              type="button"
-              class="flex items-center justify-center border-t hover:bg-muted"
-              @click="stepDate('day', -1)"
-            >
+            <button type="button" class="flex items-center justify-center border-t hover:bg-muted" @click="stepDate('day', -1)">
               <ChevronDown class="h-3 w-3" />
             </button>
           </div>
@@ -293,81 +237,37 @@ function twoDigit(value: string | number): string {
       </div>
 
       <div v-if="hasTime" class="grid grid-cols-[3.5rem_0.5rem_3.5rem_0.5rem_3.5rem] items-center gap-1.5">
-        <div
-          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
-        >
-          <input
-            :value="twoDigit(timeParts.hour)"
-            data-temporal-part="hour"
-            inputmode="numeric"
-            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
-            @change="updateTimeFromInput('hour', $event)"
-          />
+        <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
+          <input :value="twoDigit(timeParts.hour)" data-temporal-part="hour" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateTimeFromInput('hour', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('hour', 1)">
               <ChevronUp class="h-3 w-3" />
             </button>
-            <button
-              type="button"
-              class="flex items-center justify-center border-t hover:bg-muted"
-              @click="stepTime('hour', -1)"
-            >
+            <button type="button" class="flex items-center justify-center border-t hover:bg-muted" @click="stepTime('hour', -1)">
               <ChevronDown class="h-3 w-3" />
             </button>
           </div>
         </div>
         <span class="text-center text-xs text-muted-foreground">:</span>
-        <div
-          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
-        >
-          <input
-            :value="twoDigit(timeParts.minute)"
-            data-temporal-part="minute"
-            inputmode="numeric"
-            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
-            @change="updateTimeFromInput('minute', $event)"
-          />
+        <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
+          <input :value="twoDigit(timeParts.minute)" data-temporal-part="minute" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateTimeFromInput('minute', $event)" />
           <div class="grid border-l">
-            <button
-              type="button"
-              class="flex items-center justify-center hover:bg-muted"
-              @click="stepTime('minute', 1)"
-            >
+            <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('minute', 1)">
               <ChevronUp class="h-3 w-3" />
             </button>
-            <button
-              type="button"
-              class="flex items-center justify-center border-t hover:bg-muted"
-              @click="stepTime('minute', -1)"
-            >
+            <button type="button" class="flex items-center justify-center border-t hover:bg-muted" @click="stepTime('minute', -1)">
               <ChevronDown class="h-3 w-3" />
             </button>
           </div>
         </div>
         <span class="text-center text-xs text-muted-foreground">:</span>
-        <div
-          class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background"
-        >
-          <input
-            :value="twoDigit(timeParts.second)"
-            data-temporal-part="second"
-            inputmode="numeric"
-            class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none"
-            @change="updateTimeFromInput('second', $event)"
-          />
+        <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
+          <input :value="twoDigit(timeParts.second)" data-temporal-part="second" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateTimeFromInput('second', $event)" />
           <div class="grid border-l">
-            <button
-              type="button"
-              class="flex items-center justify-center hover:bg-muted"
-              @click="stepTime('second', 1)"
-            >
+            <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('second', 1)">
               <ChevronUp class="h-3 w-3" />
             </button>
-            <button
-              type="button"
-              class="flex items-center justify-center border-t hover:bg-muted"
-              @click="stepTime('second', -1)"
-            >
+            <button type="button" class="flex items-center justify-center border-t hover:bg-muted" @click="stepTime('second', -1)">
               <ChevronDown class="h-3 w-3" />
             </button>
           </div>

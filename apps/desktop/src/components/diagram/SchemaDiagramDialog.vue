@@ -10,30 +10,12 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/databaseCapabilities";
-import {
-  buildDiagramRelationships,
-  filterDiagramTables,
-  layoutDiagramTables,
-  type DiagramPosition,
-  type DiagramRelationship,
-  type DiagramTable,
-} from "@/lib/erDiagram";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { buildDiagramRelationships, filterDiagramTables, layoutDiagramTables, type DiagramPosition, type DiagramRelationship, type DiagramTable } from "@/lib/erDiagram";
 import { buildEngineeringDiagram } from "@/lib/engineeringDiagram";
 import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "@/lib/diagramSvgExport";
 import { clampDiagramZoom, zoomFromGestureScale, zoomFromWheelDelta } from "@/lib/diagramZoom";
-import {
-  Download,
-  KeyRound,
-  Link2,
-  Loader2,
-  Maximize2,
-  Network,
-  RefreshCw,
-  Search,
-  Table2,
-  ZoomIn,
-  ZoomOut,
-} from "@lucide/vue";
+import { Download, KeyRound, Link2, Loader2, Maximize2, Network, RefreshCw, Search, Table2, ZoomIn, ZoomOut } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 
@@ -85,9 +67,7 @@ const dragging = ref<{
   originY: number;
 } | null>(null);
 
-const sqlConnections = computed(() =>
-  store.connections.filter((connection) => DIAGRAM_SQL_TYPES.has(connection.db_type)),
-);
+const sqlConnections = computed(() => store.connections.filter((connection) => DIAGRAM_SQL_TYPES.has(connection.db_type)));
 
 const selectedConnection = computed(() => (connectionId.value ? store.getConfig(connectionId.value) : undefined));
 
@@ -119,15 +99,9 @@ const visibleTableMap = computed(() => new Map(visibleTables.value.map((table) =
 
 const visibleRelationships = computed(() => buildDiagramRelationships(visibleTables.value));
 
-const diagramReady = computed(
-  () => !!connectionId.value && !!database.value && (!isSchemaAware.value || !!schema.value),
-);
+const diagramReady = computed(() => !!connectionId.value && !!database.value && (!isSchemaAware.value || !!schema.value));
 
-const loadingText = computed(() =>
-  totalTableCount.value > 0
-    ? t("diagram.loadingProgress", { loaded: loadedTableCount.value, total: totalTableCount.value })
-    : t("diagram.loading"),
-);
+const loadingText = computed(() => (totalTableCount.value > 0 ? t("diagram.loadingProgress", { loaded: loadedTableCount.value, total: totalTableCount.value }) : t("diagram.loading")));
 
 function connectionIconType(id: string) {
   const config = store.getConfig(id);
@@ -152,13 +126,9 @@ const canvasSize = computed(() => {
   return { width, height };
 });
 
-const engineeringDiagram = computed(() =>
-  buildEngineeringDiagram(visibleTables.value, visibleRelationships.value, positions.value),
-);
+const engineeringDiagram = computed(() => buildEngineeringDiagram(visibleTables.value, visibleRelationships.value, positions.value));
 
-const activeCanvasSize = computed(() =>
-  diagramMode.value === "engineering" ? engineeringDiagram.value.canvas : canvasSize.value,
-);
+const activeCanvasSize = computed(() => (diagramMode.value === "engineering" ? engineeringDiagram.value.canvas : canvasSize.value));
 
 function resetLayout() {
   const count = visibleTables.value.length;
@@ -236,33 +206,19 @@ function routeSideX(rect: TableRect, routeX: number, offset = 0): number {
 }
 
 function tableRects(): TableRect[] {
-  return visibleTables.value
-    .map((table) => getTableRect(table.name))
-    .filter((rect): rect is TableRect => rect !== null);
+  return visibleTables.value.map((table) => getTableRect(table.name)).filter((rect): rect is TableRect => rect !== null);
 }
 
 function isVerticalRouteBlocked(routeX: number, y1: number, y2: number, ignoredTables: Set<string>): boolean {
   const top = Math.min(y1, y2);
   const bottom = Math.max(y1, y2);
-  return tableRects().some(
-    (rect) =>
-      !ignoredTables.has(rect.name) &&
-      routeX >= rect.x - ROUTE_BLOCK_MARGIN &&
-      routeX <= rect.x + rect.width + ROUTE_BLOCK_MARGIN &&
-      rangesOverlap(top, bottom, rect.y - ROUTE_BLOCK_MARGIN, rect.y + rect.height + ROUTE_BLOCK_MARGIN),
-  );
+  return tableRects().some((rect) => !ignoredTables.has(rect.name) && routeX >= rect.x - ROUTE_BLOCK_MARGIN && routeX <= rect.x + rect.width + ROUTE_BLOCK_MARGIN && rangesOverlap(top, bottom, rect.y - ROUTE_BLOCK_MARGIN, rect.y + rect.height + ROUTE_BLOCK_MARGIN));
 }
 
 function isHorizontalRouteBlocked(y: number, x1: number, x2: number, ignoredTables: Set<string>): boolean {
   const left = Math.min(x1, x2);
   const right = Math.max(x1, x2);
-  return tableRects().some(
-    (rect) =>
-      !ignoredTables.has(rect.name) &&
-      y >= rect.y - ROUTE_BLOCK_MARGIN &&
-      y <= rect.y + rect.height + ROUTE_BLOCK_MARGIN &&
-      rangesOverlap(left, right, rect.x - ROUTE_BLOCK_MARGIN, rect.x + rect.width + ROUTE_BLOCK_MARGIN),
-  );
+  return tableRects().some((rect) => !ignoredTables.has(rect.name) && y >= rect.y - ROUTE_BLOCK_MARGIN && y <= rect.y + rect.height + ROUTE_BLOCK_MARGIN && rangesOverlap(left, right, rect.x - ROUTE_BLOCK_MARGIN, rect.x + rect.width + ROUTE_BLOCK_MARGIN));
 }
 
 function candidateRouteXs(source: TableRect, target: TableRect): number[] {
@@ -296,11 +252,7 @@ function candidateRouteXs(source: TableRect, target: TableRect): number[] {
     const leftTargetX = routeSideX(target, left);
     const rightSourceX = routeSideX(source, right);
     const rightTargetX = routeSideX(target, right);
-    return (
-      Math.abs(left - leftSourceX) +
-      Math.abs(left - leftTargetX) -
-      (Math.abs(right - rightSourceX) + Math.abs(right - rightTargetX))
-    );
+    return Math.abs(left - leftSourceX) + Math.abs(left - leftTargetX) - (Math.abs(right - rightSourceX) + Math.abs(right - rightTargetX));
   });
 }
 
@@ -318,11 +270,7 @@ function relationshipPath(relationship: DiagramRelationship): string {
     candidates.find((candidate) => {
       const x1 = routeSideX(source, candidate);
       const x2 = routeSideX(target, candidate);
-      return (
-        !isVerticalRouteBlocked(candidate, y1, y2, ignoredTables) &&
-        !isHorizontalRouteBlocked(y1, x1, candidate, ignoredTables) &&
-        !isHorizontalRouteBlocked(y2, candidate, x2, ignoredTables)
-      );
+      return !isVerticalRouteBlocked(candidate, y1, y2, ignoredTables) && !isHorizontalRouteBlocked(y1, x1, candidate, ignoredTables) && !isHorizontalRouteBlocked(y2, candidate, x2, ignoredTables);
     }) ??
     candidates[0] ??
     Math.max(source.x + source.width, target.x + target.width) + ROUTE_PADDING;
@@ -337,21 +285,11 @@ function engineeringEntityCenter(tableName: string): DiagramPosition {
   return entity ? { x: entity.x + entity.width / 2, y: entity.y + entity.height / 2 } : { x: 0, y: 0 };
 }
 
-function engineeringAttributeCenter(attribute: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}): DiagramPosition {
+function engineeringAttributeCenter(attribute: { x: number; y: number; width: number; height: number }): DiagramPosition {
   return { x: attribute.x + attribute.width / 2, y: attribute.y + attribute.height / 2 };
 }
 
-function engineeringRelationshipCenter(relationship: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}): DiagramPosition {
+function engineeringRelationshipCenter(relationship: { x: number; y: number; width: number; height: number }): DiagramPosition {
   return {
     x: relationship.x + relationship.width / 2,
     y: relationship.y + relationship.height / 2,
@@ -372,7 +310,10 @@ async function loadDatabases(id: string) {
   try {
     await store.ensureConnected(id);
     const dbs = await api.listDatabases(id);
-    databases.value = dbs.map((db) => db.name);
+    databases.value = databaseOptionsForConnection(
+      dbs.map((db) => db.name),
+      store.getConfig(id),
+    );
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
@@ -393,12 +334,7 @@ async function loadSchemas() {
   try {
     const names = await api.listSchemas(connectionId.value, database.value);
     schemas.value = names;
-    schema.value =
-      props.prefillSchema && names.includes(props.prefillSchema)
-        ? props.prefillSchema
-        : names.includes("public")
-          ? "public"
-          : (names[0] ?? "");
+    schema.value = props.prefillSchema && names.includes(props.prefillSchema) ? props.prefillSchema : names.includes("public") ? "public" : (names[0] ?? "");
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
@@ -435,10 +371,7 @@ async function setSchema(value: string) {
 
 async function loadTableDiagramData(tableName: string, querySchema: string): Promise<DiagramTable> {
   try {
-    const [columns, foreignKeys] = await Promise.all([
-      api.getColumns(connectionId.value, database.value, querySchema, tableName),
-      api.listForeignKeys(connectionId.value, database.value, querySchema, tableName).catch(() => []),
-    ]);
+    const [columns, foreignKeys] = await Promise.all([api.getColumns(connectionId.value, database.value, querySchema, tableName), api.listForeignKeys(connectionId.value, database.value, querySchema, tableName).catch(() => [])]);
     return { name: tableName, columns, foreignKeys };
   } catch (e) {
     failedTableCount.value += 1;
@@ -460,9 +393,7 @@ async function loadDiagram() {
     await store.ensureConnected(connectionId.value);
     const querySchema = schema.value || database.value;
     const tableInfos = await api.listTables(connectionId.value, database.value, querySchema);
-    const baseTables = tableInfos
-      .filter((table) => table.table_type !== "VIEW")
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const baseTables = tableInfos.filter((table) => table.table_type !== "VIEW").sort((a, b) => a.name.localeCompare(b.name));
     totalTableCount.value = baseTables.length;
 
     const loadedTables: DiagramTable[] = [];
@@ -506,10 +437,7 @@ async function initialize() {
   if (props.prefillConnectionId) {
     connectionId.value = props.prefillConnectionId;
     await loadDatabases(props.prefillConnectionId);
-    const initialDatabase =
-      props.prefillDatabase && databases.value.includes(props.prefillDatabase)
-        ? props.prefillDatabase
-        : props.prefillDatabase || databases.value[0] || "";
+    const initialDatabase = props.prefillDatabase && databases.value.includes(props.prefillDatabase) ? props.prefillDatabase : props.prefillDatabase || databases.value[0] || "";
     if (initialDatabase) await setDatabase(initialDatabase);
     return;
   }
@@ -554,9 +482,7 @@ function resetZoomAndLayout() {
 }
 
 function tableRelationshipPaths(): Record<string, string> {
-  return Object.fromEntries(
-    visibleRelationships.value.map((relationship) => [relationship.id, relationshipPath(relationship)]),
-  );
+  return Object.fromEntries(visibleRelationships.value.map((relationship) => [relationship.id, relationshipPath(relationship)]));
 }
 
 function currentDiagramSvg(): string {
@@ -586,10 +512,7 @@ async function exportSvg() {
     const svgContent = currentDiagramSvg();
 
     if (isTauriRuntime()) {
-      const [{ save }, { writeTextFile }] = await Promise.all([
-        import("@tauri-apps/plugin-dialog"),
-        import("@tauri-apps/plugin-fs"),
-      ]);
+      const [{ save }, { writeTextFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
       const path = await save({
         defaultPath,
         filters: [{ name: "SVG", extensions: ["svg"] }],
@@ -681,9 +604,7 @@ onUnmounted(stopDrag);
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent
-      class="w-[94vw] max-w-[94vw] sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw] h-[86vh] max-h-[86vh] gap-0 p-0 overflow-hidden flex flex-col"
-    >
+    <DialogContent class="w-[94vw] max-w-[94vw] sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw] h-[86vh] max-h-[86vh] gap-0 p-0 overflow-hidden flex flex-col">
       <DialogHeader class="px-4 py-3 border-b">
         <DialogTitle class="flex items-center gap-2">
           <Network class="w-4 h-4" />
@@ -710,11 +631,7 @@ onUnmounted(stopDrag);
           </SelectContent>
         </Select>
 
-        <Select
-          :model-value="database"
-          :disabled="!databases.length || loadingDatabases"
-          @update:model-value="(value: any) => setDatabase(String(value))"
-        >
+        <Select :model-value="database" :disabled="!databases.length || loadingDatabases" @update:model-value="(value: any) => setDatabase(String(value))">
           <SelectTrigger class="h-8 w-44 text-xs">
             <SelectValue :placeholder="loadingDatabases ? t('common.loading') : t('diagram.selectDatabase')" />
           </SelectTrigger>
@@ -723,12 +640,7 @@ onUnmounted(stopDrag);
           </SelectContent>
         </Select>
 
-        <Select
-          v-if="isSchemaAware"
-          :model-value="schema"
-          :disabled="!schemas.length || loadingSchemas"
-          @update:model-value="(value: any) => setSchema(String(value))"
-        >
+        <Select v-if="isSchemaAware" :model-value="schema" :disabled="!schemas.length || loadingSchemas" @update:model-value="(value: any) => setSchema(String(value))">
           <SelectTrigger class="h-8 w-40 text-xs">
             <SelectValue :placeholder="loadingSchemas ? t('common.loading') : t('diagram.selectSchema')" />
           </SelectTrigger>
@@ -743,35 +655,17 @@ onUnmounted(stopDrag);
         </div>
 
         <div class="flex h-8 shrink-0 items-center overflow-hidden rounded-md border bg-background">
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-8 rounded-none px-2 text-xs"
-            :class="diagramMode === 'table' ? 'bg-accent' : ''"
-            @click="diagramMode = 'table'"
-          >
+          <Button variant="ghost" size="sm" class="h-8 rounded-none px-2 text-xs" :class="diagramMode === 'table' ? 'bg-accent' : ''" @click="diagramMode = 'table'">
             <Table2 class="mr-1 h-3.5 w-3.5" />
             {{ t("diagram.tableMode") }}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-8 rounded-none border-l px-2 text-xs"
-            :class="diagramMode === 'engineering' ? 'bg-accent' : ''"
-            @click="diagramMode = 'engineering'"
-          >
+          <Button variant="ghost" size="sm" class="h-8 rounded-none border-l px-2 text-xs" :class="diagramMode === 'engineering' ? 'bg-accent' : ''" @click="diagramMode = 'engineering'">
             <Network class="mr-1 h-3.5 w-3.5" />
             {{ t("diagram.engineeringMode") }}
           </Button>
         </div>
 
-        <Button
-          v-if="focusTableName && tables.length > 0"
-          variant="outline"
-          size="sm"
-          class="h-8 px-2 text-xs"
-          @click="showAllTables = !showAllTables"
-        >
+        <Button v-if="focusTableName && tables.length > 0" variant="outline" size="sm" class="h-8 px-2 text-xs" @click="showAllTables = !showAllTables">
           {{ showAllTables ? t("diagram.relatedTables") : t("diagram.allTables") }}
         </Button>
 
@@ -782,24 +676,10 @@ onUnmounted(stopDrag);
           {{ t("diagram.relationshipsCount", { count: visibleRelationships.length }) }}
         </Badge>
 
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :disabled="loadingDiagram || visibleTables.length === 0"
-          :title="t('diagram.exportSvg')"
-          @click="exportSvg"
-        >
+        <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="loadingDiagram || visibleTables.length === 0" :title="t('diagram.exportSvg')" @click="exportSvg">
           <Download class="h-4 w-4" />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :disabled="!diagramReady || loadingDiagram"
-          :title="t('diagram.refresh')"
-          @click="loadDiagram"
-        >
+        <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="!diagramReady || loadingDiagram" :title="t('diagram.refresh')" @click="loadDiagram">
           <Loader2 v-if="loadingDiagram" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
         </Button>
@@ -809,13 +689,7 @@ onUnmounted(stopDrag);
         <Button variant="ghost" size="icon" class="h-8 w-8" :title="t('diagram.zoomIn')" @click="zoomIn">
           <ZoomIn class="h-4 w-4" />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :title="t('diagram.resetLayout')"
-          @click="resetZoomAndLayout"
-        >
+        <Button variant="ghost" size="icon" class="h-8 w-8" :title="t('diagram.resetLayout')" @click="resetZoomAndLayout">
           <Maximize2 class="h-4 w-4" />
         </Button>
       </div>
@@ -828,26 +702,13 @@ onUnmounted(stopDrag);
         <div v-else-if="!diagramReady" class="h-full flex items-center justify-center text-sm text-muted-foreground">
           {{ t("diagram.selectTarget") }}
         </div>
-        <div
-          v-else-if="tables.length === 0"
-          class="h-full flex items-center justify-center text-sm text-muted-foreground"
-        >
+        <div v-else-if="tables.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
           {{ t("diagram.empty") }}
         </div>
-        <div
-          v-else-if="visibleTables.length === 0"
-          class="h-full flex items-center justify-center text-sm text-muted-foreground"
-        >
+        <div v-else-if="visibleTables.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
           {{ t("diagram.noMatches") }}
         </div>
-        <div
-          v-else
-          ref="diagramViewport"
-          class="h-full overflow-auto"
-          @wheel="onDiagramWheel"
-          @gesturestart="onDiagramGestureStart"
-          @gesturechange="onDiagramGestureChange"
-        >
+        <div v-else ref="diagramViewport" class="h-full overflow-auto" @wheel="onDiagramWheel" @gesturestart="onDiagramGestureStart" @gesturechange="onDiagramGestureChange">
           <div
             class="relative"
             :style="{
@@ -866,26 +727,11 @@ onUnmounted(stopDrag);
               <template v-if="diagramMode === 'table'">
                 <svg class="absolute inset-0 h-full w-full overflow-visible pointer-events-none">
                   <defs>
-                    <marker
-                      id="diagram-arrow"
-                      markerWidth="8"
-                      markerHeight="8"
-                      refX="7"
-                      refY="4"
-                      orient="auto"
-                      markerUnits="strokeWidth"
-                    >
+                    <marker id="diagram-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
                       <path d="M 0 0 L 8 4 L 0 8 z" class="fill-primary/70" />
                     </marker>
                   </defs>
-                  <path
-                    v-for="relationship in visibleRelationships"
-                    :key="relationship.id"
-                    :d="relationshipPath(relationship)"
-                    class="fill-none stroke-primary/55"
-                    stroke-width="1.6"
-                    marker-end="url(#diagram-arrow)"
-                  >
+                  <path v-for="relationship in visibleRelationships" :key="relationship.id" :d="relationshipPath(relationship)" class="fill-none stroke-primary/55" stroke-width="1.6" marker-end="url(#diagram-arrow)">
                     <title>{{ relationshipTitle(relationship) }}</title>
                   </path>
                 </svg>
@@ -900,20 +746,13 @@ onUnmounted(stopDrag);
                     transform: `translate(${positions[table.name]?.x ?? 0}px, ${positions[table.name]?.y ?? 0}px)`,
                   }"
                 >
-                  <div
-                    class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing"
-                    @mousedown="startDrag(table.name, $event)"
-                  >
+                  <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing" @mousedown="startDrag(table.name, $event)">
                     <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
                     <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ table.name }}</span>
                     <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ table.columns.length }}</Badge>
                   </div>
                   <div>
-                    <div
-                      v-for="column in visibleColumns(table)"
-                      :key="column.name"
-                      class="flex h-6 items-center gap-1.5 border-b border-border/40 px-3 text-xs last:border-b-0"
-                    >
+                    <div v-for="column in visibleColumns(table)" :key="column.name" class="flex h-6 items-center gap-1.5 border-b border-border/40 px-3 text-xs last:border-b-0">
                       <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
                       <Link2 v-else-if="isForeignKeyColumn(table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
                       <span v-else class="h-3 w-3 shrink-0" />
@@ -940,51 +779,19 @@ onUnmounted(stopDrag);
                       stroke-width="1.2"
                     />
                     <template v-for="relationship in engineeringDiagram.relationships" :key="relationship.id">
-                      <line
-                        :x1="engineeringEntityCenter(relationship.sourceTable).x"
-                        :y1="engineeringEntityCenter(relationship.sourceTable).y"
-                        :x2="engineeringRelationshipCenter(relationship).x"
-                        :y2="engineeringRelationshipCenter(relationship).y"
-                        stroke-width="1.4"
-                      />
-                      <line
-                        :x1="engineeringRelationshipCenter(relationship).x"
-                        :y1="engineeringRelationshipCenter(relationship).y"
-                        :x2="engineeringEntityCenter(relationship.targetTable).x"
-                        :y2="engineeringEntityCenter(relationship.targetTable).y"
-                        stroke-width="1.4"
-                      />
+                      <line :x1="engineeringEntityCenter(relationship.sourceTable).x" :y1="engineeringEntityCenter(relationship.sourceTable).y" :x2="engineeringRelationshipCenter(relationship).x" :y2="engineeringRelationshipCenter(relationship).y" stroke-width="1.4" />
+                      <line :x1="engineeringRelationshipCenter(relationship).x" :y1="engineeringRelationshipCenter(relationship).y" :x2="engineeringEntityCenter(relationship.targetTable).x" :y2="engineeringEntityCenter(relationship.targetTable).y" stroke-width="1.4" />
                       <text
                         class="fill-foreground text-[13px] font-semibold"
-                        :x="
-                          engineeringCardinalityPoint(
-                            engineeringRelationshipCenter(relationship),
-                            engineeringEntityCenter(relationship.sourceTable),
-                          ).x
-                        "
-                        :y="
-                          engineeringCardinalityPoint(
-                            engineeringRelationshipCenter(relationship),
-                            engineeringEntityCenter(relationship.sourceTable),
-                          ).y
-                        "
+                        :x="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.sourceTable)).x"
+                        :y="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.sourceTable)).y"
                       >
                         {{ relationship.sourceCardinality }}
                       </text>
                       <text
                         class="fill-foreground text-[13px] font-semibold"
-                        :x="
-                          engineeringCardinalityPoint(
-                            engineeringRelationshipCenter(relationship),
-                            engineeringEntityCenter(relationship.targetTable),
-                          ).x
-                        "
-                        :y="
-                          engineeringCardinalityPoint(
-                            engineeringRelationshipCenter(relationship),
-                            engineeringEntityCenter(relationship.targetTable),
-                          ).y
-                        "
+                        :x="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.targetTable)).x"
+                        :y="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.targetTable)).y"
                       >
                         {{ relationship.targetCardinality }}
                       </text>
@@ -1018,10 +825,7 @@ onUnmounted(stopDrag);
                   }"
                   :title="`${relationship.sourceTable} -> ${relationship.targetTable}`"
                 >
-                  <div
-                    class="absolute inset-0 border border-red-500/70 bg-red-100/80 dark:bg-red-950/35"
-                    style="clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%)"
-                  />
+                  <div class="absolute inset-0 border border-red-500/70 bg-red-100/80 dark:bg-red-950/35" style="clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%)" />
                   <span class="relative max-w-[70px] truncate">{{ relationship.label }}</span>
                 </div>
 

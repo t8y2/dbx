@@ -15,34 +15,17 @@ export type BuildRoutineRenameObjectSourceInput = BuildEditableObjectSourceSqlIn
 
 export type ObjectSourceSaveExecutionMode = "single" | "script";
 
-const postgresLikeRoutineRenameTypes = new Set<DatabaseType>([
-  "postgres",
-  "redshift",
-  "gaussdb",
-  "kwdb",
-  "kingbase",
-  "highgo",
-  "vastbase",
-]);
+const postgresLikeRoutineRenameTypes = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase"]);
 const mysqlLikeRoutineRenameTypes = new Set<DatabaseType>(["mysql", "goldendb"]);
 const oracleLikeRoutineRenameTypes = new Set<DatabaseType>(["oracle", "dameng"]);
 
-export function supportsSourceBackedRoutineRename(
-  databaseType: DatabaseType | undefined,
-  objectType: ObjectSourceKind,
-): boolean {
+export function supportsSourceBackedRoutineRename(databaseType: DatabaseType | undefined, objectType: ObjectSourceKind): boolean {
   if (objectType !== "FUNCTION" && objectType !== "PROCEDURE") return false;
   if (!databaseType || databaseType === "sqlserver") return false;
-  return (
-    mysqlLikeRoutineRenameTypes.has(databaseType) ||
-    postgresLikeRoutineRenameTypes.has(databaseType) ||
-    oracleLikeRoutineRenameTypes.has(databaseType)
-  );
+  return mysqlLikeRoutineRenameTypes.has(databaseType) || postgresLikeRoutineRenameTypes.has(databaseType) || oracleLikeRoutineRenameTypes.has(databaseType);
 }
 
-export function buildRoutineRenameObjectSourceStatements(
-  input: BuildRoutineRenameObjectSourceInput,
-): Promise<string[]> {
+export function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return api.buildRoutineRenameObjectSourceStatements(input);
 }
 

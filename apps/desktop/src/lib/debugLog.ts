@@ -53,12 +53,7 @@ function readEntries(): DebugLogEntry[] {
 }
 
 function redactSensitiveText(value: string): string {
-  return value
-    .replace(
-      /("(?:password|passphrase|apiKey|api_key|token|secret|connectionString|connection_string)"\s*:\s*")([^"]*)(")/gi,
-      "$1[redacted]$3",
-    )
-    .replace(/\b(password|passphrase|apiKey|api_key|token|secret)=([^&\s]+)/gi, "$1=[redacted]");
+  return value.replace(/("(?:password|passphrase|apiKey|api_key|token|secret|connectionString|connection_string)"\s*:\s*")([^"]*)(")/gi, "$1[redacted]$3").replace(/\b(password|passphrase|apiKey|api_key|token|secret)=([^&\s]+)/gi, "$1=[redacted]");
 }
 
 function formatValue(value: unknown, seen = new WeakSet<object>()): string {
@@ -116,14 +111,7 @@ export function clearDebugLogs() {
 
 export function getDebugLogText(): string {
   const entries = readEntries();
-  const header = [
-    `DBX debug log`,
-    `Exported: ${new Date().toISOString()}`,
-    `User agent: ${navigator.userAgent}`,
-    `Platform: ${navigator.platform}`,
-    `Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"}`,
-    "",
-  ];
+  const header = [`DBX debug log`, `Exported: ${new Date().toISOString()}`, `User agent: ${navigator.userAgent}`, `Platform: ${navigator.platform}`, `Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"}`, ""];
   const body = entries.map((entry) => `[${entry.timestamp}] [${entry.level.toUpperCase()}] ${entry.message}`);
   return [...header, ...body].join("\n");
 }
@@ -132,10 +120,7 @@ export async function downloadDebugLogs() {
   const text = await getDebugLogBundleText();
   const filename = `dbx-debug-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
   if (typeof window !== "undefined" && isTauriRuntimeLike()) {
-    const [{ save }, { writeTextFile }] = await Promise.all([
-      import("@tauri-apps/plugin-dialog"),
-      import("@tauri-apps/plugin-fs"),
-    ]);
+    const [{ save }, { writeTextFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
     const path = await save({
       defaultPath: filename,
       filters: [{ name: "Text", extensions: ["txt", "log"] }],
@@ -249,37 +234,15 @@ function installPerformanceCapture() {
 }
 
 function interactiveElement(target: HTMLElement): HTMLElement | null {
-  return target.closest(
-    [
-      "button",
-      "a[href]",
-      "input",
-      "select",
-      "textarea",
-      "[role='button']",
-      "[role='menuitem']",
-      "[role='tab']",
-      "[data-debug-id]",
-    ].join(","),
-  );
+  return target.closest(["button", "a[href]", "input", "select", "textarea", "[role='button']", "[role='menuitem']", "[role='tab']", "[data-debug-id]"].join(","));
 }
 
 function isFormControl(target: HTMLElement): boolean {
-  return (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLSelectElement ||
-    target instanceof HTMLTextAreaElement ||
-    target.getAttribute("role") === "switch"
-  );
+  return target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || target.getAttribute("role") === "switch";
 }
 
 function describeElement(element: HTMLElement): Record<string, string> {
-  const label =
-    element.getAttribute("data-debug-id") ||
-    element.getAttribute("aria-label") ||
-    element.getAttribute("title") ||
-    element.textContent ||
-    "";
+  const label = element.getAttribute("data-debug-id") || element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent || "";
   const attrs: Record<string, string> = {
     tag: element.tagName.toLowerCase(),
   };

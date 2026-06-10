@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  canTreeNodeExpand,
-  canTreeNodeShowExpander,
-  treeItemPaddingLeft,
-  usesFullWidthTreeLabel,
-} from "../../apps/desktop/src/lib/sidebarTreeItemLayout.ts";
+import { canTreeNodeExpand, canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "../../apps/desktop/src/lib/sidebarTreeItemLayout.ts";
 
 test("treeItemPaddingLeft converts tree depth to sidebar indentation", () => {
   assert.equal(treeItemPaddingLeft(0), "8px");

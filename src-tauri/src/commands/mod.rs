@@ -13,6 +13,7 @@ pub mod etcd_cmd;
 pub mod external_db;
 pub mod external_sql;
 pub mod history;
+pub mod keychain;
 pub mod mcp;
 pub mod mcp_bridge;
 pub mod mongo_cmd;

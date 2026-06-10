@@ -1,20 +1,6 @@
 export type RedisCommandSafety = "allowed" | "confirm" | "blocked";
 
-const BLOCKED_COMMANDS = new Set([
-  "KEYS",
-  "FLUSHALL",
-  "SHUTDOWN",
-  "CONFIG",
-  "SAVE",
-  "BGSAVE",
-  "SLAVEOF",
-  "REPLICAOF",
-  "MIGRATE",
-  "MODULE",
-  "SCRIPT",
-  "EVAL",
-  "EVALSHA",
-]);
+const BLOCKED_COMMANDS = new Set(["KEYS", "FLUSHALL", "SHUTDOWN", "CONFIG", "SAVE", "BGSAVE", "SLAVEOF", "REPLICAOF", "MIGRATE", "MODULE", "SCRIPT", "EVAL", "EVALSHA"]);
 
 const CONFIRM_COMMANDS = new Set([
   "DEL",

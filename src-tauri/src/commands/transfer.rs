@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::connection::AppState;
+use crate::commands::connection::{ensure_connection_writable, AppState};
 
 // Re-export types and functions used by other modules
 pub use dbx_core::transfer::{get_db_type, TransferProgress, TransferRequest, TransferStatus};
@@ -18,6 +18,9 @@ pub async fn start_transfer(
 ) -> Result<(), String> {
     let state = state.inner().clone();
     let transfer_id = request.transfer_id.clone();
+
+    // Reject transfer early if the target connection is read-only — writing to it is inherently required
+    ensure_connection_writable(&state, &request.target_connection_id, "Transfer").await?;
 
     // Validate connections exist
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;

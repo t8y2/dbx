@@ -21,13 +21,7 @@ export interface QueryEditorTableReferenceDropDetail {
 
 let activeTableReferencePayload: QueryEditorTableReferencePayload | null = null;
 
-export function createTableReferencePayload(options: {
-  connectionId?: string;
-  database?: string;
-  schema?: string;
-  tableName?: string;
-  databaseType?: DatabaseType;
-}): QueryEditorTableReferencePayload | null {
+export function createTableReferencePayload(options: { connectionId?: string; database?: string; schema?: string; tableName?: string; databaseType?: DatabaseType }): QueryEditorTableReferencePayload | null {
   if (!options.connectionId || options.database == null || !options.tableName) return null;
   const payload: QueryEditorTableReferencePayload = {
     kind: "dbx-table-reference",
@@ -48,14 +42,7 @@ export function parseTableReferencePayload(value: string | undefined | null): Qu
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as Partial<QueryEditorTableReferencePayload>;
-    if (
-      parsed.kind !== "dbx-table-reference" ||
-      typeof parsed.connectionId !== "string" ||
-      typeof parsed.database !== "string" ||
-      typeof parsed.tableName !== "string" ||
-      !parsed.connectionId ||
-      !parsed.tableName
-    ) {
+    if (parsed.kind !== "dbx-table-reference" || typeof parsed.connectionId !== "string" || typeof parsed.database !== "string" || typeof parsed.tableName !== "string" || !parsed.connectionId || !parsed.tableName) {
       return null;
     }
     const payload: QueryEditorTableReferencePayload = {
@@ -98,10 +85,7 @@ export function createTableReferenceDropEvent(detail: QueryEditorTableReferenceD
   return new CustomEvent<QueryEditorTableReferenceDropDetail>(DBX_TABLE_REFERENCE_DROP_EVENT, { detail });
 }
 
-export function tableReferenceInsertText(
-  payload: QueryEditorTableReferencePayload,
-  fallbackDatabaseType?: DatabaseType,
-): string {
+export function tableReferenceInsertText(payload: QueryEditorTableReferencePayload, fallbackDatabaseType?: DatabaseType): string {
   return qualifiedTableName({
     databaseType: payload.databaseType ?? fallbackDatabaseType,
     schema: payload.schema,

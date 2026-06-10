@@ -143,81 +143,37 @@ watch(
 
 <template>
   <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent
-      :show-close-button="false"
-      class="image-preview-dialog h-[min(86vh,920px)] w-[min(92vw,1280px)] max-w-none gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl"
-      @escape-key-down="close"
-    >
+    <DialogContent :show-close-button="false" class="image-preview-dialog h-[min(86vh,920px)] w-[min(92vw,1280px)] max-w-none gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl" @escape-key-down="close">
       <div class="flex h-12 shrink-0 items-center gap-3 border-b border-white/10 bg-white/[0.035] px-4">
         <div class="min-w-0 flex-1">
           <DialogTitle class="truncate text-sm font-semibold text-white">{{ imageTitle }}</DialogTitle>
           <div class="truncate text-[11px] text-white/45">{{ hostLabel || src }}</div>
         </div>
         <div class="flex items-center gap-1 rounded-md border border-white/10 bg-black/20 p-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white"
-            :title="t('grid.zoomOut')"
-            @click="zoomOut"
-          >
+          <Button variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.zoomOut')" @click="zoomOut">
             <ZoomOut class="h-3.5 w-3.5" />
           </Button>
           <div class="w-12 text-center text-[11px] tabular-nums text-white/65">{{ zoomLabel }}</div>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white"
-            :title="t('grid.zoomIn')"
-            @click="zoomIn"
-          >
+          <Button variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.zoomIn')" @click="zoomIn">
             <ZoomIn class="h-3.5 w-3.5" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white"
-            :title="t('grid.fitImage')"
-            @click="fitImage"
-          >
+          <Button variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.fitImage')" @click="fitImage">
             <Maximize2 class="h-3.5 w-3.5" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white"
-            :title="t('grid.openImage')"
-            @click="openExternal"
-          >
+          <Button variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.openImage')" @click="openExternal">
             <ExternalLink class="h-3.5 w-3.5" />
           </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8 text-white/70 hover:bg-white/10 hover:text-white"
-          :title="t('dangerDialog.cancel')"
-          @click="close"
-        >
+        <Button variant="ghost" size="icon" class="h-8 w-8 text-white/70 hover:bg-white/10 hover:text-white" :title="t('dangerDialog.cancel')" @click="close">
           <X class="h-4 w-4" />
         </Button>
       </div>
 
-      <div
-        ref="stageRef"
-        class="image-preview-stage relative min-h-0 flex-1 overflow-hidden"
-        :class="{ 'cursor-grabbing': dragStart, 'cursor-grab': !dragStart && imageLoaded && !imageError }"
-        @wheel="onWheel"
-      >
+      <div ref="stageRef" class="image-preview-stage relative min-h-0 flex-1 overflow-hidden" :class="{ 'cursor-grabbing': dragStart, 'cursor-grab': !dragStart && imageLoaded && !imageError }" @wheel="onWheel">
         <div v-if="!imageLoaded && !imageError" class="absolute inset-0 flex items-center justify-center">
-          <div
-            class="h-16 w-16 animate-pulse rounded-full border border-white/10 bg-white/10 shadow-[0_0_80px_rgba(255,255,255,0.12)]"
-          />
+          <div class="h-16 w-16 animate-pulse rounded-full border border-white/10 bg-white/10 shadow-[0_0_80px_rgba(255,255,255,0.12)]" />
         </div>
-        <div
-          v-if="imageError"
-          class="absolute inset-0 flex items-center justify-center px-8 text-center text-sm text-white/55"
-        >
+        <div v-if="imageError" class="absolute inset-0 flex items-center justify-center px-8 text-center text-sm text-white/55">
           {{ t("grid.imageLoadFailed") }}
         </div>
         <img
@@ -247,10 +203,7 @@ watch(
 .image-preview-stage {
   background-color: #07090d;
   background-image:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.055) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(255, 255, 255, 0.055) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.055) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.055) 75%),
+    linear-gradient(45deg, rgba(255, 255, 255, 0.055) 25%, transparent 25%), linear-gradient(-45deg, rgba(255, 255, 255, 0.055) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.055) 75%), linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.055) 75%),
     radial-gradient(circle at 50% 30%, rgba(255, 255, 255, 0.08), transparent 42%);
   background-position:
     0 0,

@@ -1,24 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
-import {
-  DatabaseZap,
-  FilePlus2,
-  Loader2,
-  Languages,
-  Moon,
-  Sun,
-  SunMoon,
-  History,
-  Bot,
-  ArrowLeftRight,
-  FileCode,
-  GitCompareArrows,
-  TableProperties,
-  Settings,
-  CloudDownload,
-  Package,
-} from "@lucide/vue";
+import { DatabaseZap, FilePlus2, Loader2, Languages, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, FileStack, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, Ellipsis } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -34,6 +17,7 @@ const props = defineProps<{
   themeMode: AppThemeMode;
   showAiPanel: boolean;
   showHistory: boolean;
+  showSqlLibrary: boolean;
   showDriverStore: boolean;
   checkingUpdates: boolean;
   hasUpdateAvailable: boolean;
@@ -48,6 +32,7 @@ const emit = defineEmits<{
   "set-theme-mode": [mode: AppThemeMode];
   "toggle-ai": [];
   "toggle-history": [];
+  "toggle-sql-library": [];
   "open-github": [];
   "open-settings": [];
   "open-driver-store": [];
@@ -59,8 +44,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } =
-  useWindowControls();
+const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 
 const themeItems = computed(() => [
   { value: "light", label: t("toolbar.themeLight"), icon: Sun },
@@ -85,110 +69,138 @@ function onToolbarDblClick(e: MouseEvent) {
   if (target.closest("button, [role='button'], a")) return;
   toggleMaximize();
 }
+
+const toolbarEl = ref<HTMLElement>();
+const toolbarCollapsed = ref(false);
+const COLLAPSE_THRESHOLD = 1000;
+
+function checkToolbarWidth() {
+  const el = toolbarEl.value;
+  if (!el) return;
+  toolbarCollapsed.value = el.clientWidth < COLLAPSE_THRESHOLD;
+}
+
+let resizeObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  resizeObserver = new ResizeObserver(checkToolbarWidth);
+  if (toolbarEl.value) resizeObserver.observe(toolbarEl.value);
+});
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+});
+
+const collapsedItems = computed(() => [
+  {
+    value: "transfer",
+    label: t("transfer.dataTransfer"),
+    icon: ArrowLeftRight,
+    action: () => emit("open-transfer"),
+    disabled: !props.hasConnections,
+  },
+  {
+    value: "sql-file",
+    label: t("sqlFile.title"),
+    icon: FileCode,
+    action: () => emit("open-sql-file"),
+    disabled: !props.hasSqlFileConnections,
+  },
+  {
+    value: "schema-diff",
+    label: t("diff.title"),
+    icon: GitCompareArrows,
+    action: () => emit("open-schema-diff"),
+    disabled: !props.hasConnections,
+  },
+  {
+    value: "data-compare",
+    label: t("dataCompare.title"),
+    icon: TableProperties,
+    action: () => emit("open-data-compare"),
+    disabled: !props.hasConnections,
+  },
+  {
+    value: "driver-store",
+    label: props.agentDriverUpdateCount > 0 ? `${t("toolbar.driverManager")} (${props.agentDriverUpdateCount})` : t("toolbar.driverManager"),
+    icon: Package,
+    action: () => emit("open-driver-store"),
+    disabled: false,
+  },
+]);
 </script>
 
 <template>
-  <div
-    class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0"
-    :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }"
-    data-tauri-drag-region
-    @dblclick="onToolbarDblClick"
-  >
+  <div ref="toolbarEl" class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }" data-tauri-drag-region @dblclick="onToolbarDblClick">
     <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('new-connection')">
       <DatabaseZap class="h-3.5 w-3.5" />
       {{ t("toolbar.newConnection") }}
     </Button>
 
-    <Button
-      variant="ghost"
-      size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      @click="emit('new-query')"
-      :disabled="!hasConnections"
-    >
+    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('new-query')" :disabled="!hasConnections">
       <FilePlus2 class="h-3.5 w-3.5" />
       {{ t("toolbar.newQuery") }}
     </Button>
 
-    <Button
-      variant="ghost"
-      size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      @click="emit('open-transfer')"
-      :disabled="!hasConnections"
-    >
-      <ArrowLeftRight class="h-3.5 w-3.5" />
-      {{ t("transfer.dataTransfer") }}
-    </Button>
+    <template v-if="!toolbarCollapsed">
+      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('open-transfer')" :disabled="!hasConnections">
+        <ArrowLeftRight class="h-3.5 w-3.5" />
+        {{ t("transfer.dataTransfer") }}
+      </Button>
 
-    <Button
-      variant="ghost"
-      size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      @click="emit('open-sql-file')"
-      :disabled="!hasSqlFileConnections"
-    >
-      <FileCode class="h-3.5 w-3.5" />
-      {{ t("sqlFile.title") }}
-    </Button>
+      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('open-sql-file')" :disabled="!hasSqlFileConnections">
+        <FileCode class="h-3.5 w-3.5" />
+        {{ t("sqlFile.title") }}
+      </Button>
 
-    <Button
-      variant="ghost"
-      size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      @click="emit('open-schema-diff')"
-      :disabled="!hasConnections"
-    >
-      <GitCompareArrows class="h-3.5 w-3.5" />
-      {{ t("diff.title") }}
-    </Button>
+      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('open-schema-diff')" :disabled="!hasConnections">
+        <GitCompareArrows class="h-3.5 w-3.5" />
+        {{ t("diff.title") }}
+      </Button>
 
-    <Button
-      variant="ghost"
-      size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      @click="emit('open-data-compare')"
-      :disabled="!hasConnections"
-    >
-      <TableProperties class="h-3.5 w-3.5" />
-      {{ t("dataCompare.title") }}
-    </Button>
+      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('open-data-compare')" :disabled="!hasConnections">
+        <TableProperties class="h-3.5 w-3.5" />
+        {{ t("dataCompare.title") }}
+      </Button>
 
-    <Button
-      variant="ghost"
-      size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      :class="{ 'bg-accent': showDriverStore }"
-      @click="emit('open-driver-store')"
-    >
-      <Package class="h-3.5 w-3.5" />
-      {{ t("toolbar.driverManager") }}
-      <span
-        v-if="agentDriverUpdateCount > 0"
-        class="ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white"
-        :aria-label="t('toolbar.updatableDriverCount')"
-      >
-        {{ agentDriverUpdateCount > 99 ? "99+" : agentDriverUpdateCount }}
-      </span>
-    </Button>
+      <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" :class="{ 'bg-accent': showDriverStore }" @click="emit('open-driver-store')">
+        <Package class="h-3.5 w-3.5" />
+        {{ t("toolbar.driverManager") }}
+        <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+          {{ agentDriverUpdateCount > 99 ? "99+" : agentDriverUpdateCount }}
+        </span>
+      </Button>
+    </template>
+
+    <template v-if="toolbarCollapsed">
+      <LightDropdown
+        model-value=""
+        :items="collapsedItems"
+        :aria-label="t('common.more')"
+        :trigger-icon="Ellipsis"
+        trigger-class="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
+        trigger-icon-class="h-4 w-4"
+        :show-trigger-label="false"
+        :show-chevron="false"
+        check-position="none"
+        align="start"
+        @update:model-value="
+          (value) => {
+            const item = collapsedItems.find((i) => i.value === value);
+            item?.action();
+          }
+        "
+      />
+    </template>
 
     <div class="flex-1" data-tauri-drag-region />
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="relative h-8 w-8"
-          :disabled="checkingUpdates"
-          @click="emit('check-updates')"
-        >
+        <Button variant="ghost" size="icon" class="relative h-8 w-8" :disabled="checkingUpdates" @click="emit('check-updates')">
           <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
           <CloudDownload v-else class="h-4 w-4" />
-          <span
-            v-if="hasUpdateAvailable"
-            class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background"
-          />
+          <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
         </Button>
       </TooltipTrigger>
       <TooltipContent>{{ t("updates.check") }}</TooltipContent>
@@ -198,13 +210,16 @@ function onToolbarDblClick(e: MouseEvent) {
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :class="{ 'bg-accent': showHistory }"
-          @click="emit('toggle-history')"
-        >
+        <Button variant="ghost" size="icon" class="h-8 w-8" :class="{ 'bg-accent': showSqlLibrary }" @click="emit('toggle-sql-library')">
+          <FileStack class="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
+    </Tooltip>
+
+    <Tooltip>
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="h-8 w-8" :class="{ 'bg-accent': showHistory }" @click="emit('toggle-history')">
           <History class="h-4 w-4" />
         </Button>
       </TooltipTrigger>
@@ -213,13 +228,7 @@ function onToolbarDblClick(e: MouseEvent) {
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :class="{ 'bg-accent': showAiPanel }"
-          @click="emit('toggle-ai')"
-        >
+        <Button variant="ghost" size="icon" class="h-8 w-8" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
           <Bot class="h-4 w-4" />
         </Button>
       </TooltipTrigger>
@@ -291,12 +300,6 @@ function onToolbarDblClick(e: MouseEvent) {
       <TooltipContent>{{ t("settings.title") }}</TooltipContent>
     </Tooltip>
 
-    <WindowControls
-      v-if="showControls"
-      :is-maximized="isMaximized"
-      @minimize="minimize"
-      @toggle-maximize="toggleMaximize"
-      @close="close"
-    />
+    <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </div>
 </template>

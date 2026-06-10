@@ -3,9 +3,9 @@ name: Deploy Docs
 on:
   push:
     branches: [main]
-    paths: ['docs/**']
+    paths: ["docs/**"]
   workflow_run:
-    workflows: ['Publish Packages']
+    workflows: ["Publish Packages"]
     types: [completed]
   workflow_dispatch:
 

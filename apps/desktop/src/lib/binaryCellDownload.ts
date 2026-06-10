@@ -20,8 +20,7 @@ export const BINARY_CELL_DOWNLOAD_MODES: BinaryCellDownloadMode[] = ["binary", "
 const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]+)$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
 const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
-const BINARY_TYPE_RE =
-  /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
+const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
 
 function copyBytesForBlob(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array(bytes);
@@ -114,11 +113,7 @@ function formatBinaryCellByteSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
-export function binaryCellDownloadPayload(
-  value: unknown,
-  mode: BinaryCellDownloadMode,
-  columnType?: string,
-): BinaryCellDownloadPayload {
+export function binaryCellDownloadPayload(value: unknown, mode: BinaryCellDownloadMode, columnType?: string): BinaryCellDownloadPayload {
   const bytes = parseBinaryCellBytes(value, columnType);
   if (!bytes) {
     throw new Error("Cell value is not a downloadable binary value.");
@@ -140,12 +135,7 @@ export function binaryCellDownloadPayload(
   };
 }
 
-export function binaryCellDownloadFileName(options: {
-  column: string;
-  rowNumber: number;
-  mode: BinaryCellDownloadMode;
-  extension: string;
-}): string {
+export function binaryCellDownloadFileName(options: { column: string; rowNumber: number; mode: BinaryCellDownloadMode; extension: string }): string {
   const column = options.column
     .trim()
     .replace(/[\\/:*?"<>|]+/g, "-")
@@ -156,10 +146,7 @@ export function binaryCellDownloadFileName(options: {
   return `${safeColumn}-row-${options.rowNumber}${suffix}.${options.extension}`;
 }
 
-export async function downloadBinaryCellPayload(
-  payload: BinaryCellDownloadPayload,
-  fileName: string,
-): Promise<BinaryCellDownloadResult> {
+export async function downloadBinaryCellPayload(payload: BinaryCellDownloadPayload, fileName: string): Promise<BinaryCellDownloadResult> {
   if (isTauriRuntime()) {
     const [{ save }, fs] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
     const path = await save({

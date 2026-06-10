@@ -7,55 +7,29 @@ DBX can import connections from other database tools, saving you from manually r
 
 ## Supported Formats
 
-| Source | Format | What's Imported |
-|---|---|---|
-| Navicat | `.ncx` export files | Host, port, username, database type, connection name |
+| Source  | Format                         | What's Imported                                      |
+| ------- | ------------------------------ | ---------------------------------------------------- |
+| Navicat | `.ncx` export files            | Host, port, username, database type, connection name |
 | DBeaver | Connection configuration files | Host, port, username, database type, connection name |
 
-<Callout type="info">
-Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools cannot be decrypted — you will need to re-enter passwords after import.
-</Callout>
+<Callout type="info">Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools cannot be decrypted — you will need to re-enter passwords after import.</Callout>
 
 ## Import Navicat Connections
 
 <Steps>
-  <Step>
-    ### Export from Navicat
-    In Navicat, select the connections you want to migrate. Use **File → Export Connections** and save the `.ncx` file.
-  </Step>
-  <Step>
-    ### Open Import Dialog
-    In DBX, go to **Settings → Import Connections** or right-click the sidebar group header and choose **Import Connections**.
-  </Step>
-  <Step>
-    ### Select the NCX File
-    Choose the `.ncx` file you exported from Navicat.
-  </Step>
-  <Step>
-    ### Review and Complete
-    DBX parses the file and lists all found connections. Review the list, re-enter passwords where needed, and save.
-  </Step>
+  <Step>### Export from Navicat In Navicat, select the connections you want to migrate. Use **File → Export Connections** and save the `.ncx` file.</Step>
+  <Step>### Open Import Dialog In DBX, go to **Settings → Import Connections** or right-click the sidebar group header and choose **Import Connections**.</Step>
+  <Step>### Select the NCX File Choose the `.ncx` file you exported from Navicat.</Step>
+  <Step>### Review and Complete DBX parses the file and lists all found connections. Review the list, re-enter passwords where needed, and save.</Step>
 </Steps>
 
 ## Import DBeaver Connections
 
 <Steps>
-  <Step>
-    ### Locate DBeaver Configuration
-    DBeaver stores connections in its workspace directory. The exact path depends on your OS and DBeaver version. Common locations include `~/.local/share/DBeaverData/workspace6/General/.dbeaver/`.
-  </Step>
-  <Step>
-    ### Open Import Dialog
-    In DBX, go to **Settings → Import Connections**.
-  </Step>
-  <Step>
-    ### Select DBeaver Files
-    Choose the DBeaver connection configuration files (`.dbeaver-data-sources.xml` or similar).
-  </Step>
-  <Step>
-    ### Review and Complete
-    DBX extracts connection details from the configuration. Re-enter any passwords that could not be decrypted.
-  </Step>
+  <Step>### Locate DBeaver Configuration DBeaver stores connections in its workspace directory. The exact path depends on your OS and DBeaver version. Common locations include `~/.local/share/DBeaverData/workspace6/General/.dbeaver/`.</Step>
+  <Step>### Open Import Dialog In DBX, go to **Settings → Import Connections**.</Step>
+  <Step>### Select DBeaver Files Choose the DBeaver connection configuration files (`.dbeaver-data-sources.xml` or similar).</Step>
+  <Step>### Review and Complete DBX extracts connection details from the configuration. Re-enter any passwords that could not be decrypted.</Step>
 </Steps>
 
 ## After Import
@@ -70,9 +44,9 @@ Imported connections appear in the sidebar alongside manually created ones. You 
 
 ## What Cannot Be Imported
 
-| Setting | Reason |
-|---|---|
-| Encrypted passwords | Each tool uses proprietary encryption; passwords must be re-entered |
-| SSH tunnel keys | Key file paths may differ between machines; re-select the key file |
-| Custom driver configurations | Driver paths and versions are tool-specific |
-| Proxy settings | Re-configure in the connection's Proxy tab |
+| Setting                      | Reason                                                              |
+| ---------------------------- | ------------------------------------------------------------------- |
+| Encrypted passwords          | Each tool uses proprietary encryption; passwords must be re-entered |
+| SSH tunnel keys              | Key file paths may differ between machines; re-select the key file  |
+| Custom driver configurations | Driver paths and versions are tool-specific                         |
+| Proxy settings               | Re-configure in the connection's Proxy tab                          |

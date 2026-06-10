@@ -11,19 +11,29 @@ pub struct QueryResultTextExportRequest {
 }
 
 impl QueryResultTextExportRequest {
-    fn data(&self) -> QueryResultTextExportData {
-        QueryResultTextExportData { columns: self.columns.clone(), rows: self.rows.clone() }
+    fn into_data(self) -> QueryResultTextExportData {
+        QueryResultTextExportData { columns: self.columns, rows: self.rows }
     }
 }
 
 #[tauri::command]
-pub fn export_query_result_json(request: QueryResultTextExportRequest) -> Result<(), String> {
-    let content = format_json(&request.data())?;
-    std::fs::write(&request.file_path, format!("\u{FEFF}{content}")).map_err(|err| err.to_string())
+pub async fn export_query_result_json(request: QueryResultTextExportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_path = request.file_path.clone();
+        let content = format_json(&request.into_data())?;
+        std::fs::write(file_path, format!("\u{FEFF}{content}")).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
-pub fn export_query_result_markdown(request: QueryResultTextExportRequest) -> Result<(), String> {
-    let content = format_markdown(&request.data());
-    std::fs::write(&request.file_path, format!("\u{FEFF}{content}")).map_err(|err| err.to_string())
+pub async fn export_query_result_markdown(request: QueryResultTextExportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_path = request.file_path.clone();
+        let content = format_markdown(&request.into_data());
+        std::fs::write(file_path, format!("\u{FEFF}{content}")).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }

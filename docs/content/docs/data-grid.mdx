@@ -19,15 +19,13 @@ Common browsing actions:
 
 ## Filter and Sort
 
-| Feature | Best For |
-|---|---|
-| Search | Finding rows in the current result set |
-| WHERE | Database-level filtering for large tables or precise conditions |
-| ORDER BY | Database-level ordering for reproducible results |
+| Feature  | Best For                                                        |
+| -------- | --------------------------------------------------------------- |
+| Search   | Finding rows in the current result set                          |
+| WHERE    | Database-level filtering for large tables or precise conditions |
+| ORDER BY | Database-level ordering for reproducible results                |
 
-<Callout type="info">
-For large tables, prefer `WHERE` and `ORDER BY`. They run in the database and are usually more reliable than client-side search.
-</Callout>
+<Callout type="info">For large tables, prefer `WHERE` and `ORDER BY`. They run in the database and are usually more reliable than client-side search.</Callout>
 
 ## Inline Editing
 
@@ -44,18 +42,16 @@ All changes are staged locally first. Before saving, DBX shows the SQL it is abo
 
 Editing is available when DBX can identify the target table and enough key information to generate reviewable `UPDATE`, `INSERT`, or `DELETE` statements. Simple table browsing is usually editable. Ad-hoc joins, aggregates, expressions, or result sets without usable keys are treated as read-only.
 
-| Result Type | Typical Behavior |
-|---|---|
-| Opened table data | Editable when the database and table support edits |
-| Simple `SELECT * FROM table` | Often editable if primary key or row identity is available |
-| Joins, aggregates, computed columns | Read-only result set |
-| Redis or MongoDB views | Use their dedicated editors instead of relational row SQL |
+| Result Type                         | Typical Behavior                                           |
+| ----------------------------------- | ---------------------------------------------------------- |
+| Opened table data                   | Editable when the database and table support edits         |
+| Simple `SELECT * FROM table`        | Often editable if primary key or row identity is available |
+| Joins, aggregates, computed columns | Read-only result set                                       |
+| Redis or MongoDB views              | Use their dedicated editors instead of relational row SQL  |
 
 ## SQL Preview
 
-<Callout type="warn">
-Edits are not written to the database immediately. Before saving, review the SQL preview carefully, especially on production connections.
-</Callout>
+<Callout type="warn">Edits are not written to the database immediately. Before saving, review the SQL preview carefully, especially on production connections.</Callout>
 
 The preview shows `UPDATE`, `INSERT`, or `DELETE` statements. Use it to confirm:
 
@@ -129,14 +125,14 @@ Column headers provide quick access to actions:
 
 ## Export and Copy
 
-| Format | Use Case |
-|---|---|
-| CSV | Excel, Numbers, or spreadsheet tools |
-| JSON | Scripts, API debugging, or programmatic processing |
-| Markdown | Issues, PRs, documentation, or chat |
-| INSERT | Copy selected rows as executable `INSERT` statements (single or batched) |
-| UPDATE | Copy selected rows as executable `UPDATE` statements |
-| XLSX | Export directly to Excel format from the table context menu |
+| Format   | Use Case                                                                 |
+| -------- | ------------------------------------------------------------------------ |
+| CSV      | Excel, Numbers, or spreadsheet tools                                     |
+| JSON     | Scripts, API debugging, or programmatic processing                       |
+| Markdown | Issues, PRs, documentation, or chat                                      |
+| INSERT   | Copy selected rows as executable `INSERT` statements (single or batched) |
+| UPDATE   | Copy selected rows as executable `UPDATE` statements                     |
+| XLSX     | Export directly to Excel format from the table context menu              |
 
 Before exporting, check the active filters and sort order so the exported data matches what you expect.
 

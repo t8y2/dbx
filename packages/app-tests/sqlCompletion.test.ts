@@ -78,15 +78,11 @@ test("suggests SQL keywords for generic keyword input", () => {
 });
 
 test("suggests PostgreSQL-specific data types and functions", () => {
-  const typeItems = buildSqlCompletionItems(
-    "create table events (payload js",
-    "create table events (payload js".length,
-    {
-      tables: [],
-      columnsByTable: new Map(),
-      databaseType: "postgres",
-    },
-  );
+  const typeItems = buildSqlCompletionItems("create table events (payload js", "create table events (payload js".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "postgres",
+  });
   const serialItems = buildSqlCompletionItems("create table events (id ser", "create table events (id ser".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -263,6 +259,46 @@ test("keeps explicit alias column suggestions scoped to the alias table", () => 
   assert.deepEqual(
     items.map((item) => [item.label, item.type, item.detail]),
     [["status", "column", "public.orders  [varchar]"]],
+  );
+});
+
+test("does not show table names after an explicit alias qualifier", () => {
+  const sql = "select * from billing_owner b where b.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "base_gateway_expand", schema: "BU", type: "table" },
+      { name: "billing_owner", schema: "BU", type: "table" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.deepEqual(items, []);
+});
+
+test("suggests columns after an explicit alias qualifier without leaking tables", () => {
+  const sql = "select * from billing_owner b where b.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "base_gateway_expand", schema: "BU", type: "table" },
+      { name: "billing_owner", schema: "BU", type: "table" },
+    ],
+    columnsByTable: new Map([
+      [
+        "BU.billing_owner",
+        [
+          { name: "owner_id", table: "billing_owner", schema: "BU", dataType: "number" },
+          { name: "owner_name", table: "billing_owner", schema: "BU", dataType: "varchar" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type, item.detail]),
+    [
+      ["owner_id", "column", "BU.billing_owner  [number]"],
+      ["owner_name", "column", "BU.billing_owner  [varchar]"],
+    ],
   );
 });
 
@@ -756,18 +792,14 @@ test("extracts CTE explicit column list", () => {
 });
 
 test("extracts multiple CTEs", () => {
-  const ctes = extractCteDefinitions(
-    "WITH first AS (SELECT id FROM users), second AS (SELECT id FROM orders) SELECT * FROM first JOIN second",
-  );
+  const ctes = extractCteDefinitions("WITH first AS (SELECT id FROM users), second AS (SELECT id FROM orders) SELECT * FROM first JOIN second");
   assert.equal(ctes.length, 2);
   assert.equal(ctes[0]?.name, "first");
   assert.equal(ctes[1]?.name, "second");
 });
 
 test("handles WITH RECURSIVE", () => {
-  const ctes = extractCteDefinitions(
-    "WITH RECURSIVE tree AS (SELECT id, parent_id FROM categories UNION ALL SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.parent_id = t.id) SELECT * FROM tree",
-  );
+  const ctes = extractCteDefinitions("WITH RECURSIVE tree AS (SELECT id, parent_id FROM categories UNION ALL SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.parent_id = t.id) SELECT * FROM tree");
   assert.equal(ctes.length, 1);
   assert.equal(ctes[0]?.name, "tree");
 });
@@ -811,14 +843,10 @@ test("suggests columns for INSERT INTO target table", () => {
 // --- Column data type in detail ---
 
 test("shows column data type in detail", () => {
-  const items = buildSqlCompletionItems(
-    "select id from public.users u where u.",
-    "select id from public.users u where u.".length,
-    {
-      tables,
-      columnsByTable,
-    },
-  );
+  const items = buildSqlCompletionItems("select id from public.users u where u.", "select id from public.users u where u.".length, {
+    tables,
+    columnsByTable,
+  });
   const emailColumn = items.find((item) => item.label === "email");
   assert.ok(emailColumn);
   assert.ok(emailColumn.detail!.includes("[varchar]"));
@@ -1101,12 +1129,7 @@ test("getSqlCompletionContext returns nonAggregatedSelectColumns", () => {
 // --- Better FK join inference ---
 
 test("prefers explicit foreign-key join condition with table aliases", () => {
-  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
-    [
-      "public.orders",
-      [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_column: "id" }],
-    ],
-  ]);
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["public.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_column: "id" }]]]);
   const sql = "select * from public.orders o join public.customers c on ";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables: [
@@ -1127,12 +1150,7 @@ test("prefers explicit foreign-key join condition with table aliases", () => {
 });
 
 test("suggests explicit foreign-key join when the joined table owns the key", () => {
-  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
-    [
-      "public.orders",
-      [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_column: "id" }],
-    ],
-  ]);
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["public.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_table: "customers", ref_column: "id" }]]]);
   const sql = "select * from public.customers c join public.orders o on ";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables: [
@@ -1334,9 +1352,7 @@ test("suggests join condition for parent_id self-reference", () => {
     tables: [{ name: "categories", schema: "public", type: "table" }],
     columnsByTable: colsWithParent,
   });
-  const parentJoin = items.find(
-    (item) => item.label === "c1.parent_id = c2.id" || item.label === "c2.parent_id = c1.id",
-  );
+  const parentJoin = items.find((item) => item.label === "c1.parent_id = c2.id" || item.label === "c2.parent_id = c1.id");
   assert.ok(parentJoin, "should suggest parent_id = id for self-reference");
 });
 

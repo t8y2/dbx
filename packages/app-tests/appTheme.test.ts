@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  getTauriThemeForMode,
-  normalizeAppThemeMode,
-  resolveAppThemeAppearance,
-} from "../../apps/desktop/src/lib/appTheme.ts";
+import { getTauriThemeForMode, normalizeAppThemeMode, resolveAppThemeAppearance } from "../../apps/desktop/src/lib/appTheme.ts";
 
 test("normalizes stored app theme modes", () => {
   assert.equal(normalizeAppThemeMode("dark"), "dark");

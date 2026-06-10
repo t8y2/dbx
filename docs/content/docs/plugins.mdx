@@ -5,9 +5,7 @@ description: Install the DBX JDBC plugin, import vendor JDBC driver JARs, and cr
 
 DBX uses native Rust database drivers by default. JDBC is optional: install the JDBC plugin when you need to connect to a database that DBX does not support natively, or when you specifically need a vendor JDBC driver.
 
-<Callout type="info">
-The JDBC plugin is not bundled with the main DBX app, and it does not include vendor JDBC drivers. Install the DBX JDBC plugin first, then import the database vendor's JDBC driver JAR.
-</Callout>
+<Callout type="info">The JDBC plugin is not bundled with the main DBX app, and it does not include vendor JDBC drivers. Install the DBX JDBC plugin first, then import the database vendor's JDBC driver JAR.</Callout>
 
 ## When to Use JDBC
 
@@ -22,14 +20,14 @@ Use JDBC when:
 
 ## Requirements
 
-| Item | Required | Notes |
-|---|---:|---|
-| DBX JDBC plugin | Yes | Installed from DBX settings; lets DBX call JDBC |
-| Java Runtime | Yes | The local machine must be able to run `java`; Java 17 or newer is recommended |
-| Vendor JDBC driver JAR | Yes | For example PostgreSQL, MySQL, Dameng DM, Oracle, H2, SQLite, or another vendor driver |
-| JDBC URL | Yes | The URL usually contains host, port, database name, and parameters |
-| Username/password | Depends | File databases or some auth modes may not need them |
-| Driver class | Usually optional | Most modern JDBC drivers auto-register; enter it only when auto-discovery fails |
+| Item                   |         Required | Notes                                                                                  |
+| ---------------------- | ---------------: | -------------------------------------------------------------------------------------- |
+| DBX JDBC plugin        |              Yes | Installed from DBX settings; lets DBX call JDBC                                        |
+| Java Runtime           |              Yes | The local machine must be able to run `java`; Java 17 or newer is recommended          |
+| Vendor JDBC driver JAR |              Yes | For example PostgreSQL, MySQL, Dameng DM, Oracle, H2, SQLite, or another vendor driver |
+| JDBC URL               |              Yes | The URL usually contains host, port, database name, and parameters                     |
+| Username/password      |          Depends | File databases or some auth modes may not need them                                    |
+| Driver class           | Usually optional | Most modern JDBC drivers auto-register; enter it only when auto-discovery fails        |
 
 ## Step 1: Install Java
 
@@ -50,6 +48,7 @@ If the command is missing, install Java first. DBX checks `JAVA_HOME` first, the
     ```
 
     If `java -version` still does not work, follow the Homebrew output to configure `PATH` or `JAVA_HOME`.
+
   </Tab>
   <Tab value="Windows">
     Install Temurin, Oracle JDK, or Microsoft Build of OpenJDK. Restart DBX after installation and verify:
@@ -57,6 +56,7 @@ If the command is missing, install Java first. DBX checks `JAVA_HOME` first, the
     ```powershell
     java -version
     ```
+
   </Tab>
   <Tab value="Linux">
     Debian / Ubuntu:
@@ -70,6 +70,7 @@ If the command is missing, install Java first. DBX checks `JAVA_HOME` first, the
     ```bash
     sudo dnf install java-17-openjdk
     ```
+
   </Tab>
 </Tabs>
 
@@ -95,23 +96,21 @@ DBX does not download vendor JDBC drivers automatically. Download the `.jar` fil
 
 Common examples:
 
-| Database | Common Maven Artifact | Driver Class | JDBC URL Example |
-|---|---|---|---|
-| PostgreSQL | `org.postgresql:postgresql` | `org.postgresql.Driver` | `jdbc:postgresql://localhost:5432/postgres` |
-| MySQL | `com.mysql:mysql-connector-j` | `com.mysql.cj.jdbc.Driver` | `jdbc:mysql://localhost:3306/test` |
-| MariaDB | `org.mariadb.jdbc:mariadb-java-client` | `org.mariadb.jdbc.Driver` | `jdbc:mariadb://localhost:3306/test` |
-| Dameng DM | `com.dameng:DmJdbcDriver8` | `dm.jdbc.driver.DmDriver` | `jdbc:dm://localhost:5236` |
-| SQL Server | `com.microsoft.sqlserver:mssql-jdbc` | `com.microsoft.sqlserver.jdbc.SQLServerDriver` | `jdbc:sqlserver://localhost:1433;databaseName=master` |
-| Oracle | `com.oracle.database.jdbc:ojdbc11` | `oracle.jdbc.OracleDriver` | `jdbc:oracle:thin:@//localhost:1521/ORCLPDB1` |
-| H2 | `com.h2database:h2` | `org.h2.Driver` | `jdbc:h2:/tmp/dbx-h2-test` |
-| SQLite | `org.xerial:sqlite-jdbc` | `org.sqlite.JDBC` | `jdbc:sqlite:/Users/me/test.db` |
-| ClickHouse | `com.clickhouse:clickhouse-jdbc` | `com.clickhouse.jdbc.ClickHouseDriver` | `jdbc:clickhouse://localhost:8123/default` |
-| DB2 | `com.ibm.db2:jcc` | `com.ibm.db2.jcc.DB2Driver` | `jdbc:db2://localhost:50000/SAMPLE` |
-| Snowflake | `net.snowflake:snowflake-jdbc` | `net.snowflake.client.jdbc.SnowflakeDriver` | `jdbc:snowflake://account.region.snowflakecomputing.com/?db=DEMO` |
+| Database   | Common Maven Artifact                  | Driver Class                                   | JDBC URL Example                                                  |
+| ---------- | -------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------- |
+| PostgreSQL | `org.postgresql:postgresql`            | `org.postgresql.Driver`                        | `jdbc:postgresql://localhost:5432/postgres`                       |
+| MySQL      | `com.mysql:mysql-connector-j`          | `com.mysql.cj.jdbc.Driver`                     | `jdbc:mysql://localhost:3306/test`                                |
+| MariaDB    | `org.mariadb.jdbc:mariadb-java-client` | `org.mariadb.jdbc.Driver`                      | `jdbc:mariadb://localhost:3306/test`                              |
+| Dameng DM  | `com.dameng:DmJdbcDriver8`             | `dm.jdbc.driver.DmDriver`                      | `jdbc:dm://localhost:5236`                                        |
+| SQL Server | `com.microsoft.sqlserver:mssql-jdbc`   | `com.microsoft.sqlserver.jdbc.SQLServerDriver` | `jdbc:sqlserver://localhost:1433;databaseName=master`             |
+| Oracle     | `com.oracle.database.jdbc:ojdbc11`     | `oracle.jdbc.OracleDriver`                     | `jdbc:oracle:thin:@//localhost:1521/ORCLPDB1`                     |
+| H2         | `com.h2database:h2`                    | `org.h2.Driver`                                | `jdbc:h2:/tmp/dbx-h2-test`                                        |
+| SQLite     | `org.xerial:sqlite-jdbc`               | `org.sqlite.JDBC`                              | `jdbc:sqlite:/Users/me/test.db`                                   |
+| ClickHouse | `com.clickhouse:clickhouse-jdbc`       | `com.clickhouse.jdbc.ClickHouseDriver`         | `jdbc:clickhouse://localhost:8123/default`                        |
+| DB2        | `com.ibm.db2:jcc`                      | `com.ibm.db2.jcc.DB2Driver`                    | `jdbc:db2://localhost:50000/SAMPLE`                               |
+| Snowflake  | `net.snowflake:snowflake-jdbc`         | `net.snowflake.client.jdbc.SnowflakeDriver`    | `jdbc:snowflake://account.region.snowflakecomputing.com/?db=DEMO` |
 
-<Callout type="warn">
-JDBC URL parameters vary by database and driver version. Follow the vendor documentation. If a driver depends on multiple JARs, import or list all required JAR paths.
-</Callout>
+<Callout type="warn">JDBC URL parameters vary by database and driver version. Follow the vendor documentation. If a driver depends on multiple JARs, import or list all required JAR paths.</Callout>
 
 ## Step 4: Import JDBC Driver JARs
 
@@ -129,14 +128,14 @@ Importing a driver only copies local files. It does not change your system Java 
 
 Create a new connection and choose **JDBC**.
 
-| Field | What to enter |
-|---|---|
-| Name | Display name, such as `H2 Test`, `DM Dev`, or `Oracle Dev` |
-| JDBC URL | Full JDBC URL, such as `jdbc:postgresql://localhost:5432/postgres` |
-| Username | Database username; leave empty if not needed |
-| Password | Database password; leave empty if not needed |
+| Field                   | What to enter                                                          |
+| ----------------------- | ---------------------------------------------------------------------- |
+| Name                    | Display name, such as `H2 Test`, `DM Dev`, or `Oracle Dev`             |
+| JDBC URL                | Full JDBC URL, such as `jdbc:postgresql://localhost:5432/postgres`     |
+| Username                | Database username; leave empty if not needed                           |
+| Password                | Database password; leave empty if not needed                           |
 | Driver Class (optional) | Enter it only if auto-discovery fails, such as `org.postgresql.Driver` |
-| Driver JARs | Choose an imported driver from the dropdown, or enter local JAR paths |
+| Driver JARs             | Choose an imported driver from the dropdown, or enter local JAR paths  |
 
 JDBC URLs usually already include host, port, and database name, so the JDBC form does not show separate host and port fields.
 
@@ -153,13 +152,13 @@ DBX already has a built-in DM ODBC connection type. If you prefer the official D
 5. Create a new connection and choose **JDBC**
 6. Fill in:
 
-| Field | Value |
-|---|---|
-| JDBC URL | `jdbc:dm://127.0.0.1:5236` |
-| Username | `SYSDBA` |
-| Password | Your DM password |
-| Driver Class (optional) | `dm.jdbc.driver.DmDriver` |
-| Driver JARs | Choose the imported DM JDBC JAR |
+| Field                   | Value                           |
+| ----------------------- | ------------------------------- |
+| JDBC URL                | `jdbc:dm://127.0.0.1:5236`      |
+| Username                | `SYSDBA`                        |
+| Password                | Your DM password                |
+| Driver Class (optional) | `dm.jdbc.driver.DmDriver`       |
+| Driver JARs             | Choose the imported DM JDBC JAR |
 
 For DM, entering `dm.jdbc.driver.DmDriver` is recommended so the connection does not depend on automatic driver discovery metadata.
 
@@ -173,13 +172,13 @@ H2 is a good way to verify the JDBC workflow.
 4. Create a new connection and choose **JDBC**
 5. Fill in:
 
-| Field | Value |
-|---|---|
-| JDBC URL | `jdbc:h2:/tmp/dbx-h2-demo` |
-| Username | `sa` |
-| Password | Leave empty |
-| Driver Class (optional) | `org.h2.Driver` |
-| Driver JARs | Choose the imported H2 JAR |
+| Field                   | Value                      |
+| ----------------------- | -------------------------- |
+| JDBC URL                | `jdbc:h2:/tmp/dbx-h2-demo` |
+| Username                | `sa`                       |
+| Password                | Leave empty                |
+| Driver Class (optional) | `org.h2.Driver`            |
+| Driver JARs             | Choose the imported H2 JAR |
 
 After saving, try:
 
@@ -201,13 +200,13 @@ SELECT * FROM users;
 3. Create a new JDBC connection
 4. Fill in:
 
-| Field | Value |
-|---|---|
-| JDBC URL | `jdbc:postgresql://localhost:5432/postgres` |
-| Username | `postgres` |
-| Password | Your PostgreSQL password |
-| Driver Class (optional) | `org.postgresql.Driver` |
-| Driver JARs | Choose the imported PostgreSQL JAR |
+| Field                   | Value                                       |
+| ----------------------- | ------------------------------------------- |
+| JDBC URL                | `jdbc:postgresql://localhost:5432/postgres` |
+| Username                | `postgres`                                  |
+| Password                | Your PostgreSQL password                    |
+| Driver Class (optional) | `org.postgresql.Driver`                     |
+| Driver JARs             | Choose the imported PostgreSQL JAR          |
 
 If SSL is required, add parameters to the JDBC URL:
 
@@ -296,6 +295,4 @@ The current DBX app supports plugin protocol version `1`. DBX rejects a plugin w
 
 The initial protocol supports `testConnection`, `connect`, `executeQuery`, `listDatabases`, `listSchemas`, `listTables`, and `getColumns`.
 
-<Callout type="info">
-JDBC connection configs store `jdbc_driver_class` and `jdbc_driver_paths`. If a driver needs several JARs, keep all paths attached to the connection so metadata and query calls use the same classpath.
-</Callout>
+<Callout type="info">JDBC connection configs store `jdbc_driver_class` and `jdbc_driver_paths`. If a driver needs several JARs, keep all paths attached to the connection so metadata and query calls use the same classpath.</Callout>

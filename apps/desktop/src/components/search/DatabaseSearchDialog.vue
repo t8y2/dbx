@@ -55,17 +55,7 @@ type SearchTableTask = {
   table: TableInfo;
 };
 
-const SYSTEM_SCHEMAS = new Set([
-  "information_schema",
-  "pg_catalog",
-  "sys",
-  "system",
-  "mysql",
-  "performance_schema",
-  "xdb",
-  "outln",
-  "dbsnmp",
-]);
+const SYSTEM_SCHEMAS = new Set(["information_schema", "pg_catalog", "sys", "system", "mysql", "performance_schema", "xdb", "outln", "dbsnmp"]);
 const MAX_TABLES = 200;
 
 const keyword = ref("");
@@ -82,18 +72,10 @@ const limitedTables = ref(false);
 const currentExecutionId = ref("");
 let runId = 0;
 
-const connection = computed(() =>
-  props.prefillConnectionId ? connectionStore.getConfig(props.prefillConnectionId) : undefined,
-);
-const scopeLabel = computed(() =>
-  [connection.value?.name, props.prefillDatabase, props.prefillSchema].filter(Boolean).join(" / "),
-);
-const canSearch = computed(() =>
-  Boolean(props.prefillConnectionId && props.prefillDatabase && keyword.value.trim() && !running.value),
-);
-const progressLabel = computed(() =>
-  t("databaseSearch.progress", { done: progressDone.value, total: progressTotal.value }),
-);
+const connection = computed(() => (props.prefillConnectionId ? connectionStore.getConfig(props.prefillConnectionId) : undefined));
+const scopeLabel = computed(() => [connection.value?.name, props.prefillDatabase, props.prefillSchema].filter(Boolean).join(" / "));
+const canSearch = computed(() => Boolean(props.prefillConnectionId && props.prefillDatabase && keyword.value.trim() && !running.value));
+const progressLabel = computed(() => t("databaseSearch.progress", { done: progressDone.value, total: progressTotal.value }));
 
 watch(
   dialogOpen,
@@ -160,11 +142,7 @@ function rowPreview(columns: string[], row: unknown[], matchedColumns: string[])
 async function listSearchTables(): Promise<SearchTableTask[]> {
   if (!connection.value || !props.prefillConnectionId || !props.prefillDatabase) return [];
   const databaseType = connection.value.db_type;
-  const schemaNames = props.prefillSchema
-    ? [props.prefillSchema]
-    : isSchemaAware(databaseType)
-      ? filterSearchSchemas(await api.listSchemas(props.prefillConnectionId, props.prefillDatabase))
-      : [props.prefillDatabase];
+  const schemaNames = props.prefillSchema ? [props.prefillSchema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.prefillConnectionId, props.prefillDatabase)) : [props.prefillDatabase];
 
   const tasks: SearchTableTask[] = [];
   for (const schema of schemaNames) {
@@ -228,13 +206,7 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
 
     const executionId = makeExecutionId();
     currentExecutionId.value = executionId;
-    const result = await api.executeQuery(
-      props.prefillConnectionId,
-      props.prefillDatabase,
-      query.sql,
-      undefined,
-      executionId,
-    );
+    const result = await api.executeQuery(props.prefillConnectionId, props.prefillDatabase, query.sql, undefined, executionId);
     if (currentExecutionId.value === executionId) currentExecutionId.value = "";
     if (currentRun !== runId || cancelled.value) return;
 
@@ -308,13 +280,7 @@ function openResult(item: SearchResultItem) {
         <div class="grid gap-3 md:grid-cols-[1fr_9rem_auto]">
           <div class="space-y-1.5">
             <Label class="text-xs">{{ t("databaseSearch.keyword") }}</Label>
-            <Input
-              v-model="keyword"
-              class="h-9"
-              :placeholder="t('databaseSearch.keywordPlaceholder')"
-              :disabled="running"
-              @keydown.enter.prevent="startSearch"
-            />
+            <Input v-model="keyword" class="h-9" :placeholder="t('databaseSearch.keywordPlaceholder')" :disabled="running" @keydown.enter.prevent="startSearch" />
           </div>
           <div class="space-y-1.5">
             <Label class="text-xs">{{ t("databaseSearch.limitPerTable") }}</Label>
@@ -340,15 +306,10 @@ function openResult(item: SearchResultItem) {
         <div v-if="running || progressTotal" class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
           <span>{{ loadingTables ? t("databaseSearch.loadingTables") : progressLabel }}</span>
           <span>{{ t("databaseSearch.resultCount", { count: results.length }) }}</span>
-          <span v-if="limitedTables" class="text-amber-600">{{
-            t("databaseSearch.limitedTables", { count: 200 })
-          }}</span>
+          <span v-if="limitedTables" class="text-amber-600">{{ t("databaseSearch.limitedTables", { count: 200 }) }}</span>
         </div>
 
-        <div
-          v-if="generalError"
-          class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-        >
+        <div v-if="generalError" class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
           <AlertCircle class="mt-0.5 h-4 w-4" />
           <span>{{ generalError }}</span>
         </div>
@@ -359,18 +320,11 @@ function openResult(item: SearchResultItem) {
             <Badge variant="outline">{{ results.length }}</Badge>
           </div>
           <div v-if="results.length" class="max-h-[360px] space-y-2 overflow-auto pr-1">
-            <button
-              v-for="item in results"
-              :key="item.id"
-              class="flex w-full items-start gap-3 rounded-md border bg-background px-3 py-2 text-left transition-colors hover:bg-muted/40"
-              @click="openResult(item)"
-            >
+            <button v-for="item in results" :key="item.id" class="flex w-full items-start gap-3 rounded-md border bg-background px-3 py-2 text-left transition-colors hover:bg-muted/40" @click="openResult(item)">
               <Table2 class="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
               <div class="min-w-0 flex-1">
                 <div class="flex min-w-0 flex-wrap items-center gap-2">
-                  <span class="truncate font-medium">{{
-                    item.schema ? `${item.schema}.${item.tableName}` : item.tableName
-                  }}</span>
+                  <span class="truncate font-medium">{{ item.schema ? `${item.schema}.${item.tableName}` : item.tableName }}</span>
                   <Badge v-for="column in item.matchedColumns" :key="column" variant="secondary">{{ column }}</Badge>
                 </div>
                 <div class="mt-1 truncate text-xs text-muted-foreground">{{ item.preview }}</div>

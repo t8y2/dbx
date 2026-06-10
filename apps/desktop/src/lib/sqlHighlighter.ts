@@ -31,13 +31,7 @@ function getShikiSqlHighlighter(): Promise<ShikiHighlighter> {
 }
 
 async function loadShikiSqlHighlighter(): Promise<ShikiHighlighter> {
-  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, sql] = await Promise.all([
-    import("shiki/core"),
-    import("shiki/engine/javascript"),
-    import("shiki/themes/github-dark.mjs"),
-    import("shiki/themes/github-light.mjs"),
-    import("shiki/langs/sql.mjs"),
-  ]);
+  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, sql] = await Promise.all([import("shiki/core"), import("shiki/engine/javascript"), import("shiki/themes/github-dark.mjs"), import("shiki/themes/github-light.mjs"), import("shiki/langs/sql.mjs")]);
 
   return createHighlighterCore({
     engine: createJavaScriptRegexEngine(),

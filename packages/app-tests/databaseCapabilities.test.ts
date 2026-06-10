@@ -3,9 +3,12 @@ import { test } from "vitest";
 import {
   SCHEMA_AWARE_TYPES,
   TREE_SCHEMA_TYPES,
+  databaseProductCapabilities,
+  databaseSupportLevel,
   databaseObjectTreeNodeSchema,
   databaseObjectTreeQuerySchema,
   getDatabaseCapability,
+  manifestDatabaseTypes,
   sidebarObjectKindsForDatabase,
   supportsDatabaseCreation,
   supportsDatabaseSearch,
@@ -61,17 +64,7 @@ test("treats Access as a local single-database agent driver", () => {
 });
 
 test("exposes the extended JDBC agent ecosystem through driver management", () => {
-  for (const dbType of [
-    "databricks",
-    "saphana",
-    "teradata",
-    "vertica",
-    "firebird",
-    "exasol",
-    "opengauss",
-    "oceanbase-oracle",
-    "gbase",
-  ] as const) {
+  for (const dbType of ["databricks", "saphana", "teradata", "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle", "gbase"] as const) {
     assert.equal(supportsDriverManagement(dbType), true, `${dbType} should be agent-managed`);
     assert.equal(supportsDatabaseSearch(dbType), true, `${dbType} should support database search`);
   }
@@ -253,6 +246,28 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableTruncate("rqlite"), false);
 });
 
+test("loads product support levels and capabilities from the driver manifest", () => {
+  assert.equal(manifestDatabaseTypes().includes("mysql"), true);
+  assert.equal(databaseSupportLevel("mysql"), "operate");
+  assert.equal(databaseSupportLevel("jdbc"), "browse");
+  assert.equal(databaseSupportLevel("redis"), "connect");
+
+  assert.deepEqual(
+    {
+      metadataBrowse: databaseProductCapabilities("jdbc").metadataBrowse,
+      objectBrowser: databaseProductCapabilities("jdbc").objectBrowser,
+      tableStructureEdit: databaseProductCapabilities("jdbc").tableStructureEdit,
+      userAdmin: databaseProductCapabilities("jdbc").userAdmin,
+    },
+    {
+      metadataBrowse: true,
+      objectBrowser: true,
+      tableStructureEdit: false,
+      userAdmin: false,
+    },
+  );
+});
+
 test("object browser entry follows database tree shape", () => {
   assert.equal(supportsObjectBrowserTreeNode("postgres", "database"), false);
   assert.equal(supportsObjectBrowserTreeNode("postgres", "schema"), true);
@@ -265,13 +280,6 @@ test("object browser entry follows database tree shape", () => {
 
 test("sidebar object capability registry describes object groups by database type", () => {
   assert.deepEqual(sidebarObjectKindsForDatabase("databend"), ["TABLE", "VIEW"]);
-  assert.deepEqual(sidebarObjectKindsForDatabase("postgres"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
-  assert.deepEqual(sidebarObjectKindsForDatabase("oracle"), [
-    "TABLE",
-    "VIEW",
-    "PROCEDURE",
-    "FUNCTION",
-    "PACKAGE",
-    "PACKAGE_BODY",
-  ]);
+  assert.deepEqual(sidebarObjectKindsForDatabase("postgres"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"]);
+  assert.deepEqual(sidebarObjectKindsForDatabase("oracle"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"]);
 });

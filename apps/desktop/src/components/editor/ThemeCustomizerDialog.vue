@@ -449,23 +449,10 @@ function handleImport() {
         <div class="w-48 shrink-0 flex flex-col gap-2">
           <div class="text-sm font-medium px-1">{{ t("settings.customThemeMyThemes") }}</div>
           <div class="flex-1 overflow-y-auto space-y-1 pr-1">
-            <div
-              v-for="theme in localThemes"
-              :key="theme.id"
-              class="group flex items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer text-sm"
-              :class="activeEditId === theme.id ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-              @click="activeEditId = theme.id"
-            >
+            <div v-for="theme in localThemes" :key="theme.id" class="group flex items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer text-sm" :class="activeEditId === theme.id ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'" @click="activeEditId = theme.id">
               <div class="flex-1 min-w-0">
                 <div v-if="renamingId === theme.id" class="flex items-center gap-1" @click.stop>
-                  <Input
-                    v-model="renamingName"
-                    class="h-6 text-xs px-1 py-0"
-                    @keydown.enter="confirmRename"
-                    @keydown.esc="cancelRename"
-                    @blur="confirmRename"
-                    autofocus
-                  />
+                  <Input v-model="renamingName" class="h-6 text-xs px-1 py-0" @keydown.enter="confirmRename" @keydown.esc="cancelRename" @blur="confirmRename" autofocus />
                 </div>
                 <div v-else class="truncate">{{ theme.name }}</div>
               </div>
@@ -489,14 +476,14 @@ function handleImport() {
         </div>
 
         <!-- Edit area -->
-        <div class="flex-1 min-w-0 overflow-hidden flex flex-col">
-          <Tabs defaultValue="visual" class="w-full flex-1 flex flex-col">
+        <div class="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+          <Tabs defaultValue="visual" class="w-full flex-1 min-h-0 flex flex-col">
             <TabsList class="grid w-full grid-cols-2">
               <TabsTrigger value="visual">{{ t("settings.customThemeVisualEdit") }}</TabsTrigger>
               <TabsTrigger value="json">{{ t("settings.customThemeJsonConfig") }}</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="visual" class="space-y-4 flex-1 overflow-y-auto pr-1">
+            <TabsContent value="visual" class="space-y-4 flex-1 min-h-0 overflow-y-auto pr-1">
               <!-- Preview area -->
               <div class="rounded-lg border bg-black/50 p-5 font-mono text-base">
                 <div class="mb-2 text-sm text-muted-foreground">{{ t("settings.customThemeLivePreview") }}</div>
@@ -505,9 +492,7 @@ function handleImport() {
                     {{ token.text }}<sup v-if="token.num" class="text-xl opacity-60">{{ token.num }}</sup>
                   </span>
                 </div>
-                <div class="mt-2 text-lg" :style="{ color: localColors.comment }">
-                  <sup class="text-xl">⑥</sup> -- {{ t("settings.customThemePreviewExample") }}
-                </div>
+                <div class="mt-2 text-lg" :style="{ color: localColors.comment }"><sup class="text-xl">⑥</sup> -- {{ t("settings.customThemePreviewExample") }}</div>
               </div>
 
               <!-- Preset color schemes -->
@@ -532,11 +517,7 @@ function handleImport() {
 
               <!-- Color configuration list -->
               <div class="grid grid-cols-2 gap-3">
-                <div
-                  v-for="item in colorItems"
-                  :key="item.key"
-                  class="relative flex items-center gap-3 rounded-lg border p-3"
-                >
+                <div v-for="item in colorItems" :key="item.key" class="relative flex items-center gap-3 rounded-lg border p-3">
                   <span class="text-xl font-bold w-8 text-center shrink-0">{{ item.num }}</span>
                   <div class="flex-1 min-w-0">
                     <div class="font-medium text-sm">{{ item.label }}</div>
@@ -545,45 +526,20 @@ function handleImport() {
                   <div class="flex items-center gap-2 shrink-0">
                     <!-- Color square + dropdown arrow -->
                     <div class="relative">
-                      <button
-                        type="button"
-                        class="flex items-center gap-0.5 rounded border p-0.5 hover:bg-muted transition-colors"
-                        @click.stop="togglePalette(item.key)"
-                      >
+                      <button type="button" class="flex items-center gap-0.5 rounded border p-0.5 hover:bg-muted transition-colors" @click.stop="togglePalette(item.key)">
                         <div class="h-6 w-6 rounded-sm" :style="{ backgroundColor: localColors[item.key] }" />
                         <ChevronDown class="h-3 w-3 text-muted-foreground pointer-events-none" />
                       </button>
                       <!-- Palette popup -->
-                      <div
-                        v-if="expandedPalette === item.key"
-                        class="absolute right-0 top-full z-50 mt-1 rounded-lg border bg-popover p-2 shadow-lg"
-                        @click.stop
-                      >
+                      <div v-if="expandedPalette === item.key" class="absolute right-0 top-full z-50 mt-1 rounded-lg border bg-popover p-2 shadow-lg" @click.stop>
                         <div class="space-y-1">
                           <div v-for="(row, rowIndex) in basicColors" :key="rowIndex" class="flex gap-1">
-                            <button
-                              v-for="color in row"
-                              :key="color"
-                              type="button"
-                              class="h-5 w-5 rounded-sm border border-border/50 hover:scale-110 transition-transform"
-                              :style="{ backgroundColor: color }"
-                              @click="applyBasicColor(item.key, color)"
-                            />
+                            <button v-for="color in row" :key="color" type="button" class="h-5 w-5 rounded-sm border border-border/50 hover:scale-110 transition-transform" :style="{ backgroundColor: color }" @click="applyBasicColor(item.key, color)" />
                           </div>
                         </div>
                         <div class="mt-2 pt-2 border-t flex items-center gap-2">
-                          <input
-                            type="color"
-                            :value="localColors[item.key]"
-                            @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)"
-                            class="h-6 w-6 cursor-pointer rounded border-0 p-0"
-                          />
-                          <input
-                            type="text"
-                            :value="localColors[item.key]"
-                            @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)"
-                            class="w-20 rounded border px-2 py-0.5 text-xs font-mono"
-                          />
+                          <input type="color" :value="localColors[item.key]" @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
+                          <input type="text" :value="localColors[item.key]" @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)" class="w-20 rounded border px-2 py-0.5 text-xs font-mono" />
                         </div>
                       </div>
                     </div>
@@ -592,20 +548,11 @@ function handleImport() {
               </div>
             </TabsContent>
 
-            <TabsContent value="json" class="space-y-4 flex-1 flex flex-col min-h-[400px]">
-              <textarea
-                v-model="jsonText"
-                @blur="handleJsonChange"
-                class="flex-1 w-full rounded-lg border bg-black/50 p-4 font-mono text-sm min-h-[360px]"
-                spellcheck="false"
-              />
+            <TabsContent value="json" class="space-y-4 flex-1 min-h-0 flex flex-col">
+              <textarea v-model="jsonText" @blur="handleJsonChange" class="flex-1 w-full rounded-lg border bg-black/50 p-4 font-mono text-sm min-h-[360px]" spellcheck="false" />
               <div class="flex gap-2">
-                <Button variant="outline" size="sm" @click="handleImport">{{
-                  t("settings.customThemePasteImport")
-                }}</Button>
-                <Button variant="outline" size="sm" @click="handleExport">{{
-                  t("settings.customThemeExportJson")
-                }}</Button>
+                <Button variant="outline" size="sm" @click="handleImport">{{ t("settings.customThemePasteImport") }}</Button>
+                <Button variant="outline" size="sm" @click="handleExport">{{ t("settings.customThemeExportJson") }}</Button>
               </div>
             </TabsContent>
           </Tabs>

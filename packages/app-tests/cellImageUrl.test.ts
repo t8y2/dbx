@@ -4,10 +4,7 @@ import { cellImagePreviewUrl } from "../../apps/desktop/src/lib/cellImageUrl.ts"
 
 test("detects obvious remote image URLs", () => {
   assert.equal(cellImagePreviewUrl("https://cdn.example.com/avatar/user.png"), "https://cdn.example.com/avatar/user.png");
-  assert.equal(
-    cellImagePreviewUrl(" https://cdn.example.com/photo.JPG?width=320#preview "),
-    "https://cdn.example.com/photo.JPG?width=320#preview",
-  );
+  assert.equal(cellImagePreviewUrl(" https://cdn.example.com/photo.JPG?width=320#preview "), "https://cdn.example.com/photo.JPG?width=320#preview");
   assert.equal(cellImagePreviewUrl("https://cdn.example.com/image.webp"), "https://cdn.example.com/image.webp");
 });
 

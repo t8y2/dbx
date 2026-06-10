@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use dbx_core::storage::DesktopSettings;
 use tauri::{AppHandle, Manager, State};
@@ -37,9 +37,15 @@ pub async fn save_pinned_tree_node_ids(state: State<'_, Arc<AppState>>, ids: Vec
 
 #[tauri::command]
 pub async fn load_native_debug_logs(app: AppHandle) -> Result<String, String> {
+    let log_dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || load_native_debug_logs_from_dir(log_dir))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+fn load_native_debug_logs_from_dir(log_dir: PathBuf) -> Result<String, String> {
     const MAX_FILES: usize = 6;
     const MAX_FILE_BYTES: u64 = 512 * 1024;
-    let log_dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
     if !log_dir.exists() {
         return Ok(format!("Native log dir does not exist yet: {}", log_dir.display()));
     }

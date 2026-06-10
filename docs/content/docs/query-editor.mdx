@@ -12,34 +12,36 @@ The query editor is where daily SQL work happens: writing queries, using complet
     ### Open a Connection
 
     Select a database connection from the sidebar. DBX loads the database type and metadata for the active connection.
+
   </Step>
   <Step>
     ### Write SQL
 
     Type SQL in the editor. Completion suggestions use SQL keywords, tables, views, columns, and available relationship metadata.
+
   </Step>
   <Step>
     ### Execute the Query
 
     Use the shortcut to execute all SQL or only the selected fragment. Results appear in the data grid below the editor.
+
   </Step>
   <Step>
     ### Reuse History
 
     Open query history to bring back previously executed SQL for repeated debugging or analysis.
+
   </Step>
 </Steps>
 
 ## Execute SQL
 
-| Action | macOS | Windows / Linux |
-|---|---|---|
-| Execute all SQL | `Cmd+Enter` | `Ctrl+Enter` |
+| Action               | macOS                         | Windows / Linux                |
+| -------------------- | ----------------------------- | ------------------------------ |
+| Execute all SQL      | `Cmd+Enter`                   | `Ctrl+Enter`                   |
 | Execute selected SQL | Select text, then `Cmd+Enter` | Select text, then `Ctrl+Enter` |
 
-<Callout type="info">
-When text is selected, DBX executes only the selected SQL. When nothing is selected, it executes the full editor content.
-</Callout>
+<Callout type="info">When text is selected, DBX executes only the selected SQL. When nothing is selected, it executes the full editor content.</Callout>
 
 After execution, the result area shows returned rows, duration, affected row count, or the error message. For multi-statement scripts, select the exact fragment you want to run to reduce mistakes.
 
@@ -47,15 +49,13 @@ DBX also tracks query sessions so long-running result sets can be closed when yo
 
 ## Execution Scope
 
-| Scope | How It Is Chosen | Use Case |
-|---|---|---|
-| Selected SQL | Highlight text before running | Safest option for multi-statement scratch pads |
+| Scope             | How It Is Chosen                            | Use Case                                          |
+| ----------------- | ------------------------------------------- | ------------------------------------------------- |
+| Selected SQL      | Highlight text before running               | Safest option for multi-statement scratch pads    |
 | Current statement | Use editor cursor workflows where available | Run one statement without selecting text manually |
-| Full editor | Run with no selection | Single-purpose query tabs and short scripts |
+| Full editor       | Run with no selection                       | Single-purpose query tabs and short scripts       |
 
-<Callout type="warn">
-DBX can execute batches and scripts, but the query editor is still safest when you run one reviewed statement at a time. Use [SQL File Execution](/en/docs/sql-file) for large `.sql` files that need progress tracking.
-</Callout>
+<Callout type="warn">DBX can execute batches and scripts, but the query editor is still safest when you run one reviewed statement at a time. Use [SQL File Execution](/en/docs/sql-file) for large `.sql` files that need progress tracking.</Callout>
 
 ## Autocomplete
 
@@ -67,9 +67,7 @@ Completion suggestions come from the active database context:
 - **JOIN suggestions**: related tables and join conditions from foreign keys or known relationships
 - **SQL Server syntax**: `CROSS APPLY`, `OUTER APPLY`, and related completions for SQL Server connections
 
-<Callout type="info">
-Completion accuracy depends on connection metadata. If you just created a table or changed columns, refresh the connection metadata and try again.
-</Callout>
+<Callout type="info">Completion accuracy depends on connection metadata. If you just created a table or changed columns, refresh the connection metadata and try again.</Callout>
 
 ## Format SQL
 
@@ -87,9 +85,7 @@ DBX records executed SQL so you can reuse it later:
 - Useful for investigation queries, reports, and repair statements
 - History entries preserve enough context to identify manual queries and AI-assisted work
 
-<Callout type="warn">
-Query history may include business fields, table names, or filter values. Be mindful of sensitive information on shared machines or demo environments.
-</Callout>
+<Callout type="warn">Query history may include business fields, table names, or filter values. Be mindful of sensitive information on shared machines or demo environments.</Callout>
 
 ## Working With the Data Grid
 

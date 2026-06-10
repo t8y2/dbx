@@ -1,26 +1,11 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  applyColumnFormatter,
-  buildColumnFormatterKey,
-  resolveColumnFormatter,
-  normalizeColumnFormatter,
-  type ColumnFormatterConfig,
-} from "../../apps/desktop/src/lib/columnFormatter.ts";
+import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/columnFormatter.ts";
 
 test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
-  assert.equal(
-    applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds" }),
-    new Date(1715758200 * 1000).toLocaleString(),
-  );
-  assert.equal(
-    applyColumnFormatter(1715758200000, { kind: "datetime", unit: "milliseconds" }),
-    new Date(1715758200000).toLocaleString(),
-  );
-  assert.equal(
-    applyColumnFormatter("1715758200", { kind: "datetime", unit: "auto" }),
-    new Date(1715758200 * 1000).toLocaleString(),
-  );
+  assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds" }), new Date(1715758200 * 1000).toLocaleString());
+  assert.equal(applyColumnFormatter(1715758200000, { kind: "datetime", unit: "milliseconds" }), new Date(1715758200000).toLocaleString());
+  assert.equal(applyColumnFormatter("1715758200", { kind: "datetime", unit: "auto" }), new Date(1715758200 * 1000).toLocaleString());
 });
 
 test("does not treat compact date strings as unix timestamps", () => {
@@ -88,12 +73,6 @@ test("applies safe custom formatter templates", () => {
 });
 
 test("resolves saved custom formatter references", () => {
-  assert.deepEqual(
-    resolveColumnFormatter(
-      { kind: "custom-ref", formatterId: "fmt_1" },
-      { fmt_1: { id: "fmt_1", name: "User label", template: "user:${value}" } },
-    ),
-    { kind: "custom-template", template: "user:${value}" },
-  );
+  assert.deepEqual(resolveColumnFormatter({ kind: "custom-ref", formatterId: "fmt_1" }, { fmt_1: { id: "fmt_1", name: "User label", template: "user:${value}" } }), { kind: "custom-template", template: "user:${value}" });
   assert.equal(resolveColumnFormatter({ kind: "custom-ref", formatterId: "missing" }, {}), undefined);
 });

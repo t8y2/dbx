@@ -1,12 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  copyNameForTreeNode,
-  objectSourceKindForTreeNode,
-  sidebarSelectionCopyAction,
-  treeNodeRowAction,
-  treeNodeRowDoubleClickAction,
-} from "../../apps/desktop/src/lib/treeNodeClick.ts";
+import { copyNameForTreeNode, objectSourceKindForTreeNode, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "../../apps/desktop/src/lib/treeNodeClick.ts";
 
 test("table and view rows open data without toggling structure groups", () => {
   assert.equal(treeNodeRowAction("table", true), "open-data");
@@ -54,6 +48,7 @@ test("maps source-capable sidebar nodes to object source kinds", () => {
   assert.equal(objectSourceKindForTreeNode("view"), "VIEW");
   assert.equal(objectSourceKindForTreeNode("procedure"), "PROCEDURE");
   assert.equal(objectSourceKindForTreeNode("function"), "FUNCTION");
+  assert.equal(objectSourceKindForTreeNode("sequence"), "SEQUENCE");
   assert.equal(objectSourceKindForTreeNode("package"), "PACKAGE");
   assert.equal(objectSourceKindForTreeNode("package-body"), "PACKAGE_BODY");
   assert.equal(objectSourceKindForTreeNode("table"), null);

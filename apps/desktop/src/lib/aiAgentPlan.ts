@@ -1,10 +1,5 @@
 import type { AiAction, AiAssistantMode } from "@/lib/ai";
-import {
-  classifyAiSqlExecution,
-  shouldAttemptAiAutoExecute,
-  stripAiSqlComments,
-  type AiSqlExecutionDecision,
-} from "@/lib/aiSqlExecutionPolicy";
+import { classifyAiSqlExecution, shouldAttemptAiAutoExecute, stripAiSqlComments, type AiSqlExecutionDecision } from "@/lib/aiSqlExecutionPolicy";
 import type { ConnectionConfig } from "@/types/database";
 
 export type AiAgentStep =
@@ -18,13 +13,7 @@ export type AiAgentStep =
   | {
       kind: "execute_sql";
       status: "skipped";
-      reason:
-        | "ask_mode"
-        | "no_sql"
-        | "no_execution_intent"
-        | "unsupported_action"
-        | "blocked_by_policy"
-        | "requires_confirmation";
+      reason: "ask_mode" | "no_sql" | "no_execution_intent" | "unsupported_action" | "blocked_by_policy" | "requires_confirmation";
     };
 
 export interface AiAgentPlanInput {

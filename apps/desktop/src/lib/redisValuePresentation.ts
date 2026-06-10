@@ -24,18 +24,13 @@ export function canEditRedisMemberDetail(kind: RedisMemberDetailKind): boolean {
 
 export function clampRedisMemberDetailSheetWidth(width: number, viewportWidth: number): number {
   const viewportMax = Math.max(REDIS_MEMBER_DETAIL_SHEET_MIN_WIDTH, viewportWidth - 32);
-  return Math.min(
-    Math.min(REDIS_MEMBER_DETAIL_SHEET_MAX_WIDTH, viewportMax),
-    Math.max(REDIS_MEMBER_DETAIL_SHEET_MIN_WIDTH, width),
-  );
+  return Math.min(Math.min(REDIS_MEMBER_DETAIL_SHEET_MAX_WIDTH, viewportMax), Math.max(REDIS_MEMBER_DETAIL_SHEET_MIN_WIDTH, width));
 }
 
 export function formatRedisMemberDetail(value: unknown): RedisMemberDetail {
   if (typeof value === "string") {
     const json = parseRedisJsonDetail(value);
-    return json
-      ? { text: json.formattedText, rawText: value, format: "json", json }
-      : { text: value, rawText: value, format: "text" };
+    return json ? { text: json.formattedText, rawText: value, format: "json", json } : { text: value, rawText: value, format: "text" };
   }
 
   try {
@@ -100,14 +95,11 @@ export function getRedisMemberSelectionKey(title: string, value: unknown): strin
 export function highlightRedisJsonDetail(json: string): string {
   const escaped = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  return escaped.replace(
-    /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
-    (match) => {
-      let cls = "json-number";
-      if (match.startsWith('"')) cls = match.endsWith(":") ? "json-key" : "json-string";
-      else if (match === "true" || match === "false") cls = "json-boolean";
-      else if (match === "null") cls = "json-null";
-      return `<span class="${cls}">${match}</span>`;
-    },
-  );
+  return escaped.replace(/("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g, (match) => {
+    let cls = "json-number";
+    if (match.startsWith('"')) cls = match.endsWith(":") ? "json-key" : "json-string";
+    else if (match === "true" || match === "false") cls = "json-boolean";
+    else if (match === "null") cls = "json-null";
+    return `<span class="${cls}">${match}</span>`;
+  });
 }

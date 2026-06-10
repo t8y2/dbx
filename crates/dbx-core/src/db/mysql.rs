@@ -696,6 +696,7 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     (lower.contains("1105") && lower.contains("hy000"))
+        || (lower.contains("1615") && lower.contains("re-prepared"))
         || lower.contains("com_stmt_prepare")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
@@ -1448,6 +1449,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
     Ok(QueryResult {
         columns,
         column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1492,6 +1494,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     Ok(QueryResult {
         columns,
         column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1555,6 +1558,7 @@ pub async fn execute_query_on_conn_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -2058,6 +2062,13 @@ mod tests {
     #[test]
     fn mysql_unsupported_prepare_command_can_retry_with_text_protocol() {
         let error = "ERROR PX000 (3000): [a2jupsonbbv6zai1gomo5whu36ndqy] Unsupported command: COM_STMT_PREPARE";
+
+        assert!(mysql_error_should_retry_with_text_protocol(error));
+    }
+
+    #[test]
+    fn mysql_reprepared_statement_error_can_retry_with_text_protocol() {
+        let error = "Server error: ERROR HY000 (1615): Prepared statement needs to be re-prepared";
 
         assert!(mysql_error_should_retry_with_text_protocol(error));
     }

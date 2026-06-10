@@ -1,22 +1,10 @@
 import type { TreeNodeType } from "@/types/database";
 
-const leafTypes: Set<TreeNodeType> = new Set([
-  "column",
-  "index",
-  "fkey",
-  "trigger",
-  "procedure",
-  "function",
-  "package",
-  "package-body",
-  "object-browser",
-  "redis-db",
-  "mongo-collection",
-  "user-admin",
-  "saved-sql-file",
-]);
+const leafTypes: Set<TreeNodeType> = new Set(["column", "index", "fkey", "trigger", "procedure", "function", "package", "package-body", "object-browser", "redis-db", "mongo-collection", "user-admin", "saved-sql-file"]);
 
 const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "mongo-collection"]);
+
+const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder"]);
 
 export function treeItemPaddingLeft(depth: number): string {
   return `${depth * 16 + 8}px`;
@@ -32,8 +20,6 @@ export function canTreeNodeExpand(type: TreeNodeType): boolean {
 
 export function canTreeNodeShowExpander({ type, childCount }: { type: TreeNodeType; childCount?: number }): boolean {
   if (!canTreeNodeExpand(type)) return false;
-  if (type === "saved-sql-root" || type === "saved-sql-folder") {
-    return (childCount ?? 0) > 0;
-  }
+  if (childCount === 0 && emptyContainerTypes.has(type)) return false;
   return true;
 }

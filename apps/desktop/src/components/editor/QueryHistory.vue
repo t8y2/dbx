@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import { Clock, Copy, Database, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
+import { Copy, Database, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -47,9 +47,7 @@ const filtered = computed(() => {
       return false;
     }
     if (!q) return true;
-    return [entry.sql, entry.connection_name, entry.database, entry.operation, entry.target]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(q));
+    return [entry.sql, entry.connection_name, entry.database, entry.operation, entry.target].filter(Boolean).some((value) => String(value).toLowerCase().includes(q));
   });
 });
 
@@ -142,10 +140,7 @@ function detailsRows(entry: HistoryEntry) {
     [t("history.detail.time"), formatFullTime(entry.executed_at)],
     [t("history.detail.duration"), `${entry.execution_time_ms}ms`],
     [t("history.detail.affectedRows"), entry.affected_rows ?? "-"],
-    [
-      t("history.detail.rollback"),
-      canRollbackHistoryEntry(entry) ? t("history.rollbackAvailable") : t("history.rollbackUnavailable"),
-    ],
+    [t("history.detail.rollback"), canRollbackHistoryEntry(entry) ? t("history.rollbackAvailable") : t("history.rollbackUnavailable")],
     [t("history.detail.status"), entry.success ? t("history.success") : t("history.failed")],
   ];
   if (entry.error) rows.push([t("history.detail.error"), entry.error]);
@@ -206,7 +201,6 @@ onMounted(() => store.load());
 <template>
   <div class="h-full flex flex-col overflow-hidden border-l">
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
-      <Clock class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
       <span class="text-xs font-medium">{{ t("history.title") }}</span>
       <span class="flex-1" />
       <Button v-if="store.entries.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
@@ -218,52 +212,24 @@ onMounted(() => store.load());
     </div>
 
     <div class="border-b shrink-0">
-      <div class="flex items-center gap-1 px-2 py-1">
-        <Search class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-        <input
-          v-model="searchText"
-          autocapitalize="off"
-          autocorrect="off"
-          spellcheck="false"
-          class="flex-1 h-5 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
-          :placeholder="t('history.search')"
-        />
-      </div>
-      <div class="flex gap-1 overflow-x-auto px-2 pb-2">
-        <button
-          v-for="filter in filters"
-          :key="filter"
-          type="button"
-          class="h-6 shrink-0 rounded border px-2 text-xs"
-          :class="activeFilter === filter ? 'border-primary bg-primary text-primary-foreground' : 'bg-background'"
-          @click="activeFilter = filter"
-        >
+      <div class="flex gap-1 overflow-x-auto px-2 pt-2">
+        <button v-for="filter in filters" :key="filter" type="button" class="h-6 shrink-0 rounded border px-2 text-xs" :class="activeFilter === filter ? 'border-primary bg-primary text-primary-foreground' : 'bg-background'" @click="activeFilter = filter">
           {{ filterLabel(filter) }}
         </button>
+      </div>
+      <div class="relative flex items-center px-2 py-1">
+        <Search class="absolute left-3 w-3 h-3 text-muted-foreground pointer-events-none" />
+        <input v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 text-xs bg-transparent border rounded pl-5 pr-1 outline-none placeholder:text-muted-foreground" :placeholder="t('history.search')" />
       </div>
     </div>
 
     <div class="min-h-0 flex-1">
-      <RecycleScroller
-        v-if="shouldVirtualizeHistory(filtered.length)"
-        class="h-full"
-        :items="filtered"
-        :item-size="HISTORY_ROW_HEIGHT"
-        :buffer="HISTORY_SCROLL_BUFFER"
-        :skip-hover="true"
-        key-field="id"
-      >
+      <RecycleScroller v-if="shouldVirtualizeHistory(filtered.length)" class="h-full" :items="filtered" :item-size="HISTORY_ROW_HEIGHT" :buffer="HISTORY_SCROLL_BUFFER" :skip-hover="true" key-field="id">
         <template #default="{ item: entry }">
           <CustomContextMenu :items="getHistoryMenuItems(entry)" v-slot="{ onContextMenu }">
-            <div
-              class="h-[72px] cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-accent/50"
-              @click="selectedEntry = entry"
-              @contextmenu="onContextMenu"
-            >
+            <div class="h-[72px] cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-accent/50" @click="selectedEntry = entry" @contextmenu="onContextMenu">
               <div class="mb-0.5 flex items-center gap-1">
-                <span
-                  class="inline-flex h-5 w-9 shrink-0 items-center justify-center rounded border px-1 text-[10px] leading-none text-muted-foreground"
-                >
+                <span class="inline-flex h-5 w-9 shrink-0 items-center justify-center rounded border px-1 text-[10px] leading-none text-muted-foreground">
                   {{ kindShortLabel(entry) }}
                 </span>
                 <span class="truncate font-medium">{{ entryTitle(entry) }}</span>
@@ -311,10 +277,7 @@ onMounted(() => store.load());
                 {{ t("history.copy") }}
               </Button>
             </div>
-            <pre
-              class="max-h-48 overflow-auto rounded border bg-muted/30 p-3 text-xs"
-              v-html="highlight(selectedEntry.sql)"
-            ></pre>
+            <pre class="max-h-48 overflow-auto rounded border bg-muted/30 p-3 text-xs" v-html="highlight(selectedEntry.sql)"></pre>
           </div>
           <div v-if="selectedEntry.rollback_sql">
             <div class="mb-1 flex items-center justify-between">
@@ -324,10 +287,7 @@ onMounted(() => store.load());
                 {{ t("history.copy") }}
               </Button>
             </div>
-            <pre
-              class="max-h-40 overflow-auto rounded border bg-muted/30 p-3 text-xs"
-              v-html="highlight(selectedEntry.rollback_sql || '')"
-            ></pre>
+            <pre class="max-h-40 overflow-auto rounded border bg-muted/30 p-3 text-xs" v-html="highlight(selectedEntry.rollback_sql || '')"></pre>
           </div>
         </div>
         <DialogFooter>
@@ -336,11 +296,7 @@ onMounted(() => store.load());
             {{ t("history.analyzeWithAi") }}
           </Button>
           <Button variant="outline" @click="selectedEntry && restore(selectedEntry)">{{ t("history.restore") }}</Button>
-          <Button
-            v-if="selectedEntry && canRollbackHistoryEntry(selectedEntry)"
-            :disabled="isRollingBack"
-            @click="rollback(selectedEntry)"
-          >
+          <Button v-if="selectedEntry && canRollbackHistoryEntry(selectedEntry)" :disabled="isRollingBack" @click="rollback(selectedEntry)">
             <RotateCcw class="h-4 w-4" />
             {{ isRollingBack ? t("common.loading") : t("history.rollback") }}
           </Button>

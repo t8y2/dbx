@@ -1,4 +1,5 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
+import { supportsDatabaseFeature } from "./databaseDriverManifest";
 
 export type UserAdminDialect = "mysql" | "postgres";
 export type PrivilegeScope = "mysql" | "database" | "schema" | "table" | "role";
@@ -45,47 +46,16 @@ export interface DatabaseUserAdminProvider {
 }
 
 export const MYSQL_USER_ADMIN_TYPES = new Set<DatabaseType>(["mysql", "goldendb"]);
-export const POSTGRES_USER_ADMIN_TYPES = new Set<DatabaseType>([
-  "postgres",
-  "gaussdb",
-  "highgo",
-  "kingbase",
-  "kwdb",
-  "opengauss",
-  "vastbase",
-]);
+export const POSTGRES_USER_ADMIN_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "highgo", "kingbase", "kwdb", "opengauss", "vastbase"]);
 
-export const MYSQL_COMMON_PRIVILEGES = [
-  "SELECT",
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "CREATE",
-  "DROP",
-  "ALTER",
-  "INDEX",
-  "REFERENCES",
-  "EXECUTE",
-  "SHOW VIEW",
-  "TRIGGER",
-  "EVENT",
-  "CREATE TEMPORARY TABLES",
-] as const;
+export const MYSQL_COMMON_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "SHOW VIEW", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES"] as const;
 
 export const POSTGRES_DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
 export const POSTGRES_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
-export const POSTGRES_TABLE_PRIVILEGES = [
-  "SELECT",
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "TRUNCATE",
-  "REFERENCES",
-  "TRIGGER",
-] as const;
+export const POSTGRES_TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] as const;
 
 export function supportsDatabaseUserAdmin(dbType: DatabaseType | undefined): boolean {
-  return !!getDatabaseUserAdminProvider(dbType);
+  return !!dbType && supportsDatabaseFeature(dbType, "userAdmin") && !!getDatabaseUserAdminProvider(dbType);
 }
 
 export function getDatabaseUserAdminProvider(dbType: DatabaseType | undefined): DatabaseUserAdminProvider | null {
@@ -162,16 +132,12 @@ export function mysqlPrivilegeTargetSql(database: string, table = "*"): string {
 export function mysqlGrantPrivilegesSql(input: PrivilegeChangeInput): string {
   const privileges = normalizePrivileges(input.privileges).join(", ");
   const grantOption = input.grantOption ? " WITH GRANT OPTION" : "";
-  return `GRANT ${privileges} ON ${mysqlPrivilegeTargetSql(input.database, input.table)} TO ${mysqlUserAccount(
-    input.user,
-  )}${grantOption};`;
+  return `GRANT ${privileges} ON ${mysqlPrivilegeTargetSql(input.database, input.table)} TO ${mysqlUserAccount(input.user)}${grantOption};`;
 }
 
 export function mysqlRevokePrivilegesSql(input: PrivilegeChangeInput): string {
   const privileges = normalizePrivileges(input.privileges).join(", ");
-  return `REVOKE ${privileges} ON ${mysqlPrivilegeTargetSql(input.database, input.table)} FROM ${mysqlUserAccount(
-    input.user,
-  )};`;
+  return `REVOKE ${privileges} ON ${mysqlPrivilegeTargetSql(input.database, input.table)} FROM ${mysqlUserAccount(input.user)};`;
 }
 
 export function normalizePrivileges(privileges: string[], fallback = "SELECT"): string[] {
@@ -319,14 +285,10 @@ export function postgresPrivilegeTargetSql(input: Pick<PrivilegeChangeInput, "sc
 
 export function postgresGrantPrivilegesSql(input: PrivilegeChangeInput): string {
   if (input.scope === "role") {
-    return `GRANT ${quotePostgresIdentifier(input.role?.trim() || "")} TO ${quotePostgresIdentifier(input.user.user)}${
-      input.grantOption ? " WITH ADMIN OPTION" : ""
-    };`;
+    return `GRANT ${quotePostgresIdentifier(input.role?.trim() || "")} TO ${quotePostgresIdentifier(input.user.user)}${input.grantOption ? " WITH ADMIN OPTION" : ""};`;
   }
   const privileges = normalizePrivileges(input.privileges, postgresDefaultPrivilege(input.scope)).join(", ");
-  return `GRANT ${privileges} ON ${postgresPrivilegeTargetSql(input)} TO ${quotePostgresIdentifier(input.user.user)}${
-    input.grantOption ? " WITH GRANT OPTION" : ""
-  };`;
+  return `GRANT ${privileges} ON ${postgresPrivilegeTargetSql(input)} TO ${quotePostgresIdentifier(input.user.user)}${input.grantOption ? " WITH GRANT OPTION" : ""};`;
 }
 
 export function postgresRevokePrivilegesSql(input: PrivilegeChangeInput): string {

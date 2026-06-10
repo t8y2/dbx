@@ -1,6 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletion";
 import { getSqlCompletionContext } from "@/lib/sqlCompletion";
-import type { SqlColumnReference, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
   span: SqlTextSpan;
@@ -13,10 +13,7 @@ export interface SqlSemanticDiagnosticSchema {
   columnsByTable: Map<string, SqlCompletionColumn[]>;
 }
 
-export function buildSqlSemanticDiagnostics(
-  analysis: SqlReferenceAnalysis,
-  schema: SqlSemanticDiagnosticSchema,
-): SqlSemanticDiagnostic[] {
+export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
   const tables = analysis.tables.filter((table) => table.name.trim());
   const knownTables = new Map<string, SqlTableReference>();
@@ -74,37 +71,23 @@ export function buildSqlParserErrorDiagnostic(error: unknown, sql: string): SqlS
   };
 }
 
-export function areSqlSemanticDiagnosticsEqual(
-  left: readonly SqlSemanticDiagnostic[],
-  right: readonly SqlSemanticDiagnostic[],
-): boolean {
+export function areSqlSemanticDiagnosticsEqual(left: readonly SqlSemanticDiagnostic[], right: readonly SqlSemanticDiagnostic[]): boolean {
   if (left.length !== right.length) return false;
   return left.every((item, index) => {
     const other = right[index];
-    return (
-      !!other &&
-      item.message === other.message &&
-      item.severity === other.severity &&
-      item.span.start_line === other.span.start_line &&
-      item.span.start_column === other.span.start_column &&
-      item.span.end_line === other.span.end_line &&
-      item.span.end_column === other.span.end_column
-    );
+    return !!other && item.message === other.message && item.severity === other.severity && item.span.start_line === other.span.start_line && item.span.start_column === other.span.start_column && item.span.end_line === other.span.end_line && item.span.end_column === other.span.end_column;
   });
 }
 
-export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number): boolean {
+export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
+  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch") return false;
   const context = getSqlCompletionContext(sql, cursor);
   if (context.suggestTables || context.exclusiveTableSuggestions || context.exclusiveColumnSuggestions) return false;
   if (context.qualifier) return false;
   return true;
 }
 
-function resolveColumnTable(
-  column: SqlColumnReference,
-  tables: SqlTableReference[],
-  knownTables: Map<string, SqlTableReference>,
-): SqlTableReference | null {
+function resolveColumnTable(column: SqlColumnReference, tables: SqlTableReference[], knownTables: Map<string, SqlTableReference>): SqlTableReference | null {
   if (column.qualifier) {
     return knownTables.get(normalizeName(column.qualifier)) ?? null;
   }
@@ -112,10 +95,7 @@ function resolveColumnTable(
   return tables[0];
 }
 
-function columnsForTable(
-  table: SqlTableReference,
-  columnsByTable: Map<string, SqlCompletionColumn[]>,
-): SqlCompletionColumn[] | null {
+function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] | null {
   const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
   for (const key of keys) {
     const columns = columnsByTable.get(key) ?? columnsByTable.get(normalizeName(key));

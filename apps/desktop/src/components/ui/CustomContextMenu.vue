@@ -54,7 +54,12 @@ function close() {
   show.value = false;
 }
 
-function onClickOutside(e: MouseEvent) {
+function onPointerDownOutside(e: PointerEvent) {
+  // Only respond to primary (left) button presses. This avoids a macOS
+  // issue where Ctrl+right-click generates a synthetic click event on
+  // mouseup. By using pointerdown (which fires on press, before
+  // contextmenu) instead of click, we never see that synthetic event.
+  if (e.button !== 0) return;
   const target = e.target as Node;
   const inMenu = menuRef.value?.contains(target);
   const inSub = subRef.value?.contains(target);
@@ -78,13 +83,13 @@ function onResize() {
 watch(show, (val) => {
   if (val) {
     openMenus.add(close);
-    document.addEventListener("click", onClickOutside, true);
+    document.addEventListener("pointerdown", onPointerDownOutside, true);
     document.addEventListener("keydown", onKeydown);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
   } else {
     openMenus.delete(close);
-    document.removeEventListener("click", onClickOutside, true);
+    document.removeEventListener("pointerdown", onPointerDownOutside, true);
     document.removeEventListener("keydown", onKeydown);
     document.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", onResize);
@@ -205,9 +210,7 @@ function adjustSubPosition() {
 function itemButtonClass(variant?: "default" | "destructive") {
   return [
     "w-full gap-2 rounded-md px-2 py-1 text-[13px] leading-4 outline-hidden select-none text-left cursor-default flex items-center disabled:pointer-events-none disabled:opacity-50 transition-colors",
-    variant === "destructive"
-      ? "text-destructive hover:bg-destructive/10 hover:text-destructive focus-visible:bg-destructive/10 focus-visible:text-destructive"
-      : "hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground",
+    variant === "destructive" ? "text-destructive hover:bg-destructive/10 hover:text-destructive focus-visible:bg-destructive/10 focus-visible:text-destructive" : "hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground",
   ];
 }
 
@@ -229,7 +232,7 @@ function shortcutKeys(shortcut?: string): string[] {
 
 onBeforeUnmount(() => {
   openMenus.delete(close);
-  document.removeEventListener("click", onClickOutside, true);
+  document.removeEventListener("pointerdown", onPointerDownOutside, true);
   document.removeEventListener("keydown", onKeydown);
   document.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", onResize);
@@ -240,39 +243,19 @@ onBeforeUnmount(() => {
   <slot :on-context-menu="onContextMenu" />
   <!-- Main menu -->
   <Teleport to="body">
-    <div
-      v-if="show"
-      ref="menuRef"
-      :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }"
-      class="bg-popover text-popover-foreground min-w-40 rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
-    >
+    <div v-if="show" ref="menuRef" :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg">
       <template v-for="(item, index) in items" :key="index">
         <template v-if="item.visible !== false">
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button
-            v-else
-            :disabled="item.disabled"
-            :class="[
-              ...itemButtonClass(item.variant),
-              activeSubIndex === index ? 'bg-accent text-accent-foreground' : '',
-            ]"
-            @click="handleItemClick(item)"
-            @mouseenter="(e) => onItemMouseEnter(index, e)"
-            @mouseleave="onItemMouseLeave"
-          >
+          <button v-else :disabled="item.disabled" :class="[...itemButtonClass(item.variant), activeSubIndex === index ? 'bg-accent text-accent-foreground' : '']" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="item.icon" v-if="item.icon" :class="['size-4', item.iconClass]" />
             </span>
             <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
             <span v-if="item.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
-              <kbd
-                v-for="key in shortcutKeys(item.shortcut)"
-                :key="key"
-                class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs"
-                >{{ key }}</kbd
-              >
+              <kbd v-for="key in shortcutKeys(item.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
             <ChevronRight v-if="item.children?.length" class="ml-auto size-4 text-muted-foreground/80" />
           </button>
@@ -295,23 +278,13 @@ onBeforeUnmount(() => {
           <div v-if="child.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button
-            v-else
-            :disabled="child.disabled"
-            :class="itemButtonClass(child.variant)"
-            @click="handleSubItemClick(child)"
-          >
+          <button v-else :disabled="child.disabled" :class="itemButtonClass(child.variant)" @click="handleSubItemClick(child)">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="child.icon" v-if="child.icon" :class="['size-4', child.iconClass]" />
             </span>
             <span class="min-w-0 flex-1 truncate">{{ child.label }}</span>
             <span v-if="child.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
-              <kbd
-                v-for="key in shortcutKeys(child.shortcut)"
-                :key="key"
-                class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs"
-                >{{ key }}</kbd
-              >
+              <kbd v-for="key in shortcutKeys(child.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
           </button>
         </template>

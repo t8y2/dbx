@@ -23,12 +23,7 @@ export interface TableDiagramSvgOptions {
 }
 
 function escapeXml(value: string | number): string {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
 function svgNumber(value: number): string {
@@ -36,10 +31,7 @@ function svgNumber(value: number): string {
 }
 
 function svgHeader(canvas: DiagramCanvas): string {
-  return [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" viewBox="0 0 ${svgNumber(canvas.width)} ${svgNumber(canvas.height)}">`,
-    '<rect width="100%" height="100%" fill="#fafafa"/>',
-  ].join("");
+  return [`<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" viewBox="0 0 ${svgNumber(canvas.width)} ${svgNumber(canvas.height)}">`, '<rect width="100%" height="100%" fill="#fafafa"/>'].join("");
 }
 
 function svgText(
@@ -55,14 +47,7 @@ function svgText(
     decoration?: string;
   } = {},
 ): string {
-  const attrs = [
-    `x="${svgNumber(x)}"`,
-    `y="${svgNumber(y)}"`,
-    `fill="${options.fill ?? "#18181b"}"`,
-    `font-size="${options.size ?? 12}"`,
-    `font-family="${options.family ?? "Arial, Helvetica, sans-serif"}"`,
-    'dominant-baseline="middle"',
-  ];
+  const attrs = [`x="${svgNumber(x)}"`, `y="${svgNumber(y)}"`, `fill="${options.fill ?? "#18181b"}"`, `font-size="${options.size ?? 12}"`, `font-family="${options.family ?? "Arial, Helvetica, sans-serif"}"`, 'dominant-baseline="middle"'];
   if (options.weight) attrs.push(`font-weight="${options.weight}"`);
   if (options.anchor) attrs.push(`text-anchor="${options.anchor}"`);
   if (options.decoration) attrs.push(`text-decoration="${options.decoration}"`);
@@ -72,22 +57,11 @@ function svgText(
 function tableHeight(table: DiagramTable, options: TableDiagramSvgOptions): number {
   const visibleCount = Math.min(table.columns.length, options.maxVisibleColumns);
   const overflowHeight = table.columns.length > options.maxVisibleColumns ? options.columnRowHeight : 0;
-  return (
-    options.cardHeaderHeight +
-    visibleCount * options.columnRowHeight +
-    overflowHeight +
-    (options.cardBottomPadding ?? 12)
-  );
+  return options.cardHeaderHeight + visibleCount * options.columnRowHeight + overflowHeight + (options.cardBottomPadding ?? 12);
 }
 
 function tableDiagramDefs(): string {
-  return [
-    "<defs>",
-    '<marker id="dbx-diagram-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">',
-    '<path d="M 0 0 L 8 4 L 0 8 z" fill="#2563eb"/>',
-    "</marker>",
-    "</defs>",
-  ].join("");
+  return ["<defs>", '<marker id="dbx-diagram-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">', '<path d="M 0 0 L 8 4 L 0 8 z" fill="#2563eb"/>', "</marker>", "</defs>"].join("");
 }
 
 function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
@@ -95,20 +69,12 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
 }
 
 export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
-  const parts = [
-    svgHeader(options.canvas),
-    tableDiagramDefs(),
-    '<g fill="none" stroke="#2563eb" stroke-opacity="0.58" stroke-width="1.6">',
-  ];
+  const parts = [svgHeader(options.canvas), tableDiagramDefs(), '<g fill="none" stroke="#2563eb" stroke-opacity="0.58" stroke-width="1.6">'];
 
   for (const relationship of options.relationships) {
     const path = options.relationshipPaths[relationship.id];
     if (!path) continue;
-    parts.push(
-      `<path d="${escapeXml(path)}" marker-end="url(#dbx-diagram-arrow)">` +
-        `<title>${escapeXml(`${relationship.sourceTable}.${relationship.sourceColumn} -> ${relationship.targetTable}.${relationship.targetColumn}`)}</title>` +
-        "</path>",
-    );
+    parts.push(`<path d="${escapeXml(path)}" marker-end="url(#dbx-diagram-arrow)">` + `<title>${escapeXml(`${relationship.sourceTable}.${relationship.sourceColumn} -> ${relationship.targetTable}.${relationship.targetColumn}`)}</title>` + "</path>");
   }
   parts.push("</g>");
 
@@ -118,9 +84,7 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
     const visibleColumns = table.columns.slice(0, options.maxVisibleColumns);
     const hiddenCount = Math.max(0, table.columns.length - options.maxVisibleColumns);
     parts.push(`<g transform="translate(${svgNumber(position.x)} ${svgNumber(position.y)})">`);
-    parts.push(
-      `<rect width="${options.cardWidth}" height="${svgNumber(height)}" rx="6" fill="#ffffff" stroke="#d4d4d8"/>`,
-    );
+    parts.push(`<rect width="${options.cardWidth}" height="${svgNumber(height)}" rx="6" fill="#ffffff" stroke="#d4d4d8"/>`);
     parts.push(`<rect width="${options.cardWidth}" height="${options.cardHeaderHeight}" rx="6" fill="#f4f4f5"/>`);
     parts.push(`<path d="M 0 ${options.cardHeaderHeight} H ${options.cardWidth}" stroke="#e4e4e7"/>`);
     parts.push(svgText(table.name, 36, options.cardHeaderHeight / 2, { size: 13, weight: "600" }));
@@ -152,8 +116,7 @@ export function buildTableDiagramSvg(options: TableDiagramSvgOptions): string {
     });
 
     if (hiddenCount > 0) {
-      const y =
-        options.cardHeaderHeight + visibleColumns.length * options.columnRowHeight + options.columnRowHeight / 2;
+      const y = options.cardHeaderHeight + visibleColumns.length * options.columnRowHeight + options.columnRowHeight / 2;
       parts.push(
         svgText(options.moreColumnsLabel?.(hiddenCount) ?? `+ ${hiddenCount} columns`, 12, y, {
           size: 11,
@@ -195,21 +158,15 @@ export function buildEngineeringDiagramSvg(diagram: EngineeringDiagram): string 
     const from = centers.get(attribute.tableName);
     if (!from) continue;
     const to = nodeCenter(attribute);
-    parts.push(
-      `<line x1="${svgNumber(from.x)}" y1="${svgNumber(from.y)}" x2="${svgNumber(to.x)}" y2="${svgNumber(to.y)}"/>`,
-    );
+    parts.push(`<line x1="${svgNumber(from.x)}" y1="${svgNumber(from.y)}" x2="${svgNumber(to.x)}" y2="${svgNumber(to.y)}"/>`);
   }
   for (const relationship of diagram.relationships) {
     const source = centers.get(relationship.sourceTable);
     const target = centers.get(relationship.targetTable);
     if (!source || !target) continue;
     const middle = nodeCenter(relationship);
-    parts.push(
-      `<line x1="${svgNumber(source.x)}" y1="${svgNumber(source.y)}" x2="${svgNumber(middle.x)}" y2="${svgNumber(middle.y)}"/>`,
-    );
-    parts.push(
-      `<line x1="${svgNumber(middle.x)}" y1="${svgNumber(middle.y)}" x2="${svgNumber(target.x)}" y2="${svgNumber(target.y)}"/>`,
-    );
+    parts.push(`<line x1="${svgNumber(source.x)}" y1="${svgNumber(source.y)}" x2="${svgNumber(middle.x)}" y2="${svgNumber(middle.y)}"/>`);
+    parts.push(`<line x1="${svgNumber(middle.x)}" y1="${svgNumber(middle.y)}" x2="${svgNumber(target.x)}" y2="${svgNumber(target.y)}"/>`);
     const sourceLabel = cardinalityPoint(middle, source);
     const targetLabel = cardinalityPoint(middle, target);
     parts.push(
@@ -230,10 +187,7 @@ export function buildEngineeringDiagramSvg(diagram: EngineeringDiagram): string 
   parts.push("</g>");
 
   for (const attribute of diagram.attributes) {
-    parts.push(
-      `<ellipse cx="${svgNumber(attribute.x + attribute.width / 2)}" cy="${svgNumber(attribute.y + attribute.height / 2)}" ` +
-        `rx="${svgNumber(attribute.width / 2)}" ry="${svgNumber(attribute.height / 2)}" fill="#dcfce7" stroke="#16a34a" stroke-opacity="0.65"/>`,
-    );
+    parts.push(`<ellipse cx="${svgNumber(attribute.x + attribute.width / 2)}" cy="${svgNumber(attribute.y + attribute.height / 2)}" ` + `rx="${svgNumber(attribute.width / 2)}" ry="${svgNumber(attribute.height / 2)}" fill="#dcfce7" stroke="#16a34a" stroke-opacity="0.65"/>`);
     parts.push(
       svgText(attribute.label, attribute.x + attribute.width / 2, attribute.y + attribute.height / 2, {
         size: 11,
@@ -268,9 +222,7 @@ export function buildEngineeringDiagramSvg(diagram: EngineeringDiagram): string 
   }
 
   for (const entity of diagram.entities) {
-    parts.push(
-      `<rect x="${svgNumber(entity.x)}" y="${svgNumber(entity.y)}" width="${entity.width}" height="${entity.height}" fill="#dbeafe" stroke="#3b82f6" stroke-opacity="0.7"/>`,
-    );
+    parts.push(`<rect x="${svgNumber(entity.x)}" y="${svgNumber(entity.y)}" width="${entity.width}" height="${entity.height}" fill="#dbeafe" stroke="#3b82f6" stroke-opacity="0.7"/>`);
     parts.push(
       svgText(entity.name, entity.x + entity.width / 2, entity.y + entity.height / 2, {
         size: 13,

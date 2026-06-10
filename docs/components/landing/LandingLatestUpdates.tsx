@@ -1,15 +1,15 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
-import { ArrowRight, CheckCircle2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { RevealSection } from '@/components/landing/RevealSection';
-import { fetchChangelog, type ChangelogRelease } from '@/lib/changelog';
-import { buildLandingLatestUpdates } from '@/lib/landingLatest';
-import { fetchLatestReleaseInfo, type LatestReleaseInfo } from '@/lib/latestRelease';
+import Link from "next/link";
+import { ArrowRight, CheckCircle2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { RevealSection } from "@/components/landing/RevealSection";
+import { fetchChangelog, type ChangelogRelease } from "@/lib/changelog";
+import { buildLandingLatestUpdates } from "@/lib/landingLatest";
+import { fetchLatestReleaseInfo, type LatestReleaseInfo } from "@/lib/latestRelease";
 
 type LandingLatestUpdatesProps = {
-  lang: 'en' | 'cn';
+  lang: "en" | "cn";
   fallbackVersion: string;
   initialRelease?: ChangelogRelease;
   initialLatestRelease?: LatestReleaseInfo | null;

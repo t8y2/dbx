@@ -5,19 +5,17 @@ description: Edit table columns and indexes visually, then preview DDL before ap
 
 The table structure editor modifies columns, indexes, and constraints for a single table. Use it for focused structure changes or to generate reviewable DDL without writing it by hand.
 
-<Callout type="info">
-The structure editor is enabled for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse. Other databases may still expose DDL through the schema browser, but DBX does not show the visual editor when it cannot generate safe changes.
-</Callout>
+<Callout type="info">The structure editor is enabled for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse. Other databases may still expose DDL through the schema browser, but DBX does not show the visual editor when it cannot generate safe changes.</Callout>
 
 ## What You Can Edit
 
-| Object | Supported Actions |
-|---|---|
-| Columns | Add, delete, rename, and modify columns; change type, length, default, nullable, and comments |
-| Primary Key | Add, modify, or remove primary key columns |
-| Indexes | Add, delete, and rebuild indexes; configure index type, included columns, WHERE filter, and comments |
-| Comments | MySQL/PostgreSQL can write column and index comments |
-| Column Order | Reorder columns visually; DBX generates the appropriate ALTER statements |
+| Object       | Supported Actions                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| Columns      | Add, delete, rename, and modify columns; change type, length, default, nullable, and comments        |
+| Primary Key  | Add, modify, or remove primary key columns                                                           |
+| Indexes      | Add, delete, and rebuild indexes; configure index type, included columns, WHERE filter, and comments |
+| Comments     | MySQL/PostgreSQL can write column and index comments                                                 |
+| Column Order | Reorder columns visually; DBX generates the appropriate ALTER statements                             |
 
 ## Editor Interface
 
@@ -37,37 +35,39 @@ Database engines differ in DDL capabilities. DBX generates SQL for the active co
     ### Open Table Structure
 
     Right-click a table in the sidebar and open its structure view.
+
   </Step>
   <Step>
     ### Edit Columns or Indexes
 
     Add, modify, or remove columns and indexes in the visual editor. Changes are staged locally first.
+
   </Step>
   <Step>
     ### Review SQL Preview
 
     Before saving, review generated statements such as `ALTER TABLE`, `CREATE INDEX`, and `DROP INDEX`.
+
   </Step>
   <Step>
     ### Apply Changes
 
     Execute the SQL only after confirming it matches your intent.
+
   </Step>
 </Steps>
 
-<Callout type="warn">
-Dropping columns, changing column types, and changing nullable constraints can affect existing data. Back up production databases first and confirm application code does not depend on the old structure.
-</Callout>
+<Callout type="warn">Dropping columns, changing column types, and changing nullable constraints can affect existing data. Back up production databases first and confirm application code does not depend on the old structure.</Callout>
 
 ## Engine Differences
 
-| Engine | Notes |
-|---|---|
-| MySQL / MariaDB | Add, delete, and modify columns; add and delete indexes |
-| PostgreSQL | Rename columns, change type/default/nullability/comments, and add/delete indexes |
-| SQLite | Add, delete, and rename columns; more complex existing-column edits are blocked with a warning |
-| SQL Server | Focused editor support for common table structure operations |
-| Other engines | Use generated DDL, Schema Diff, or manual SQL when DBX does not expose the visual editor |
+| Engine          | Notes                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| MySQL / MariaDB | Add, delete, and modify columns; add and delete indexes                                        |
+| PostgreSQL      | Rename columns, change type/default/nullability/comments, and add/delete indexes               |
+| SQLite          | Add, delete, and rename columns; more complex existing-column edits are blocked with a warning |
+| SQL Server      | Focused editor support for common table structure operations                                   |
+| Other engines   | Use generated DDL, Schema Diff, or manual SQL when DBX does not expose the visual editor       |
 
 ## Recommendations
 

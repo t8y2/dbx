@@ -1,0 +1,50 @@
+# DBX - Database Workspace
+# https://dbxio.com
+
+## What is DBX?
+DBX is an open-source database workspace that supports 25+ database engines in a 15 MB package, available as both desktop and Docker deployment. It includes AI-powered SQL generation, MCP server integration for coding agents, schema tools, and self-hosted browser access.
+
+## Core Features
+- **SQL Editor**: CodeMirror 6-based editor with syntax highlighting, auto-completion, formatting, and query history.
+- **AI SQL Assistant**: Generate, explain, optimize, and fix SQL using Claude or OpenAI models.
+- **MCP Integration**: Expose database connections to AI coding agents (Claude Code, Cursor, Windsurf) via Model Context Protocol.
+- **Data Grid**: Virtual scrolling, inline editing, filtering, sorting, and export to CSV/JSON/Markdown.
+- **Schema Browser**: Browse databases, schemas, tables, columns, indexes, foreign keys, and triggers.
+- **Schema Diff**: Compare schemas across environments and generate migration SQL.
+- **Redis Browser**: Pattern-based key search with support for all Redis data types.
+- **MongoDB Browser**: Document CRUD with paginated browsing.
+- **SSH Tunnels**: Connect to databases behind firewalls with key/password authentication.
+
+## Supported Databases
+MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, MariaDB, TiDB, and more.
+
+## MCP Server
+```bash
+npm install -g @dbx-app/mcp-server
+```
+Configure `.mcp.json` to let AI agents query databases through DBX connections:
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "npx",
+      "args": ["-y", "@dbx-app/mcp-server"]
+    }
+  }
+}
+```
+
+## Key Links
+- Documentation: https://dbxio.com/en/docs/what-is-dbx
+- Changelog: https://dbxio.com/en/changelog
+- Community: https://dbxio.com/en/community
+- GitHub: https://github.com/t8y2/dbx
+- Drivers: https://dbxio.com/en/drivers
+
+## Platform Support
+- Desktop: Windows, macOS (Intel + Apple Silicon), Linux
+- Docker: Self-hosted browser-based access
+- MCP: npm package for AI agent integration
+
+## Pricing
+DBX is free and open-source (AGPL-3.0).

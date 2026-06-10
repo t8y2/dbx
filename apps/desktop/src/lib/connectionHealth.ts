@@ -1,12 +1,4 @@
-const CONNECTION_ERROR_PATTERNS = [
-  "connection",
-  "broken pipe",
-  "reset by peer",
-  "timed out",
-  "closed",
-  "eof",
-  "i/o error",
-];
+const CONNECTION_ERROR_PATTERNS = ["connection", "broken pipe", "reset by peer", "timed out", "closed", "eof", "i/o error"];
 
 export function staleConnectionMessage(error: unknown): string {
   if (error instanceof Error) return error.message;

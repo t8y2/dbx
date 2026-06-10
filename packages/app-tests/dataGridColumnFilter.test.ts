@@ -1,9 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  appendColumnValueFilterCondition,
-  buildColumnValueFilterCondition,
-} from "../../apps/desktop/src/lib/dataGridColumnFilter.ts";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition } from "../../apps/desktop/src/lib/dataGridColumnFilter.ts";
 
 function installFilterFetchMock() {
   globalThis.fetch = (async (input, init) => {
@@ -12,16 +9,9 @@ function installFilterFetchMock() {
     }
     const body = JSON.parse(String(init?.body ?? "{}"));
     const options = body.options;
-    const quote =
-      options.databaseType === "mysql"
-        ? (name: string) => `\`${name}\``
-        : options.databaseType === "sqlserver"
-          ? (name: string) => `[${name}]`
-          : (name: string) => `"${name}"`;
+    const quote = options.databaseType === "mysql" ? (name: string) => `\`${name}\`` : options.databaseType === "sqlserver" ? (name: string) => `[${name}]` : (name: string) => `"${name}"`;
     const text = String(options.rawValue ?? "").trim();
-    const result = /^null$/i.test(text)
-      ? `${quote(options.columnName)} IS NULL`
-      : `${quote(options.columnName)} = ${/^\d+$/.test(text) ? text : `'${text}'`}`;
+    const result = /^null$/i.test(text) ? `${quote(options.columnName)} IS NULL` : `${quote(options.columnName)} = ${/^\d+$/.test(text) ? text : `'${text}'`}`;
     return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
 }

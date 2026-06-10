@@ -115,11 +115,7 @@ export function collectEtcdGroupIds(nodes: EtcdKeyTreeNode[]): Set<string> {
   return ids;
 }
 
-export function flattenVisibleEtcdKeyTree(
-  nodes: EtcdKeyTreeNode[],
-  expandedGroupIds: ReadonlySet<string>,
-  depth = 0,
-): EtcdKeyTreeRow[] {
+export function flattenVisibleEtcdKeyTree(nodes: EtcdKeyTreeNode[], expandedGroupIds: ReadonlySet<string>, depth = 0): EtcdKeyTreeRow[] {
   const rows: EtcdKeyTreeRow[] = [];
   for (const node of nodes) {
     rows.push({ node, depth });

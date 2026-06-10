@@ -1,12 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  buildGroupedObjectTreeNodes,
-  buildObjectGroupPlaceholderNodes,
-  buildSimpleObjectTreeNodes,
-  buildTableTreeNodes,
-  mergeTableInfosIntoObjects,
-} from "../../apps/desktop/src/lib/tableTree.ts";
+import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects } from "../../apps/desktop/src/lib/tableTree.ts";
 import type { ObjectInfo, TableInfo, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function table(name: string, parent?: string): TableInfo {
@@ -177,7 +171,7 @@ test("buildObjectGroupPlaceholderNodes creates capability-driven lazy sidebar gr
     connectionId: "conn",
     database: "app",
     schema: "HR",
-    objectTypes: ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"],
+    objectTypes: ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"],
   });
 
   assert.deepEqual(
@@ -187,11 +181,12 @@ test("buildObjectGroupPlaceholderNodes creates capability-driven lazy sidebar gr
       { label: "tree.views", type: "group-views", count: undefined, children: [] },
       { label: "tree.procedures", type: "group-procedures", count: undefined, children: [] },
       { label: "tree.functions", type: "group-functions", count: undefined, children: [] },
+      { label: "tree.sequences", type: "group-sequences", count: undefined, children: [] },
     ],
   );
 });
 
-test("buildSimpleObjectTreeNodes keeps routines and packages visible in flat sidebar mode", () => {
+test("buildSimpleObjectTreeNodes keeps routines, sequences, and packages visible in flat sidebar mode", () => {
   const nodes = buildSimpleObjectTreeNodes({
     nodeId: "conn:app:HR",
     connectionId: "conn",
@@ -202,6 +197,7 @@ test("buildSimpleObjectTreeNodes keeps routines and packages visible in flat sid
       { name: "ACTIVE_ORDERS", object_type: "VIEW", schema: "HR" },
       { name: "REFRESH_STATS", object_type: "PROCEDURE", schema: "HR" },
       { name: "TOTAL_DUE", object_type: "FUNCTION", schema: "HR" },
+      { name: "ORDER_ID_SEQ", object_type: "SEQUENCE", schema: "HR" },
       { name: "PAYROLL", object_type: "PACKAGE", schema: "HR" },
       { name: "PAYROLL", object_type: "PACKAGE_BODY", schema: "HR" },
     ],
@@ -212,6 +208,7 @@ test("buildSimpleObjectTreeNodes keeps routines and packages visible in flat sid
     [
       { label: "ORDERS", type: "table" },
       { label: "ACTIVE_ORDERS", type: "view" },
+      { label: "ORDER_ID_SEQ", type: "sequence" },
       { label: "PAYROLL", type: "package" },
       { label: "PAYROLL", type: "package-body" },
       { label: "REFRESH_STATS", type: "procedure" },

@@ -33,13 +33,7 @@ async function deriveKey(passphrase: string, salt: Uint8Array<ArrayBuffer>): Pro
   const encoder = new TextEncoder();
   const subtle = getSubtleCrypto();
   const baseKey = await subtle.importKey("raw", encoder.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
-  return subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
-    baseKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
+  return subtle.deriveKey({ name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" }, baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
 
 function toBase64(data: ArrayBuffer | Uint8Array<ArrayBuffer>): string {
@@ -104,11 +98,5 @@ export async function decryptConfig(payload: EncryptedPayload, passphrase: strin
 export function isEncryptedConfig(data: unknown): data is EncryptedPayload {
   if (typeof data !== "object" || data === null) return false;
   const obj = data as Record<string, unknown>;
-  return (
-    obj.format === "dbx-encrypted" &&
-    obj.version === 1 &&
-    typeof obj.salt === "string" &&
-    typeof obj.iv === "string" &&
-    typeof obj.data === "string"
-  );
+  return obj.format === "dbx-encrypted" && obj.version === 1 && typeof obj.salt === "string" && typeof obj.iv === "string" && typeof obj.data === "string";
 }

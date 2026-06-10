@@ -1,21 +1,8 @@
 {
   "protocolVersion": 1,
   "handshakeMethod": "handshake",
-  "handshakeResponseFields": [
-    "protocolVersion",
-    "agentProtocolVersion",
-    "capabilities"
-  ],
-  "capabilities": [
-    "connect",
-    "test_connection",
-    "metadata",
-    "query",
-    "paged_query",
-    "transaction",
-    "ddl",
-    "kv"
-  ],
+  "handshakeResponseFields": ["protocolVersion", "agentProtocolVersion", "capabilities"],
+  "capabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv"],
   "commonMethods": [
     "handshake",
     "connect",
@@ -39,18 +26,6 @@
     "disconnect",
     "shutdown"
   ],
-  "mongoLegacyMethods": [
-    "list_databases",
-    "list_collections",
-    "find_documents",
-    "insert_document",
-    "update_document",
-    "delete_document"
-  ],
-  "kvMethods": [
-    "kv_list_prefix",
-    "kv_get",
-    "kv_put",
-    "kv_delete"
-  ]
+  "mongoLegacyMethods": ["list_databases", "list_collections", "find_documents", "insert_document", "update_document", "delete_document"],
+  "kvMethods": ["kv_list_prefix", "kv_get", "kv_put", "kv_delete"]
 }

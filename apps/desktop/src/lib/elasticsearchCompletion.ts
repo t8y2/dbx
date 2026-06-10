@@ -52,28 +52,7 @@ const INDEX_ENDPOINTS = [
   { label: "_refresh", apply: "_refresh", method: "POST", detail: "Refresh index" },
 ];
 
-const JSON_KEYWORDS = [
-  "query",
-  "bool",
-  "must",
-  "should",
-  "must_not",
-  "filter",
-  "match",
-  "match_all",
-  "term",
-  "terms",
-  "range",
-  "exists",
-  "sort",
-  "aggs",
-  "aggregations",
-  "size",
-  "from",
-  "_source",
-  "fields",
-  "track_total_hits",
-];
+const JSON_KEYWORDS = ["query", "bool", "must", "should", "must_not", "filter", "match", "match_all", "term", "terms", "range", "exists", "sort", "aggs", "aggregations", "size", "from", "_source", "fields", "track_total_hits"];
 
 const JSON_SNIPPETS = [
   {
@@ -147,19 +126,12 @@ export function getElasticsearchCompletionContext(text: string, cursor: number):
   };
 }
 
-export function buildElasticsearchCompletionItems(
-  text: string,
-  cursor: number,
-  input: ElasticsearchCompletionInput = {},
-): ElasticsearchCompletionItem[] {
+export function buildElasticsearchCompletionItems(text: string, cursor: number, input: ElasticsearchCompletionInput = {}): ElasticsearchCompletionItem[] {
   const context = getElasticsearchCompletionContext(text, cursor);
   return buildElasticsearchCompletionItemsFromContext(context, input);
 }
 
-export function buildElasticsearchCompletionItemsFromContext(
-  context: ElasticsearchCompletionContext,
-  input: ElasticsearchCompletionInput = {},
-): ElasticsearchCompletionItem[] {
+export function buildElasticsearchCompletionItemsFromContext(context: ElasticsearchCompletionContext, input: ElasticsearchCompletionInput = {}): ElasticsearchCompletionItem[] {
   if (context.mode === "method") return methodItems(context.prefix);
   if (context.mode === "json") return jsonItems(context.prefix);
   return pathItems(context, input.indices ?? []);
@@ -224,15 +196,13 @@ function indexItems(prefix: string, indices: string[]): ElasticsearchCompletionI
 
 function rootEndpointItems(prefix: string): ElasticsearchCompletionItem[] {
   const normalizedPrefix = prefix.startsWith("/") ? prefix.slice(1) : prefix;
-  return ROOT_ENDPOINTS.filter((endpoint) => matchesFuzzyPrefix(endpoint.label.slice(1), normalizedPrefix)).map(
-    (endpoint) => ({
-      label: endpoint.label,
-      type: endpoint.apply.includes("\n") ? ("snippet" as const) : ("property" as const),
-      detail: `${endpoint.method} ${endpoint.detail}`,
-      apply: endpoint.apply,
-      boost: 95,
-    }),
-  );
+  return ROOT_ENDPOINTS.filter((endpoint) => matchesFuzzyPrefix(endpoint.label.slice(1), normalizedPrefix)).map((endpoint) => ({
+    label: endpoint.label,
+    type: endpoint.apply.includes("\n") ? ("snippet" as const) : ("property" as const),
+    detail: `${endpoint.method} ${endpoint.detail}`,
+    apply: endpoint.apply,
+    boost: 95,
+  }));
 }
 
 function indexEndpointItems(prefix: string): ElasticsearchCompletionItem[] {
@@ -254,15 +224,13 @@ function jsonItems(prefix: string): ElasticsearchCompletionItem[] {
     apply: `"${key}"`,
     boost: key.startsWith(normalizedPrefix) ? 95 : 70,
   }));
-  const snippetItems = JSON_SNIPPETS.filter((snippet) => matchesFuzzyPrefix(snippet.label, normalizedPrefix)).map(
-    (snippet) => ({
-      label: snippet.label,
-      type: "snippet" as const,
-      detail: snippet.detail,
-      apply: snippet.apply,
-      boost: 105,
-    }),
-  );
+  const snippetItems = JSON_SNIPPETS.filter((snippet) => matchesFuzzyPrefix(snippet.label, normalizedPrefix)).map((snippet) => ({
+    label: snippet.label,
+    type: "snippet" as const,
+    detail: snippet.detail,
+    apply: snippet.apply,
+    boost: 105,
+  }));
   return dedupeAndSort([...snippetItems, ...keyItems]);
 }
 

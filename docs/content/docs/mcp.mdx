@@ -3,9 +3,7 @@ title: MCP Integration
 description: Let AI coding agents query your databases through the Model Context Protocol.
 ---
 
-<Callout type="info">
-One line of config to let AI coding agents query your databases directly. Works with Claude Code, Cursor, Windsurf, and VS Code Copilot.
-</Callout>
+<Callout type="info">One line of config to let AI coding agents query your databases directly. Works with Claude Code, Cursor, Windsurf, and VS Code Copilot.</Callout>
 
 ## What is MCP?
 
@@ -28,6 +26,7 @@ AI Agent → MCP Server → Your Database → Results
     ```bash
     npm install -g @dbx-app/mcp-server
     ```
+
   </Step>
   <Step>
     ### Configure Your AI Agent
@@ -44,6 +43,7 @@ AI Agent → MCP Server → Your Database → Results
       }
     }
     ```
+
   </Step>
   <Step>
     ### Start Using
@@ -55,17 +55,18 @@ AI Agent → MCP Server → Your Database → Results
     - "Describe the users table"
     - "Query the average salary from employees"
     - "Open the orders table" (requires DBX running)
+
   </Step>
 </Steps>
 
 ## Supported AI Agents
 
-| Agent | Configuration |
-|---|---|
-| Claude Code | `.mcp.json` (native support) |
-| Cursor | `.cursor/mcp.json` |
-| Windsurf | `.windsurfrules` |
-| VS Code + Copilot | MCP extension |
+| Agent             | Configuration                |
+| ----------------- | ---------------------------- |
+| Claude Code       | `.mcp.json` (native support) |
+| Cursor            | `.cursor/mcp.json`           |
+| Windsurf          | `.windsurfrules`             |
+| VS Code + Copilot | MCP extension                |
 
 ## Tools
 
@@ -76,9 +77,11 @@ DBX MCP Server provides the following tools. Your AI agent calls them automatica
 List all database connections configured in DBX.
 
 **Example:**
+
 > "List my database connections"
 
 **Response:**
+
 ```
 | Name     | Type     | Host      | Port | Database |
 | -------- | -------- | --------- | ---- | -------- |
@@ -90,22 +93,23 @@ List all database connections configured in DBX.
 
 List tables and views for a connection.
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | DBX connection name |
-| `schema` | No | Schema name (default: public) |
+| Parameter         | Required | Description                   |
+| ----------------- | -------- | ----------------------------- |
+| `connection_name` | Yes      | DBX connection name           |
+| `schema`          | No       | Schema name (default: public) |
 
 ### `dbx_describe_table`
 
 Get column definitions for a table. The AI uses this to understand your data structure before generating queries.
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | DBX connection name |
-| `table` | Yes | Table name |
-| `schema` | No | Schema name (default: public) |
+| Parameter         | Required | Description                   |
+| ----------------- | -------- | ----------------------------- |
+| `connection_name` | Yes      | DBX connection name           |
+| `table`           | Yes      | Table name                    |
+| `schema`          | No       | Schema name (default: public) |
 
 **Response:**
+
 ```
 | Column      | Type      | Nullable | Default | Comment    |
 | ----------- | --------- | -------- | ------- | ---------- |
@@ -119,61 +123,63 @@ Get column definitions for a table. The AI uses this to understand your data str
 
 Execute a SQL query and return results (max 100 rows).
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | DBX connection name |
-| `sql` | Yes | SQL query |
+| Parameter         | Required | Description         |
+| ----------------- | -------- | ------------------- |
+| `connection_name` | Yes      | DBX connection name |
+| `sql`             | Yes      | SQL query           |
 
 ### `dbx_get_schema_context`
 
 Return compact table and column context for SQL generation.
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | DBX connection name |
-| `schema` | No | Schema name |
-| `tables` | No | Specific table names to include |
-| `max_tables` | No | Maximum number of tables to include; capped between 1 and 20 |
+| Parameter         | Required | Description                                                  |
+| ----------------- | -------- | ------------------------------------------------------------ |
+| `connection_name` | Yes      | DBX connection name                                          |
+| `schema`          | No       | Schema name                                                  |
+| `tables`          | No       | Specific table names to include                              |
+| `max_tables`      | No       | Maximum number of tables to include; capped between 1 and 20 |
 
 ### `dbx_add_connection`
 
 Add a new database connection to DBX.
 
-| Parameter | Required | Description |
-|---|---|---|
-| `name` | Yes | Connection name |
-| `db_type` | Yes | Database type (postgres, mysql, sqlite, redis, etc.) |
-| `host` | Yes | Database host |
-| `port` | Yes | Database port |
-| `username` | No | Username |
-| `password` | No | Password |
-| `database` | No | Default database name |
-| `ssl` | No | Enable SSL (default: false) |
+| Parameter  | Required | Description                                          |
+| ---------- | -------- | ---------------------------------------------------- |
+| `name`     | Yes      | Connection name                                      |
+| `db_type`  | Yes      | Database type (postgres, mysql, sqlite, redis, etc.) |
+| `host`     | Yes      | Database host                                        |
+| `port`     | Yes      | Database port                                        |
+| `username` | No       | Username                                             |
+| `password` | No       | Password                                             |
+| `database` | No       | Default database name                                |
+| `ssl`      | No       | Enable SSL (default: false)                          |
 
 **Example:**
+
 > "Add a PostgreSQL connection named prod-db on db.example.com:5432"
 
 ### `dbx_remove_connection`
 
 Remove a database connection from DBX.
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | Name of the connection to remove |
+| Parameter         | Required | Description                      |
+| ----------------- | -------- | -------------------------------- |
+| `connection_name` | Yes      | Name of the connection to remove |
 
 **Example:**
+
 > "Remove the test-db connection"
 
 ### `dbx_open_table`
 
 Open a table in DBX desktop app UI. **Requires DBX to be running.**
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | DBX connection name |
-| `table` | Yes | Table name |
-| `database` | No | Database name |
-| `schema` | No | Schema name |
+| Parameter         | Required | Description         |
+| ----------------- | -------- | ------------------- |
+| `connection_name` | Yes      | DBX connection name |
+| `table`           | Yes      | Table name          |
+| `database`        | No       | Database name       |
+| `schema`          | No       | Schema name         |
 
 DBX opens a new tab with the table data and brings the window to front.
 
@@ -181,11 +187,11 @@ DBX opens a new tab with the table data and brings the window to front.
 
 Execute a SQL query in DBX desktop app UI. **Requires DBX to be running.**
 
-| Parameter | Required | Description |
-|---|---|---|
-| `connection_name` | Yes | DBX connection name |
-| `sql` | Yes | SQL query |
-| `database` | No | Database name |
+| Parameter         | Required | Description         |
+| ----------------- | -------- | ------------------- |
+| `connection_name` | Yes      | DBX connection name |
+| `sql`             | Yes      | SQL query           |
+| `database`        | No       | Database name       |
 
 ## How It Works
 
@@ -193,11 +199,11 @@ Execute a SQL query in DBX desktop app UI. **Requires DBX to be running.**
 
 The MCP Server reads DBX's SQLite database:
 
-| Platform | Path |
-|---|---|
-| macOS | `~/Library/Application Support/com.dbx.app/dbx.db` |
-| Linux | `~/.config/com.dbx.app/dbx.db` |
-| Windows | `%APPDATA%\com.dbx.app\dbx.db` |
+| Platform | Path                                               |
+| -------- | -------------------------------------------------- |
+| macOS    | `~/Library/Application Support/com.dbx.app/dbx.db` |
+| Linux    | `~/.config/com.dbx.app/dbx.db`                     |
+| Windows  | `%APPDATA%\com.dbx.app\dbx.db`                     |
 
 ### UI Integration
 
@@ -215,41 +221,31 @@ MCP query support in desktop local mode is implemented for PostgreSQL, MySQL, an
 
 MCP query execution is intentionally conservative:
 
-| Rule | Default |
-|---|---|
-| Empty or unrecognized SQL | Blocked |
-| Multiple SQL statements | Allowed; each statement is checked and executed separately |
-| Non-read SQL | Blocked unless writes are explicitly allowed |
-| `DROP`, `TRUNCATE`, or `ALTER` | Blocked unless dangerous SQL is explicitly allowed |
-| `UPDATE` or `DELETE` without `WHERE` when writes are allowed | Blocked |
+| Rule                                                         | Default                                                    |
+| ------------------------------------------------------------ | ---------------------------------------------------------- |
+| Empty or unrecognized SQL                                    | Blocked                                                    |
+| Multiple SQL statements                                      | Allowed; each statement is checked and executed separately |
+| Non-read SQL                                                 | Blocked unless writes are explicitly allowed               |
+| `DROP`, `TRUNCATE`, or `ALTER`                               | Blocked unless dangerous SQL is explicitly allowed         |
+| `UPDATE` or `DELETE` without `WHERE` when writes are allowed | Blocked                                                    |
 
 Set `DBX_MCP_ALLOW_WRITES=1` to allow write statements. Set `DBX_MCP_ALLOW_DANGEROUS_SQL=1` only in controlled environments where destructive SQL is expected.
 
 ### Desktop And Web Mode
 
-| Mode | How It Is Selected | Notes |
-|---|---|---|
-| Desktop local mode | Default | Reads DBX desktop connection storage and can call desktop-only UI bridge tools |
-| Web mode | Set `DBX_WEB_URL` | Sends requests to the DBX web backend instead of reading local desktop storage |
+| Mode               | How It Is Selected | Notes                                                                          |
+| ------------------ | ------------------ | ------------------------------------------------------------------------------ |
+| Desktop local mode | Default            | Reads DBX desktop connection storage and can call desktop-only UI bridge tools |
+| Web mode           | Set `DBX_WEB_URL`  | Sends requests to the DBX web backend instead of reading local desktop storage |
 
 ## FAQ
 
 <Accordions>
-  <Accordion title="MCP Server can't connect to my database">
-    Check that the connection works in DBX first. The MCP Server uses the same config and credentials. Make sure the database is running and network-reachable.
-  </Accordion>
-  <Accordion title="dbx_open_table says 'DBX is not running'">
-    Start the DBX desktop app first. UI integration requires DBX's local HTTP service (port 4224).
-  </Accordion>
-  <Accordion title="Connection name not found">
-    Connection name matching is case-insensitive but must match the name configured in DBX. Use `dbx_list_connections` to see all available names.
-  </Accordion>
-  <Accordion title="Query timeout">
-    MCP Server has a 30-second query timeout. Consider adding indexes or simplifying your query. You can also ask the AI to use `dbx_describe_table` first to understand the schema, then generate an optimized query.
-  </Accordion>
-  <Accordion title="How to use MCP with Docker?">
-    DBX deployed via Docker also supports MCP. The MCP Server reads connection configs from inside the Docker container. Make sure the MCP Server can access DBX's config directory.
-  </Accordion>
+  <Accordion title="MCP Server can't connect to my database">Check that the connection works in DBX first. The MCP Server uses the same config and credentials. Make sure the database is running and network-reachable.</Accordion>
+  <Accordion title="dbx_open_table says 'DBX is not running'">Start the DBX desktop app first. UI integration requires DBX's local HTTP service (port 4224).</Accordion>
+  <Accordion title="Connection name not found">Connection name matching is case-insensitive but must match the name configured in DBX. Use `dbx_list_connections` to see all available names.</Accordion>
+  <Accordion title="Query timeout">MCP Server has a 30-second query timeout. Consider adding indexes or simplifying your query. You can also ask the AI to use `dbx_describe_table` first to understand the schema, then generate an optimized query.</Accordion>
+  <Accordion title="How to use MCP with Docker?">DBX deployed via Docker also supports MCP. The MCP Server reads connection configs from inside the Docker container. Make sure the MCP Server can access DBX's config directory.</Accordion>
 </Accordions>
 
 ## Requirements

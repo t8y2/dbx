@@ -1,5 +1,6 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/api";
+import { supportsDatabaseFeature } from "./databaseDriverManifest";
 
 export interface ExplainPlanNode {
   id: string;
@@ -20,23 +21,18 @@ export interface ParsedExplainPlan {
   nodes: ExplainPlanNode[];
 }
 
-export type BuildExplainSqlResult =
-  | { ok: true; sql: string }
-  | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
+export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
 const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng"]);
 export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" {
-  return !!databaseType && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
+  return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
 export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string): Promise<BuildExplainSqlResult> {
   return api.buildExplainSql({ databaseType, sql }) as Promise<BuildExplainSqlResult>;
 }
 
-export function parseExplainResult(
-  databaseType: "mysql" | "postgres" | "dameng",
-  result: QueryResult,
-): ParsedExplainPlan {
+export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng", result: QueryResult): ParsedExplainPlan {
   if (databaseType === "dameng") {
     return parseDamengExplain(result);
   }
@@ -103,10 +99,8 @@ export function parseDamengExplainText(planText: string): ParsedExplainPlan {
     const depth = Math.max(0, Math.round((indent - baseIndent) / 2));
     while (parentStack.length > depth) parentStack.pop();
 
-    const childIndex =
-      parentStack.length === 0 ? rootNodes.length + 1 : parentStack[parentStack.length - 1].children.length + 1;
-    const id =
-      parentStack.length === 0 ? String(childIndex) : `${parentStack[parentStack.length - 1].id}.${childIndex}`;
+    const childIndex = parentStack.length === 0 ? rootNodes.length + 1 : parentStack[parentStack.length - 1].children.length + 1;
+    const id = parentStack.length === 0 ? String(childIndex) : `${parentStack[parentStack.length - 1].id}.${childIndex}`;
 
     const details: string[] = [];
     if (nodeInfo.props) details.push(nodeInfo.props);
@@ -315,8 +309,7 @@ function buildColumnIndex(columns: string[]): Record<string, number> {
     if (name === "objectName") return lower.findIndex((c) => c.includes("object_name"));
     if (name === "objectType") return lower.findIndex((c) => c.includes("object_type"));
     if (name === "cost") return lower.findIndex((c) => c === "cost" || c === "total_cost");
-    if (name === "cardinality")
-      return lower.findIndex((c) => c === "cardinality" || c.includes("cardinality") || c === "rows");
+    if (name === "cardinality") return lower.findIndex((c) => c === "cardinality" || c.includes("cardinality") || c === "rows");
     return -1;
   };
   return {
@@ -446,11 +439,7 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
     cost: [startupCost, totalCost].every(Boolean) ? `${startupCost}..${totalCost}` : totalCost,
     rows,
     width,
-    details: [
-      joinType ? `Join: ${joinType}` : "",
-      filter ? `Filter: ${filter}` : "",
-      sortKey ? `Sort: ${sortKey}` : "",
-    ].filter(Boolean),
+    details: [joinType ? `Join: ${joinType}` : "", filter ? `Filter: ${filter}` : "", sortKey ? `Sort: ${sortKey}` : ""].filter(Boolean),
     children,
   };
 }
@@ -485,13 +474,7 @@ function parseMysqlBlock(block: Record<string, unknown>, id: string, nodeType: s
     });
   }
 
-  [
-    "ordering_operation",
-    "grouping_operation",
-    "duplicates_removal",
-    "union_result",
-    "materialized_from_subquery",
-  ].forEach((key) => {
+  ["ordering_operation", "grouping_operation", "duplicates_removal", "union_result", "materialized_from_subquery"].forEach((key) => {
     const child = objectValue(block[key]);
     if (child) children.push(parseMysqlBlock(child, `${id}.${children.length}`, key));
   });
@@ -512,13 +495,8 @@ function parseMysqlTable(table: Record<string, unknown>, id: string): ExplainPla
   const accessType = stringValue(table.access_type) || "table";
   const costInfo = objectValue(table.cost_info);
   const rows = numberLike(table.rows_examined_per_scan) || numberLike(table.rows_produced_per_join);
-  const cost =
-    stringValue(costInfo?.query_cost) || stringValue(costInfo?.read_cost) || stringValue(costInfo?.eval_cost);
-  const details = [
-    stringValue(table.attached_condition) ? `Condition: ${stringValue(table.attached_condition)}` : "",
-    arrayValue(table.used_columns)?.length ? `Columns: ${arrayValue(table.used_columns)!.map(String).join(", ")}` : "",
-    table.using_index === true ? "Using index" : "",
-  ].filter(Boolean);
+  const cost = stringValue(costInfo?.query_cost) || stringValue(costInfo?.read_cost) || stringValue(costInfo?.eval_cost);
+  const details = [stringValue(table.attached_condition) ? `Condition: ${stringValue(table.attached_condition)}` : "", arrayValue(table.used_columns)?.length ? `Columns: ${arrayValue(table.used_columns)!.map(String).join(", ")}` : "", table.using_index === true ? "Using index" : ""].filter(Boolean);
 
   return {
     id,
@@ -536,9 +514,7 @@ function parseMysqlTable(table: Record<string, unknown>, id: string): ExplainPla
 // ── Helpers ───────────────────────────────────────────────────────────
 
 function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 function arrayValue(value: unknown): unknown[] | null {

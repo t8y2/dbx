@@ -62,10 +62,7 @@ function encodeMessage(payload: unknown): string {
   return `${JSON.stringify(payload)}\n`;
 }
 
-function readJsonRpcResponse(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number,
-): Promise<InitializeResponse> {
+function readJsonRpcResponse(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<InitializeResponse> {
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
@@ -97,9 +94,7 @@ function readJsonRpcResponse(
 
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
-      reject(
-        new Error(`MCP server exited before initialize response. code=${code} signal=${signal} stderr: ${stderr}`),
-      );
+      reject(new Error(`MCP server exited before initialize response. code=${code} signal=${signal} stderr: ${stderr}`));
     };
 
     const onError = (error: Error) => {

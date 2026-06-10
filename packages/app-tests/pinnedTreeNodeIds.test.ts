@@ -9,4 +9,3 @@ test("prunePinnedTreeNodeIdsForConnection removes pinned ids for a deleted conne
 
   assert.deepEqual([...next], ["conn-10:db:main", "other"]);
 });
-

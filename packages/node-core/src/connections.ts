@@ -25,6 +25,8 @@ export interface ConnectionConfig {
   redis_sentinel_username?: string;
   redis_sentinel_password?: string;
   redis_sentinel_tls?: boolean;
+  redis_key_separator?: string;
+  read_only?: boolean;
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig);
@@ -41,6 +43,7 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+  use_ssh_agent?: boolean;
 }
 
 export interface ProxyTunnelConfig {
@@ -103,9 +106,7 @@ function openDb(readonly = false, path = defaultDbPath()): Database.Database {
 }
 
 function getSecret(db: Database.Database, connectionId: string, key: string): string {
-  const row = db
-    .prepare("SELECT secret FROM connection_secrets WHERE connection_id = ? AND key = ?")
-    .get(connectionId, key) as { secret: string } | undefined;
+  const row = db.prepare("SELECT secret FROM connection_secrets WHERE connection_id = ? AND key = ?").get(connectionId, key) as { secret: string } | undefined;
   return row?.secret ?? "";
 }
 
@@ -162,6 +163,7 @@ function normalizeTransportLayers(config: LegacyConnectionConfig): TransportLaye
       key_passphrase: config.ssh_key_passphrase || "",
       connect_timeout_secs: config.ssh_connect_timeout_secs || 5,
       expose_lan: !!config.ssh_expose_lan,
+      use_ssh_agent: false,
     });
   }
   if (config.proxy_enabled && config.proxy_host) {
@@ -183,18 +185,10 @@ function hydrateTransportLayerSecrets(db: Database.Database, config: ConnectionC
   config.transport_layers = normalizeTransportLayers(config as LegacyConnectionConfig);
   config.transport_layers.forEach((layer, index) => {
     if (layer.type === "ssh") {
-      layer.password ||=
-        getSecret(db, connectionId, transportLayerSshPasswordKey(index, layer)) ||
-        (layer.id === "legacy" ? getSecret(db, connectionId, "ssh_password") : getSecret(db, connectionId, `ssh_tunnels.${layer.id || index}.password`));
-      layer.key_passphrase ||=
-        getSecret(db, connectionId, transportLayerSshKeyPassphraseKey(index, layer)) ||
-        (layer.id === "legacy"
-          ? getSecret(db, connectionId, "ssh_key_passphrase")
-          : getSecret(db, connectionId, `ssh_tunnels.${layer.id || index}.key_passphrase`));
+      layer.password ||= getSecret(db, connectionId, transportLayerSshPasswordKey(index, layer)) || (layer.id === "legacy" ? getSecret(db, connectionId, "ssh_password") : getSecret(db, connectionId, `ssh_tunnels.${layer.id || index}.password`));
+      layer.key_passphrase ||= getSecret(db, connectionId, transportLayerSshKeyPassphraseKey(index, layer)) || (layer.id === "legacy" ? getSecret(db, connectionId, "ssh_key_passphrase") : getSecret(db, connectionId, `ssh_tunnels.${layer.id || index}.key_passphrase`));
     } else {
-      layer.password ||=
-        getSecret(db, connectionId, transportLayerProxyPasswordKey(index, layer)) ||
-        (layer.id === "legacy-proxy" ? getSecret(db, connectionId, "proxy_password") : "");
+      layer.password ||= getSecret(db, connectionId, transportLayerProxyPasswordKey(index, layer)) || (layer.id === "legacy-proxy" ? getSecret(db, connectionId, "proxy_password") : "");
     }
   });
 }
@@ -271,9 +265,7 @@ export async function inspectConnectionStore(options: ConnectionStoreOptions = {
 }
 
 function tableExists(db: Database.Database, name: string): boolean {
-  const row = db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
-    .get(name) as { "1": number } | undefined;
+  const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as { "1": number } | undefined;
   return !!row;
 }
 
@@ -320,42 +312,22 @@ export async function addConnection(config: Omit<ConnectionConfig, "id">): Promi
   const insert = db.transaction(() => {
     db.prepare("INSERT INTO connections (id, config_json) VALUES (?, ?)").run(id, configJson);
     if (normalized.password) {
-      db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
-        id,
-        "password",
-        normalized.password,
-      );
+      db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(id, "password", normalized.password);
     }
     normalizeTransportLayers(normalized as LegacyConnectionConfig).forEach((layer, index) => {
       if (layer.type === "ssh") {
         if (layer.password) {
-          db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
-            id,
-            transportLayerSshPasswordKey(index, layer),
-            layer.password,
-          );
+          db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(id, transportLayerSshPasswordKey(index, layer), layer.password);
         }
         if (layer.key_passphrase) {
-          db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
-            id,
-            transportLayerSshKeyPassphraseKey(index, layer),
-            layer.key_passphrase,
-          );
+          db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(id, transportLayerSshKeyPassphraseKey(index, layer), layer.key_passphrase);
         }
       } else if (layer.password) {
-        db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
-          id,
-          transportLayerProxyPasswordKey(index, layer),
-          layer.password,
-        );
+        db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(id, transportLayerProxyPasswordKey(index, layer), layer.password);
       }
     });
     if (normalized.redis_sentinel_password) {
-      db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(
-        id,
-        "redis_sentinel_password",
-        normalized.redis_sentinel_password,
-      );
+      db.prepare("INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)").run(id, "redis_sentinel_password", normalized.redis_sentinel_password);
     }
   });
   insert();

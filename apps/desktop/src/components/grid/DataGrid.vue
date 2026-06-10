@@ -1,20 +1,24 @@
 <script lang="ts">
-import { ref } from "vue";
+import { ref, shallowRef } from "vue";
 const globalDdlOpen = ref(false);
+type CachedStructuredFilterRule = {
+  id: string;
+  columnName: string;
+  mode: "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than";
+  rawValue: string;
+  conjunction: "AND" | "OR";
+};
+type StructuredFilterCacheState = {
+  scopeKey: string;
+  manualWhereInput: string;
+  rules: CachedStructuredFilterRule[];
+  appliedWhereInput: string;
+};
+const structuredFilterStateCache = new Map<string, StructuredFilterCacheState>();
 </script>
 
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onMounted,
-  onUnmounted,
-  onActivated,
-  onDeactivated,
-  useSlots,
-  watch,
-  type Component,
-} from "vue";
+import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowUp,
@@ -60,12 +64,7 @@ import {
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -77,26 +76,17 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ImagePreviewDialog from "@/components/grid/ImagePreviewDialog.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
+import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/api";
+import { coerceDataGridCellValue, dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { uuid } from "@/lib/utils";
 import { resolveHeaderColumnType } from "@/lib/dataGridColumnType";
-import {
-  canEditExistingTableRows,
-  hiveTablePropertiesIndicateTransactional,
-  isHiddenGridColumn,
-  isTdengineExistingRowReadonlyColumn,
-  usesSyntheticRowIdKey,
-} from "@/lib/tableEditing";
-import {
-  buildDataGridContextFilterCondition,
-  buildDataGridCountSql,
-  buildHiveTablePropertiesSql,
-  type DataGridContextFilterMode,
-} from "@/lib/dataGridSql";
+import { canEditExistingTableRows, hiveTablePropertiesIndicateTransactional, isHiddenGridColumn, isTdengineExistingRowReadonlyColumn, usesSyntheticRowIdKey } from "@/lib/tableEditing";
+import { buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGridSql";
 import {
   buildVisibleTransposeRows,
   nextAppendedTransposeState,
@@ -104,88 +94,31 @@ import {
   nextKeyboardTransposeState,
   nextTransposeState,
   nextTransposeStateForRecordCount,
+  transposeRecordIndexesForMode,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
 } from "@/lib/dataGridTranspose";
 import { matchesRowStatusFilter, type RowStatus, type RowStatusFilter } from "@/lib/gridRowStatus";
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
-import {
-  BINARY_CELL_DOWNLOAD_MODES,
-  binaryCellDisplayText,
-  binaryCellDownloadFileName,
-  binaryCellDownloadPayload,
-  canDownloadBinaryCellValue,
-  downloadBinaryCellPayload,
-  type BinaryCellDownloadMode,
-} from "@/lib/binaryCellDownload";
-import {
-  canFormatCellDetailJson,
-  cellDetailEditorText,
-  defaultCellDetailTab,
-  formatJsonText,
-  isGeometryColumnType,
-  linkedCellDetailTarget,
-  valueEditorActions,
-  visibleCellDetailTabs,
-  type CellDetailTab,
-} from "@/lib/cellDetailPresentation";
+import { getApplicablePreviewActions } from "@/lib/resultPreviewRegistry";
+import "@/lib/previewHandlers/geometryMapPreview";
+import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, type BinaryCellDownloadMode } from "@/lib/binaryCellDownload";
+import { canFormatCellDetailJson, cellDetailEditorText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/cellDetailPresentation";
 import { renderWktOnCanvas, isHexGeometry } from "@/lib/geometryPreview";
-import {
-  buildDataGridCellDetail,
-  buildDataGridColumnDetail,
-  buildDataGridRowDetail,
-  dataGridColumnDetailJson,
-  dataGridColumnDetailTsv,
-  dataGridRowDetailJson,
-  dataGridRowDetailTsv,
-  filterDataGridDetailFields,
-  type DataGridCellDetail,
-} from "@/lib/dataGridDetail";
-import {
-  applyColumnFormatter,
-  buildColumnFormatterKey,
-  normalizeColumnFormatter,
-  resolveColumnFormatter,
-  type ColumnFormatterConfig,
-  type DateTimeFormatterUnit,
-} from "@/lib/columnFormatter";
+import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "@/lib/dataGridDetail";
+import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit } from "@/lib/columnFormatter";
 import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
-import {
-  isCancelSearchShortcut,
-  isCopyCurrentRowShortcut,
-  isDeleteCurrentRowShortcut,
-  isFocusSearchShortcut,
-  isModRShortcut,
-  isToggleTransposeShortcut,
-} from "@/lib/keyboardShortcuts";
+import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGridEnumEditor";
+import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGridPagination";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
-import {
-  appendColumnValueFilterCondition,
-  buildColumnValueFilterCondition,
-  combineWhereInputs,
-  filterModeNeedsValue,
-  parseFilterValue,
-} from "@/lib/dataGridColumnFilter";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGridColumnFilter";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
-import {
-  MAX_RESULT_PAGE_SIZE,
-  MIN_RESULT_PAGE_SIZE,
-  normalizeResultPageSize,
-  resultPageSizeMenuOptions,
-} from "@/lib/paginationPageSize";
-import {
-  allNullColumnIndexes,
-  filterColumnVisibilityOptions,
-  hiddenColumnIndexesWithAllNullColumns,
-  invertedHiddenColumnIndexes,
-  nextHiddenColumnIndexes,
-  removeAutoHiddenColumnIndexes,
-  visibleColumnIndexesForFilter,
-} from "@/lib/dataGridColumnVisibility";
+import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/paginationPageSize";
+import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGridColumnVisibility";
 import { parseClipboardTable } from "@/lib/gridSelection";
 
 import { useToast } from "@/composables/useToast";
@@ -200,6 +133,8 @@ import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composabl
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { nextDataGridSortState, type DataGridSortDirection } from "@/lib/dataGridSort";
+
+const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -245,13 +180,7 @@ const props = defineProps<{
   cacheKey?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: () => Promise<QueryResult | undefined>;
-  customSave?: (changes: {
-    dirtyRows: Map<number, Map<number, string | number | boolean | null>>;
-    newRows: (string | number | boolean | null)[][];
-    deletedRows: Set<number>;
-    columns: string[];
-    rows: (string | number | boolean | null)[][];
-  }) => Promise<void>;
+  customSave?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
 }>();
 
 const dataGridTraceId = uuid().slice(0, 8);
@@ -377,48 +306,19 @@ function shortTypeName(t: string): string {
   return t;
 }
 
+function headerColumnSortable(actualColIdx: number): boolean {
+  const resolved = props.result.column_sortables?.[actualColIdx];
+  return resolved !== undefined ? resolved : true;
+}
+
 function typeColorClass(t: string): string {
   // Strip precision/scale suffix like (20,6)
   const base = t.replace(/\(.*\)$/, "").toLowerCase();
-  if (
-    [
-      "int",
-      "int2",
-      "int4",
-      "int8",
-      "smallint",
-      "bigint",
-      "integer",
-      "serial",
-      "bigserial",
-      "tinyint",
-      "mediumint",
-    ].includes(base)
-  )
-    return "text-blue-500";
-  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money"].includes(base))
-    return "text-cyan-500";
-  if (
-    [
-      "varchar",
-      "text",
-      "char",
-      "character varying",
-      "character",
-      "string",
-      "nvarchar",
-      "nchar",
-      "ntext",
-      "longtext",
-      "mediumtext",
-      "tinytext",
-      "clob",
-    ].includes(base)
-  )
-    return "text-green-500";
+  if (["int", "int2", "int4", "int8", "smallint", "bigint", "integer", "serial", "bigserial", "tinyint", "mediumint"].includes(base)) return "text-blue-500";
+  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money"].includes(base)) return "text-cyan-500";
+  if (["varchar", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob"].includes(base)) return "text-green-500";
   if (["bool", "boolean", "bit"].includes(base)) return "text-orange-500";
-  if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(base))
-    return "text-purple-500";
+  if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(base)) return "text-purple-500";
   if (["json", "jsonb", "xml", "array"].includes(base)) return "text-pink-500";
   if (["uuid", "uniqueidentifier"].includes(base)) return "text-amber-500";
   if (["bytea", "blob", "binary", "varbinary", "image"].includes(base)) return "text-red-400";
@@ -453,8 +353,11 @@ const sideGeometryPreviewOpen = ref(false);
 const dialogGeometryPreviewOpen = ref(false);
 const sideGeometryCanvas = ref<HTMLCanvasElement | null>(null);
 const dialogGeometryCanvas = ref<HTMLCanvasElement | null>(null);
+const previewDialogOpen = ref(false);
+const previewDialogConfig = shallowRef<{ component: any; props: Record<string, any> } | null>(null);
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
+const multiRowTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
 const transposeScrollRef = ref<HTMLElement | { $el?: HTMLElement }>();
 const transposeScrollLeft = ref(0);
@@ -537,8 +440,6 @@ const headerPanelDismissGuardUntil = ref(0);
 const localFilterSearch = ref("");
 const localFilterDraft = ref<LocalColumnFilterDraft | null>(null);
 const filterBuilderOpen = ref(false);
-const structuredFilterRules = ref<StructuredFilterRule[]>([]);
-const appliedStructuredWhereInput = ref("");
 const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -551,12 +452,11 @@ const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 ];
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
-const structuredFilterCount = computed(
-  () =>
-    structuredFilterRules.value.filter(
-      (rule) => !!rule.columnName && (!filterModeNeedsValue(rule.mode) || rule.rawValue.trim().length > 0),
-    ).length,
-);
+const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
+const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
+const structuredFilterRules = ref<StructuredFilterRule[]>([]);
+const appliedStructuredWhereInput = ref("");
+const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !!rule.columnName && (!filterModeNeedsValue(rule.mode) || rule.rawValue.trim().length > 0)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
 type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref">;
@@ -571,9 +471,7 @@ const formatterCustomName = ref("");
 const formatterCustomTemplate = ref("${value}");
 
 const savedCustomFormatters = computed(() => {
-  return Object.values(settingsStore.editorSettings.customColumnFormatters).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
+  return Object.values(settingsStore.editorSettings.customColumnFormatters).sort((a, b) => a.name.localeCompare(b.name));
 });
 
 function localFilterKey(value: CellValue): string {
@@ -614,9 +512,7 @@ const localFilterSummaries = computed(() =>
 function rowMatchesLocalColumnFilters(data: CellValue[]): boolean {
   const activeEntries = Object.entries(localColumnFilters.value).filter(([, selected]) => selected.size > 0);
   if (activeEntries.length === 0) return true;
-  return activeEntries.every(([columnIndex, selected]) =>
-    selected.has(localFilterKey(data[Number(columnIndex)] ?? null)),
-  );
+  return activeEntries.every(([columnIndex, selected]) => selected.has(localFilterKey(data[Number(columnIndex)] ?? null)));
 }
 
 const localFilteredRows = computed(() => {
@@ -668,9 +564,7 @@ const localFilterAllOptions = computed(() => {
 
 const localFilterOptions = computed(() => {
   const query = localFilterSearch.value.trim().toLowerCase();
-  return localFilterAllOptions.value
-    .filter((option) => !query || option.label.toLowerCase().includes(query))
-    .slice(0, 500);
+  return localFilterAllOptions.value.filter((option) => !query || option.label.toLowerCase().includes(query)).slice(0, 500);
 });
 
 const localFilterAllVisibleSelected = computed(() => {
@@ -711,9 +605,7 @@ function guardHeaderPanelDismiss() {
 }
 
 function shouldIgnoreHeaderPanelClose(columnIndex: number, openColumn: number | null): boolean {
-  return (
-    compactColumnHeaderActions.value && openColumn === columnIndex && Date.now() < headerPanelDismissGuardUntil.value
-  );
+  return compactColumnHeaderActions.value && openColumn === columnIndex && Date.now() < headerPanelDismissGuardUntil.value;
 }
 
 function openCompactLocalFilter(colIdx: number) {
@@ -756,12 +648,7 @@ function columnFormatter(columnIndex: number): ColumnFormatterConfig | undefined
   const column = props.result.columns[columnIndex];
   if (!column) return undefined;
   const key = formatterKeyForColumn(column);
-  return key
-    ? resolveColumnFormatter(
-        settingsStore.editorSettings.columnFormatters[key],
-        settingsStore.editorSettings.customColumnFormatters,
-      )
-    : undefined;
+  return key ? resolveColumnFormatter(settingsStore.editorSettings.columnFormatters[key], settingsStore.editorSettings.customColumnFormatters) : undefined;
 }
 
 function savedColumnFormatter(columnIndex: number): ColumnFormatterConfig | undefined {
@@ -890,10 +777,7 @@ function createCustomFormatterId(): string {
 }
 
 function formatterPreviewRows(columnIndex: number) {
-  const formatter = resolveColumnFormatter(
-    currentFormatterDraft(),
-    settingsStore.editorSettings.customColumnFormatters,
-  );
+  const formatter = resolveColumnFormatter(currentFormatterDraft(), settingsStore.editorSettings.customColumnFormatters);
   return displayRowRefs.value.slice(0, 5).map((_, index) => {
     const item = displayItemAt(index);
     const value = item?.data[columnIndex] ?? null;
@@ -930,11 +814,7 @@ function toggleAllLocalFilterOptions() {
 async function applyLocalFilter() {
   const draft = localFilterDraft.value;
   if (!draft) return;
-  if (
-    canApplyTypedLocalFilterValue.value &&
-    localFilterDraftIsAllSelected.value &&
-    localFilterOptions.value.length === 0
-  ) {
+  if (canApplyTypedLocalFilterValue.value && localFilterDraftIsAllSelected.value && localFilterOptions.value.length === 0) {
     await applyTypedLocalFilterValue();
     return;
   }
@@ -995,6 +875,38 @@ function defaultStructuredFilterRule(): StructuredFilterRule {
     rawValue: "",
     conjunction: "AND",
   };
+}
+
+function cloneStructuredFilterRules(rules: StructuredFilterRule[]): StructuredFilterRule[] {
+  return rules.map((rule) => ({ ...rule }));
+}
+
+function cachedStructuredFilterState(): StructuredFilterCacheState | undefined {
+  const cached = structuredFilterStateCache.get(structuredFilterCacheKey.value);
+  return cached?.scopeKey === structuredFilterScopeKey.value ? cached : undefined;
+}
+
+function persistStructuredFilterState() {
+  structuredFilterStateCache.set(structuredFilterCacheKey.value, {
+    scopeKey: structuredFilterScopeKey.value,
+    manualWhereInput: whereFilterInput.value,
+    rules: cloneStructuredFilterRules(structuredFilterRules.value),
+    appliedWhereInput: appliedStructuredWhereInput.value,
+  });
+}
+
+function loadStructuredFilterStateForScope() {
+  const cached = cachedStructuredFilterState();
+  if (cached) {
+    structuredFilterRules.value = cloneStructuredFilterRules(cached.rules);
+    appliedStructuredWhereInput.value = cached.appliedWhereInput;
+    whereFilterInput.value = cached.manualWhereInput;
+    nextTick(() => emit("update:whereInput", currentWhereInput() ?? ""));
+    return;
+  }
+  appliedStructuredWhereInput.value = "";
+  structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
+  persistStructuredFilterState();
 }
 
 function ensureStructuredFilterRule() {
@@ -1102,23 +1014,19 @@ async function applyStructuredFilters() {
   await applyWhereFilter();
 }
 
+watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
 watch(
-  filterBuilderColumnOptions,
-  (columns) => {
-    if (columns.length === 0) {
-      structuredFilterRules.value = [];
-      appliedStructuredWhereInput.value = "";
+  [structuredFilterRules, appliedStructuredWhereInput],
+  () => {
+    const columns = filterBuilderColumnOptions.value;
+    if (columns.length > 0 && structuredFilterRules.value.some((rule) => !columns.includes(rule.columnName))) {
+      structuredFilterRules.value = structuredFilterRules.value.map((rule) => (columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
       return;
     }
-    if (structuredFilterRules.value.length === 0) {
-      structuredFilterRules.value = [defaultStructuredFilterRule()];
-      return;
-    }
-    structuredFilterRules.value = structuredFilterRules.value.map((rule) =>
-      columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" },
-    );
+    persistStructuredFilterState();
   },
-  { immediate: true },
+  { deep: true },
 );
 
 function updateSuggestionPosition() {
@@ -1304,14 +1212,12 @@ function dismissWhereSuggestions() {
 
 function navigateWhereSuggestion(delta: number) {
   if (whereSuggestions.value.length === 0) return;
-  whereSuggestionIndex.value = Math.min(
-    Math.max(whereSuggestionIndex.value + delta, 0),
-    whereSuggestions.value.length - 1,
-  );
+  whereSuggestionIndex.value = Math.min(Math.max(whereSuggestionIndex.value + delta, 0), whereSuggestions.value.length - 1);
 }
 
 watch(whereFilterInput, (val) => {
-  emit("update:whereInput", val);
+  emit("update:whereInput", currentWhereInput() ?? "");
+  persistStructuredFilterState();
   whereSuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
@@ -1337,8 +1243,7 @@ function onWhereFilterKeydown(e: KeyboardEvent) {
     if (start !== end) {
       e.preventDefault();
       const selected = whereFilterInput.value.slice(start, end);
-      whereFilterInput.value =
-        whereFilterInput.value.slice(0, start) + e.key + selected + close + whereFilterInput.value.slice(end);
+      whereFilterInput.value = whereFilterInput.value.slice(0, start) + e.key + selected + close + whereFilterInput.value.slice(end);
       nextTick(() => {
         input.setSelectionRange(start + 1 + selected.length, start + 1 + selected.length);
       });
@@ -1429,10 +1334,7 @@ function dismissOrderBySuggestions() {
 
 function navigateOrderBySuggestion(delta: number) {
   if (orderBySuggestions.value.length === 0) return;
-  orderBySuggestionIndex.value = Math.min(
-    Math.max(orderBySuggestionIndex.value + delta, 0),
-    orderBySuggestions.value.length - 1,
-  );
+  orderBySuggestionIndex.value = Math.min(Math.max(orderBySuggestionIndex.value + delta, 0), orderBySuggestions.value.length - 1);
 }
 
 watch(orderByInput, (val) => {
@@ -1491,6 +1393,17 @@ const rowStatusFilter = ref<RowStatusFilter>("all");
 const gridRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
 const gridScrollbarGutter = ref(0);
+const gridHorizontalScrollbarTrackRef = ref<HTMLDivElement>();
+const hasGridHorizontalOverflow = ref(false);
+const gridHorizontalScrollbarThumbLeftPercent = ref(0);
+const gridHorizontalScrollbarThumbWidthPercent = ref(100);
+const gridHorizontalScrollbarDragging = ref(false);
+let gridHorizontalScrollbarFrame = 0;
+let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
+let gridHorizontalScrollbarDragState: {
+  trackRect: DOMRect;
+  thumbOffsetPx: number;
+} | null = null;
 const hiddenColumnIndexes = ref<Set<number>>(new Set());
 const nullColumnsHidden = ref(false);
 const autoHiddenNullColumnIndexes = ref<Set<number>>(new Set());
@@ -1502,9 +1415,7 @@ const displayableColumnIndexes = computed(() =>
     .filter(({ column }) => !isHiddenGridColumn(props.databaseType, column, props.tableMeta?.primaryKeys ?? []))
     .map(({ index }) => index),
 );
-const visibleColumnIndexes = computed(() =>
-  visibleColumnIndexesForFilter(displayableColumnIndexes.value, hiddenColumnIndexes.value),
-);
+const visibleColumnIndexes = computed(() => visibleColumnIndexesForFilter(displayableColumnIndexes.value, hiddenColumnIndexes.value));
 const visibleColumns = computed(() => visibleColumnIndexes.value.map((index) => props.result.columns[index]));
 const visibleSourceColumns = computed(() => {
   if (!props.sourceColumns || props.sourceColumns.length !== props.result.columns.length) return undefined;
@@ -1521,22 +1432,21 @@ const visibleColumnTypes = computed(() =>
   visibleColumnIndexes.value.map((index) => {
     const resultColumn = props.result.columns[index]?.toLocaleLowerCase();
     const sourceColumn = props.sourceColumns?.[index]?.toLocaleLowerCase();
-    return (
-      (sourceColumn ? tableColumnTypesByName.value.get(sourceColumn) : undefined) ||
-      (resultColumn ? tableColumnTypesByName.value.get(resultColumn) : undefined)
-    );
+    return (sourceColumn ? tableColumnTypesByName.value.get(sourceColumn) : undefined) || (resultColumn ? tableColumnTypesByName.value.get(resultColumn) : undefined);
   }),
 );
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
+
+/** Preview actions from the result preview registry for the current result. */
+const previewActions = computed(() => {
+  if (!props.result) return [];
+  return getApplicablePreviewActions(props.result);
+});
 const displayableColumnCount = computed(() => displayableColumnIndexes.value.length);
 const hiddenColumnCount = computed(() => displayableColumnCount.value - visibleColumnCount.value);
-const allNullColumnIndexesForResult = computed(() =>
-  allNullColumnIndexes(props.result.rows, displayableColumnIndexes.value),
-);
+const allNullColumnIndexesForResult = computed(() => allNullColumnIndexes(props.result.rows, displayableColumnIndexes.value));
 const allNullColumnCount = computed(() => allNullColumnIndexesForResult.value.length);
-const canToggleAllNullColumns = computed(
-  () => nullColumnsHidden.value || (allNullColumnCount.value > 0 && displayableColumnCount.value > 1),
-);
+const canToggleAllNullColumns = computed(() => nullColumnsHidden.value || (allNullColumnCount.value > 0 && displayableColumnCount.value > 1));
 function filteredColumnVisibilityOptions(query: string) {
   const displayable = new Set(displayableColumnIndexes.value);
   return filterColumnVisibilityOptions(props.result.columns, query).filter((option) => displayable.has(option.index));
@@ -1558,10 +1468,7 @@ function invertColumnVisibility() {
   hiddenColumnIndexes.value = invertedHiddenColumnIndexes(displayableColumnIndexes.value, hiddenColumnIndexes.value);
 }
 function showAllNullColumns() {
-  hiddenColumnIndexes.value = removeAutoHiddenColumnIndexes(
-    hiddenColumnIndexes.value,
-    autoHiddenNullColumnIndexes.value,
-  );
+  hiddenColumnIndexes.value = removeAutoHiddenColumnIndexes(hiddenColumnIndexes.value, autoHiddenNullColumnIndexes.value);
   autoHiddenNullColumnIndexes.value = new Set();
   nullColumnsHidden.value = false;
 }
@@ -1584,10 +1491,7 @@ function toggleAllNullColumns() {
 }
 watch(allNullColumnIndexesForResult, () => {
   if (!nullColumnsHidden.value) return;
-  hiddenColumnIndexes.value = removeAutoHiddenColumnIndexes(
-    hiddenColumnIndexes.value,
-    autoHiddenNullColumnIndexes.value,
-  );
+  hiddenColumnIndexes.value = removeAutoHiddenColumnIndexes(hiddenColumnIndexes.value, autoHiddenNullColumnIndexes.value);
   autoHiddenNullColumnIndexes.value = new Set();
   hideAllNullColumns();
 });
@@ -1600,9 +1504,7 @@ function matchesTableInfoColumn(resultColumn: string, sourceColumn: string | und
   return resultColumn.toLocaleLowerCase() === target || sourceColumn?.toLocaleLowerCase() === target;
 }
 function scrollToTableInfoColumn(columnName: string) {
-  const columnIndex = props.result.columns.findIndex((column, index) =>
-    matchesTableInfoColumn(column, props.sourceColumns?.[index], columnName),
-  );
+  const columnIndex = props.result.columns.findIndex((column, index) => matchesTableInfoColumn(column, props.sourceColumns?.[index], columnName));
   if (columnIndex < 0 || !displayableColumnIndexes.value.includes(columnIndex)) return;
 
   if (hiddenColumnIndexes.value.has(columnIndex)) {
@@ -1621,12 +1523,7 @@ function scrollToTableInfoColumn(columnName: string) {
     const scroller = gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller");
     if (visibleColIdx < 0 || !scroller) return;
 
-    const targetLeft = Math.max(
-      0,
-      columnContentOffsetLeft(visibleColIdx) -
-        scroller.clientWidth / 2 +
-        (renderedColumnWidths.value[visibleColIdx] ?? 0) / 2,
-    );
+    const targetLeft = Math.max(0, columnContentOffsetLeft(visibleColIdx) - scroller.clientWidth / 2 + (renderedColumnWidths.value[visibleColIdx] ?? 0) / 2);
     scroller.scrollLeft = targetLeft;
     updateGridHorizontalViewport(scroller);
     if (headerRef.value) {
@@ -1636,14 +1533,13 @@ function scrollToTableInfoColumn(columnName: string) {
 }
 
 // --- Column resize composable ---
-const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } =
-  useDataGridColumnResize({
-    columns: visibleColumns,
-    sourceRows: computed(() => props.result.rows),
-    columnIndexes: visibleColumnIndexes,
-    gridRef,
-    scrollbarGutter: gridScrollbarGutter,
-  });
+const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
+  columns: visibleColumns,
+  sourceRows: computed(() => props.result.rows),
+  columnIndexes: visibleColumnIndexes,
+  gridRef,
+  scrollbarGutter: gridScrollbarGutter,
+});
 const gridStyle = computed(() => ({
   ...columnVars.value,
   "--header-total-w": dataGridHeaderContentWidth("var(--total-w)", gridScrollbarGutter.value),
@@ -1664,7 +1560,121 @@ const renderedColumnOffsets = computed(() => {
 function updateGridHorizontalViewport(element: HTMLElement) {
   gridHorizontalScrollLeft.value = element.scrollLeft;
   gridViewportWidth.value = element.clientWidth;
+  updateGridHorizontalScrollbar(element);
 }
+
+function gridScrollerElement(): HTMLElement | null {
+  return gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller") ?? null;
+}
+
+function updateGridHorizontalScrollbar(element: HTMLElement | null = gridScrollerElement()) {
+  if (!element) {
+    hasGridHorizontalOverflow.value = false;
+    gridHorizontalScrollbarThumbLeftPercent.value = 0;
+    gridHorizontalScrollbarThumbWidthPercent.value = 100;
+    return;
+  }
+
+  const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+  hasGridHorizontalOverflow.value = maxScrollLeft > 1;
+
+  const rawThumbWidth = element.scrollWidth > 0 ? (element.clientWidth / element.scrollWidth) * 100 : 100;
+  const thumbWidth = Math.min(100, Math.max(6, rawThumbWidth));
+  const thumbTravel = Math.max(0, 100 - thumbWidth);
+  gridHorizontalScrollbarThumbWidthPercent.value = thumbWidth;
+  gridHorizontalScrollbarThumbLeftPercent.value = maxScrollLeft > 0 ? (element.scrollLeft / maxScrollLeft) * thumbTravel : 0;
+}
+
+function scheduleGridHorizontalScrollbarUpdate() {
+  if (gridHorizontalScrollbarFrame) return;
+  const update = () => {
+    gridHorizontalScrollbarFrame = 0;
+    updateGridHorizontalScrollbar();
+  };
+  if (typeof requestAnimationFrame === "function") {
+    gridHorizontalScrollbarFrame = requestAnimationFrame(update);
+  } else {
+    window.setTimeout(update, 0);
+  }
+}
+
+function observeGridHorizontalScrollbarScroller() {
+  gridHorizontalScrollbarResizeObserver?.disconnect();
+  gridHorizontalScrollbarResizeObserver = null;
+  const scroller = gridScrollerElement();
+  if (scroller && typeof ResizeObserver !== "undefined") {
+    gridHorizontalScrollbarResizeObserver = new ResizeObserver(scheduleGridHorizontalScrollbarUpdate);
+    gridHorizontalScrollbarResizeObserver.observe(scroller);
+    for (const child of Array.from(scroller.children)) {
+      gridHorizontalScrollbarResizeObserver.observe(child);
+    }
+  }
+  scheduleGridHorizontalScrollbarUpdate();
+}
+
+function applyGridHorizontalScrollbarDrag(clientX: number) {
+  const scroller = gridScrollerElement();
+  const dragState = gridHorizontalScrollbarDragState;
+  if (!scroller || !dragState) return;
+
+  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  if (maxScrollLeft <= 1) return;
+
+  const thumbWidthPx = dragState.trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
+  const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
+  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
+  scroller.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * maxScrollLeft;
+  updateGridHorizontalViewport(scroller);
+  if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
+  if (useCanvasGridRows.value) {
+    syncCanvasViewport();
+  }
+}
+
+function onGridHorizontalScrollbarPointerMove(event: PointerEvent) {
+  if (!gridHorizontalScrollbarDragState) return;
+  event.preventDefault();
+  applyGridHorizontalScrollbarDrag(event.clientX);
+}
+
+function stopGridHorizontalScrollbarDrag() {
+  if (!gridHorizontalScrollbarDragState) return;
+  gridHorizontalScrollbarDragState = null;
+  gridHorizontalScrollbarDragging.value = false;
+  window.removeEventListener("pointermove", onGridHorizontalScrollbarPointerMove, true);
+  window.removeEventListener("pointerup", stopGridHorizontalScrollbarDrag, true);
+  window.removeEventListener("pointercancel", stopGridHorizontalScrollbarDrag, true);
+  document.body.style.userSelect = "";
+}
+
+function startGridHorizontalScrollbarDrag(event: PointerEvent) {
+  const scroller = gridScrollerElement();
+  const track = gridHorizontalScrollbarTrackRef.value;
+  if (!scroller || !track || !hasGridHorizontalOverflow.value) return;
+
+  const trackRect = track.getBoundingClientRect();
+  const thumbLeftPx = trackRect.width * (gridHorizontalScrollbarThumbLeftPercent.value / 100);
+  const thumbWidthPx = trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
+  const pointerX = event.clientX - trackRect.left;
+  const pointerInsideThumb = pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx;
+
+  gridHorizontalScrollbarDragState = {
+    trackRect,
+    thumbOffsetPx: pointerInsideThumb ? pointerX - thumbLeftPx : thumbWidthPx / 2,
+  };
+  gridHorizontalScrollbarDragging.value = true;
+  document.body.style.userSelect = "none";
+  window.addEventListener("pointermove", onGridHorizontalScrollbarPointerMove, true);
+  window.addEventListener("pointerup", stopGridHorizontalScrollbarDrag, true);
+  window.addEventListener("pointercancel", stopGridHorizontalScrollbarDrag, true);
+  event.preventDefault();
+  applyGridHorizontalScrollbarDrag(event.clientX);
+}
+
+const gridHorizontalScrollbarThumbStyle = computed<CSSProperties>(() => ({
+  width: `${gridHorizontalScrollbarThumbWidthPercent.value}%`,
+  left: `${gridHorizontalScrollbarThumbLeftPercent.value}%`,
+}));
 
 function updateGridScrollbarGutter(element: HTMLElement) {
   gridScrollbarGutter.value = scrollbarGutterWidth(element);
@@ -1678,6 +1688,7 @@ function refreshGridScrollerMetrics() {
   if (headerRef.value) {
     headerRef.value.scrollLeft = scrollerEl.scrollLeft;
   }
+  observeGridHorizontalScrollbarScroller();
 }
 
 function syncHeaderScroll(e: Event) {
@@ -1712,14 +1723,8 @@ function getHorizontalColumnWindow(): HorizontalColumnWindow {
     return { start: 0, end: 0, beforeWidth: 0, afterWidth: 0 };
   }
 
-  const viewportStart = Math.max(
-    0,
-    gridHorizontalScrollLeft.value - DATA_GRID_ROW_NUM_WIDTH - HORIZONTAL_COLUMN_BUFFER_PX,
-  );
-  const viewportEnd =
-    Math.max(gridViewportWidth.value, 1) +
-    Math.max(0, gridHorizontalScrollLeft.value - DATA_GRID_ROW_NUM_WIDTH) +
-    HORIZONTAL_COLUMN_BUFFER_PX;
+  const viewportStart = Math.max(0, gridHorizontalScrollLeft.value - DATA_GRID_ROW_NUM_WIDTH - HORIZONTAL_COLUMN_BUFFER_PX);
+  const viewportEnd = Math.max(gridViewportWidth.value, 1) + Math.max(0, gridHorizontalScrollLeft.value - DATA_GRID_ROW_NUM_WIDTH) + HORIZONTAL_COLUMN_BUFFER_PX;
   let low = 0;
   let high = totalColumns - 1;
   while (low < high) {
@@ -1853,14 +1858,30 @@ watch(
 );
 const manualTotalRowCount = ref<number | undefined>(undefined);
 const manualTotalRowCountLoading = ref(false);
-const showTruncationWarning = computed(
-  () => props.result.truncated === true && typeof props.pageLimit !== "number" && props.result.has_more !== true,
-);
+const showTruncationWarning = computed(() => props.result.truncated === true && typeof props.pageLimit !== "number" && props.result.has_more !== true);
 const isResultsContext = computed(() => props.context === "results");
-const displayedTotalRowCount = computed(() => props.totalRowCount ?? manualTotalRowCount.value);
-const hasKnownTotalRowCount = computed(
-  () => typeof displayedTotalRowCount.value === "number" && displayedTotalRowCount.value >= 0,
-);
+// affected_rows reported by the backend can be larger than the rows we
+// actually have in memory — e.g. ES auto-pages SELECT * on a big index and
+// reports the index's true match count. Surface that in the status bar so
+// the user sees the real total, but do NOT use it to unlock pagination:
+// we don't have those rows, so letting the user page into them would just
+// show blank screens.
+const inferredBackendTotalRowCount = computed(() => {
+  const affected = props.result.affected_rows;
+  if (typeof affected !== "number" || !Number.isFinite(affected)) return undefined;
+  if (affected <= props.result.rows.length) return undefined;
+  return affected;
+});
+const serverKnownTotalRowCount = computed(() => props.totalRowCount ?? manualTotalRowCount.value);
+const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? inferredBackendTotalRowCount.value);
+// Only a server-confirmed total drives pagination — an inferred total means
+// rows exist that we never fetched, so navigation must stay inside rows.length.
+const hasKnownTotalRowCount = computed(() => typeof serverKnownTotalRowCount.value === "number" && serverKnownTotalRowCount.value >= 0);
+// When context=results and the caller hasn't configured server-side
+// pagination (no pageLimit), the backend handed us every row up-front and
+// rowCount IS the total. Without this hint, the "page is full → assume more"
+// fallback in canGoNextDataGridPage lets the user keep clicking next forever.
+const allRowsLoaded = computed(() => isResultsContext.value && props.pageLimit === undefined);
 const canGoNextPage = computed(() => {
   return canGoNextDataGridPage({
     hasMore: props.result.has_more,
@@ -1869,27 +1890,18 @@ const canGoNextPage = computed(() => {
     pageOffset: props.pageOffset,
     currentPage: currentPage.value,
     totalRowCount: hasKnownTotalRowCount.value ? displayedTotalRowCount.value : undefined,
+    allRowsLoaded: allRowsLoaded.value,
   });
 });
-const canJumpLastPage = computed(
-  () => canGoNextPage.value && (hasKnownTotalRowCount.value || !!props.tableMeta || !!props.countSql),
-);
+const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
-const canCalculateTotalRowCount = computed(
-  () => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql),
-);
-const showQueryEditReadyBadge = computed(
-  () => isResultsContext.value && hasData.value && !!props.editable && !!props.tableMeta,
-);
+const canCalculateTotalRowCount = computed(() => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql));
+const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && !!props.tableMeta);
 const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsContext.value);
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
 type DataGridTableMeta = NonNullable<typeof props.tableMeta>;
 const hiveTableTransactional = ref<boolean | undefined>(undefined);
-const canEditExistingRows = computed(
-  () =>
-    !!props.customSave ||
-    canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []),
-);
+const canEditExistingRows = computed(() => !!props.customSave || canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []));
 watch(
   () => [props.databaseType, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
   async () => {
@@ -1929,22 +1941,11 @@ function currentWhereInput(): string | undefined {
 }
 
 function currentOrderBy(): string | undefined {
-  return (
-    orderByInput.value.trim() ||
-    (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined)
-  );
+  return orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined);
 }
 
 watch(
-  () => [
-    props.countSql ?? "",
-    props.tableMeta?.schema ?? "",
-    props.tableMeta?.tableName ?? "",
-    currentWhereInput() ?? "",
-    props.database ?? "",
-    props.connectionId ?? "",
-    props.result,
-  ],
+  () => [props.countSql ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", currentWhereInput() ?? "", props.database ?? "", props.connectionId ?? "", props.result],
   () => {
     manualTotalRowCount.value = undefined;
   },
@@ -2015,6 +2016,15 @@ async function lastPage() {
     emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
     return;
   }
+  if (allRowsLoaded.value) {
+    const total = props.result.rows.length;
+    if (total <= 0) return;
+    const lastPageNum = Math.ceil(total / pageSize.value);
+    if (lastPageNum <= currentPage.value) return;
+    currentPage.value = lastPageNum;
+    resetGridVerticalScroll(true);
+    return;
+  }
   if (!props.connectionId) return;
   const countTarget = await buildCurrentCountTarget();
   const sql = countTarget?.sql;
@@ -2053,12 +2063,7 @@ async function calculateTotalRowCount() {
   try {
     const countTarget = await buildCurrentCountTarget();
     if (!countTarget?.sql) return;
-    const result = await api.executeQuery(
-      props.connectionId,
-      props.database ?? "",
-      countTarget.sql,
-      countTarget.schema,
-    );
+    const result = await api.executeQuery(props.connectionId, props.database ?? "", countTarget.sql, countTarget.schema);
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (Number.isFinite(total) && total >= 0) {
       manualTotalRowCount.value = total;
@@ -2161,14 +2166,63 @@ const {
   saveChanges,
   discardChanges,
   rowDataWithChanges,
-  coerceCellValue,
   canEditColumn,
   resetGridVerticalScroll,
   getResetScrollAfterResult,
   clearResetScrollAfterResult,
   cleanupFrames,
   recordScrollPosition,
+  isPreviewLoading,
+  previewChanges,
 } = editor;
+
+const showSqlPreview = ref(false);
+const previewSqlText = ref("");
+
+let previewRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function refreshPreviewSql() {
+  if (!showSqlPreview.value) return;
+  const stmts = await previewChanges();
+  if (showSqlPreview.value) {
+    previewSqlText.value = stmts.join("\n");
+  }
+}
+
+function schedulePreviewRefresh() {
+  if (!showSqlPreview.value) return;
+  if (pendingChangeCount.value === 0) {
+    // All changes were discarded — close the preview
+    previewSqlText.value = "";
+    return;
+  }
+  if (previewRefreshTimer) clearTimeout(previewRefreshTimer);
+  previewRefreshTimer = setTimeout(() => {
+    previewRefreshTimer = null;
+    void refreshPreviewSql();
+  }, 500);
+}
+
+async function openSqlPreview() {
+  const stmts = await previewChanges();
+  previewSqlText.value = stmts.join("\n");
+  if (stmts.length > 0) {
+    showSqlPreview.value = true;
+  }
+}
+
+function closeSqlPreview() {
+  showSqlPreview.value = false;
+  if (previewRefreshTimer) {
+    clearTimeout(previewRefreshTimer);
+    previewRefreshTimer = null;
+  }
+}
+
+// Watch for edits — auto-refresh preview when panel is open
+watch([pendingChangeCount, dirtyRows, newRows, deletedRows], () => {
+  schedulePreviewRefresh();
+});
 
 const saveActionMode = computed(() =>
   dataGridSaveActionMode({
@@ -2217,8 +2271,29 @@ function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
   return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
 }
 
+function coerceDetailCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+  return coerceDataGridCellValue({
+    value,
+    oldValue,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(columnIndex),
+  }) as CellValue;
+}
+
 function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKind | undefined {
   return temporalCellEditorKind(tableColumnForGridColumn(columnIndex)?.data_type, props.databaseType);
+}
+
+function enumValuesForGridColumn(columnIndex: number): string[] {
+  return enumValuesForColumn(tableColumnForGridColumn(columnIndex));
+}
+
+function isEnumGridColumn(columnIndex: number): boolean {
+  return isEnumColumn(tableColumnForGridColumn(columnIndex));
+}
+
+function isEnumGridColumnNullable(columnIndex: number): boolean {
+  return tableColumnForGridColumn(columnIndex)?.is_nullable ?? false;
 }
 
 function canDeleteRowItem(item: RowItem | undefined): boolean {
@@ -2229,15 +2304,8 @@ async function onToolbarRefresh() {
   if (transactionActive.value) {
     discardChanges();
   }
-  emit(
-    "reload",
-    props.sql,
-    searchText.value,
-    currentWhereInput(),
-    currentOrderBy(),
-    pageSize.value,
-    (currentPage.value - 1) * pageSize.value,
-  );
+  preserveTransposeOnNextResult.value = showTranspose.value;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 async function onToolbarCommit() {
@@ -2247,15 +2315,7 @@ async function onToolbarCommit() {
 function onToolbarRollback() {
   preserveTransposeOnNextResult.value = showTranspose.value;
   discardChanges();
-  emit(
-    "reload",
-    props.sql,
-    searchText.value,
-    currentWhereInput(),
-    currentOrderBy(),
-    pageSize.value,
-    (currentPage.value - 1) * pageSize.value,
-  );
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function addRow() {
@@ -2270,9 +2330,7 @@ const sortedRows = computed(() => {
     const rows = props.result.rows;
     indices = indices.filter((sourceIndex) => {
       const data = rows[sourceIndex];
-      return data.some(
-        (cell, columnIndex) => cell !== null && formatCellCached(cell, columnIndex).toLowerCase().includes(q),
-      );
+      return data.some((cell, columnIndex) => cell !== null && formatCellCached(cell, columnIndex).toLowerCase().includes(q));
     });
   }
   return indices;
@@ -2449,10 +2507,7 @@ function scrollToCurrentMatch() {
   if (useCanvasGridRows.value) {
     const scroller = canvasScrollerElement();
     if (!scroller) return;
-    const targetTop = Math.max(
-      0,
-      match.displayRow * CANVAS_DATA_GRID_ROW_HEIGHT - (scroller.clientHeight - CANVAS_DATA_GRID_ROW_HEIGHT) / 2,
-    );
+    const targetTop = Math.max(0, match.displayRow * CANVAS_DATA_GRID_ROW_HEIGHT - (scroller.clientHeight - CANVAS_DATA_GRID_ROW_HEIGHT) / 2);
     scroller.scrollTop = targetTop;
     syncCanvasViewport();
     return;
@@ -2487,20 +2542,12 @@ const exportContextCell = computed(() => {
   return { ...contextCell.value, col: visibleCol };
 });
 
-const deleteRowDetails = computed(() =>
-  props.tableMeta?.tableName
-    ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName })
-    : t("dangerDialog.deleteRowDetailsNoTable"),
-);
+const deleteRowDetails = computed(() => (props.tableMeta?.tableName ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName }) : t("dangerDialog.deleteRowDetailsNoTable")));
 
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
-const hasActiveFilter = computed(
-  () => !!deferredClientSearchText.value || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value,
-);
+const hasActiveFilter = computed(() => !!deferredClientSearchText.value || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
-const emptyDescription = computed(() =>
-  hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription"),
-);
+const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
 watch(
   () => [hasVisibleRows.value, props.result.columns.length] as const,
   () => {
@@ -2508,9 +2555,7 @@ watch(
   },
   { immediate: true },
 );
-const isErrorResult = computed(
-  () => props.result.columns.length === 1 && props.result.columns[0] === "Error" && props.result.rows.length > 0,
-);
+const isErrorResult = computed(() => props.result.columns.length === 1 && props.result.columns[0] === "Error" && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
 // --- Selection composable ---
 const selection = useDataGridSelection({
@@ -2592,11 +2637,7 @@ function handleQuickDownloadMenuOpenChange(open: boolean, rowIndex: number, actu
 
 function cellDetailButtonVisible(rowIndex: number, actualColIdx: number) {
   if (isScrolling.value) return false;
-  return (
-    (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) ||
-    quickDownloadMenuOpenFor(rowIndex, actualColIdx) ||
-    (showCellDetail.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx)
-  );
+  return (hoveredDetailCell.value?.rowIndex === rowIndex && hoveredDetailCell.value.col === actualColIdx) || quickDownloadMenuOpenFor(rowIndex, actualColIdx) || (showCellDetail.value && detailCell.value?.rowIndex === rowIndex && detailCell.value.col === actualColIdx);
 }
 
 function affectedRowIds(): number[] {
@@ -2628,6 +2669,18 @@ function exportSelectedRowsMarkdown() {
 
 function exportSelectedRowsSql() {
   return exportSql(affectedRowIds());
+}
+
+function executePreviewAction(action: { execute: (ctx: any) => any }) {
+  const config = action.execute({
+    result: props.result,
+    selectedRowIds: affectedRowIds(),
+    displayRowRefs: displayRowRefs.value,
+  });
+  if (config) {
+    previewDialogConfig.value = config;
+    previewDialogOpen.value = true;
+  }
 }
 
 function isRowActive(index: number): boolean {
@@ -2690,7 +2743,7 @@ const rowDetail = computed(() => {
     rowId: item.id,
     row: item.data,
     columns: props.result.columns,
-    columnIndexes: displayableColumnIndexes.value,
+    columnIndexes: visibleColumnIndexes.value,
     typeByColumn: columnTypeMap.value,
     commentByColumn: columnCommentMap.value,
     displayValue: (value, index) => formatCellCached(value, index),
@@ -2716,13 +2769,9 @@ const columnDetail = computed(() => {
   });
 });
 
-const filteredRowDetailFields = computed(() =>
-  rowDetail.value ? filterDataGridDetailFields(rowDetail.value.fields, rowDetailSearch.value) : [],
-);
+const filteredRowDetailFields = computed(() => (rowDetail.value ? filterDataGridDetailFields(rowDetail.value.fields, rowDetailSearch.value) : []));
 
-const filteredColumnDetailFields = computed(() =>
-  columnDetail.value ? filterDataGridDetailFields(columnDetail.value.fields, columnDetailSearch.value) : [],
-);
+const filteredColumnDetailFields = computed(() => (columnDetail.value ? filterDataGridDetailFields(columnDetail.value.fields, columnDetailSearch.value) : []));
 
 watch(cellDetailDialogOpen, (open) => {
   if (open) cellDetailJsonView.value = false;
@@ -2872,7 +2921,11 @@ watch(activeCellDetail, (detail) => {
     resetDetailEdit();
     return;
   }
-  detailEditValue.value = cellDetailEditorText(detail.value, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: detail.value,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 });
@@ -2952,7 +3005,11 @@ function closeCellDetails() {
 function startDetailEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
-  detailEditValue.value = cellDetailEditorText(detail.value, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: detail.value,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   isEditingDetail.value = true;
 }
 
@@ -2966,7 +3023,7 @@ function commitDetailEdit() {
 
   if (item.isNew && item.newIndex !== undefined) {
     const oldVal = newRows.value[item.newIndex]?.[detail.colIndex];
-    newRows.value[item.newIndex][detail.colIndex] = coerceCellValue(detailEditValue.value, oldVal);
+    newRows.value[item.newIndex][detail.colIndex] = coerceDetailCellValue(detailEditValue.value, oldVal, detail.colIndex);
     return;
   }
 
@@ -2974,7 +3031,7 @@ function commitDetailEdit() {
   if (!canEditExistingRows.value) return;
 
   const oldVal = props.result.rows[item.sourceIndex]?.[detail.colIndex];
-  const newVal = coerceCellValue(detailEditValue.value, oldVal);
+  const newVal = coerceDetailCellValue(detailEditValue.value, oldVal, detail.colIndex);
   if (newVal !== oldVal) {
     if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
     dirtyRows.value.get(item.sourceIndex)!.set(detail.colIndex, newVal);
@@ -3003,7 +3060,11 @@ function syncEditorFromDetailEdit() {
 function cancelValueEditorEdit() {
   const detail = activeCellDetail.value;
   if (!detail || !detail.isEditable) return;
-  detailEditValue.value = cellDetailEditorText(detail.value, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: detail.value,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   syncEditorFromDetailEdit();
   isEditingDetail.value = true;
 }
@@ -3035,7 +3096,11 @@ function restoreDetailOriginalValue() {
     dirtyRows.value = new Map(dirtyRows.value);
   }
 
-  detailEditValue.value = cellDetailEditorText(restoredValue, detail.type);
+  detailEditValue.value = dataGridCellEditorText({
+    value: restoredValue,
+    databaseType: props.databaseType,
+    columnInfo: tableColumnForGridColumn(detail.colIndex),
+  });
   syncEditorFromDetailEdit();
   isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
   detailCell.value = { ...detailCell.value! };
@@ -3086,11 +3151,7 @@ function toggleSort(colName: string, colIdx: number) {
   if (getIsResizing()) return;
   currentPage.value = 1;
   resetGridVerticalScroll(true);
-  const next = nextDataGridSortState(
-    { column: sortCol.value, columnIndex: sortColIndex.value, direction: sortDir.value },
-    colName,
-    colIdx,
-  );
+  const next = nextDataGridSortState({ column: sortCol.value, columnIndex: sortColIndex.value, direction: sortDir.value }, colName, colIdx);
   sortCol.value = next.column;
   sortColIndex.value = next.columnIndex;
   sortDir.value = next.direction;
@@ -3201,6 +3262,7 @@ async function applyWhereFilter() {
   isApplyingWhere.value = true;
   saveError.value = "";
   currentPage.value = 1;
+  emit("update:whereInput", currentWhereInput() ?? "");
   try {
     const tableMeta = await waitForTableMeta();
     if (!tableMeta) return;
@@ -3210,9 +3272,7 @@ async function applyWhereFilter() {
       tableName: tableMeta.tableName,
       columns: tableMeta.columns.map((column) => column.name),
       primaryKeys: tableMeta.primaryKeys,
-      orderBy:
-        orderByInput.value.trim() ||
-        (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
+      orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
       whereInput: currentWhereInput(),
       includeRowId: usesSyntheticRowIdKey(props.databaseType, tableMeta.primaryKeys),
@@ -3229,9 +3289,7 @@ const CELL_DISPLAY_MAX_LENGTH = 256;
 const CELL_FORMAT_CACHE_LIMIT = 20_000;
 const CELL_FORMAT_CACHE_PRUNE_COUNT = 5_000;
 
-const resolvedColumnFormatters = computed(() =>
-  props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)),
-);
+const resolvedColumnFormatters = computed(() => props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)));
 const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
 const primitiveCellFormatCache = new Map<string, string>();
 let objectCellFormatCache = new WeakMap<object, Map<number, string>>();
@@ -3265,9 +3323,10 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 function formatCell(value: CellValue, columnIndex?: number): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   const columnName = columnIndex === undefined ? undefined : props.result.columns[columnIndex];
-  const binaryDisplay = formatter
-    ? null
-    : binaryCellDisplayText(value, columnName ? columnTypeMap.value.get(columnName) : undefined);
+  const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
+  const arrayDisplay = formatter ? undefined : dataGridCellDisplayText({ value, databaseType: props.databaseType, columnInfo });
+  if (arrayDisplay !== undefined) return arrayDisplay;
+  const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnInfo?.data_type ?? (columnName ? columnTypeMap.value.get(columnName) : undefined));
   if (binaryDisplay) return binaryDisplay;
   const s = applyColumnFormatter(value, formatter);
   return s.length > CELL_DISPLAY_MAX_LENGTH ? s.slice(0, CELL_DISPLAY_MAX_LENGTH) : s;
@@ -3296,10 +3355,7 @@ function formatCellCached(value: CellValue, columnIndex?: number): string {
   return rememberPrimitiveCellFormat(key, formatCell(value, columnIndex));
 }
 
-watch(
-  () => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000")],
-  clearCellFormatCache,
-);
+watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000")], clearCellFormatCache);
 
 function quoteIdent(name: string): string {
   return quoteTableIdentifier(props.databaseType, name);
@@ -3338,15 +3394,10 @@ const canvasViewportHeight = ref(0);
 const canvasScrollTop = ref(0);
 const canvasHoverCell = ref<{ rowIndex: number; visibleColIdx: number } | null>(null);
 const canvasDevicePixelRatio = ref(typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
-const canvasBackingPixelRatio = computed(() =>
-  Math.min(4, Math.max(1, canvasDevicePixelRatio.value * settingsStore.editorSettings.uiScale)),
-);
+const canvasBackingPixelRatio = computed(() => Math.min(4, Math.max(1, canvasDevicePixelRatio.value * settingsStore.editorSettings.uiScale)));
 const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
 const canvasContentHeight = computed(() => Math.max(1, displayRowCount.value * CANVAS_DATA_GRID_ROW_HEIGHT));
-const canvasRenderStyleKey = computed(
-  () =>
-    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}`,
-);
+const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}`);
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
 let canvasResizeObserver: ResizeObserver | null = null;
@@ -3355,6 +3406,17 @@ let canvasPixelRatioMediaQueryCleanup: (() => void) | null = null;
 let canvasPixelRatioFrame = 0;
 let canvasDrawFrame = 0;
 let dataGridIsActive = true;
+
+watch(
+  () => [totalWidth.value, displayRowCount.value, useCanvasGridRows.value, props.result.columns.join("\u0000")],
+  () => {
+    nextTick(() => {
+      refreshGridScrollerMetrics();
+      observeGridHorizontalScrollbarScroller();
+    });
+  },
+  { flush: "post" },
+);
 
 function toggleDataGridRenderMode() {
   settingsStore.updateEditorSettings({
@@ -3510,10 +3572,7 @@ function canvasWheelDeltaToPixels(delta: number, deltaMode: number, pageSize: nu
 function shouldAccelerateCanvasWheel(event: WheelEvent): boolean {
   if (event.ctrlKey || event.metaKey) return false;
   if (event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) return true;
-  return (
-    Math.abs(event.deltaY) >= CANVAS_TRACKPAD_DELTA_THRESHOLD ||
-    Math.abs(event.deltaX) >= CANVAS_TRACKPAD_DELTA_THRESHOLD
-  );
+  return Math.abs(event.deltaY) >= CANVAS_TRACKPAD_DELTA_THRESHOLD || Math.abs(event.deltaX) >= CANVAS_TRACKPAD_DELTA_THRESHOLD;
 }
 
 function onCanvasWheel(event: WheelEvent) {
@@ -3523,25 +3582,9 @@ function onCanvasWheel(event: WheelEvent) {
 
   const verticalDelta = canvasWheelDeltaToPixels(event.deltaY, event.deltaMode, scroller.clientHeight);
   const horizontalDelta = canvasWheelDeltaToPixels(event.deltaX, event.deltaMode, scroller.clientWidth);
-  const shiftedHorizontalDelta =
-    event.shiftKey && Math.abs(verticalDelta) > Math.abs(horizontalDelta) ? verticalDelta : 0;
-  const nextTop =
-    shiftedHorizontalDelta === 0
-      ? Math.max(
-          0,
-          Math.min(
-            scroller.scrollHeight - scroller.clientHeight,
-            scroller.scrollTop + verticalDelta * CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER,
-          ),
-        )
-      : scroller.scrollTop;
-  const nextLeft = Math.max(
-    0,
-    Math.min(
-      scroller.scrollWidth - scroller.clientWidth,
-      scroller.scrollLeft + (horizontalDelta + shiftedHorizontalDelta) * CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER,
-    ),
-  );
+  const shiftedHorizontalDelta = event.shiftKey && Math.abs(verticalDelta) > Math.abs(horizontalDelta) ? verticalDelta : 0;
+  const nextTop = shiftedHorizontalDelta === 0 ? Math.max(0, Math.min(scroller.scrollHeight - scroller.clientHeight, scroller.scrollTop + verticalDelta * CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER)) : scroller.scrollTop;
+  const nextLeft = Math.max(0, Math.min(scroller.scrollWidth - scroller.clientWidth, scroller.scrollLeft + (horizontalDelta + shiftedHorizontalDelta) * CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER));
 
   if (nextTop === scroller.scrollTop && nextLeft === scroller.scrollLeft) return;
   event.preventDefault();
@@ -3553,20 +3596,12 @@ function onCanvasWheel(event: WheelEvent) {
 function onCanvasMouseMove(event: MouseEvent) {
   const hit = canvasHitTest(event);
   const hitItem = hit ? displayItemAt(hit.rowIndex) : undefined;
-  const next =
-    hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
+  const next = hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
   const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
   if (canvasRef.value) {
-    canvasRef.value.style.cursor = hit?.rowNumber
-      ? "default"
-      : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx)
-        ? "text"
-        : "cell";
+    canvasRef.value.style.cursor = hit?.rowNumber ? "default" : hitItem && actualColIdx !== undefined && canEditCellItem(hitItem, actualColIdx) ? "text" : "cell";
   }
-  if (
-    next?.rowIndex === canvasHoverCell.value?.rowIndex &&
-    next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx
-  ) {
+  if (next?.rowIndex === canvasHoverCell.value?.rowIndex && next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx) {
     return;
   }
   const previous = canvasHoverCell.value;
@@ -3601,10 +3636,7 @@ function keepCanvasDetailHover() {
 
 function clearCanvasDetailHover(event?: MouseEvent) {
   const relatedTarget = event?.relatedTarget;
-  if (
-    relatedTarget instanceof Node &&
-    (canvasOverlayRef.value?.contains(relatedTarget) || canvasRef.value?.contains(relatedTarget))
-  ) {
+  if (relatedTarget instanceof Node && (canvasOverlayRef.value?.contains(relatedTarget) || canvasRef.value?.contains(relatedTarget))) {
     return;
   }
   onCanvasMouseLeave();
@@ -3659,8 +3691,7 @@ function canvasCellViewportRect(rowIndex: number, visibleColIdx: number) {
   const widths = renderedColumnWidths.value;
   const colWidth = widths[visibleColIdx];
   if (colWidth === undefined) return null;
-  const left =
-    DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - gridHorizontalScrollLeft.value;
+  const left = DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - gridHorizontalScrollLeft.value;
   return {
     left,
     top: rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - canvasScrollTop.value,
@@ -3730,8 +3761,7 @@ const canvasEditingCellStyle = computed(() => {
 
 const canvasDetailButtonCell = computed(() => {
   if (!useCanvasGridRows.value || isScrolling.value) return null;
-  const target =
-    hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
+  const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
   if (!target || !cellDetailButtonVisible(target.rowIndex, target.col)) return null;
   const visibleColIdx = visibleColumnIndexes.value.indexOf(target.col);
   if (visibleColIdx < 0) return null;
@@ -3834,7 +3864,11 @@ function pauseCanvasGridWork() {
 
 function resumeCanvasGridWork() {
   dataGridIsActive = true;
-  nextTick(attachCanvasResizeObserver);
+  nextTick(() => {
+    attachCanvasResizeObserver();
+    refreshGridScrollerMetrics();
+    observeGridHorizontalScrollbarScroller();
+  });
 }
 
 onMounted(resumeCanvasGridWork);
@@ -3848,6 +3882,11 @@ onMounted(() => {
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   pauseCanvasGridWork();
+  gridHorizontalScrollbarResizeObserver?.disconnect();
+  stopGridHorizontalScrollbarDrag();
+  if (gridHorizontalScrollbarFrame && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(gridHorizontalScrollbarFrame);
+  }
   if (typeof window === "undefined") return;
   window.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
   window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
@@ -4182,9 +4221,7 @@ function pasteStartCell() {
 }
 
 function selectedVisibleColumnIndexes(): number[] {
-  return [...selectedColumnIndexes.value]
-    .filter((index) => index >= 0 && index < visibleColumns.value.length)
-    .sort((a, b) => a - b);
+  return [...selectedColumnIndexes.value].filter((index) => index >= 0 && index < visibleColumns.value.length).sort((a, b) => a - b);
 }
 
 function applyVisibleCellValue(item: RowItem, visibleCol: number, value: string | null): boolean {
@@ -4377,8 +4414,7 @@ function toggleKeyboardTranspose(): boolean {
 
 function moveSelectedCell(rowDelta: number, colDelta: number): boolean {
   const position = currentSelectedCellPosition();
-  if (!position || editingCell.value || displayRowCount.value === 0 || visibleColumnIndexes.value.length === 0)
-    return false;
+  if (!position || editingCell.value || displayRowCount.value === 0 || visibleColumnIndexes.value.length === 0) return false;
   const rowIndex = Math.max(0, Math.min(displayRowCount.value - 1, position.rowIndex + rowDelta));
   const colIndex = Math.max(0, Math.min(visibleColumnIndexes.value.length - 1, position.colIndex + colDelta));
   selectSingleCell(rowIndex, colIndex);
@@ -4527,9 +4563,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     const keydownAt = Date.now();
     window.setTimeout(() => {
       if (lastPasteEventAt >= keydownAt) return;
-      pasteClipboardIntoSelection().catch((e) =>
-        toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000),
-      );
+      pasteClipboardIntoSelection().catch((e) => toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000));
     }, 50);
     return;
   }
@@ -4727,9 +4761,7 @@ watch(
   (count) => ensureTransposeRecordWidths(count),
 );
 const transposePinnedWidthOverride = ref<number | null>(null);
-const transposePinnedWidth = computed(
-  () => transposePinnedWidthOverride.value ?? transposeFieldWidth(visibleColumns.value),
-);
+const transposePinnedWidth = computed(() => transposePinnedWidthOverride.value ?? transposeFieldWidth(visibleColumns.value));
 
 const transposeRecordWindow = computed(() =>
   visibleTransposeRecordWindow({
@@ -4745,22 +4777,31 @@ const visibleTransposeRecordIndexes = computed(() => {
   const window = transposeRecordWindow.value;
   return Array.from({ length: window.end - window.start }, (_, offset) => window.start + offset);
 });
+const activeTransposeRecordIndexes = computed(() =>
+  transposeRecordIndexesForMode({
+    multiRow: multiRowTranspose.value,
+    activeRecordIndex: transposeRowIndex.value,
+    totalRecords: displayRowCount.value,
+    visibleRecordIndexes: visibleTransposeRecordIndexes.value,
+  }),
+);
+const transposeBeforeSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.beforeWidth : 0));
+const transposeAfterSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.afterWidth : 0));
 const transposeRows = computed(() => {
   return buildVisibleTransposeRows({
     columns: visibleColumns.value,
     records: displayRowRefs.value.map((_, index) => displayItemAt(index)?.data ?? []),
-    recordIndexes: visibleTransposeRecordIndexes.value,
+    recordIndexes: activeTransposeRecordIndexes.value,
     valueIndexes: visibleColumnIndexes.value,
     typeByColumn: columnTypeMap.value,
     displayValue: (value, _column, index) => formatCellCached(value, visibleColumnIndexes.value[index]),
   });
 });
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
-const transposeTotalWidth = computed(
-  () =>
-    transposePinnedWidth.value +
-    Array.from({ length: displayRowCount.value }, (_, i) => getTransposeRecordWidth(i)).reduce((sum, w) => sum + w, 0),
-);
+const transposeTotalWidth = computed(() => {
+  const recordIndexes = multiRowTranspose.value ? Array.from({ length: displayRowCount.value }, (_, i) => i) : activeTransposeRecordIndexes.value;
+  return transposePinnedWidth.value + recordIndexes.reduce((sum, i) => sum + getTransposeRecordWidth(i), 0);
+});
 
 function transposeScrollElement(): HTMLElement | undefined {
   const raw = transposeScrollRef.value;
@@ -4795,6 +4836,26 @@ function scrollTransposeRecordIntoView(rowIndex: number) {
     });
     updateTransposeViewport();
   });
+}
+
+function setMultiRowTranspose(value: boolean) {
+  multiRowTranspose.value = value;
+  if (!showTranspose.value) return;
+  nextTick(updateTransposeViewport);
+  if (value && transposeRowIndex.value !== null) {
+    scrollTransposeRecordIntoView(transposeRowIndex.value);
+  } else {
+    nextTick(() => {
+      const el = transposeScrollElement();
+      if (!el) return;
+      el.scrollLeft = 0;
+      updateTransposeViewport();
+    });
+  }
+}
+
+function toggleMultiRowTranspose() {
+  setMultiRowTranspose(!multiRowTranspose.value);
 }
 
 function applyTransposeState(next: { showTranspose: boolean; transposeRowIndex: number | null }) {
@@ -4972,9 +5033,7 @@ watch(
     closeCellDetails();
     closeDetailDialogs();
     if (shouldPreserveTranspose) {
-      applyTransposeState(
-        nextTransposeStateForRecordCount(showTranspose.value, transposeRowIndex.value, displayRowCount.value),
-      );
+      applyTransposeState(nextTransposeStateForRecordCount(showTranspose.value, transposeRowIndex.value, displayRowCount.value));
     } else {
       closeTranspose(false);
     }
@@ -5049,6 +5108,7 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: colIdx };
   if (hasRowSelection.value && isRowSelected(rowId)) {
+    clearCellSelection();
     void prefetchCopyStatements();
     return;
   }
@@ -5063,6 +5123,9 @@ function onRowContext(rowId: number, rowIndex: number) {
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: -1 };
+  if (hasRowSelection.value && isRowSelected(rowId)) {
+    clearCellSelection();
+  }
   if (!isRowSelected(rowId)) {
     clearCellSelection();
     selectedRowIds.value = new Set([rowId]);
@@ -5153,11 +5216,7 @@ const ddlDrawerStyle = computed(() => ({
   width: `${ddlWidth.value}px`,
 }));
 
-const detailPanelStyle = computed(() =>
-  cellDetailPanelIsBottom.value
-    ? { height: `${detailPanelHeight.value}px`, maxHeight: `min(70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px)` }
-    : { width: `${detailPanelHeight.value}px` },
-);
+const detailPanelStyle = computed(() => (cellDetailPanelIsBottom.value ? { height: `${detailPanelHeight.value}px`, maxHeight: `min(70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px)` } : { width: `${detailPanelHeight.value}px` }));
 
 const contentGridStyle = computed(() =>
   cellDetailPanelIsBottom.value
@@ -5224,12 +5283,7 @@ async function fetchDdl() {
   showTableInfo.value = true;
   ddlLoading.value = true;
   try {
-    ddlContent.value = await api.getTableDdl(
-      props.connectionId,
-      props.database || "",
-      props.tableMeta.schema || props.database || "",
-      props.tableMeta.tableName,
-    );
+    ddlContent.value = await api.getTableDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {
@@ -5242,12 +5296,7 @@ async function fetchIndexes() {
   indexesLoading.value = true;
   indexesError.value = "";
   try {
-    indexes.value = await api.listIndexes(
-      props.connectionId,
-      props.database || "",
-      props.tableMeta.schema || props.database || "",
-      props.tableMeta.tableName,
-    );
+    indexes.value = await api.listIndexes(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
     indexesLoaded.value = true;
   } catch (e: any) {
     indexesError.value = String(e?.message || e);
@@ -5261,12 +5310,7 @@ async function fetchForeignKeys() {
   foreignKeysLoading.value = true;
   foreignKeysError.value = "";
   try {
-    foreignKeys.value = await api.listForeignKeys(
-      props.connectionId,
-      props.database || "",
-      props.tableMeta.schema || props.database || "",
-      props.tableMeta.tableName,
-    );
+    foreignKeys.value = await api.listForeignKeys(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
     foreignKeysLoaded.value = true;
   } catch (e: any) {
     foreignKeysError.value = String(e?.message || e);
@@ -5280,12 +5324,7 @@ async function fetchTriggers() {
   triggersLoading.value = true;
   triggersError.value = "";
   try {
-    triggers.value = await api.listTriggers(
-      props.connectionId,
-      props.database || "",
-      props.tableMeta.schema || props.database || "",
-      props.tableMeta.tableName,
-    );
+    triggers.value = await api.listTriggers(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
     triggersLoaded.value = true;
   } catch (e: any) {
     triggersError.value = String(e?.message || e);
@@ -5478,29 +5517,19 @@ onUnmounted(() => {
 const filteredColumns = computed(() => {
   if (!searchQuery.value) return props.tableMeta?.columns ?? [];
   const q = searchQuery.value.toLowerCase();
-  return (props.tableMeta?.columns ?? []).filter(
-    (c) => c.name.toLowerCase().includes(q) || c.data_type.toLowerCase().includes(q),
-  );
+  return (props.tableMeta?.columns ?? []).filter((c) => c.name.toLowerCase().includes(q) || c.data_type.toLowerCase().includes(q));
 });
 
 const filteredIndexes = computed(() => {
   if (!searchQuery.value) return indexes.value;
   const q = searchQuery.value.toLowerCase();
-  return indexes.value.filter(
-    (i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)),
-  );
+  return indexes.value.filter((i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)));
 });
 
 const filteredForeignKeys = computed(() => {
   if (!searchQuery.value) return foreignKeys.value;
   const q = searchQuery.value.toLowerCase();
-  return foreignKeys.value.filter(
-    (fk) =>
-      fk.name.toLowerCase().includes(q) ||
-      fk.column.toLowerCase().includes(q) ||
-      fk.ref_table.toLowerCase().includes(q) ||
-      fk.ref_column.toLowerCase().includes(q),
-  );
+  return foreignKeys.value.filter((fk) => fk.name.toLowerCase().includes(q) || fk.column.toLowerCase().includes(q) || fk.ref_table.toLowerCase().includes(q) || fk.ref_column.toLowerCase().includes(q));
 });
 
 const filteredTriggers = computed(() => {
@@ -5533,6 +5562,9 @@ defineExpose({
   toggleDdl: toggleTableInfo,
   showTableInfo,
   toggleTableInfo,
+  multiRowTranspose,
+  setMultiRowTranspose,
+  toggleMultiRowTranspose,
   focusSearch,
   visibleColumnCount,
   displayableColumnCount,
@@ -5564,9 +5596,7 @@ function copyRowLabels() {
   return {
     row: isMultiRow.value ? t("grid.copyRows", { count }) : t("grid.copyRow"),
     insert: isMultiRow.value ? t("grid.copyRowsInsert", { count }) : t("grid.copyRowInsert"),
-    insertNoPk: isMultiRow.value
-      ? t("grid.copyRowsInsertWithoutPrimaryKeys", { count })
-      : t("grid.copyRowInsertWithoutPrimaryKeys"),
+    insertNoPk: isMultiRow.value ? t("grid.copyRowsInsertWithoutPrimaryKeys", { count }) : t("grid.copyRowInsertWithoutPrimaryKeys"),
     update: isMultiRow.value ? t("grid.copyRowsUpdate", { count }) : t("grid.copyRowUpdate"),
   };
 }
@@ -5667,10 +5697,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
   // 2. Column sort & filter
   if (contextColumn.value) {
-    items.push(
-      { label: t("grid.sortAscending"), action: () => applyContextSort("asc"), icon: ArrowUp },
-      { label: t("grid.sortDescending"), action: () => applyContextSort("desc"), icon: ArrowDown },
-    );
+    items.push({ label: t("grid.sortAscending"), action: () => applyContextSort("asc"), icon: ArrowUp }, { label: t("grid.sortDescending"), action: () => applyContextSort("desc"), icon: ArrowDown });
     if (sortCol.value) {
       items.push({ label: t("grid.clearSort"), action: () => applyContextSort(null), icon: ArrowUpDown });
     }
@@ -5739,8 +5766,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     } else if (canDeleteRowItem(contextRowItem.value)) {
       items.push({
         label: labels.delete,
-        action: () =>
-          isMultiRow.value ? requestDeleteRows(affectedRowIds()) : requestDeleteRow(contextRowItem.value!.id),
+        action: () => (isMultiRow.value ? requestDeleteRows(affectedRowIds()) : requestDeleteRow(contextRowItem.value!.id)),
         icon: Trash2,
         variant: "destructive" as const,
       });
@@ -5751,26 +5777,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   // 8. Export submenu
   items.push(exportSubmenu());
 
+  // 9. Preview actions from registry (e.g. geometry map preview)
+  if (!contextHeaderColumn.value && contextCell.value) {
+    const colType = props.result.column_types?.[contextCell.value.col];
+    if (colType && isGeometryColumnType(colType)) {
+      const actions = previewActions.value;
+      if (actions.length > 0) {
+        items.push({ label: "", separator: true });
+        for (const action of actions) {
+          items.push({
+            label: t("grid.layerPreview"),
+            action: () => executePreviewAction(action),
+            icon: action.icon,
+          });
+        }
+      }
+    }
+  }
+
   return items;
 });
 </script>
 
 <template>
-  <div
-    ref="gridRef"
-    data-grid-root
-    class="h-full flex flex-col overflow-hidden outline-none"
-    :style="gridStyle"
-    tabindex="0"
-    @keydown="onGridKeydown"
-    @paste="onGridPaste"
-  >
+  <div ref="gridRef" data-grid-root class="h-full flex flex-col overflow-hidden outline-none" :style="gridStyle" tabindex="0" @keydown="onGridKeydown" @paste="onGridPaste">
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
-      <div
-        v-if="hasData || canShowWhereSearch"
-        class="flex-1 flex flex-col overflow-hidden"
-        @contextmenu="onContextMenu"
-      >
+      <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
         <div
           v-if="showDataGridTopbar"
@@ -5781,17 +5813,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           "
         >
           <div class="data-grid-topbar flex items-stretch relative">
-            <div
-              v-if="useTransaction && editable && (tableMeta || customSave)"
-              class="flex items-center px-2 py-0.5 border-r shrink-0"
-            >
-              <Select
-                :model-value="rowStatusFilter"
-                @update:model-value="(value: any) => setRowStatusFilter(String(value))"
-              >
-                <SelectTrigger
-                  class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground [&_svg]:size-3"
-                >
+            <div v-if="useTransaction && editable && (tableMeta || customSave)" class="flex items-center px-2 py-0.5 border-r shrink-0">
+              <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
+                <SelectTrigger class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground [&_svg]:size-3">
                   <SelectValue :placeholder="t('grid.filterRows')" />
                 </SelectTrigger>
                 <SelectContent position="popper">
@@ -5805,12 +5829,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </div>
             <template v-if="hasLocalColumnFilters && !canShowWhereSearch && !hasSearchBarSlot">
               <div class="flex items-center gap-1 px-2 py-0.5 min-w-0">
-                <button
-                  type="button"
-                  class="flex shrink-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15"
-                  :title="t('grid.clearLocalFilters')"
-                  @click="clearLocalFilter()"
-                >
+                <button type="button" class="flex shrink-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15" :title="t('grid.clearLocalFilters')" @click="clearLocalFilter()">
                   <Filter class="h-3 w-3" />
                   {{ localFilterCount }}
                   <X class="h-3 w-3" />
@@ -5819,29 +5838,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </template>
             <template v-if="canShowWhereSearch">
               <div ref="searchSplitContainerRef" class="flex flex-1 min-w-0">
-                <div
-                  class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative"
-                  :class="{ 'border-l': useTransaction && editable && (tableMeta || customSave) }"
-                  :style="whereSearchPaneStyle"
-                >
+                <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': useTransaction && editable && (tableMeta || customSave) }" :style="whereSearchPaneStyle">
                   <Popover v-model:open="filterBuilderOpen">
                     <PopoverTrigger as-child>
                       <button
                         type="button"
                         class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
-                        :class="
-                          filterButtonActive
-                            ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15'
-                            : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'
-                        "
+                        :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
                         :disabled="!canUseWhereSearch"
                         @click="ensureStructuredFilterRule"
                       >
                         <Filter class="h-3 w-3" />
-                        <span
-                          v-if="filterButtonCount"
-                          class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground"
-                        >
+                        <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">
                           {{ filterButtonCount }}
                         </span>
                       </button>
@@ -5855,33 +5863,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </Button>
                       </div>
 
-                      <div
-                        v-if="hasLocalColumnFilters"
-                        class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2"
-                      >
+                      <div v-if="hasLocalColumnFilters" class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2">
                         <div class="flex items-center justify-between gap-3">
                           <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
                             <Filter class="h-3.5 w-3.5 shrink-0" />
-                            <span class="truncate">{{
-                              t("grid.localFiltersActive", { count: localFilterCount })
-                            }}</span>
+                            <span class="truncate">{{ t("grid.localFiltersActive", { count: localFilterCount }) }}</span>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            class="h-7 shrink-0 px-2 text-xs"
-                            @click="clearLocalFilter()"
-                          >
+                          <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" @click="clearLocalFilter()">
                             <X class="mr-1 h-3.5 w-3.5" />
                             {{ t("grid.clearLocalFiltersShort") }}
                           </Button>
                         </div>
                         <div class="space-y-1">
-                          <div
-                            v-for="summary in localFilterSummaries"
-                            :key="summary.columnIndex"
-                            class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-2 rounded border border-primary/10 bg-background/70 px-2 py-1 text-xs"
-                          >
+                          <div v-for="summary in localFilterSummaries" :key="summary.columnIndex" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-2 rounded border border-primary/10 bg-background/70 px-2 py-1 text-xs">
                             <span class="truncate font-medium text-foreground" :title="summary.columnName">
                               {{ summary.columnName }}
                             </span>
@@ -5894,13 +5888,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 {{ t("grid.localFilterMoreValues", { count: summary.hiddenValueCount }) }}
                               </span>
                             </span>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              class="h-6 w-6 text-muted-foreground hover:text-destructive"
-                              :title="t('grid.clearFilter')"
-                              @click="clearLocalFilter(summary.columnIndex)"
-                            >
+                            <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" @click="clearLocalFilter(summary.columnIndex)">
                               <X class="h-3.5 w-3.5" />
                             </Button>
                           </div>
@@ -5923,48 +5911,24 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               {{ rule.conjunction }}
                             </Button>
                           </div>
-                          <div
-                            class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2"
-                          >
-                            <Select
-                              :model-value="rule.columnName"
-                              @update:model-value="
-                                (value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })
-                              "
-                            >
-                              <SelectTrigger
-                                class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate"
-                              >
+                          <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
+                            <Select :model-value="rule.columnName" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                              <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                 <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                               </SelectTrigger>
                               <SelectContent position="popper">
-                                <SelectItem
-                                  v-for="columnName in filterBuilderColumnOptions"
-                                  :key="columnName"
-                                  :value="columnName"
-                                >
+                                <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
                                   {{ columnName }}
                                 </SelectItem>
                               </SelectContent>
                             </Select>
 
-                            <Select
-                              :model-value="rule.mode"
-                              @update:model-value="
-                                (value: any) => updateStructuredFilterRule(rule.id, { mode: value as FilterMode })
-                              "
-                            >
-                              <SelectTrigger
-                                class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate"
-                              >
+                            <Select :model-value="rule.mode" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { mode: value as FilterMode })">
+                              <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent position="popper">
-                                <SelectItem
-                                  v-for="option in filterModeOptions"
-                                  :key="option.value"
-                                  :value="option.value"
-                                >
+                                <SelectItem v-for="option in filterModeOptions" :key="option.value" :value="option.value">
                                   {{ t(option.labelKey) }}
                                 </SelectItem>
                               </SelectContent>
@@ -5975,35 +5939,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               :model-value="rule.rawValue"
                               class="h-8 min-w-0 text-xs"
                               :placeholder="t('grid.filterBuilderValue')"
-                              @update:model-value="
-                                (value) => updateStructuredFilterRule(rule.id, { rawValue: String(value ?? '') })
-                              "
+                              @update:model-value="(value) => updateStructuredFilterRule(rule.id, { rawValue: String(value ?? '') })"
                               @keydown.enter.prevent="applyStructuredFilters"
                             />
-                            <div
-                              v-else
-                              class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground"
-                            >
+                            <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground">
                               <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
                             </div>
 
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
-                              :disabled="structuredFilterRules.length === 1"
-                              @click="removeStructuredFilterRule(rule.id)"
-                            >
+                            <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="structuredFilterRules.length === 1" @click="removeStructuredFilterRule(rule.id)">
                               <Trash2 class="h-3.5 w-3.5" />
                             </Button>
                           </div>
                         </template>
                       </div>
 
-                      <div
-                        v-else
-                        class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground"
-                      >
+                      <div v-else class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
                         {{ t("grid.filterBuilderEmpty") }}
                       </div>
 
@@ -6035,25 +5985,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     @click="updateWhereSuggestionPosition"
                     @blur="dismissWhereSuggestions"
                   />
-                  <span
-                    ref="whereMeasureRef"
-                    class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none"
-                    aria-hidden="true"
-                  />
+                  <span ref="whereMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- WHERE suggestion dropdown -->
                   <Teleport to="body">
-                    <div
-                      v-if="whereSuggestions.length > 0"
-                      class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md"
-                      :style="whereSuggestionStyle"
-                    >
+                    <div v-if="whereSuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
                       <div
                         v-for="(sug, idx) in whereSuggestions"
                         :key="sug"
                         class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                        :class="
-                          idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'
-                        "
+                        :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
                         @mousedown.prevent="
                           whereSuggestionIndex = idx;
                           acceptWhereSuggestion();
@@ -6086,9 +6026,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
                 </button>
                 <div class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0 relative">
-                  <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0"
-                    >ORDER BY</span
-                  >
+                  <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">ORDER BY</span>
                   <input
                     ref="orderByInputRef"
                     v-model="orderByInput"
@@ -6101,25 +6039,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     @click="updateOrderBySuggestionPosition"
                     @blur="dismissOrderBySuggestions"
                   />
-                  <span
-                    ref="orderByMeasureRef"
-                    class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none"
-                    aria-hidden="true"
-                  />
+                  <span ref="orderByMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- ORDER BY suggestion dropdown -->
                   <Teleport to="body">
-                    <div
-                      v-if="orderBySuggestions.length > 0"
-                      class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md"
-                      :style="orderBySuggestionStyle"
-                    >
+                    <div v-if="orderBySuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
                       <div
                         v-for="(sug, idx) in orderBySuggestions"
                         :key="sug"
                         class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                        :class="
-                          idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'
-                        "
+                        :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
                         @mousedown.prevent="
                           orderBySuggestionIndex = idx;
                           acceptOrderBySuggestion();
@@ -6145,20 +6073,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
             </template>
 
-            <slot
-              name="search-bar"
-              :local-filter-count="localFilterCount"
-              :has-local-column-filters="hasLocalColumnFilters"
-              :local-filter-summaries="localFilterSummaries"
-              :clear-local-filter="clearLocalFilter"
-            />
+            <slot name="search-bar" :local-filter-count="localFilterCount" :has-local-column-filters="hasLocalColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
 
             <div class="flex shrink-0 items-center gap-1 px-1 ml-auto">
               <Tooltip v-if="showQueryEditReadyBadge">
                 <TooltipTrigger as-child>
-                  <div
-                    class="flex h-5 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300"
-                  >
+                  <div class="flex h-5 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
                     {{ t("grid.queryEditReady") }}
                   </div>
                 </TooltipTrigger>
@@ -6166,27 +6086,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   {{ t("grid.queryEditReadyHint", { table: tableMeta?.tableName }) }}
                 </TooltipContent>
               </Tooltip>
-              <Button
-                v-if="props.context !== 'results'"
-                variant="ghost"
-                size="sm"
-                class="h-5 text-xs px-1.5 shrink-0"
-                :disabled="isSaving"
-                @click="onToolbarRefresh"
-              >
+              <Button v-if="props.context !== 'results'" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :disabled="isSaving" @click="onToolbarRefresh">
                 <Loader2 v-if="loading" class="w-3 h-3 mr-1 animate-spin" />
                 <RefreshCcw v-else class="w-3 h-3 mr-1" />
                 {{ t("grid.refresh") }}
               </Button>
               <Tooltip>
                 <TooltipTrigger as-child>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-5 text-xs px-1.5 shrink-0"
-                    :class="dataGridRenderMode === 'canvas' ? 'text-primary bg-primary/10' : ''"
-                    @click="toggleDataGridRenderMode"
-                  >
+                  <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="dataGridRenderMode === 'canvas' ? 'text-primary bg-primary/10' : ''" @click="toggleDataGridRenderMode">
                     <SquareDashed class="w-3 h-3 mr-1" />
                     {{ dataGridRenderMode === "canvas" ? t("grid.canvasRenderMode") : t("grid.domRenderMode") }}
                   </Button>
@@ -6195,30 +6102,25 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   {{ t("grid.renderModeHint") }}
                 </TooltipContent>
               </Tooltip>
-              <Button
-                v-if="editable && (tableMeta || customSave)"
-                variant="ghost"
-                size="sm"
-                class="h-5 text-xs px-1.5 shrink-0"
-                @click="addRow"
-              >
-                <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }}
-              </Button>
+              <Button v-if="editable && (tableMeta || customSave)" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" @click="addRow"> <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }} </Button>
               <template v-if="saveToolbarState.showActions">
+                <Tooltip v-if="pendingChangeCount > 0">
+                  <TooltipTrigger as-child>
+                    <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700" :disabled="isPreviewLoading" @click="openSqlPreview">
+                      <Loader2 v-if="isPreviewLoading" class="w-3 h-3 mr-1 animate-spin" />
+                      <Eye v-else class="w-3 h-3 mr-1" />
+                      {{ t("toolbar.previewSql") }}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-sm">
+                    {{ t("toolbar.previewSql") }}
+                  </TooltipContent>
+                </Tooltip>
                 <Tooltip>
                   <TooltipTrigger as-child>
-                    <Button
-                      variant="default"
-                      size="sm"
-                      class="h-5 text-xs px-1.5 shrink-0"
-                      :disabled="saveToolbarState.actionsDisabled"
-                      @click="onToolbarCommit"
-                    >
+                    <Button variant="default" size="sm" class="h-5 text-xs px-1.5 shrink-0" :disabled="saveToolbarState.actionsDisabled" @click="onToolbarCommit">
                       <Loader2 v-if="isSaving" class="w-3 h-3 mr-1 animate-spin" />
-                      <span
-                        v-else-if="pendingChangeCount > 0"
-                        class="mr-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950"
-                      >
+                      <span v-else-if="pendingChangeCount > 0" class="mr-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950">
                         {{ pendingChangeCount }}
                       </span>
                       <Save v-else class="w-3 h-3 mr-1" />
@@ -6229,13 +6131,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }}
                   </TooltipContent>
                 </Tooltip>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-5 text-xs px-1.5 shrink-0"
-                  :disabled="saveToolbarState.actionsDisabled"
-                  @click="useTransaction ? onToolbarRollback() : discardChanges()"
-                >
+                <Button variant="outline" size="sm" class="h-5 text-xs px-1.5 shrink-0" :disabled="saveToolbarState.actionsDisabled" @click="useTransaction ? onToolbarRollback() : discardChanges()">
                   <RotateCcw class="w-3 h-3 mr-1" />
                   {{ t(saveActionMode.secondaryActionKey) }}
                 </Button>
@@ -6244,26 +6140,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           </div>
         </div>
         <!-- Truncation warning banner -->
-        <div
-          v-if="showTruncationWarning"
-          class="shrink-0 px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5"
-        >
+        <div v-if="showTruncationWarning" class="shrink-0 px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
           <span>{{ t("grid.truncatedHint", { count: pageSize }) }}</span>
         </div>
         <!-- Content area: table + side/bottom detail panes -->
         <div class="flex-1 grid min-h-0 overflow-hidden" :style="contentGridStyle">
           <div class="col-start-1 row-start-1 flex flex-col min-w-0 overflow-hidden relative">
             <!-- Search overlay (Ctrl+F) -->
-            <Transition
-              enter-active-class="transition-opacity duration-150"
-              leave-active-class="transition-opacity duration-100"
-              enter-from-class="opacity-0"
-              leave-to-class="opacity-0"
-            >
-              <div
-                v-if="searchOverlayVisible"
-                class="absolute top-1 right-2 z-20 flex items-center gap-1 px-2 py-1 bg-background border rounded-md shadow-md"
-              >
+            <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
+              <div v-if="searchOverlayVisible" class="absolute top-1 right-2 z-20 flex items-center gap-1 px-2 py-1 bg-background border rounded-md shadow-md">
                 <Search class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                 <input
                   ref="searchInputRef"
@@ -6276,15 +6161,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   @keydown="onSearchKeydown"
                   @click="updateSuggestionPosition"
                 />
-                <span
-                  ref="measureRef"
-                  class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none"
-                  aria-hidden="true"
-                />
-                <div
-                  v-if="searchSuggestions.length > 0"
-                  class="absolute top-full right-0 mt-0.5 z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md"
-                >
+                <span ref="measureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
+                <div v-if="searchSuggestions.length > 0" class="absolute top-full right-0 mt-0.5 z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md">
                   <div
                     v-for="(sug, idx) in searchSuggestions"
                     :key="sug"
@@ -6300,19 +6178,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <span>{{ sug }}</span>
                   </div>
                 </div>
-                <span v-if="searchMatches.length > 0" class="text-xs text-muted-foreground shrink-0">
-                  {{ currentMatchIndex + 1 }}/{{ searchMatches.length }}
-                </span>
+                <span v-if="searchMatches.length > 0" class="text-xs text-muted-foreground shrink-0"> {{ currentMatchIndex + 1 }}/{{ searchMatches.length }} </span>
                 <span v-else-if="deferredClientSearchText" class="text-xs text-muted-foreground shrink-0"> 0 </span>
                 <button class="text-muted-foreground hover:text-foreground shrink-0" @click="closeSearch">
                   <X class="w-3.5 h-3.5" />
                 </button>
               </div>
             </Transition>
-            <div
-              v-if="isErrorResult"
-              class="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-destructive"
-            >
+            <div v-if="isErrorResult" class="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-destructive">
               <TriangleAlert class="h-8 w-8 text-destructive/50" aria-hidden="true" />
               <div class="space-y-1">
                 <div class="text-sm font-medium">{{ t("grid.queryError") }}</div>
@@ -6324,26 +6197,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <div class="h-8 flex items-center gap-2 px-3 border-y shrink-0 bg-muted/20">
                 <Rows3 class="w-3.5 h-3.5 text-muted-foreground" />
                 <span class="text-xs font-medium">{{ t("grid.transpose") }}</span>
-                <span class="text-xs text-muted-foreground">
-                  {{ t("grid.rowNumber") }} {{ (transposeRowIndex ?? 0) + 1 }}
+                <span class="text-xs text-muted-foreground"> {{ t("grid.rowNumber") }} {{ (transposeRowIndex ?? 0) + 1 }} </span>
+                <span class="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {{ multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
                 </span>
                 <span class="flex-1" />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-5 w-5"
-                  :disabled="transposeRowIndex === 0"
-                  @click="transposeNav(-1)"
-                >
+                <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="transposeRowIndex === 0" @click="transposeNav(-1)">
                   <ChevronLeft class="w-3 h-3" />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-5 w-5"
-                  :disabled="transposeRowIndex === displayItems.length - 1"
-                  @click="transposeNav(1)"
-                >
+                <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="transposeRowIndex === displayItems.length - 1" @click="transposeNav(1)">
                   <ChevronRight class="w-3 h-3" />
                 </Button>
                 <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeTranspose">
@@ -6365,95 +6227,52 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 @scroll="onTransposeScroll"
               >
                 <template #before>
-                  <div
-                    class="sticky top-0 z-20 flex h-7 border-b border-border bg-[rgb(239_239_239)] text-xs font-semibold text-muted-foreground dark:bg-muted"
-                    :style="{ width: `${transposeTotalWidth}px` }"
-                  >
-                    <div
-                      class="sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 bg-[rgb(239_239_239)] truncate dark:bg-muted relative"
-                      :style="{ width: `${transposePinnedWidth}px` }"
-                    >
+                  <div class="sticky top-0 z-20 flex h-7 border-b border-border bg-[rgb(239_239_239)] text-xs font-semibold text-muted-foreground dark:bg-muted" :style="{ width: `${transposeTotalWidth}px` }">
+                    <div class="sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 bg-[rgb(239_239_239)] truncate dark:bg-muted relative" :style="{ width: `${transposePinnedWidth}px` }">
                       {{ t("grid.columnName") }}
-                      <div
-                        class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"
-                        @mousedown.stop="onTransposePinnedResizeStart"
-                      />
+                      <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.beforeWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
                     <div
-                      v-for="recordIndex in visibleTransposeRecordIndexes"
+                      v-for="recordIndex in activeTransposeRecordIndexes"
                       :key="`transpose-head-${recordIndex}`"
                       class="shrink-0 border-r border-border px-2 py-1.5 text-center tabular-nums relative"
                       :class="{
-                        'transpose-record-header-selected text-primary font-semibold':
-                          transposeRecordUsesFramedHeader(recordIndex),
-                        'transpose-record-header-active text-primary':
-                          transposeRecordUsesActiveHighlight(recordIndex) &&
-                          !transposeRecordUsesFramedHeader(recordIndex),
-                        'bg-[rgb(239_239_239)] dark:bg-muted':
-                          !transposeRecordUsesActiveHighlight(recordIndex) &&
-                          !transposeRecordUsesFramedHeader(recordIndex),
+                        'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
+                        'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                        'bg-[rgb(239_239_239)] dark:bg-muted': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
                       }"
                       :style="{ width: `${getTransposeRecordWidth(recordIndex)}px` }"
                       @click="selectTransposeRecord(recordIndex, $event)"
                       @contextmenu="selectTransposeRecord(recordIndex, $event)"
                     >
                       {{ recordIndex + 1 }}
-                      <div
-                        class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"
-                        @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)"
-                        @dblclick.stop="autoFitTransposeRecord(recordIndex)"
-                      />
+                      <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.afterWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                   </div>
                 </template>
                 <template #default="{ item }">
-                  <div
-                    class="flex border-b border-border/60 text-xs"
-                    :style="{ height: '30px', width: `${transposeTotalWidth}px` }"
-                  >
-                    <div
-                      class="sticky left-0 z-10 flex shrink-0 items-center border-r border-border bg-background px-3 py-0 font-medium truncate"
-                      :style="{ width: `${transposePinnedWidth}px` }"
-                      :title="item.column"
-                    >
+                  <div class="flex border-b border-border/60 text-xs" :style="{ height: '30px', width: `${transposeTotalWidth}px` }">
+                    <div class="sticky left-0 z-10 flex shrink-0 items-center border-r border-border bg-background px-3 py-0 font-medium truncate" :style="{ width: `${transposePinnedWidth}px` }" :title="item.column">
                       {{ item.column }}
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.beforeWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
                     <div
                       v-for="cell in item.values"
                       :key="`${item.id}:${cell.recordIndex}`"
                       class="relative flex shrink-0 items-center border-r border-border/70 px-2 py-0 font-mono truncate"
                       :class="{
                         'text-muted-foreground italic': cell.isNull,
-                        'cell-selected':
-                          transposeCellIsSelected(cell.recordIndex, cell.valueIndex) &&
-                          !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'cell-selected-dirty':
-                          transposeCellIsSelected(cell.recordIndex, cell.valueIndex) &&
-                          displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'row-cell-selected':
-                          transposeRecordUsesSelectionVisual(cell.recordIndex) &&
-                          !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) &&
-                          !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'row-cell-selected-dirty':
-                          transposeRecordUsesSelectionVisual(cell.recordIndex) &&
-                          !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) &&
-                          displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'bg-primary/15':
-                          transposeRecordUsesActiveHighlight(cell.recordIndex) &&
-                          !transposeRecordUsesSelectionVisual(cell.recordIndex) &&
-                          !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] &&
-                          !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                        'cell-selected': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'cell-selected-dirty': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                         'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
                         'hover:bg-accent/50':
-                          !isScrolling &&
-                          canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) &&
-                          !transposeRecordUsesSelectionVisual(cell.recordIndex) &&
-                          !transposeRecordUsesActiveHighlight(cell.recordIndex) &&
-                          !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                          !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                       }"
                       :style="{ width: `${getTransposeRecordWidth(cell.recordIndex)}px` }"
                       :title="cell.display"
@@ -6461,25 +6280,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       @mouseenter="onTransposeCellMouseenter(cell.recordIndex, cell.valueIndex)"
                       @mouseleave="onCellMouseleave(cell.recordIndex, cell.valueIndex)"
                       @contextmenu="onTransposeCellContext(cell.recordIndex, cell.valueIndex, $event)"
-                      @dblclick.stop="
-                        canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) &&
-                        startEdit(displayItems[cell.recordIndex].id, cell.valueIndex)
-                      "
+                      @dblclick.stop="canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && startEdit(displayItems[cell.recordIndex].id, cell.valueIndex)"
                     >
-                      <template
-                        v-if="
-                          editingCell?.rowId === displayItems[cell.recordIndex]?.id &&
-                          editingCell?.col === cell.valueIndex
-                        "
-                      >
-                        <TemporalCellEditor
-                          v-if="temporalEditorKindForColumn(cell.valueIndex)"
-                          v-model="editValue"
-                          :kind="temporalEditorKindForColumn(cell.valueIndex)!"
-                          cell-layout="transpose"
-                          @cancel="cancelEdit"
-                          @commit="commitGridEdit"
-                        />
+                      <template v-if="editingCell?.rowId === displayItems[cell.recordIndex]?.id && editingCell?.col === cell.valueIndex">
+                        <TemporalCellEditor v-if="temporalEditorKindForColumn(cell.valueIndex)" v-model="editValue" :kind="temporalEditorKindForColumn(cell.valueIndex)!" cell-layout="transpose" @cancel="cancelEdit" @commit="commitGridEdit" />
+                        <EnumCellEditor v-else-if="isEnumGridColumn(cell.valueIndex)" v-model="editValue" :values="enumValuesForGridColumn(cell.valueIndex)" :nullable="isEnumGridColumnNullable(cell.valueIndex)" cell-layout="transpose" @cancel="cancelEdit" @commit="commitGridEdit" />
                         <input
                           v-else
                           v-model="editValue"
@@ -6495,34 +6300,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </template>
                       <template v-else>
                         {{ cell.display }}
-                        <div
-                          v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)"
-                          class="absolute right-0.5 top-0.5 flex items-center gap-1"
-                        >
-                          <DropdownMenu
-                            v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
-                            :open="quickDownloadMenuOpenFor(cell.recordIndex, cell.valueIndex)"
-                            @update:open="
-                              (value: boolean) =>
-                                handleQuickDownloadMenuOpenChange(value, cell.recordIndex, cell.valueIndex)
-                            "
-                          >
+                        <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
+                          <DropdownMenu v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)" :open="quickDownloadMenuOpenFor(cell.recordIndex, cell.valueIndex)" @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, cell.recordIndex, cell.valueIndex)">
                             <DropdownMenuTrigger as-child>
-                              <button
-                                class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                                :title="t('grid.downloadBinaryValue')"
-                                @mousedown.stop
-                                @click.stop
-                              >
+                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" @mousedown.stop @click.stop>
                                 <Download class="h-3 w-3" />
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" class="w-44">
-                              <DropdownMenuItem
-                                v-for="mode in BINARY_CELL_DOWNLOAD_MODES"
-                                :key="mode"
-                                @click="downloadCellBinaryValue(cell.recordIndex, cell.valueIndex, mode)"
-                              >
+                              <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadCellBinaryValue(cell.recordIndex, cell.valueIndex, mode)">
                                 {{ t(`grid.binaryDownload.${mode}`) }}
                               </DropdownMenuItem>
                             </DropdownMenuContent>
@@ -6538,38 +6324,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </div>
                       </template>
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeRecordWindow.afterWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                   </div>
                 </template>
               </RecycleScroller>
             </div>
             <template v-else>
               <!-- Sticky header -->
-              <div
-                ref="headerRef"
-                class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 border-y border-border overflow-hidden"
-              >
+              <div ref="headerRef" class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 border-y border-border overflow-hidden">
                 <div class="flex text-xs font-semibold text-foreground" :style="{ width: 'var(--header-total-w)' }">
-                  <div
-                    class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none cursor-pointer hover:bg-accent/60 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted"
-                    :style="{ width: 'var(--row-num-w)' }"
-                    @click="selectAllCells"
-                  >
-                    #
-                  </div>
+                  <div class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none cursor-pointer hover:bg-accent/60 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted" :style="{ width: 'var(--row-num-w)' }" @click="selectAllCells">#</div>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
-                  <LightTooltip
-                    v-for="col in renderedGridColumns"
-                    :key="`${col.name}-${col.actualColIdx}`"
-                    :text="col.name"
-                    side="bottom"
-                    :side-offset="4"
-                  >
+                  <LightTooltip v-for="col in renderedGridColumns" :key="`${col.name}-${col.actualColIdx}`" :text="col.name" side="bottom" :side-offset="4">
                     <div
                       class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-accent/60 select-none relative overflow-hidden"
                       :class="{
-                        'bg-primary/15 ring-1 ring-inset ring-primary/40':
-                          highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
+                        'bg-primary/15 ring-1 ring-inset ring-primary/40': highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
                       }"
                       :style="renderedColumnStyle(col.visibleColIdx)"
                       :data-grid-column-index="col.actualColIdx"
@@ -6581,92 +6351,49 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <span class="min-w-0 truncate leading-4">
                             {{ col.name }}
                           </span>
-                          <span
-                            v-if="headerColumnType(col.name, col.actualColIdx)"
-                            class="min-w-0 truncate text-[10px] font-normal leading-3"
-                            :class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
-                            :title="headerColumnType(col.name, col.actualColIdx)"
-                          >
+                          <span v-if="headerColumnType(col.name, col.actualColIdx)" class="min-w-0 truncate text-[10px] font-normal leading-3" :class="typeColorClass(headerColumnType(col.name, col.actualColIdx))" :title="headerColumnType(col.name, col.actualColIdx)">
                             {{ headerColumnType(col.name, col.actualColIdx) }}
                           </span>
-                          <span
-                            v-if="headerColumnComment(col.name)"
-                            class="min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground"
-                            :title="headerColumnComment(col.name)"
-                          >
+                          <span v-if="headerColumnComment(col.name)" class="min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground" :title="headerColumnComment(col.name)">
                             {{ headerColumnComment(col.name) }}
                           </span>
                         </span>
                         <button
+                          v-if="headerColumnSortable(col.actualColIdx)"
                           type="button"
                           class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                          :class="
-                            sortCol === col.name && sortColIndex === col.actualColIdx
-                              ? 'text-primary opacity-100'
-                              : 'opacity-80'
-                          "
+                          :class="sortCol === col.name && sortColIndex === col.actualColIdx ? 'text-primary opacity-100' : 'opacity-80'"
                           :title="t('grid.sort')"
                           @click.stop="toggleSort(col.name, col.actualColIdx)"
                         >
-                          <ArrowUp
-                            v-if="sortCol === col.name && sortColIndex === col.actualColIdx && sortDir === 'asc'"
-                            class="h-3 w-3 shrink-0"
-                          />
-                          <ArrowDown
-                            v-else-if="sortCol === col.name && sortColIndex === col.actualColIdx && sortDir === 'desc'"
-                            class="h-3 w-3 shrink-0"
-                          />
+                          <ArrowUp v-if="sortCol === col.name && sortColIndex === col.actualColIdx && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
+                          <ArrowDown v-else-if="sortCol === col.name && sortColIndex === col.actualColIdx && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
                           <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
                         </button>
-                        <DropdownMenu
-                          v-if="compactColumnHeaderActions"
-                          :open="headerActionMenuOpenColumn === col.actualColIdx"
-                          @update:open="
-                            (value: boolean) => (headerActionMenuOpenColumn = value ? col.actualColIdx : null)
-                          "
-                        >
+                        <DropdownMenu v-if="compactColumnHeaderActions" :open="headerActionMenuOpenColumn === col.actualColIdx" @update:open="(value: boolean) => (headerActionMenuOpenColumn = value ? col.actualColIdx : null)">
                           <DropdownMenuTrigger as-child>
                             <button
                               type="button"
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                              :class="
-                                columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx)
-                                  ? 'text-primary opacity-90'
-                                  : 'opacity-80'
-                              "
+                              :class="columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx) ? 'text-primary opacity-90' : 'opacity-80'"
                               :title="t('grid.columnActions')"
                               @click.stop
                             >
                               <ChevronDown class="h-3 w-3" />
                             </button>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent
-                            align="end"
-                            class="w-max min-w-28 max-w-48 p-0.5"
-                            @click.stop
-                            @keydown.stop
-                          >
-                            <DropdownMenuItem
-                              class="gap-1 px-1.5 py-0.5 text-xs"
-                              :disabled="!formatterKeyForColumn(col.name)"
-                              @select.prevent="openCompactColumnFormatter(col.actualColIdx)"
-                            >
+                          <DropdownMenuContent align="end" class="w-max min-w-28 max-w-48 p-0.5" @click.stop @keydown.stop>
+                            <DropdownMenuItem class="gap-1 px-1.5 py-0.5 text-xs" :disabled="!formatterKeyForColumn(col.name)" @select.prevent="openCompactColumnFormatter(col.actualColIdx)">
                               <Code2 class="h-3 w-3" />
                               {{ t("grid.columnFormatter") }}
                             </DropdownMenuItem>
-                            <DropdownMenuItem
-                              class="gap-1 px-1.5 py-0.5 text-xs"
-                              @select.prevent="openCompactLocalFilter(col.actualColIdx)"
-                            >
+                            <DropdownMenuItem class="gap-1 px-1.5 py-0.5 text-xs" @select.prevent="openCompactLocalFilter(col.actualColIdx)">
                               <Filter class="h-3 w-3" />
                               {{ t("grid.localFilter") }}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
-                        <Popover
-                          :open="formatterOpenColumn === col.actualColIdx"
-                          @update:open="(value: boolean) => handleColumnFormatterOpenChange(value, col.actualColIdx)"
-                        >
+                        <Popover :open="formatterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleColumnFormatterOpenChange(value, col.actualColIdx)">
                           <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
                             <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
                           </PopoverAnchor>
@@ -6682,13 +6409,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               <Code2 class="h-3.5 w-3.5" />
                             </button>
                           </PopoverTrigger>
-                          <PopoverContent
-                            align="start"
-                            side="bottom"
-                            class="w-[380px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl"
-                            @click.stop
-                            @keydown.stop
-                          >
+                          <PopoverContent align="start" side="bottom" class="w-[380px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
                             <div class="border-b bg-muted/40 px-3 py-2">
                               <div class="text-sm font-semibold">
                                 {{ t("grid.columnFormatterFor", { column: col.name }) }}
@@ -6702,10 +6423,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 <div class="text-xs font-medium text-muted-foreground">
                                   {{ t("grid.formatterType") }}
                                 </div>
-                                <Select
-                                  :model-value="formatterKind"
-                                  @update:model-value="(value: any) => (formatterKind = value)"
-                                >
+                                <Select :model-value="formatterKind" @update:model-value="(value: any) => (formatterKind = value)">
                                   <SelectTrigger class="h-8 text-xs">
                                     <SelectValue />
                                   </SelectTrigger>
@@ -6713,9 +6431,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                     <SelectItem value="datetime">{{ t("grid.formatterDatetime") }}</SelectItem>
                                     <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
                                     <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
-                                    <SelectItem value="custom-template">{{
-                                      t("grid.formatterCustomTemplate")
-                                    }}</SelectItem>
+                                    <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
                                   </SelectContent>
                                 </Select>
                               </div>
@@ -6724,19 +6440,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 <div class="text-xs font-medium text-muted-foreground">
                                   {{ t("grid.formatterTimestampUnit") }}
                                 </div>
-                                <Select
-                                  :model-value="formatterDateUnit"
-                                  @update:model-value="(value: any) => (formatterDateUnit = value)"
-                                >
+                                <Select :model-value="formatterDateUnit" @update:model-value="(value: any) => (formatterDateUnit = value)">
                                   <SelectTrigger class="h-8 text-xs">
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
                                     <SelectItem value="auto">{{ t("grid.formatterUnitAuto") }}</SelectItem>
                                     <SelectItem value="seconds">{{ t("grid.formatterUnitSeconds") }}</SelectItem>
-                                    <SelectItem value="milliseconds">{{
-                                      t("grid.formatterUnitMilliseconds")
-                                    }}</SelectItem>
+                                    <SelectItem value="milliseconds">{{ t("grid.formatterUnitMilliseconds") }}</SelectItem>
                                   </SelectContent>
                                 </Select>
                               </div>
@@ -6745,14 +6456,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 <div class="text-xs font-medium text-muted-foreground">
                                   {{ t("grid.formatterJsonPathInput") }}
                                 </div>
-                                <input
-                                  v-model="formatterJsonPath"
-                                  autocapitalize="off"
-                                  autocorrect="off"
-                                  spellcheck="false"
-                                  class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary"
-                                  placeholder="$.user.name"
-                                />
+                                <input v-model="formatterJsonPath" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary" placeholder="$.user.name" />
                               </div>
 
                               <div v-else-if="formatterKind === 'mask'" class="grid grid-cols-2 gap-2">
@@ -6760,23 +6464,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                   <span class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterMaskPrefix") }}
                                   </span>
-                                  <input
-                                    v-model.number="formatterMaskPrefix"
-                                    type="number"
-                                    min="0"
-                                    class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary"
-                                  />
+                                  <input v-model.number="formatterMaskPrefix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
                                 </label>
                                 <label class="space-y-1.5">
                                   <span class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterMaskSuffix") }}
                                   </span>
-                                  <input
-                                    v-model.number="formatterMaskSuffix"
-                                    type="number"
-                                    min="0"
-                                    class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary"
-                                  />
+                                  <input v-model.number="formatterMaskSuffix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
                                 </label>
                               </div>
 
@@ -6785,22 +6479,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                   <div class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterSavedCustom") }}
                                   </div>
-                                  <Select
-                                    :model-value="formatterCustomId"
-                                    @update:model-value="(value: any) => selectCustomFormatter(String(value))"
-                                  >
+                                  <Select :model-value="formatterCustomId" @update:model-value="(value: any) => selectCustomFormatter(String(value))">
                                     <SelectTrigger class="h-8 text-xs">
                                       <SelectValue />
                                     </SelectTrigger>
                                     <SelectContent>
-                                      <SelectItem :value="CUSTOM_FORMATTER_NEW">{{
-                                        t("grid.formatterNewCustom")
-                                      }}</SelectItem>
-                                      <SelectItem
-                                        v-for="formatter in savedCustomFormatters"
-                                        :key="formatter.id"
-                                        :value="formatter.id"
-                                      >
+                                      <SelectItem :value="CUSTOM_FORMATTER_NEW">{{ t("grid.formatterNewCustom") }}</SelectItem>
+                                      <SelectItem v-for="formatter in savedCustomFormatters" :key="formatter.id" :value="formatter.id">
                                         {{ formatter.name }}
                                       </SelectItem>
                                     </SelectContent>
@@ -6810,24 +6495,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                   <span class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterCustomName") }}
                                   </span>
-                                  <input
-                                    v-model="formatterCustomName"
-                                    class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary"
-                                    :placeholder="t('grid.formatterCustomNamePlaceholder')"
-                                  />
+                                  <input v-model="formatterCustomName" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" :placeholder="t('grid.formatterCustomNamePlaceholder')" />
                                 </label>
                                 <label class="block space-y-1.5">
                                   <span class="text-xs font-medium text-muted-foreground">
                                     {{ t("grid.formatterCustomTemplateInput") }}
                                   </span>
-                                  <input
-                                    v-model="formatterCustomTemplate"
-                                    autocapitalize="off"
-                                    autocorrect="off"
-                                    spellcheck="false"
-                                    class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary"
-                                    placeholder="ID-${value}"
-                                  />
+                                  <input v-model="formatterCustomTemplate" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary" placeholder="ID-${value}" />
                                 </label>
                                 <div class="text-[11px] leading-4 text-muted-foreground">
                                   {{ t("grid.formatterCustomTemplateHint") }}
@@ -6839,11 +6513,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                   {{ t("grid.formatterPreview") }}
                                 </div>
                                 <div class="max-h-40 overflow-auto rounded border bg-muted/20">
-                                  <div
-                                    v-for="row in formatterPreviewRows(col.actualColIdx)"
-                                    :key="row.index"
-                                    class="grid grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)] gap-2 border-b px-2 py-1.5 text-[11px] last:border-b-0"
-                                  >
+                                  <div v-for="row in formatterPreviewRows(col.actualColIdx)" :key="row.index" class="grid grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)] gap-2 border-b px-2 py-1.5 text-[11px] last:border-b-0">
                                     <span class="text-muted-foreground">{{ row.index }}</span>
                                     <span class="truncate font-mono text-muted-foreground">{{ row.raw }}</span>
                                     <span class="truncate font-mono">{{ row.formatted }}</span>
@@ -6853,40 +6523,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             </div>
 
                             <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-3 py-2">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                class="h-7 px-2 text-xs"
-                                :disabled="!columnHasFormatter(col.actualColIdx)"
-                                @click="clearColumnFormatter(col.actualColIdx)"
-                              >
+                              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="!columnHasFormatter(col.actualColIdx)" @click="clearColumnFormatter(col.actualColIdx)">
                                 {{ t("grid.clearFormatter") }}
                               </Button>
                               <div class="flex items-center gap-2">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  class="h-7 px-2 text-xs"
-                                  @click="closeColumnFormatter"
-                                >
+                                <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="closeColumnFormatter">
                                   {{ t("dangerDialog.cancel") }}
                                 </Button>
-                                <Button
-                                  size="sm"
-                                  class="h-7 px-2 text-xs"
-                                  :disabled="!formatterDraftIsSavable()"
-                                  @click="saveColumnFormatter(col.actualColIdx)"
-                                >
+                                <Button size="sm" class="h-7 px-2 text-xs" :disabled="!formatterDraftIsSavable()" @click="saveColumnFormatter(col.actualColIdx)">
                                   {{ t("grid.saveFormatter") }}
                                 </Button>
                               </div>
                             </div>
                           </PopoverContent>
                         </Popover>
-                        <Popover
-                          :open="localFilterOpenColumn === col.actualColIdx"
-                          @update:open="(value: boolean) => handleLocalFilterOpenChange(value, col.actualColIdx)"
-                        >
+                        <Popover :open="localFilterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleLocalFilterOpenChange(value, col.actualColIdx)">
                           <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
                             <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
                           </PopoverAnchor>
@@ -6901,108 +6552,50 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               <Filter class="h-3.5 w-3.5" />
                             </button>
                           </PopoverTrigger>
-                          <PopoverContent
-                            align="start"
-                            side="bottom"
-                            class="w-[300px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl"
-                            @click.stop
-                            @keydown.stop
-                          >
+                          <PopoverContent align="start" side="bottom" class="w-[300px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
                             <div class="border-b bg-muted/40 px-2 py-1.5 text-center text-xs font-semibold">
                               {{ t("grid.localFilterFor", { column: col.name }) }}
                             </div>
                             <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
                               <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <input
-                                v-model="localFilterSearch"
-                                autocapitalize="off"
-                                autocorrect="off"
-                                spellcheck="false"
-                                class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
-                                :placeholder="t('grid.searchValues')"
-                              />
+                              <input v-model="localFilterSearch" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('grid.searchValues')" />
                             </div>
-                            <div
-                              class="grid grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] border-b bg-muted/40 px-2 py-1 text-xs font-medium text-muted-foreground"
-                            >
-                              <button
-                                type="button"
-                                class="flex h-4 w-4 items-center justify-center rounded border"
-                                :class="
-                                  localFilterAllVisibleSelected
-                                    ? 'border-blue-600 bg-blue-600 text-white'
-                                    : 'border-border bg-background text-foreground/70'
-                                "
-                                @click="toggleAllLocalFilterOptions"
-                              >
+                            <div class="grid grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] border-b bg-muted/40 px-2 py-1 text-xs font-medium text-muted-foreground">
+                              <button type="button" class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterAllVisibleSelected ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'" @click="toggleAllLocalFilterOptions">
                                 <Check v-if="localFilterAllVisibleSelected" class="h-3 w-3 stroke-[3]" />
                               </button>
                               <span>{{ t("grid.value") }}</span>
                               <span class="text-right">{{ t("grid.count") }}</span>
                             </div>
                             <div class="max-h-72 overflow-auto py-0.5">
-                              <button
-                                v-for="option in localFilterOptions"
-                                :key="option.key"
-                                type="button"
-                                class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent"
-                                @click="toggleLocalFilterValue(option.key)"
-                              >
-                                <span
-                                  class="flex h-4 w-4 items-center justify-center rounded border"
-                                  :class="
-                                    localFilterDraft?.values.has(option.key)
-                                      ? 'border-blue-600 bg-blue-600 text-white'
-                                      : 'border-border bg-background text-foreground/70'
-                                  "
-                                >
+                              <button v-for="option in localFilterOptions" :key="option.key" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="toggleLocalFilterValue(option.key)">
+                                <span class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterDraft?.values.has(option.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'">
                                   <Check v-if="localFilterDraft?.values.has(option.key)" class="h-3 w-3 stroke-[3]" />
                                 </span>
-                                <span
-                                  class="truncate font-mono"
-                                  :class="{ 'italic text-muted-foreground': option.value === null }"
-                                >
+                                <span class="truncate font-mono" :class="{ 'italic text-muted-foreground': option.value === null }">
                                   {{ option.label }}
                                 </span>
-                                <span class="text-right tabular-nums text-muted-foreground text-xs">{{
-                                  option.count
-                                }}</span>
+                                <span class="text-right tabular-nums text-muted-foreground text-xs">{{ option.count }}</span>
                               </button>
-                              <div
-                                v-if="localFilterAllOptions.length > localFilterOptions.length"
-                                class="px-2 py-0.5 text-center text-[10px] text-muted-foreground"
-                              >
+                              <div v-if="localFilterAllOptions.length > localFilterOptions.length" class="px-2 py-0.5 text-center text-[10px] text-muted-foreground">
                                 {{
                                   t("grid.moreValues", {
                                     count: localFilterAllOptions.length - localFilterOptions.length,
                                   })
                                 }}
                               </div>
-                              <button
-                                v-if="canApplyTypedLocalFilterValue"
-                                type="button"
-                                class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs text-primary hover:bg-accent"
-                                @click="applyTypedLocalFilterValue"
-                              >
+                              <button v-if="canApplyTypedLocalFilterValue" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs text-primary hover:bg-accent" @click="applyTypedLocalFilterValue">
                                 <Search class="h-3.5 w-3.5" />
                                 <span class="truncate font-mono">
                                   {{ t("grid.filterTypedValue", { value: localFilterTypedValue }) }}
                                 </span>
                               </button>
-                              <div
-                                v-if="localFilterOptions.length === 0 && !canApplyTypedLocalFilterValue"
-                                class="px-2 py-6 text-center text-xs text-muted-foreground"
-                              >
+                              <div v-if="localFilterOptions.length === 0 && !canApplyTypedLocalFilterValue" class="px-2 py-6 text-center text-xs text-muted-foreground">
                                 {{ t("grid.noSearchResults") }}
                               </div>
                             </div>
                             <div class="flex items-center justify-between gap-2 border-t bg-muted/40 px-2 py-1.5">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                class="h-7 px-2 text-xs"
-                                @click="clearLocalFilter(col.actualColIdx)"
-                              >
+                              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="clearLocalFilter(col.actualColIdx)">
                                 {{ t("grid.clearFilter") }}
                               </Button>
                               <div class="flex items-center gap-2">
@@ -7017,31 +6610,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           </PopoverContent>
                         </Popover>
                       </span>
-                      <div
-                        class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30"
-                        @mousedown.stop="onResizeStart(col.visibleColIdx, $event)"
-                        @dblclick.stop="autoFitColumn(col.visibleColIdx)"
-                      />
+                      <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onResizeStart(col.visibleColIdx, $event)" @dblclick.stop="autoFitColumn(col.visibleColIdx)" />
                     </div>
                     <template #content>
                       <div class="grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 px-3 py-2">
                         <span class="text-background/70">{{ t("grid.columnName") }}</span>
                         <span class="flex min-w-0 items-center gap-2">
                           <span class="min-w-0 flex-1 truncate font-mono">{{ col.name }}</span>
-                          <button
-                            type="button"
-                            class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10"
-                            :title="t('grid.copyColumnName')"
-                            @click.stop="copyText(col.name)"
-                          >
+                          <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10" :title="t('grid.copyColumnName')" @click.stop="copyText(col.name)">
                             <Copy class="h-3 w-3" />
                           </button>
                         </span>
                         <template v-if="columnTypeMap.get(col.name)">
                           <span class="text-background/70">{{ t("grid.columnType") }}</span>
-                          <span :class="typeColorClass(columnTypeMap.get(col.name)!)">{{
-                            columnTypeMap.get(col.name)
-                          }}</span>
+                          <span :class="typeColorClass(columnTypeMap.get(col.name)!)">{{ columnTypeMap.get(col.name) }}</span>
                         </template>
                         <template v-if="columnCommentMap.get(col.name)">
                           <span class="text-background/70">{{ t("grid.columnComment") }}</span>
@@ -7051,30 +6633,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </template>
                   </LightTooltip>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.afterWidth}px` }" />
-                  <div
-                    v-if="gridScrollbarGutter > 0"
-                    class="shrink-0 border-l border-border"
-                    :style="{ width: 'var(--grid-scrollbar-gutter)' }"
-                  />
+                  <div v-if="gridScrollbarGutter > 0" class="shrink-0 border-l border-border" :style="{ width: 'var(--grid-scrollbar-gutter)' }" />
                 </div>
               </div>
 
               <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
-                <div
-                  class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none"
-                  :class="{ 'is-scrolling': isScrolling }"
-                  @scroll="onScrollerScroll"
-                >
+                <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll">
                   <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />
                 </div>
-                <div
-                  class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground"
-                >
-                  <component
-                    :is="hasActiveFilter ? SearchX : Inbox"
-                    class="h-8 w-8 text-muted-foreground/50"
-                    aria-hidden="true"
-                  />
+                <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+                  <component :is="hasActiveFilter ? SearchX : Inbox" class="h-8 w-8 text-muted-foreground/50" aria-hidden="true" />
                   <div class="space-y-1">
                     <div class="text-sm font-medium text-foreground">{{ emptyTitle }}</div>
                     <div class="text-xs">{{ emptyDescription }}</div>
@@ -7082,14 +6650,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </div>
               </div>
 
-              <div
-                v-else-if="useCanvasGridRows"
-                ref="scrollerRef"
-                class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none bg-background"
-                :class="{ 'is-scrolling': isScrolling }"
-                @scroll="onCanvasScroll"
-                @wheel="onCanvasWheel"
-              >
+              <div v-else-if="useCanvasGridRows" ref="scrollerRef" class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none bg-background" :class="{ 'is-scrolling': isScrolling }" @scroll="onCanvasScroll" @wheel="onCanvasWheel">
                 <div class="relative" :style="{ width: `${totalWidth}px`, height: `${canvasContentHeight}px` }">
                   <canvas
                     ref="canvasRef"
@@ -7110,18 +6671,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       marginTop: `-${canvasViewportHeight}px`,
                     }"
                   >
-                    <div
-                      v-if="canvasEditingCell"
-                      class="absolute pointer-events-auto z-20"
-                      :class="{ 'tabular-nums': canvasEditingCellIsNumeric }"
-                      :style="canvasEditingCellStyle"
-                      @mousedown.stop
-                      @click.stop
-                    >
-                      <TemporalCellEditor
-                        v-if="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)"
+                    <div v-if="canvasEditingCell" class="absolute pointer-events-auto z-20" :class="{ 'tabular-nums': canvasEditingCellIsNumeric }" :style="canvasEditingCellStyle" @mousedown.stop @click.stop>
+                      <TemporalCellEditor v-if="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)" v-model="editValue" :kind="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)!" @cancel="cancelEdit" @commit="commitGridEdit" />
+                      <EnumCellEditor
+                        v-else-if="isEnumGridColumn(canvasEditingCell.actualColIdx)"
                         v-model="editValue"
-                        :kind="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)!"
+                        :values="enumValuesForGridColumn(canvasEditingCell.actualColIdx)"
+                        :nullable="isEnumGridColumnNullable(canvasEditingCell.actualColIdx)"
                         @cancel="cancelEdit"
                         @commit="commitGridEdit"
                       />
@@ -7138,49 +6694,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @paste.stop
                       />
                     </div>
-                    <div
-                      v-if="canvasDetailButtonCell"
-                      class="absolute pointer-events-auto z-20 flex items-center gap-1"
-                      :style="canvasDetailButtonStyle"
-                      @mouseenter="keepCanvasDetailHover"
-                      @mouseleave="clearCanvasDetailHover"
-                    >
+                    <div v-if="canvasDetailButtonCell" class="absolute pointer-events-auto z-20 flex items-center gap-1" :style="canvasDetailButtonStyle" @mouseenter="keepCanvasDetailHover" @mouseleave="clearCanvasDetailHover">
                       <DropdownMenu
                         v-if="canvasDetailButtonCell.canQuickDownload"
-                        :open="
-                          quickDownloadMenuOpenFor(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)
-                        "
-                        @update:open="
-                          (value: boolean) =>
-                            handleQuickDownloadMenuOpenChange(
-                              value,
-                              canvasDetailButtonCell!.rowIndex,
-                              canvasDetailButtonCell!.actualColIdx,
-                            )
-                        "
+                        :open="quickDownloadMenuOpenFor(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                        @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx)"
                       >
                         <DropdownMenuTrigger as-child>
-                          <button
-                            class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                            :title="t('grid.downloadBinaryValue')"
-                            @mousedown.stop
-                            @click.stop
-                          >
+                          <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" @mousedown.stop @click.stop>
                             <Download class="h-3 w-3" />
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" class="w-44">
-                          <DropdownMenuItem
-                            v-for="mode in BINARY_CELL_DOWNLOAD_MODES"
-                            :key="mode"
-                            @click="
-                              downloadCellBinaryValue(
-                                canvasDetailButtonCell.rowIndex,
-                                canvasDetailButtonCell.actualColIdx,
-                                mode,
-                              )
-                            "
-                          >
+                          <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadCellBinaryValue(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx, mode)">
                             {{ t(`grid.binaryDownload.${mode}`) }}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
@@ -7189,13 +6715,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                         :title="t('grid.cellDetails')"
                         @mousedown.stop
-                        @click.stop="
-                          showCellDetailsForVisibleCell(
-                            canvasDetailButtonCell.rowIndex,
-                            canvasDetailButtonCell.visibleColIdx,
-                            canvasDetailButtonCell.actualColIdx,
-                          )
-                        "
+                        @click.stop="showCellDetailsForVisibleCell(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.visibleColIdx, canvasDetailButtonCell.actualColIdx)"
                       >
                         <Info class="h-3 w-3" />
                       </button>
@@ -7205,29 +6725,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
 
               <!-- Virtual scrolled rows -->
-              <RecycleScroller
-                v-else-if="hasVisibleRows"
-                ref="scrollerRef"
-                class="data-grid-scroller flex-1 overflow-x-auto overscroll-none"
-                :class="{ 'is-scrolling': isScrolling }"
-                :items="displayItems"
-                :item-size="26"
-                :buffer="600"
-                :skip-hover="true"
-                key-field="id"
-                @scroll="onScrollerScroll"
-              >
+              <RecycleScroller v-else-if="hasVisibleRows" ref="scrollerRef" class="data-grid-scroller flex-1 overflow-x-auto overscroll-none" :class="{ 'is-scrolling': isScrolling }" :items="displayItems" :item-size="26" :buffer="600" :skip-hover="true" key-field="id" @scroll="onScrollerScroll">
                 <template #default="{ item }">
                   <div
                     class="flex text-xs border-b border-border"
                     :class="{
                       'bg-destructive/5 opacity-70': item.isDeleted,
                       'bg-primary/5': item.isNew && !isRowActive(item.displayIndex),
-                      'bg-muted/30':
-                        !item.isNew &&
-                        !item.isDeleted &&
-                        !isRowActive(item.displayIndex) &&
-                        item.displayIndex % 2 === 1,
+                      'bg-muted/30': !item.isNew && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
                       'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
                     }"
                     :style="{ height: '26px', width: 'var(--total-w)' }"
@@ -7238,11 +6743,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :class="[
                         rowNumberStatusClass(item),
                         {
-                          'text-primary font-semibold !bg-primary/25':
-                            isRowSelected(item.id) &&
-                            item.status !== 'new' &&
-                            item.status !== 'edited' &&
-                            item.status !== 'deleted',
+                          'text-primary font-semibold !bg-primary/25': isRowSelected(item.id) && item.status !== 'new' && item.status !== 'edited' && item.status !== 'deleted',
                         },
                       ]"
                       :style="{ width: 'var(--row-num-w)' }"
@@ -7261,26 +6762,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :class="{
                         'text-muted-foreground italic': isNull(item.data[col.actualColIdx]),
                         'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
-                        'cell-selected':
-                          cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
-                        'cell-selected-dirty':
-                          cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
-                        'row-cell-selected':
-                          rowCellsUseSelectionVisual(item.id) &&
-                          !cellIsSelected(item.displayIndex, col.visibleColIdx) &&
-                          !item.isDirtyCol[col.actualColIdx],
-                        'row-cell-selected-dirty':
-                          rowCellsUseSelectionVisual(item.id) &&
-                          !cellIsSelected(item.displayIndex, col.visibleColIdx) &&
-                          item.isDirtyCol[col.actualColIdx],
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(
-                          item.displayIndex,
-                          col.actualColIdx,
-                        ),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(
-                          item.displayIndex,
-                          col.actualColIdx,
-                        ),
+                        'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                        'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                        'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
+                        'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
+                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                         'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
                         'cursor-text hover:bg-accent/50': !isScrolling && canEditCellItem(item, col.actualColIdx),
                         'line-through': item.isDeleted,
@@ -7293,13 +6780,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx)"
                     >
                       <template v-if="editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx">
-                        <TemporalCellEditor
-                          v-if="temporalEditorKindForColumn(col.actualColIdx)"
-                          v-model="editValue"
-                          :kind="temporalEditorKindForColumn(col.actualColIdx)!"
-                          @cancel="cancelEdit"
-                          @commit="commitGridEdit"
-                        />
+                        <TemporalCellEditor v-if="temporalEditorKindForColumn(col.actualColIdx)" v-model="editValue" :kind="temporalEditorKindForColumn(col.actualColIdx)!" @cancel="cancelEdit" @commit="commitGridEdit" />
+                        <EnumCellEditor v-else-if="isEnumGridColumn(col.actualColIdx)" v-model="editValue" :values="enumValuesForGridColumn(col.actualColIdx)" :nullable="isEnumGridColumnNullable(col.actualColIdx)" @cancel="cancelEdit" @commit="commitGridEdit" />
                         <input
                           v-else
                           v-model="editValue"
@@ -7315,34 +6797,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </template>
                       <template v-else>
                         {{ formatCellCached(item.data[col.actualColIdx], col.actualColIdx) }}
-                        <div
-                          v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)"
-                          class="absolute right-0.5 top-0.5 flex items-center gap-1"
-                        >
-                          <DropdownMenu
-                            v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
-                            :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)"
-                            @update:open="
-                              (value: boolean) =>
-                                handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)
-                            "
-                          >
+                        <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
+                          <DropdownMenu v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)" :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)" @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)">
                             <DropdownMenuTrigger as-child>
-                              <button
-                                class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                                :title="t('grid.downloadBinaryValue')"
-                                @mousedown.stop
-                                @click.stop
-                              >
+                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" @mousedown.stop @click.stop>
                                 <Download class="h-3 w-3" />
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" class="w-44">
-                              <DropdownMenuItem
-                                v-for="mode in BINARY_CELL_DOWNLOAD_MODES"
-                                :key="mode"
-                                @click="downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode)"
-                              >
+                              <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode)">
                                 {{ t(`grid.binaryDownload.${mode}`) }}
                               </DropdownMenuItem>
                             </DropdownMenuContent>
@@ -7351,9 +6814,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                             :title="t('grid.cellDetails')"
                             @mousedown.stop
-                            @click.stop="
-                              showCellDetailsForVisibleCell(item.displayIndex, col.visibleColIdx, col.actualColIdx)
-                            "
+                            @click.stop="showCellDetailsForVisibleCell(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
                           >
                             <Info class="h-3 w-3" />
                           </button>
@@ -7364,10 +6825,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </div>
                 </template>
               </RecycleScroller>
+              <div v-if="hasGridHorizontalOverflow" ref="gridHorizontalScrollbarTrackRef" class="data-grid-horizontal-scrollbar" :class="{ 'data-grid-horizontal-scrollbar--dragging': gridHorizontalScrollbarDragging }" @pointerdown="startGridHorizontalScrollbarDrag">
+                <div class="data-grid-horizontal-scrollbar__thumb" :style="gridHorizontalScrollbarThumbStyle" />
+              </div>
               <div v-if="loading" class="absolute inset-0 z-20 bg-background/50 flex items-center justify-center">
-                <div
-                  class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-background border shadow-sm text-xs text-muted-foreground"
-                >
+                <div class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-background border shadow-sm text-xs text-muted-foreground">
                   <Loader2 class="w-3.5 h-3.5 animate-spin" />
                   <span>{{ (loadingElapsed / 1000).toFixed(1) }}s</span>
                 </div>
@@ -7375,39 +6837,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </template>
           </div>
           <!-- Table Info Drawer -->
-          <div
-            v-if="showTableInfo"
-            class="relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0"
-            :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
-            :style="ddlDrawerStyle"
-          >
-            <div
-              class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30"
-              @mousedown.prevent="onDdlResizeStart"
-            />
+          <div v-if="showTableInfo" class="relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle">
+            <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDdlResizeStart" />
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
-              <Button
-                v-if="activeTableInfoTab === 'ddl'"
-                variant="ghost"
-                size="sm"
-                class="h-6 px-2 text-xs"
-                :title="t('grid.copyDdl')"
-                :aria-label="t('grid.copyDdl')"
-                @click="copyDdl"
-              >
+              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="sm" class="h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                 <Copy class="w-3 h-3" />
                 <span>{{ t("grid.copyDdl") }}</span>
               </Button>
-              <Button
-                v-if="activeTableInfoTab === 'ddl'"
-                variant="ghost"
-                size="icon"
-                class="h-5 w-5"
-                :class="{ 'bg-accent': ddlWrap }"
-                @click="toggleDdlWrap"
-              >
+              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-5 w-5" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
                 <WrapText class="w-3 h-3" />
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">
@@ -7431,31 +6870,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <div class="px-2 py-1.5 border-b shrink-0 bg-background">
               <div class="relative">
                 <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-                <input
-                  v-model="searchQuery"
-                  :placeholder="t('grid.tableInfoSearch')"
-                  class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50"
-                  @keydown.escape="searchQuery = ''"
-                />
-                <button
-                  v-if="searchQuery"
-                  class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  @click="searchQuery = ''"
-                >
+                <input v-model="searchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="searchQuery = ''" />
+                <button v-if="searchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
                   <X class="w-3 h-3" />
                 </button>
               </div>
             </div>
 
             <div v-if="activeTableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
-              <div
-                v-if="searchQuery && filteredColumns.length === 0"
-                class="p-6 text-center text-xs text-muted-foreground"
-              >
+              <div v-if="searchQuery && filteredColumns.length === 0" class="p-6 text-center text-xs text-muted-foreground">
                 {{ t("grid.tableInfoNoResults") }}
               </div>
               <table v-else class="w-full text-xs">
-                <thead class="sticky top-0 bg-muted/80 backdrop-blur text-muted-foreground">
+                <thead class="sticky top-0 bg-muted text-muted-foreground">
                   <tr class="border-b">
                     <th class="text-left font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
                     <th class="text-left font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
@@ -7495,10 +6922,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
               </div>
               <div v-else-if="indexesError" class="p-3 text-xs text-destructive">{{ indexesError }}</div>
-              <div
-                v-else-if="searchQuery && filteredIndexes.length === 0"
-                class="p-6 text-center text-xs text-muted-foreground"
-              >
+              <div v-else-if="searchQuery && filteredIndexes.length === 0" class="p-6 text-center text-xs text-muted-foreground">
                 {{ t("grid.tableInfoNoResults") }}
               </div>
               <div v-else-if="indexes.length === 0" class="p-6 text-center text-xs text-muted-foreground">
@@ -7509,12 +6933,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div class="font-medium truncate">{{ index.name }}</div>
                   <div class="mt-1 flex flex-wrap gap-1">
                     <span v-if="index.is_primary" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">PK</span>
-                    <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600"
-                      >UNIQUE</span
-                    >
-                    <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{
-                      index.index_type
-                    }}</span>
+                    <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600">UNIQUE</span>
+                    <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
                   </div>
                   <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
                     {{ index.columns.join(", ") }}
@@ -7528,10 +6948,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
               </div>
               <div v-else-if="foreignKeysError" class="p-3 text-xs text-destructive">{{ foreignKeysError }}</div>
-              <div
-                v-else-if="searchQuery && filteredForeignKeys.length === 0"
-                class="p-6 text-center text-xs text-muted-foreground"
-              >
+              <div v-else-if="searchQuery && filteredForeignKeys.length === 0" class="p-6 text-center text-xs text-muted-foreground">
                 {{ t("grid.tableInfoNoResults") }}
               </div>
               <div v-else-if="foreignKeys.length === 0" class="p-6 text-center text-xs text-muted-foreground">
@@ -7540,9 +6957,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <div v-else class="divide-y">
                 <div v-for="fk in filteredForeignKeys" :key="`${fk.name}:${fk.column}`" class="p-3 text-xs">
                   <div class="font-medium truncate">{{ fk.name }}</div>
-                  <div class="mt-1 font-mono text-[11px] text-muted-foreground break-all">
-                    {{ fk.column }} -> {{ fk.ref_table }}.{{ fk.ref_column }}
-                  </div>
+                  <div class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ fk.column }} -> {{ fk.ref_table }}.{{ fk.ref_column }}</div>
                 </div>
               </div>
             </div>
@@ -7552,10 +6967,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
               </div>
               <div v-else-if="triggersError" class="p-3 text-xs text-destructive">{{ triggersError }}</div>
-              <div
-                v-else-if="searchQuery && filteredTriggers.length === 0"
-                class="p-6 text-center text-xs text-muted-foreground"
-              >
+              <div v-else-if="searchQuery && filteredTriggers.length === 0" class="p-6 text-center text-xs text-muted-foreground">
                 {{ t("grid.tableInfoNoResults") }}
               </div>
               <div v-else-if="triggers.length === 0" class="p-6 text-center text-xs text-muted-foreground">
@@ -7569,75 +6981,29 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
             </div>
 
-            <pre
-              v-else-if="activeTableInfoTab === 'ddl' && !ddlLoading"
-              data-native-clipboard
-              class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text"
-              :class="ddlWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-              v-html="filteredDdlContent"
-            ></pre>
+            <pre v-else-if="activeTableInfoTab === 'ddl' && !ddlLoading" data-native-clipboard class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text" :class="ddlWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'" v-html="filteredDdlContent"></pre>
             <div v-else class="flex-1 flex items-center justify-center">
               <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
             </div>
           </div>
           <!-- Cell Detail Drawer -->
-          <div
-            v-if="showCellDetail && activeCellDetail"
-            class="relative flex flex-col bg-background min-w-0"
-            :class="[
-              cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-3 row-start-1 border-l',
-              { 'detail-drawer-resizing': isResizingDetail },
-            ]"
-            :style="detailPanelStyle"
-          >
-            <div
-              v-if="!cellDetailPanelIsBottom"
-              class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30"
-              @mousedown.prevent="onDetailResizeStart"
-            />
-            <div
-              v-else
-              class="absolute left-0 right-0 top-0 z-20 h-1.5 -translate-y-1/2 cursor-row-resize hover:bg-primary/30"
-              @mousedown.prevent="onDetailResizeStart"
-            />
+          <div v-if="showCellDetail && activeCellDetail" class="relative flex flex-col bg-background min-w-0" :class="[cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-3 row-start-1 border-l', { 'detail-drawer-resizing': isResizingDetail }]" :style="detailPanelStyle">
+            <div v-if="!cellDetailPanelIsBottom" class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDetailResizeStart" />
+            <div v-else class="absolute left-0 right-0 top-0 z-20 h-1.5 -translate-y-1/2 cursor-row-resize hover:bg-primary/30" @mousedown.prevent="onDetailResizeStart" />
             <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
               <Info class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t("grid.cellDetails") }}</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-5 w-5"
-                :title="cellDetailPanelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')"
-                @click="toggleCellDetailPanelLayout"
-              >
+              <Button variant="ghost" size="icon" class="h-5 w-5" :title="cellDetailPanelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')" @click="toggleCellDetailPanelLayout">
                 <PanelRight v-if="cellDetailPanelIsBottom" class="w-3 h-3" />
                 <PanelBottom v-else class="w-3 h-3" />
               </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-5 w-5"
-                :title="t('grid.openCellDetailsDialog')"
-                @click="openActiveCellDetailDialog"
-              >
+              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openCellDetailsDialog')" @click="openActiveCellDetailDialog">
                 <Maximize2 class="w-3 h-3" />
               </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-5 w-5"
-                :title="t('grid.openRowDetailsDialog')"
-                @click="openActiveRowDetailDialog"
-              >
+              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openRowDetailsDialog')" @click="openActiveRowDetailDialog">
                 <ListTree class="w-3 h-3" />
               </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-5 w-5"
-                :title="t('grid.openColumnDetailsDialog')"
-                @click="openActiveColumnDetailDialog"
-              >
+              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" @click="openActiveColumnDetailDialog">
                 <TableProperties class="w-3 h-3" />
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeCellDetails">
@@ -7647,16 +7013,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
             <Tabs v-model="activeCellDetailTab" class="flex-1 min-h-0 gap-0">
               <div class="shrink-0 border-b px-3 py-2">
-                <TabsList
-                  class="grid h-7 w-full p-0.5"
-                  :class="activeCellDetailTabs.length > 1 ? 'grid-cols-2' : 'grid-cols-1'"
-                >
+                <TabsList class="grid h-7 w-full p-0.5" :class="activeCellDetailTabs.length > 1 ? 'grid-cols-2' : 'grid-cols-1'">
                   <TabsTrigger value="details" class="h-6 text-xs">{{ t("grid.cellDetails") }}</TabsTrigger>
-                  <TabsTrigger
-                    v-if="activeCellDetailTabs.includes('valueEditor')"
-                    value="valueEditor"
-                    class="h-6 text-xs"
-                  >
+                  <TabsTrigger v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="h-6 text-xs">
                     {{ t("grid.valueEditor") }}
                   </TabsTrigger>
                 </TabsList>
@@ -7664,10 +7023,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
                 <div data-native-clipboard class="flex-1 min-h-0 overflow-auto p-3 text-xs space-y-3">
-                  <div
-                    v-if="cellDetailPanelIsBottom"
-                    class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2"
-                  >
+                  <div v-if="cellDetailPanelIsBottom" class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2">
                     <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
                       <div class="truncate font-medium" :title="activeCellDetail.column">
@@ -7680,11 +7036,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </div>
                     <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnType") }}</div>
-                      <div
-                        class="truncate"
-                        :class="activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'"
-                        :title="activeCellDetail.type || '-'"
-                      >
+                      <div class="truncate" :class="activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'" :title="activeCellDetail.type || '-'">
                         {{ activeCellDetail.type || "-" }}
                       </div>
                     </div>
@@ -7715,11 +7067,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                       <div class="space-y-1">
                         <div class="text-muted-foreground">{{ t("grid.columnType") }}</div>
-                        <div
-                          :class="
-                            activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'
-                          "
-                        >
+                        <div :class="activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'">
                           {{ activeCellDetail.type || "-" }}
                         </div>
                       </div>
@@ -7743,34 +7091,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
-                        <Button
-                          v-if="activeCellDetail.formattedJson"
-                          :variant="sideDetailJsonView ? 'secondary' : 'ghost'"
-                          size="sm"
-                          class="h-6 gap-1 px-2 text-xs"
-                          :title="t('grid.formattedJson')"
-                          @click="sideDetailJsonView = !sideDetailJsonView"
-                        >
+                        <Button v-if="activeCellDetail.formattedJson" :variant="sideDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="sideDetailJsonView = !sideDetailJsonView">
                           <Code2 class="h-3 w-3" />
                           {{ t("grid.formattedJson") }}
                         </Button>
-                        <Button
-                          v-if="activeCellDetail.isEditable"
-                          variant="ghost"
-                          size="icon"
-                          class="h-6 w-6"
-                          :title="t('grid.editValue')"
-                          @click="startDetailEdit"
-                        >
+                        <Button v-if="activeCellDetail.isEditable" variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.editValue')" @click="startDetailEdit">
                           <Pencil class="h-3 w-3" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="h-6 w-6"
-                          :title="t('grid.copyValue')"
-                          @click="copyDetailCurrentValue"
-                        >
+                        <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyDetailCurrentValue">
                           <Copy class="h-3 w-3" />
                         </Button>
                         <DropdownMenu v-if="canDownloadDetailBinaryValue(activeCellDetail)">
@@ -7780,77 +7108,33 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end" class="w-44">
-                            <DropdownMenuItem
-                              v-for="mode in BINARY_CELL_DOWNLOAD_MODES"
-                              :key="mode"
-                              @click="downloadDetailBinaryValue(activeCellDetail, mode)"
-                            >
+                            <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadDetailBinaryValue(activeCellDetail, mode)">
                               {{ t(`grid.binaryDownload.${mode}`) }}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                         <!-- Skip hex fallback from backend (unsupported geometry types like TIN/Triangle) -->
-                        <Popover
-                          v-if="
-                            isGeometryColumnType(activeCellDetail.type) &&
-                            activeCellDetail.value !== null &&
-                            !isEditingDetail &&
-                            !isHexGeometry(activeCellDetail.value as string)
-                          "
-                          v-model:open="sideGeometryPreviewOpen"
-                        >
+                        <Popover v-if="isGeometryColumnType(activeCellDetail.type) && activeCellDetail.value !== null && !isEditingDetail && !isHexGeometry(activeCellDetail.value as string)" v-model:open="sideGeometryPreviewOpen">
                           <PopoverTrigger as-child>
                             <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.geometryPreview')">
                               <Eye class="h-3 w-3" />
                             </Button>
                           </PopoverTrigger>
                           <PopoverContent class="w-auto p-1.5" align="end">
-                            <canvas
-                              v-show="sideGeometryPreviewOpen"
-                              ref="sideGeometryCanvas"
-                              width="400"
-                              height="280"
-                              class="block rounded"
-                            />
+                            <canvas v-show="sideGeometryPreviewOpen" ref="sideGeometryCanvas" width="400" height="280" class="block rounded" />
                           </PopoverContent>
                         </Popover>
                       </div>
                     </div>
                     <div v-if="activeCellDetail.imagePreviewUrl && !isEditingDetail" class="space-y-1.5">
                       <div class="text-muted-foreground">{{ t("grid.imagePreview") }}</div>
-                      <a
-                        :href="activeCellDetail.imagePreviewUrl"
-                        role="button"
-                        class="block overflow-hidden rounded border bg-muted/20"
-                        @click.prevent="openImagePreview(activeCellDetail.imagePreviewUrl, activeCellDetail.column)"
-                      >
-                        <img
-                          :src="activeCellDetail.imagePreviewUrl"
-                          :alt="activeCellDetail.column"
-                          loading="lazy"
-                          decoding="async"
-                          referrerpolicy="no-referrer"
-                          class="max-h-72 w-full object-contain"
-                        />
+                      <a :href="activeCellDetail.imagePreviewUrl" role="button" class="block overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(activeCellDetail.imagePreviewUrl, activeCellDetail.column)">
+                        <img :src="activeCellDetail.imagePreviewUrl" :alt="activeCellDetail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
                       </a>
                     </div>
                     <template v-if="isEditingDetail">
-                      <TemporalCellEditor
-                        v-if="detailTemporalEditorKind"
-                        v-model="detailEditValue"
-                        :kind="detailTemporalEditorKind"
-                        variant="inline"
-                        :commit-on-close="false"
-                        @cancel="cancelDetailEdit"
-                        @commit="commitDetailEdit"
-                      />
-                      <div
-                        v-else
-                        ref="detailsEditorContainer"
-                        data-cell-detail-editor-root
-                        class="w-full rounded border overflow-hidden"
-                        :class="cellDetailPanelIsBottom ? 'h-28' : 'h-40'"
-                      />
+                      <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelDetailEdit" @commit="commitDetailEdit" />
+                      <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="w-full rounded border overflow-hidden" :class="cellDetailPanelIsBottom ? 'h-28' : 'h-40'" />
                       <div class="flex gap-1 mt-1">
                         <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
                           {{ t("dangerDialog.confirm") }}
@@ -7860,21 +7144,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </Button>
                       </div>
                     </template>
-                    <pre
-                      v-else
-                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
-                      :class="{ 'cursor-text': activeCellDetail.isEditable }"
-                      @dblclick="startDetailEdit"
-                      >{{
-                        sideDetailJsonView && activeCellDetail.formattedJson
-                          ? activeCellDetail.formattedJson
-                          : activeCellDetail.rawValuePreview
-                      }}</pre
-                    >
-                    <div
-                      v-if="activeCellDetail.isValuePreviewTruncated && !sideDetailJsonView"
-                      class="text-[11px] text-muted-foreground"
-                    >
+                    <pre v-else class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50" :class="{ 'cursor-text': activeCellDetail.isEditable }" @dblclick="startDetailEdit">{{
+                      sideDetailJsonView && activeCellDetail.formattedJson ? activeCellDetail.formattedJson : activeCellDetail.rawValuePreview
+                    }}</pre>
+                    <div v-if="activeCellDetail.isValuePreviewTruncated && !sideDetailJsonView" class="text-[11px] text-muted-foreground">
                       {{
                         t("grid.largeValuePreviewHint", {
                           count: activeCellDetail.rawValuePreview.length,
@@ -7884,85 +7157,26 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </div>
                 </div>
 
-                <div
-                  class="border-t p-2 grid gap-1"
-                  :class="cellDetailPanelIsBottom ? 'grid-cols-[repeat(3,max-content)] justify-end' : 'grid-cols-1'"
-                >
-                  <Button
-                    v-if="activeCellDetail.isEditable && activeCellDetail.value !== null"
-                    variant="ghost"
-                    size="sm"
-                    class="h-7 justify-start text-xs"
-                    @click="setDetailNull"
-                  >
-                    <X class="w-3 h-3 mr-2" /> {{ t("grid.setNull") }}
-                  </Button>
-                  <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="copyDetailColumnName">
-                    <Copy class="w-3 h-3 mr-2" /> {{ t("grid.copyColumnName") }}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-7 justify-start text-xs"
-                    :disabled="!canCopyPreparedDetailSqlCondition()"
-                    @click="copyDetailSqlCondition"
-                  >
-                    <Code2 class="w-3 h-3 mr-2" /> {{ t("grid.copySqlCondition") }}
-                  </Button>
+                <div class="border-t p-2 grid gap-1" :class="cellDetailPanelIsBottom ? 'grid-cols-[repeat(3,max-content)] justify-end' : 'grid-cols-1'">
+                  <Button v-if="activeCellDetail.isEditable && activeCellDetail.value !== null" variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="setDetailNull"> <X class="w-3 h-3 mr-2" /> {{ t("grid.setNull") }} </Button>
+                  <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="copyDetailColumnName"> <Copy class="w-3 h-3 mr-2" /> {{ t("grid.copyColumnName") }} </Button>
+                  <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" :disabled="!canCopyPreparedDetailSqlCondition()" @click="copyDetailSqlCondition"> <Code2 class="w-3 h-3 mr-2" /> {{ t("grid.copySqlCondition") }} </Button>
                 </div>
               </TabsContent>
 
-              <TabsContent
-                v-if="activeCellDetailTabs.includes('valueEditor')"
-                value="valueEditor"
-                class="m-0 min-h-0 flex-1 flex flex-col p-3 text-xs"
-              >
+              <TabsContent v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="m-0 min-h-0 flex-1 flex flex-col p-3 text-xs">
                 <div class="flex min-h-0 flex-1 flex-col">
-                  <TemporalCellEditor
-                    v-if="detailTemporalEditorKind"
-                    v-model="detailEditValue"
-                    :kind="detailTemporalEditorKind"
-                    variant="inline"
-                    :commit-on-close="false"
-                    @cancel="cancelValueEditorEdit"
-                    @commit="commitValueEditorEdit"
-                  />
-                  <div
-                    v-else
-                    ref="valueEditorContainer"
-                    data-cell-detail-editor-root
-                    class="min-h-0 flex-1 w-full rounded border overflow-auto"
-                  />
+                  <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelValueEditorEdit" @commit="commitValueEditorEdit" />
+                  <div v-else ref="valueEditorContainer" data-cell-detail-editor-root class="min-h-0 flex-1 w-full rounded border overflow-auto" />
                 </div>
                 <div class="flex gap-1 mt-2 shrink-0">
-                  <Button
-                    v-if="activeValueEditorActions.includes('formatJson')"
-                    variant="outline"
-                    size="sm"
-                    class="h-6 text-xs"
-                    @mousedown.prevent
-                    @click="formatValueEditorJson"
-                  >
+                  <Button v-if="activeValueEditorActions.includes('formatJson')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="formatValueEditorJson">
                     {{ t("grid.formatJson") }}
                   </Button>
-                  <Button
-                    v-if="activeValueEditorActions.includes('setNull')"
-                    variant="outline"
-                    size="sm"
-                    class="h-6 text-xs"
-                    @mousedown.prevent
-                    @click="setValueEditorNull"
-                  >
+                  <Button v-if="activeValueEditorActions.includes('setNull')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="setValueEditorNull">
                     {{ t("grid.setNull") }}
                   </Button>
-                  <Button
-                    v-if="activeValueEditorActions.includes('restoreOriginal')"
-                    variant="outline"
-                    size="sm"
-                    class="h-6 text-xs"
-                    @mousedown.prevent
-                    @click="restoreDetailOriginalValue"
-                  >
+                  <Button v-if="activeValueEditorActions.includes('restoreOriginal')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="restoreDetailOriginalValue">
                     {{ t("grid.restoreOriginalValue") }}
                   </Button>
                 </div>
@@ -7977,37 +7191,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     </div>
 
     <!-- Error bar -->
-    <div
-      v-if="saveError"
-      class="px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0 flex items-center gap-2"
-    >
+    <div v-if="saveError" class="px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0 flex items-center gap-2">
       <span class="flex-1">{{ saveError }}</span>
       <button class="hover:underline" @click="saveError = ''">{{ t("grid.dismiss") }}</button>
     </div>
 
     <!-- Bottom status bar -->
-    <div
-      v-if="!isErrorResult"
-      class="grid grid-cols-[minmax(0,1fr)_minmax(0,38%)_minmax(0,1fr)] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0"
-    >
+    <div v-if="!isErrorResult" class="grid grid-cols-[minmax(0,1fr)_minmax(0,38%)_minmax(0,1fr)] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0">
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
           {{ t("grid.totalRows", { count: result.rows.length }) }}
-          <span
-            v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0"
-            class="text-muted-foreground/70"
-            >{{ t("grid.totalRowCount", { count: displayedTotalRowCount }) }}</span
-          >
+          <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t("grid.totalRowCount", { count: displayedTotalRowCount }) }}</span>
           <span v-else-if="totalRowCountBusy" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
           </span>
-          <button
-            v-else-if="canCalculateTotalRowCount"
-            type="button"
-            class="text-muted-foreground/70 hover:text-foreground hover:underline underline-offset-2 disabled:pointer-events-none"
-            :disabled="manualTotalRowCountLoading"
-            @click="calculateTotalRowCount"
-          >
+          <button v-else-if="canCalculateTotalRowCount" type="button" class="text-muted-foreground/70 hover:text-foreground hover:underline underline-offset-2 disabled:pointer-events-none" :disabled="manualTotalRowCountLoading" @click="calculateTotalRowCount">
             {{ t("grid.calculateTotalRowsInline") }}
           </button>
         </span>
@@ -8027,10 +7225,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
       <Tooltip v-if="sqlOneLiner">
         <TooltipTrigger as-child>
-          <span
-            class="min-w-0 max-w-full justify-self-center truncate opacity-60 cursor-pointer hover:opacity-100"
-            @click="copySql"
-          >
+          <span class="min-w-0 max-w-full justify-self-center truncate opacity-60 cursor-pointer hover:opacity-100" @click="copySql">
             {{ sqlOneLiner }}
           </span>
         </TooltipTrigger>
@@ -8067,13 +7262,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             />
             <Tooltip>
               <TooltipTrigger as-child>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  class="h-6 w-6 shrink-0"
-                  :aria-label="t('grid.applyPageSize')"
-                  @click.stop="applyCustomPageSize"
-                >
+                <Button variant="outline" size="icon" class="h-6 w-6 shrink-0" :aria-label="t('grid.applyPageSize')" @click.stop="applyCustomPageSize">
                   <Check class="h-3 w-3" />
                 </Button>
               </TooltipTrigger>
@@ -8153,34 +7342,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <div class="flex items-center justify-between gap-2">
               <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
               <div class="flex items-center gap-1">
-                <Button
-                  v-if="dialogCellDetail.formattedJson"
-                  :variant="cellDetailJsonView ? 'secondary' : 'ghost'"
-                  size="sm"
-                  class="h-6 gap-1 px-2 text-xs"
-                  :title="t('grid.formattedJson')"
-                  @click="cellDetailJsonView = !cellDetailJsonView"
-                >
+                <Button v-if="dialogCellDetail.formattedJson" :variant="cellDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="cellDetailJsonView = !cellDetailJsonView">
                   <Code2 class="h-3 w-3" />
                   {{ t("grid.formattedJson") }}
                 </Button>
-                <Button
-                  v-if="dialogCellDetail.isEditable"
-                  variant="ghost"
-                  size="icon"
-                  class="h-6 w-6"
-                  :title="t('grid.editValue')"
-                  @click="openDialogCellInSidePanel"
-                >
+                <Button v-if="dialogCellDetail.isEditable" variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.editValue')" @click="openDialogCellInSidePanel">
                   <Pencil class="h-3 w-3" />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-6 w-6"
-                  :title="t('grid.copyValue')"
-                  @click="copyDialogCellCurrentValue"
-                >
+                <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyDialogCellCurrentValue">
                   <Copy class="h-3 w-3" />
                 </Button>
                 <DropdownMenu v-if="canDownloadDetailBinaryValue(dialogCellDetail)">
@@ -8190,70 +7359,31 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" class="w-44">
-                    <DropdownMenuItem
-                      v-for="mode in BINARY_CELL_DOWNLOAD_MODES"
-                      :key="mode"
-                      @click="downloadDetailBinaryValue(dialogCellDetail, mode)"
-                    >
+                    <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadDetailBinaryValue(dialogCellDetail, mode)">
                       {{ t(`grid.binaryDownload.${mode}`) }}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <!-- Skip hex fallback from backend (unsupported geometry types like TIN/Triangle) -->
-                <Popover
-                  v-if="
-                    isGeometryColumnType(dialogCellDetail.type) &&
-                    dialogCellDetail.value !== null &&
-                    !isHexGeometry(dialogCellDetail.value as string)
-                  "
-                  v-model:open="dialogGeometryPreviewOpen"
-                >
+                <Popover v-if="isGeometryColumnType(dialogCellDetail.type) && dialogCellDetail.value !== null && !isHexGeometry(dialogCellDetail.value as string)" v-model:open="dialogGeometryPreviewOpen">
                   <PopoverTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.geometryPreview')">
                       <Eye class="h-3 w-3" />
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent class="w-auto p-1.5" align="end">
-                    <canvas
-                      v-show="dialogGeometryPreviewOpen"
-                      ref="dialogGeometryCanvas"
-                      width="400"
-                      height="280"
-                      class="block rounded"
-                    />
+                    <canvas v-show="dialogGeometryPreviewOpen" ref="dialogGeometryCanvas" width="400" height="280" class="block rounded" />
                   </PopoverContent>
                 </Popover>
               </div>
             </div>
-            <a
-              v-if="dialogCellDetail.imagePreviewUrl"
-              :href="dialogCellDetail.imagePreviewUrl"
-              role="button"
-              class="block max-h-72 overflow-hidden rounded border bg-muted/20"
-              @click.prevent="openImagePreview(dialogCellDetail.imagePreviewUrl, dialogCellDetail.column)"
-            >
-              <img
-                :src="dialogCellDetail.imagePreviewUrl"
-                :alt="dialogCellDetail.column"
-                loading="lazy"
-                decoding="async"
-                referrerpolicy="no-referrer"
-                class="max-h-72 w-full object-contain"
-              />
+            <a v-if="dialogCellDetail.imagePreviewUrl" :href="dialogCellDetail.imagePreviewUrl" role="button" class="block max-h-72 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(dialogCellDetail.imagePreviewUrl, dialogCellDetail.column)">
+              <img :src="dialogCellDetail.imagePreviewUrl" :alt="dialogCellDetail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
             </a>
-            <pre
-              class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words"
-              :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }"
-              >{{
-                cellDetailJsonView && dialogCellDetail.formattedJson
-                  ? dialogCellDetail.formattedJson
-                  : dialogCellDetail.rawValuePreview
-              }}</pre
-            >
-            <div
-              v-if="dialogCellDetail.isValuePreviewTruncated && !cellDetailJsonView"
-              class="text-[11px] text-muted-foreground"
-            >
+            <pre class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }">{{
+              cellDetailJsonView && dialogCellDetail.formattedJson ? dialogCellDetail.formattedJson : dialogCellDetail.rawValuePreview
+            }}</pre>
+            <div v-if="dialogCellDetail.isValuePreviewTruncated && !cellDetailJsonView" class="text-[11px] text-muted-foreground">
               {{ t("grid.largeValuePreviewHint", { count: dialogCellDetail.rawValuePreview.length }) }}
             </div>
           </div>
@@ -8261,9 +7391,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
         <DialogFooter class="shrink-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex flex-wrap gap-2"></div>
-          <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyDialogCellColumnName">
-            <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnName") }}
-          </Button>
+          <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyDialogCellColumnName"> <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnName") }} </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -8280,20 +7408,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         <div class="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
           <span class="whitespace-nowrap">{{ t("grid.columnsCount", { count: rowDetail.fields.length }) }}</span>
           <div class="relative ml-auto w-56 max-w-full">
-            <Search
-              class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-            />
-            <Input
-              v-model="rowDetailSearch"
-              :placeholder="t('grid.detailSearchPlaceholder')"
-              class="h-7 pl-7 text-xs"
-            />
+            <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="rowDetailSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" />
           </div>
         </div>
 
         <div class="min-h-0 flex-1 overflow-auto rounded border">
           <table class="w-full min-w-[640px] text-xs">
-            <thead class="sticky top-0 z-10 bg-muted/80 text-muted-foreground backdrop-blur">
+            <thead class="sticky top-0 z-10 bg-muted text-muted-foreground">
               <tr class="border-b">
                 <th class="w-16 px-3 py-2 text-left font-medium">{{ t("grid.fieldIndex") }}</th>
                 <th class="w-56 px-3 py-2 text-left font-medium">{{ t("grid.columnName") }}</th>
@@ -8302,18 +7424,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </tr>
             </thead>
             <tbody>
-              <tr
-                v-for="(field, fieldIndex) in filteredRowDetailFields"
-                :key="`${field.colIndex}:${field.column}`"
-                class="border-b align-top last:border-b-0"
-              >
+              <tr v-for="(field, fieldIndex) in filteredRowDetailFields" :key="`${field.colIndex}:${field.column}`" class="border-b align-top last:border-b-0">
                 <td class="px-3 py-2 text-muted-foreground tabular-nums">{{ fieldIndex + 1 }}</td>
                 <td class="px-3 py-2">
                   <div class="font-medium break-words">{{ field.column }}</div>
-                  <div
-                    :class="field.type ? typeColorClass(field.type) : 'text-muted-foreground'"
-                    class="mt-1 text-[11px]"
-                  >
+                  <div :class="field.type ? typeColorClass(field.type) : 'text-muted-foreground'" class="mt-1 text-[11px]">
                     {{ field.type || "-" }}
                   </div>
                   <div v-if="field.comment" class="mt-1 text-[11px] text-muted-foreground whitespace-pre-wrap">
@@ -8325,68 +7440,35 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     {{ field.value === null ? t("grid.nullValue") : t("grid.valueLength") }}:
                     {{ field.value === null ? "true" : field.length }}
                   </div>
-                  <a
-                    v-if="field.imagePreviewUrl"
-                    :href="field.imagePreviewUrl"
-                    role="button"
-                    class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20"
-                    @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
-                  >
-                    <img
-                      :src="field.imagePreviewUrl"
-                      :alt="field.column"
-                      loading="lazy"
-                      decoding="async"
-                      referrerpolicy="no-referrer"
-                      class="max-h-48 w-full object-contain"
-                    />
+                  <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)">
+                    <img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain" />
                   </a>
-                  <pre
-                    class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                    :class="{ 'italic text-muted-foreground': field.value === null }"
-                    >{{ field.rawValuePreview }}</pre
-                  >
+                  <pre class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
                   <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">
                     {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
                   </div>
                   <div v-if="field.formattedJson" class="mt-2 space-y-1">
                     <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                    <pre
-                      class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                      >{{ field.formattedJson }}</pre
-                    >
+                    <pre class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
                   </div>
                 </td>
                 <td class="px-2 py-2">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-6 w-6"
-                    :title="t('grid.copyValue')"
-                    @click="copyRowDetailFieldValue(field)"
-                  >
+                  <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyRowDetailFieldValue(field)">
                     <Copy class="h-3 w-3" />
                   </Button>
                 </td>
               </tr>
             </tbody>
           </table>
-          <div
-            v-if="rowDetailSearch && !filteredRowDetailFields.length"
-            class="px-3 py-6 text-center text-xs text-muted-foreground"
-          >
+          <div v-if="rowDetailSearch && !filteredRowDetailFields.length" class="px-3 py-6 text-center text-xs text-muted-foreground">
             {{ t("grid.detailSearchNoMatch") }}
           </div>
         </div>
 
         <DialogFooter class="shrink-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyRowDetailJson">
-              <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyRow") }}
-            </Button>
-            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyRowDetailTsv">
-              <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyRowTsv") }}
-            </Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyRowDetailJson"> <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyRow") }} </Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyRowDetailTsv"> <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyRowTsv") }} </Button>
           </div>
         </DialogFooter>
       </DialogContent>
@@ -8427,20 +7509,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         <div class="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
           <span class="whitespace-nowrap">{{ t("grid.rowCount") }}: {{ columnDetail.fields.length }}</span>
           <div class="relative ml-auto w-56 max-w-full">
-            <Search
-              class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-            />
-            <Input
-              v-model="columnDetailSearch"
-              :placeholder="t('grid.detailSearchPlaceholder')"
-              class="h-7 pl-7 text-xs"
-            />
+            <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="columnDetailSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" />
           </div>
         </div>
 
         <div class="min-h-0 flex-1 overflow-auto rounded border">
           <table class="w-full min-w-[500px] text-xs">
-            <thead class="sticky top-0 z-10 bg-muted/80 text-muted-foreground backdrop-blur">
+            <thead class="sticky top-0 z-10 bg-muted text-muted-foreground">
               <tr class="border-b">
                 <th class="w-24 px-3 py-2 text-left font-medium">{{ t("grid.rowNumber") }}</th>
                 <th class="px-3 py-2 text-left font-medium">{{ t("grid.cellValue") }}</th>
@@ -8448,83 +7524,44 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </tr>
             </thead>
             <tbody>
-              <tr
-                v-for="field in filteredColumnDetailFields"
-                :key="`${field.rowId}:${field.colIndex}`"
-                class="border-b align-top last:border-b-0"
-              >
+              <tr v-for="field in filteredColumnDetailFields" :key="`${field.rowId}:${field.colIndex}`" class="border-b align-top last:border-b-0">
                 <td class="px-3 py-2 tabular-nums">{{ field.rowNumber }}</td>
                 <td class="w-full max-w-0 px-3 py-2">
                   <div class="mb-1 text-[11px] text-muted-foreground">
                     {{ field.value === null ? t("grid.nullValue") : t("grid.valueLength") }}:
                     {{ field.value === null ? "true" : field.length }}
                   </div>
-                  <a
-                    v-if="field.imagePreviewUrl"
-                    :href="field.imagePreviewUrl"
-                    role="button"
-                    class="mb-2 block max-h-40 overflow-hidden rounded border bg-muted/20"
-                    @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
-                  >
-                    <img
-                      :src="field.imagePreviewUrl"
-                      :alt="field.column"
-                      loading="lazy"
-                      decoding="async"
-                      referrerpolicy="no-referrer"
-                      class="max-h-40 w-full object-contain"
-                    />
+                  <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-40 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)">
+                    <img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-40 w-full object-contain" />
                   </a>
-                  <pre
-                    class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                    :class="{ 'italic text-muted-foreground': field.value === null }"
-                    >{{ field.rawValuePreview }}</pre
-                  >
+                  <pre class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
                   <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">
                     {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
                   </div>
                   <div v-if="field.formattedJson" class="mt-2 space-y-1">
                     <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                    <pre
-                      class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                      >{{ field.formattedJson }}</pre
-                    >
+                    <pre class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
                   </div>
                 </td>
                 <td class="px-2 py-2">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-6 w-6"
-                    :title="t('grid.copyValue')"
-                    @click="copyColumnDetailFieldValue(field)"
-                  >
+                  <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyColumnDetailFieldValue(field)">
                     <Copy class="h-3 w-3" />
                   </Button>
                 </td>
               </tr>
             </tbody>
           </table>
-          <div
-            v-if="columnDetailSearch && !filteredColumnDetailFields.length"
-            class="px-3 py-6 text-center text-xs text-muted-foreground"
-          >
+          <div v-if="columnDetailSearch && !filteredColumnDetailFields.length" class="px-3 py-6 text-center text-xs text-muted-foreground">
             {{ t("grid.detailSearchNoMatch") }}
           </div>
         </div>
 
         <DialogFooter class="shrink-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyColumnDetailJson">
-              <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnValues") }}
-            </Button>
-            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyColumnDetailTsv">
-              <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnTsv") }}
-            </Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyColumnDetailJson"> <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnValues") }} </Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyColumnDetailTsv"> <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnTsv") }} </Button>
           </div>
-          <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyColumnDetailColumnName">
-            <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnName") }}
-          </Button>
+          <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyColumnDetailColumnName"> <Copy class="mr-1.5 h-3 w-3" /> {{ t("grid.copyColumnName") }} </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -8538,11 +7575,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <p class="text-sm text-muted-foreground">
             {{ t("grid.bulkEditDescription", { count: selectedCellCount }) }}
           </p>
-          <Input
-            v-model="bulkEditValue"
-            :placeholder="t('grid.bulkEditValuePlaceholder')"
-            @keydown.enter.prevent="applyBulkEditValue"
-          />
+          <Input v-model="bulkEditValue" :placeholder="t('grid.bulkEditValuePlaceholder')" @keydown.enter.prevent="applyBulkEditValue" />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="bulkEditDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -8551,22 +7584,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       </DialogContent>
     </Dialog>
 
+    <!-- SQL Preview panel for pending data changes -->
+    <div v-if="showSqlPreview" class="h-52 shrink-0 border-t">
+      <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" @close="closeSqlPreview" />
+    </div>
+
     <DangerConfirmDialog
       v-model:open="showDeleteRowConfirm"
-      :message="
-        pendingDeleteRowIds.length > 1
-          ? t('dangerDialog.deleteRowsMessage', { count: pendingDeleteRowIds.length })
-          : t('dangerDialog.deleteRowMessage')
-      "
+      :message="pendingDeleteRowIds.length > 1 ? t('dangerDialog.deleteRowsMessage', { count: pendingDeleteRowIds.length }) : t('dangerDialog.deleteRowMessage')"
       :details="deleteRowDetails"
-      :confirm-label="
-        pendingDeleteRowIds.length > 1
-          ? t('grid.deleteRows', { count: pendingDeleteRowIds.length })
-          : t('grid.deleteRow')
-      "
+      :confirm-label="pendingDeleteRowIds.length > 1 ? t('grid.deleteRows', { count: pendingDeleteRowIds.length }) : t('grid.deleteRow')"
       @confirm="confirmDeleteRow"
     />
     <ImagePreviewDialog v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
+    <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />
     <ExportProgressDialog v-model:open="exportProgressDialog" v-bind="exportProgressState" disable-cancel />
   </div>
 </template>
@@ -8622,11 +7653,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     --data-grid-cell-active-bg: color-mix(in oklab, var(--primary) 15%, transparent);
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
     --data-grid-cell-selected-bg: color-mix(in oklab, var(--primary) 25%, transparent);
-    --data-grid-cell-selected-dirty-bg: color-mix(
-      in oklab,
-      rgb(234 181 50) 30%,
-      color-mix(in oklab, var(--primary) 18%, transparent)
-    );
+    --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, var(--primary) 18%, transparent));
     --data-grid-cell-selected-border: color-mix(in oklab, var(--primary) 70%, transparent);
     --data-grid-cell-hover-bg: color-mix(in oklab, var(--accent) 50%, transparent);
     --data-grid-row-number-new-bg: color-mix(in oklab, rgb(16 185 129) 15%, var(--background));
@@ -8643,13 +7670,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-topbar-scroll {
   scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 
 .data-grid-scroller {
   overflow-anchor: none;
   scrollbar-gutter: stable;
   will-change: scroll-position;
-  contain: strict;
+  contain: layout style paint;
+  scrollbar-width: none;
+}
+
+.data-grid-scroller::-webkit-scrollbar {
+  display: none;
 }
 
 .data-grid-scroller :deep(.vue-recycle-scroller__item-wrapper) {
@@ -8663,6 +7696,46 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-scroller.is-scrolling :deep(.vue-recycle-scroller__item-view) {
   pointer-events: none;
+}
+
+.data-grid-horizontal-scrollbar {
+  position: absolute;
+  inset-inline: calc(var(--row-num-w) + 8px) 10px;
+  bottom: 8px;
+  z-index: 30;
+  height: 10px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.data-grid-horizontal-scrollbar::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 4px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+
+.data-grid-horizontal-scrollbar__thumb {
+  position: absolute;
+  top: 3px;
+  height: 4px;
+  min-width: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 42%, transparent);
+  transition:
+    height 120ms ease,
+    background-color 120ms ease,
+    top 120ms ease;
+}
+
+.data-grid-horizontal-scrollbar:hover .data-grid-horizontal-scrollbar__thumb,
+.data-grid-horizontal-scrollbar--dragging .data-grid-horizontal-scrollbar__thumb {
+  top: 2px;
+  height: 6px;
+  background: color-mix(in oklch, var(--foreground) 62%, transparent);
 }
 
 .canvas-grid-surface {
@@ -8680,6 +7753,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .transpose-grid-scroller {
   overflow-anchor: none;
+  scrollbar-gutter: stable;
   will-change: scroll-position;
 }
 
@@ -8706,17 +7780,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .cell-selected {
   background-color: var(--data-grid-cell-selected-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .row-cell-selected {
   background-color: var(--data-grid-cell-selected-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .transpose-record-header-selected {
   background-color: var(--data-grid-row-number-selected-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .transpose-record-header-active {
@@ -8725,12 +7802,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .cell-selected-dirty {
   background-color: var(--data-grid-cell-selected-dirty-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .row-cell-selected-dirty {
   background-color: var(--data-grid-cell-selected-dirty-bg);
-  box-shadow: inset 0 0 0 1px var(--data-grid-cell-selected-border);
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .data-grid-row-number.bg-emerald-500\/15 {

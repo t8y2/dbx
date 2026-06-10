@@ -47,19 +47,9 @@ export interface FieldLineageResult {
   items: FieldLineageItem[];
 }
 
-export function analyzeFieldLineage(options: {
-  target: FieldLineageTarget;
-  tables?: FieldLineageTable[];
-  views?: FieldLineageView[];
-  histories?: FieldLineageHistory[];
-}): FieldLineageResult {
+export function analyzeFieldLineage(options: { target: FieldLineageTarget; tables?: FieldLineageTable[]; views?: FieldLineageView[]; histories?: FieldLineageHistory[] }): FieldLineageResult {
   const target = normalizeTarget(options.target);
-  const items: FieldLineageItem[] = [
-    ...foreignKeyLineage(target, options.tables ?? []),
-    ...viewLineage(target, options.views ?? []),
-    ...historyLineage(target, options.histories ?? []),
-    ...sameNameLineage(target, options.tables ?? []),
-  ];
+  const items: FieldLineageItem[] = [...foreignKeyLineage(target, options.tables ?? []), ...viewLineage(target, options.views ?? []), ...historyLineage(target, options.histories ?? []), ...sameNameLineage(target, options.tables ?? [])];
 
   return { target: options.target, items };
 }
@@ -74,11 +64,7 @@ export function summarizeLineageCounts(items: FieldLineageItem[]) {
 
 export function identifierInSql(sql: string, identifier: string): boolean {
   const escaped = escapeRegExp(identifier);
-  const quoted = [
-    `"${escapeRegExp(identifier)}"`,
-    `\`${escapeRegExp(identifier)}\``,
-    `\\[${escapeRegExp(identifier)}\\]`,
-  ];
+  const quoted = [`"${escapeRegExp(identifier)}"`, `\`${escapeRegExp(identifier)}\``, `\\[${escapeRegExp(identifier)}\\]`];
   const pattern = `(?:${quoted.join("|")}|(?<![\\w$])${escaped}(?![\\w$]))`;
   return new RegExp(pattern, "i").test(sql);
 }
@@ -131,10 +117,7 @@ function viewLineage(target: Required<FieldLineageTarget>, views: FieldLineageVi
         confidence,
         direction: "reference" as const,
         title: `${view.name} references ${target.column}`,
-        description:
-          confidence === "likely"
-            ? `View definition mentions both ${target.table} and ${target.column}.`
-            : `View definition mentions ${target.column}.`,
+        description: confidence === "likely" ? `View definition mentions both ${target.table} and ${target.column}.` : `View definition mentions ${target.column}.`,
         schema: view.schema,
         table: view.name,
         sqlSnippet: snippetAround(view.ddl, target.column),
@@ -172,8 +155,7 @@ function sameNameLineage(target: Required<FieldLineageTarget>, tables: FieldLine
         confidence: "possible",
         direction: "reference",
         title: `${table.name}.${column}`,
-        description:
-          "Another field has the same name. This is a possible semantic relationship, not a verified dependency.",
+        description: "Another field has the same name. This is a possible semantic relationship, not a verified dependency.",
         schema: table.schema,
         table: table.name,
         column,

@@ -42,9 +42,7 @@ const progress = ref<api.TableImportProgress | null>(null);
 const errorMessage = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 
-const selectedConnection = computed(() =>
-  props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined,
-);
+const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const targetColumnNames = computed(() => targetColumns.value.map((column) => column.name));
 const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
   const currentPreview = preview.value;
@@ -57,26 +55,14 @@ const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
     .filter((mapping) => mapping.targetColumn);
 });
 const mappedCount = computed(() => mappedColumns.value.length);
-const canImport = computed(
-  () =>
-    !!preview.value &&
-    !!props.prefillConnectionId &&
-    !!props.prefillTable &&
-    mappedColumns.value.length > 0 &&
-    !running.value,
-);
+const canImport = computed(() => !!preview.value && !!props.prefillConnectionId && !!props.prefillTable && mappedColumns.value.length > 0 && !running.value);
 const progressPercent = computed(() => {
   const p = progress.value;
   if (!p || p.totalRows <= 0) return 0;
   return Math.min(100, Math.round((p.rowsImported / p.totalRows) * 100));
 });
 const targetLabel = computed(() => {
-  const pieces = [
-    selectedConnection.value?.name,
-    props.prefillDatabase,
-    props.prefillSchema,
-    props.prefillTable,
-  ].filter(Boolean);
+  const pieces = [selectedConnection.value?.name, props.prefillDatabase, props.prefillSchema, props.prefillTable].filter(Boolean);
   return pieces.join(" / ");
 });
 
@@ -105,12 +91,7 @@ async function loadTargetColumns() {
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.prefillConnectionId);
-    targetColumns.value = await api.getColumns(
-      props.prefillConnectionId,
-      props.prefillDatabase,
-      props.prefillSchema || props.prefillDatabase,
-      props.prefillTable,
-    );
+    targetColumns.value = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, props.prefillSchema || props.prefillDatabase, props.prefillTable);
     applyAutoMapping();
   } catch (e: any) {
     errorMessage.value = String(e?.message || e);
@@ -255,13 +236,7 @@ watch(
 
       <div class="space-y-4 py-2">
         <div class="grid grid-cols-[1fr_auto] gap-2">
-          <input
-            ref="fileInput"
-            type="file"
-            accept=".csv,.tsv,.json,.xlsx,.xlsm,.xls"
-            class="hidden"
-            @change="handleFileInputChange"
-          />
+          <input ref="fileInput" type="file" accept=".csv,.tsv,.json,.xlsx,.xlsm,.xls" class="hidden" @change="handleFileInputChange" />
           <div class="min-w-0 rounded-md border bg-muted/20 px-3 py-2">
             <div class="truncate text-xs text-muted-foreground">{{ t("tableImport.target") }}</div>
             <div class="truncate text-sm font-medium">
@@ -294,18 +269,11 @@ watch(
           <div class="rounded-md border">
             <div class="border-b px-3 py-2 text-xs font-medium">{{ t("tableImport.mapping") }}</div>
             <div class="max-h-[280px] overflow-auto p-2">
-              <div
-                v-for="sourceColumn in preview.columns"
-                :key="sourceColumn"
-                class="grid grid-cols-[1fr_1fr] items-center gap-2 py-1"
-              >
+              <div v-for="sourceColumn in preview.columns" :key="sourceColumn" class="grid grid-cols-[1fr_1fr] items-center gap-2 py-1">
                 <div class="truncate font-mono text-xs" :title="sourceColumn">
                   {{ sourceColumn }}
                 </div>
-                <Select
-                  :model-value="columnMapping[sourceColumn] || SKIP_VALUE"
-                  @update:model-value="(value: any) => updateMapping(sourceColumn, value)"
-                >
+                <Select :model-value="columnMapping[sourceColumn] || SKIP_VALUE" @update:model-value="(value: any) => updateMapping(sourceColumn, value)">
                   <SelectTrigger class="h-7 text-xs">
                     <SelectValue />
                   </SelectTrigger>
@@ -326,23 +294,14 @@ watch(
               <table class="min-w-full border-separate border-spacing-0 text-xs">
                 <thead class="sticky top-0 bg-background">
                   <tr>
-                    <th
-                      v-for="column in preview.columns"
-                      :key="column"
-                      class="border-b border-r px-2 py-1.5 text-left font-medium"
-                    >
+                    <th v-for="column in preview.columns" :key="column" class="border-b border-r px-2 py-1.5 text-left font-medium">
                       <span class="block max-w-[140px] truncate">{{ column }}</span>
                     </th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="(row, rowIndex) in preview.rows" :key="rowIndex">
-                    <td
-                      v-for="(cell, colIndex) in row"
-                      :key="colIndex"
-                      class="max-w-[180px] border-b border-r px-2 py-1.5 font-mono"
-                      :class="{ 'text-muted-foreground': cell === null }"
-                    >
+                    <td v-for="(cell, colIndex) in row" :key="colIndex" class="max-w-[180px] border-b border-r px-2 py-1.5 font-mono" :class="{ 'text-muted-foreground': cell === null }">
                       <span class="block truncate">{{ formatCell(cell) }}</span>
                     </td>
                   </tr>
@@ -375,10 +334,7 @@ watch(
               <Loader2 v-if="running && !cancelling" class="h-3.5 w-3.5 animate-spin text-primary" />
               <Square v-else-if="cancelling" class="h-3.5 w-3.5 fill-current text-destructive" />
               <Check v-else class="h-3.5 w-3.5 text-emerald-600" />
-              <span class="truncate">
-                {{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? preview.totalRows }} ·
-                {{ progressPercent }}%
-              </span>
+              <span class="truncate"> {{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? preview.totalRows }} · {{ progressPercent }}% </span>
             </div>
           </div>
         </div>
@@ -387,10 +343,7 @@ watch(
           <Loader2 class="h-3.5 w-3.5 animate-spin" />
           {{ t("common.loading") }}
         </div>
-        <div
-          v-if="errorMessage"
-          class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-        >
+        <div v-if="errorMessage" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {{ errorMessage }}
         </div>
       </div>

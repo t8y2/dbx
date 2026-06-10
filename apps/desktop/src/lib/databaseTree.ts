@@ -3,10 +3,7 @@ import { DEFAULT_DATABASE_TREE_LABEL } from "./treeNodeContext";
 
 const sidebarNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-export function shouldIncludeDefaultDatabaseNode(
-  connection: Pick<ConnectionConfig, "db_type"> | undefined,
-  databases: DatabaseInfo[],
-): boolean {
+export function shouldIncludeDefaultDatabaseNode(connection: Pick<ConnectionConfig, "db_type"> | undefined, databases: DatabaseInfo[]): boolean {
   return connection?.db_type === "mysql" && databases.some((database) => !database.name.trim());
 }
 
@@ -18,11 +15,7 @@ export function sortSidebarDatabases(databases: readonly DatabaseInfo[]): Databa
   return [...databases].sort((left, right) => sidebarNameCollator.compare(left.name, right.name));
 }
 
-export function buildDatabaseTreeNodes(
-  connectionId: string,
-  databases: DatabaseInfo[],
-  options: { includeDefaultWhenEmpty?: boolean } = {},
-): TreeNode[] {
+export function buildDatabaseTreeNodes(connectionId: string, databases: DatabaseInfo[], options: { includeDefaultWhenEmpty?: boolean } = {}): TreeNode[] {
   const nodes = sortSidebarDatabases(databases).flatMap((db) => {
     const name = db.name.trim();
     if (!name) return [];
@@ -54,11 +47,7 @@ export function buildDatabaseTreeNodes(
   ];
 }
 
-export function buildDuckDbConnectionTreeNodes(
-  connectionId: string,
-  databases: DatabaseInfo[],
-  primarySchemas: string[],
-): TreeNode[] {
+export function buildDuckDbConnectionTreeNodes(connectionId: string, databases: DatabaseInfo[], primarySchemas: string[]): TreeNode[] {
   const schemaNodes = sortSidebarNames(primarySchemas).flatMap((schema) => {
     const name = schema.trim();
     if (!name) return [];

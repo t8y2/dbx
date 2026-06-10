@@ -1,22 +1,22 @@
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
-import { ChangelogList } from '@/components/landing/ChangelogList';
-import { fetchChangelog, type ChangelogRelease } from '@/lib/changelog';
+import { useEffect, useState } from "react";
+import { ChangelogList } from "@/components/landing/ChangelogList";
+import { fetchChangelog, type ChangelogRelease } from "@/lib/changelog";
 
 type ChangelogRuntimeProps = {
-  lang: 'en' | 'cn';
+  lang: "en" | "cn";
   initialReleases?: ChangelogRelease[];
 };
 
 const text = {
   en: {
-    loading: 'Loading releases...',
-    empty: 'No releases found.',
+    loading: "Loading releases...",
+    empty: "No releases found.",
   },
   cn: {
-    loading: '正在加载版本记录...',
-    empty: '暂无版本记录。',
+    loading: "正在加载版本记录...",
+    empty: "暂无版本记录。",
   },
 };
 

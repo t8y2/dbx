@@ -1,15 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import {
-  binaryCellDisplayText,
-  binaryCellDownloadFileName,
-  binaryCellDownloadPayload,
-  canDownloadBinaryCellValue,
-  isBinaryCellColumnType,
-  parseBinaryCellBytes,
-  parseBinaryCellHexValue,
-} from "../../apps/desktop/src/lib/binaryCellDownload.ts";
+import { binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, isBinaryCellColumnType, parseBinaryCellBytes, parseBinaryCellHexValue } from "../../apps/desktop/src/lib/binaryCellDownload.ts";
 
 test("parseBinaryCellHexValue accepts 0x and \\x prefixed hex values", () => {
   assert.deepEqual(Array.from(parseBinaryCellHexValue("0X48656c6c6f") ?? []), [72, 101, 108, 108, 111]);
@@ -26,9 +18,7 @@ test("parseBinaryCellBytes accepts common driver binary shapes", () => {
   assert.deepEqual(Array.from(parseBinaryCellBytes("89504e47", "BLOB") ?? []), [137, 80, 78, 71]);
   assert.deepEqual(Array.from(parseBinaryCellBytes("\\x89\\x50\\x4e\\x47") ?? []), [137, 80, 78, 71]);
   assert.deepEqual(Array.from(parseBinaryCellBytes([0, 1, 171, 255]) ?? []), [0, 1, 171, 255]);
-  assert.deepEqual(Array.from(parseBinaryCellBytes({ type: "Buffer", data: [222, 173, 190, 239] }) ?? []), [
-    222, 173, 190, 239,
-  ]);
+  assert.deepEqual(Array.from(parseBinaryCellBytes({ type: "Buffer", data: [222, 173, 190, 239] }) ?? []), [222, 173, 190, 239]);
 });
 
 test("binary cell download detects common blob column types", () => {
@@ -69,8 +59,5 @@ test("binaryCellDownloadPayload decodes GBK text bytes", () => {
 });
 
 test("binaryCellDownloadFileName sanitizes column names", () => {
-  assert.equal(
-    binaryCellDownloadFileName({ column: "avatar/blob", rowNumber: 7, mode: "gbk", extension: "txt" }),
-    "avatar-blob-row-7-gbk.txt",
-  );
+  assert.equal(binaryCellDownloadFileName({ column: "avatar/blob", rowNumber: 7, mode: "gbk", extension: "txt" }), "avatar-blob-row-7-gbk.txt");
 });

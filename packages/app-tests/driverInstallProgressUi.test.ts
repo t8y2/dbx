@@ -1,13 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import {
-  addDriverInstallQueue,
-  driverInstallProgressPercent,
-  isDriverInstallProgressTarget,
-  removeDriverInstallQueue,
-  takeNextDriverInstallQueue,
-} from "../../apps/desktop/src/lib/driverInstallProgressUi.ts";
+import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue } from "../../apps/desktop/src/lib/driverInstallProgressUi.ts";
 
 test("formats driver install progress as a bounded whole percent", () => {
   assert.equal(driverInstallProgressPercent({ step: "driver", downloaded: 3_900_000, total: 10_500_000 }), 37);
@@ -22,14 +16,8 @@ test("returns null when install progress has no measurable total", () => {
 });
 
 test("targets only the row currently installing or upgrading", () => {
-  assert.equal(
-    isDriverInstallProgressTarget("mysql", { installing: "mysql", upgradingAll: false, progress: null }),
-    true,
-  );
-  assert.equal(
-    isDriverInstallProgressTarget("postgres", { installing: "mysql", upgradingAll: false, progress: null }),
-    false,
-  );
+  assert.equal(isDriverInstallProgressTarget("mysql", { installing: "mysql", upgradingAll: false, progress: null }), true);
+  assert.equal(isDriverInstallProgressTarget("postgres", { installing: "mysql", upgradingAll: false, progress: null }), false);
   assert.equal(
     isDriverInstallProgressTarget("postgres", {
       installing: null,

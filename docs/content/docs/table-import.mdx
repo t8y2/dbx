@@ -7,12 +7,12 @@ Table Import writes a local file into a selected database table. Use it for one-
 
 ## Supported Files
 
-| Format | Details |
-|---|---|
-| CSV | Comma-separated text for general data exchange |
-| TSV | Tab-separated text, useful when values contain commas |
-| JSON | JSON arrays exported from APIs or scripts |
-| Excel | `.xlsx`, `.xlsm`, or `.xls` files; DBX reads the first sheet |
+| Format | Details                                                      |
+| ------ | ------------------------------------------------------------ |
+| CSV    | Comma-separated text for general data exchange               |
+| TSV    | Tab-separated text, useful when values contain commas        |
+| JSON   | JSON arrays exported from APIs or scripts                    |
+| Excel  | `.xlsx`, `.xlsm`, or `.xls` files; DBX reads the first sheet |
 
 DBX previews the first 50 rows before import. Empty CSV/TSV cells are treated as `NULL`. JSON imports can be a single object, an array of objects, or an array of arrays; mixed object and array rows are rejected.
 
@@ -23,39 +23,42 @@ DBX previews the first 50 rows before import. Empty CSV/TSV cells are treated as
     ### Select the Target Table
 
     Right-click the target table in the sidebar and choose **Import Data**.
+
   </Step>
   <Step>
     ### Choose a File
 
     Select a CSV, TSV, JSON, or Excel file.
+
   </Step>
   <Step>
     ### Review Column Mapping
 
     DBX tries to match file columns to table columns by name. Check primary keys, required fields, dates, and numeric values.
+
   </Step>
   <Step>
     ### Choose Import Mode
 
     Select append or truncate-then-import. Truncate mode removes existing target data first.
+
   </Step>
   <Step>
     ### Run and Inspect
 
     After import, check inserted rows, failures, and the resulting table data.
+
   </Step>
 </Steps>
 
 ## Import Modes
 
-| Mode | Behavior | Best For |
-|---|---|---|
-| Append | Keep existing data and insert new rows | Backfills and sample data |
+| Mode                 | Behavior                                          | Best For                                           |
+| -------------------- | ------------------------------------------------- | -------------------------------------------------- |
+| Append               | Keep existing data and insert new rows            | Backfills and sample data                          |
 | Truncate then import | Remove existing rows first, then insert file data | Rebuilding test tables or replacing temporary data |
 
-<Callout type="warn">
-Truncate-then-import deletes existing rows from the target table. Confirm backups and impact before using it on production data.
-</Callout>
+<Callout type="warn">Truncate-then-import deletes existing rows from the target table. Confirm backups and impact before using it on production data.</Callout>
 
 Imports run in batches. The default batch size is 500 rows, and the progress view reports imported rows, total rows, errors, and cancellation state.
 
@@ -82,9 +85,9 @@ Table import is available for MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL
 
 ## Troubleshooting
 
-| Symptom | Possible Cause |
-|---|---|
-| Some columns are skipped | File column names do not match table columns, or the mapping was disabled |
-| Import fails | Required value missing, type mismatch, primary key conflict, or unique constraint conflict |
-| Text is garbled | File encoding does not match parser settings |
-| Dates are wrong | Date format is not recognized by the target database |
+| Symptom                  | Possible Cause                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| Some columns are skipped | File column names do not match table columns, or the mapping was disabled                  |
+| Import fails             | Required value missing, type mismatch, primary key conflict, or unique constraint conflict |
+| Text is garbled          | File encoding does not match parser settings                                               |
+| Dates are wrong          | Date format is not recognized by the target database                                       |

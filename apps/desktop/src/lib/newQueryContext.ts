@@ -36,9 +36,7 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
   const secondaryTarget = targetFromContext(secondaryContext, input.connections);
   if (secondaryTarget) return secondaryTarget;
 
-  const activeConnection = input.activeConnectionId
-    ? input.connections.find((connection) => connection.id === input.activeConnectionId)
-    : undefined;
+  const activeConnection = input.activeConnectionId ? input.connections.find((connection) => connection.id === input.activeConnectionId) : undefined;
   const fallbackConnection = activeConnection || input.connections[0];
   return fallbackConnection
     ? {
@@ -49,10 +47,7 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
     : null;
 }
 
-function targetFromContext(
-  context: Pick<QueryTab | TreeNode, "connectionId" | "database" | "schema"> | undefined,
-  connections: Pick<ConnectionConfig, "id" | "database">[],
-): NewQueryTarget | null {
+function targetFromContext(context: Pick<QueryTab | TreeNode, "connectionId" | "database" | "schema"> | undefined, connections: Pick<ConnectionConfig, "id" | "database">[]): NewQueryTarget | null {
   if (!context?.connectionId) return null;
   const connection = connections.find((item) => item.id === context.connectionId);
   if (!connection) return null;

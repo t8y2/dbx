@@ -1,9 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  normalizeSidebarHiddenTablePrefixes,
-  sidebarDisplayTableName,
-} from "../../apps/desktop/src/lib/sidebarTableNameDisplay.ts";
+import { normalizeSidebarHiddenTablePrefixes, sidebarDisplayTableName } from "../../apps/desktop/src/lib/sidebarTableNameDisplay.ts";
 
 test("normalizes sidebar hidden table prefixes", () => {
   assert.deepEqual(normalizeSidebarHiddenTablePrefixes([" app_", "app_", "", "ods."]), ["app_", "ods."]);

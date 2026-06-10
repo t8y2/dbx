@@ -10,6 +10,6 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
 }
 
 #[tauri::command]
-pub fn get_system_proxy_url() -> Option<String> {
-    dbx_core::update::system_proxy_url()
+pub async fn get_system_proxy_url() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(dbx_core::update::system_proxy_url).await.ok().flatten()
 }

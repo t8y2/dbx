@@ -14,8 +14,9 @@ pub async fn load_history(
     state: State<'_, Arc<AppState>>,
     limit: usize,
     offset: usize,
+    activity_kind: Option<String>,
 ) -> Result<Vec<HistoryEntry>, String> {
-    state.storage.load_history_entries(limit, offset).await
+    state.storage.load_history_entries(limit, offset, activity_kind).await
 }
 
 #[tauri::command]

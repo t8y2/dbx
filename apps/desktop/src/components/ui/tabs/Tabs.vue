@@ -13,13 +13,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 </script>
 
 <template>
-  <TabsRoot
-    v-slot="slotProps"
-    data-slot="tabs"
-    :data-orientation="forwarded.orientation || 'horizontal'"
-    v-bind="forwarded"
-    :class="cn('gap-2 group/tabs flex data-horizontal:flex-col', props.class)"
-  >
+  <TabsRoot v-slot="slotProps" data-slot="tabs" :data-orientation="forwarded.orientation || 'horizontal'" v-bind="forwarded" :class="cn('gap-2 group/tabs flex data-horizontal:flex-col', props.class)">
     <slot v-bind="slotProps" />
   </TabsRoot>
 </template>

@@ -3,11 +3,7 @@ import type { DatabaseType } from "@/types/database";
 
 export type ExecuteMode = "all" | "current";
 
-export function resolveExecutableSql(
-  fullSql: string,
-  selectedSql: string,
-  options?: { mode?: ExecuteMode; cursorPos?: number },
-): string {
+export function resolveExecutableSql(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number }): string {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 
@@ -18,11 +14,7 @@ export function resolveExecutableSql(
   return fullSql;
 }
 
-export async function resolveExecutableSqlWithBackend(
-  fullSql: string,
-  selectedSql: string,
-  options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType },
-): Promise<string> {
+export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType }): Promise<string> {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 

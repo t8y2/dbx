@@ -11,26 +11,7 @@ const SHIKI_THEMES = {
   light: "github-light",
 } as const;
 
-const SHIKI_LANGUAGES = [
-  "bash",
-  "css",
-  "go",
-  "html",
-  "java",
-  "javascript",
-  "json",
-  "markdown",
-  "php",
-  "python",
-  "rust",
-  "shellscript",
-  "sql",
-  "tsx",
-  "typescript",
-  "vue",
-  "xml",
-  "yaml",
-] as const;
+const SHIKI_LANGUAGES = ["bash", "css", "go", "html", "java", "javascript", "json", "markdown", "php", "python", "rust", "shellscript", "sql", "tsx", "typescript", "vue", "xml", "yaml"] as const;
 
 const SHIKI_LANG_BY_AI_LABEL: Record<string, (typeof SHIKI_LANGUAGES)[number] | "text"> = {
   BASH: "bash",
@@ -83,30 +64,7 @@ function getAiShikiHighlighter(): Promise<ShikiHighlighter> {
 }
 
 async function loadAiShikiHighlighter(): Promise<ShikiHighlighter> {
-  const [
-    { createHighlighterCore },
-    { createJavaScriptRegexEngine },
-    githubDark,
-    githubLight,
-    bash,
-    css,
-    go,
-    html,
-    java,
-    javascript,
-    json,
-    markdown,
-    php,
-    python,
-    rust,
-    shellscript,
-    sql,
-    tsx,
-    typescript,
-    vue,
-    xml,
-    yaml,
-  ] = await Promise.all([
+  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, bash, css, go, html, java, javascript, json, markdown, php, python, rust, shellscript, sql, tsx, typescript, vue, xml, yaml] = await Promise.all([
     import("shiki/core"),
     import("shiki/engine/javascript"),
     import("shiki/themes/github-dark.mjs"),
@@ -133,26 +91,7 @@ async function loadAiShikiHighlighter(): Promise<ShikiHighlighter> {
 
   return createHighlighterCore({
     engine: createJavaScriptRegexEngine(),
-    langs: [
-      bash.default,
-      css.default,
-      go.default,
-      html.default,
-      java.default,
-      javascript.default,
-      json.default,
-      markdown.default,
-      php.default,
-      python.default,
-      rust.default,
-      shellscript.default,
-      sql.default,
-      tsx.default,
-      typescript.default,
-      vue.default,
-      xml.default,
-      yaml.default,
-    ],
+    langs: [bash.default, css.default, go.default, html.default, java.default, javascript.default, json.default, markdown.default, php.default, python.default, rust.default, shellscript.default, sql.default, tsx.default, typescript.default, vue.default, xml.default, yaml.default],
     themes: [githubDark.default, githubLight.default],
   });
 }

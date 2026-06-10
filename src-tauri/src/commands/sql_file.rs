@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::connection::AppState;
+use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::sql_file_import::{execute_sql_file_content, sql_file_error_progress, sql_file_progress};
 
 pub use dbx_core::sql::{decode_sql_file_bytes, SqlFilePreview, SqlFileRequest, SqlFileStatus};
@@ -48,6 +48,8 @@ pub async fn execute_sql_file(
     state: State<'_, Arc<AppState>>,
     request: SqlFileRequest,
 ) -> Result<(), String> {
+    // Fast-fail: reject early if the connection is read-only (individual statements are also checked in do_execute)
+    ensure_connection_writable(&state, &request.connection_id, "SQL file execution").await?;
     let token = CancellationToken::new();
     {
         let mut executions = sql_file_executions().write().await;

@@ -3,6 +3,7 @@ export type DatabaseType =
   | "postgres"
   | "sqlite"
   | "rqlite"
+  | "turso"
   | "redis"
   | "duckdb"
   | "clickhouse"
@@ -48,6 +49,7 @@ export type DatabaseType =
   | "iotdb"
   | "etcd"
   | "iris"
+  | "influxdb"
   | "jdbc";
 
 export interface SqlSnippet {
@@ -75,6 +77,7 @@ export interface ConnectionConfig {
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
+  idle_timeout_secs?: number;
   ssl?: boolean;
   ca_cert_path?: string;
   client_cert_path?: string;
@@ -91,8 +94,10 @@ export interface ConnectionConfig {
   redis_sentinel_password?: string;
   redis_sentinel_tls?: boolean;
   redis_cluster_nodes?: string;
+  redis_key_separator?: string;
   etcd_endpoints?: string;
   one_time?: boolean;
+  read_only?: boolean;
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig);
@@ -109,6 +114,7 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+  use_ssh_agent?: boolean;
 }
 
 export interface ProxyTunnelConfig {
@@ -178,7 +184,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -191,7 +197,7 @@ export interface ObjectInfo {
   parent_name?: string | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY";
+export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -246,6 +252,11 @@ export interface QueryResult {
    * fallback query paths, older backends). Consumers must tolerate gaps.
    */
   column_types?: string[];
+  /**
+   * Sortable for each column. Parallel to `columns`. Optional and may
+   * be shorter/empty when a driver cannot supply sortable information.
+   */
+  column_sortables?: boolean[];
   rows: (string | number | boolean | null)[][];
   affected_rows: number;
   execution_time_ms: number;
@@ -288,6 +299,7 @@ export type TreeNodeType =
   | "view"
   | "procedure"
   | "function"
+  | "sequence"
   | "package"
   | "package-body"
   | "group-columns"
@@ -298,6 +310,7 @@ export type TreeNodeType =
   | "group-views"
   | "group-procedures"
   | "group-functions"
+  | "group-sequences"
   | "group-packages"
   | "group-partitions"
   | "object-browser"
@@ -320,9 +333,7 @@ export interface ConnectionGroup {
   collapsed: boolean;
 }
 
-export type SidebarOrderEntry =
-  | { type: "group"; id: string; connectionIds: string[] }
-  | { type: "connection"; id: string };
+export type SidebarOrderEntry = { type: "group"; id: string; connectionIds: string[] } | { type: "connection"; id: string };
 
 export interface SidebarLayout {
   groups: ConnectionGroup[];
@@ -387,6 +398,15 @@ export interface QueryTab {
   lastExplainedSql?: string;
   isExecuting: boolean;
   isCancelling?: boolean;
+  queryExecutionStartedAt?: number;
+  editorViewport?: {
+    scrollTop: number;
+    scrollLeft: number;
+  };
+  editorSelection?: {
+    anchor: number;
+    head: number;
+  };
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
@@ -422,27 +442,17 @@ export interface QueryTab {
     }[];
   };
   querySourceColumns?: Array<string | undefined>;
-  queryEditabilityReason?:
-    | "not-select"
-    | "cte"
-    | "set-operation"
-    | "aggregation"
-    | "external-source"
-    | "complex-source"
-    | "computed-columns"
-    | "no-table"
-    | "no-primary-key"
-    | "primary-key-not-returned"
-    | "aliased-columns"
-    | "metadata-unavailable";
+  queryEditabilityReason?: "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
   resultEvicted?: boolean;
   whereInput?: string;
+  previewSql?: string;
 }
 
 export interface SavedSqlFolder {
   id: string;
   connectionId: string;
   name: string;
+  orderIndex?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -455,6 +465,7 @@ export interface SavedSqlFile {
   database: string;
   schema?: string;
   sql: string;
+  orderIndex?: number;
   createdAt: string;
   updatedAt: string;
 }

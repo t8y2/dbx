@@ -1,17 +1,6 @@
 import type { ConnectionConfig } from "./connections.js";
 import type { TableInfo, ColumnInfo, QueryOptions, QueryResult } from "./database.js";
-import {
-  evaluateMongoAggregateSafety,
-  evaluateMongoWriteSafety,
-  inferMongoColumns,
-  mongoDocumentsToQueryResult,
-  parseMongoAggregateCommand,
-  parseMongoCountDocumentsCommand,
-  parseMongoFindCommand,
-  parseMongoGetIndexesCommand,
-  parseMongoWriteCommand,
-  type MongoWriteCommand,
-} from "./database.js";
+import { evaluateMongoAggregateSafety, evaluateMongoWriteSafety, inferMongoColumns, mongoDocumentsToQueryResult, parseMongoAggregateCommand, parseMongoCountDocumentsCommand, parseMongoFindCommand, parseMongoGetIndexesCommand, parseMongoWriteCommand, type MongoWriteCommand } from "./database.js";
 import { sqlSafetyFromEnv } from "./sql-safety.js";
 
 const baseUrl = process.env.DBX_WEB_URL!.replace(/\/+$/, "");
@@ -211,9 +200,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       const affected = await executeMongoWrite(config, write);
       return { columns: [], rows: [], row_count: affected };
     }
-    throw new Error(
-      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
-    );
+    throw new Error("Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})");
   }
   const res = await apiFetch("/api/query/execute", {
     method: "POST",

@@ -51,9 +51,7 @@ async function submit() {
 </script>
 
 <template>
-  <div
-    class="flex items-center justify-center h-screen bg-gradient-to-br from-background via-background to-blue-950/20"
-  >
+  <div class="flex items-center justify-center h-screen bg-gradient-to-br from-background via-background to-blue-950/20">
     <div class="w-[360px] space-y-8">
       <div class="flex flex-col items-center gap-4">
         <AppLogo class="w-20 h-20 rounded-2xl shadow-lg shadow-blue-500/20" />
@@ -72,31 +70,14 @@ async function submit() {
         </div>
         <div class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
-            v-model="password"
-            type="password"
-            :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')"
-            class="pl-10 h-11"
-            autocomplete="off"
-            autofocus
-          />
+          <Input v-model="password" type="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" class="pl-10 h-11" autocomplete="off" autofocus />
         </div>
         <div v-if="setupMode" class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
-            v-model="confirmPassword"
-            type="password"
-            :placeholder="t('auth.confirmPassword')"
-            class="pl-10 h-11"
-            autocomplete="off"
-          />
+          <Input v-model="confirmPassword" type="password" :placeholder="t('auth.confirmPassword')" class="pl-10 h-11" autocomplete="off" />
         </div>
         <p v-if="error" class="text-sm text-destructive text-center">{{ error }}</p>
-        <Button
-          type="submit"
-          class="w-full h-11 text-sm font-medium"
-          :disabled="loading || !password || (setupMode && !confirmPassword)"
-        >
+        <Button type="submit" class="w-full h-11 text-sm font-medium" :disabled="loading || !password || (setupMode && !confirmPassword)">
           <Loader2 v-if="loading" class="w-4 h-4 animate-spin mr-2" />
           {{ loading ? t("auth.processing") : setupMode ? t("auth.setPassword") : t("auth.login") }}
         </Button>

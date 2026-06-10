@@ -36,11 +36,7 @@ export function normalizeSelectionRange(anchor: CellPosition, focus: CellPositio
   };
 }
 
-export function rowSelectionRange(
-  rowIndex: number,
-  columnCount: number,
-  endRowIndex = rowIndex,
-): CellSelectionRange | null {
+export function rowSelectionRange(rowIndex: number, columnCount: number, endRowIndex = rowIndex): CellSelectionRange | null {
   if (rowIndex < 0 || endRowIndex < 0 || columnCount <= 0) return null;
   return {
     startRow: Math.min(rowIndex, endRowIndex),
@@ -50,11 +46,7 @@ export function rowSelectionRange(
   };
 }
 
-export function columnSelectionRange(
-  rowCount: number,
-  colIndex: number,
-  endColIndex = colIndex,
-): CellSelectionRange | null {
+export function columnSelectionRange(rowCount: number, colIndex: number, endColIndex = colIndex): CellSelectionRange | null {
   if (rowCount <= 0 || colIndex < 0 || endColIndex < 0) return null;
   return {
     startRow: 0,
@@ -71,34 +63,20 @@ export function allCellsSelectionRange(rowCount: number, columnCount: number): C
 
 export function isCellInSelection(rowIndex: number, colIndex: number, range: CellSelectionRange | null): boolean {
   if (!range) return false;
-  return (
-    rowIndex >= range.startRow && rowIndex <= range.endRow && colIndex >= range.startCol && colIndex <= range.endCol
-  );
+  return rowIndex >= range.startRow && rowIndex <= range.endRow && colIndex >= range.startCol && colIndex <= range.endCol;
 }
 
-export function extractSelection(
-  columns: readonly string[],
-  rows: readonly GridCellValue[][],
-  range: CellSelectionRange | null,
-): SelectionData {
+export function extractSelection(columns: readonly string[], rows: readonly GridCellValue[][], range: CellSelectionRange | null): SelectionData {
   if (!range) return { columns: [], rows: [] };
 
   const selectedColumns = columns.slice(range.startCol, range.endCol + 1);
-  const selectedRows = rows
-    .slice(range.startRow, range.endRow + 1)
-    .map((row) => row.slice(range.startCol, range.endCol + 1));
+  const selectedRows = rows.slice(range.startRow, range.endRow + 1).map((row) => row.slice(range.startCol, range.endCol + 1));
 
   return { columns: selectedColumns, rows: selectedRows };
 }
 
-export function extractColumnsSelection(
-  columns: readonly string[],
-  rows: readonly GridCellValue[][],
-  selectedColumnIndexes: Iterable<number>,
-): SelectionData {
-  const normalizedIndexes = normalizeSelectedColumnIndexes(selectedColumnIndexes).filter(
-    (index) => index < columns.length,
-  );
+export function extractColumnsSelection(columns: readonly string[], rows: readonly GridCellValue[][], selectedColumnIndexes: Iterable<number>): SelectionData {
+  const normalizedIndexes = normalizeSelectedColumnIndexes(selectedColumnIndexes).filter((index) => index < columns.length);
   if (normalizedIndexes.length === 0) return { columns: [], rows: [] };
 
   return {

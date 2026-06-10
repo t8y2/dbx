@@ -9,7 +9,9 @@ use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+#[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_executable_sql_keyword;
+use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -68,24 +70,11 @@ pub enum TransferStatus {
 }
 
 pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
-    match db_type {
-        DatabaseType::Mysql
-        | DatabaseType::ClickHouse
-        | DatabaseType::Doris
-        | DatabaseType::StarRocks
-        | DatabaseType::Hive => format!("`{}`", name.replace('`', "``")),
-        DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
-        _ => format!("\"{}\"", name.replace('"', "\"\"")),
-    }
+    quote_transfer_identifier(name, db_type)
 }
 
 pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType) -> String {
-    let qt = quote_identifier(table, db_type);
-    if schema.is_empty() || matches!(db_type, DatabaseType::Mysql | DatabaseType::MongoDb) {
-        qt
-    } else {
-        format!("{}.{}", quote_identifier(schema, db_type), qt)
-    }
+    qualified_transfer_table(table, schema, db_type)
 }
 
 fn quote_string_literal(value: &str) -> String {
@@ -468,9 +457,17 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             | DatabaseType::Doris
             | DatabaseType::StarRocks => {
                 if *b {
-                    "1".to_string()
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        "b'1'".to_string()
+                    } else {
+                        "1".to_string()
+                    }
                 } else {
-                    "0".to_string()
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        "b'0'".to_string()
+                    } else {
+                        "0".to_string()
+                    }
                 }
             }
             _ => {
@@ -481,9 +478,26 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 }
             }
         },
-        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Number(n) => match db_type {
+            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+                if column_type.is_some_and(is_mysql_bit_type) {
+                    format!("b'{}'", n.to_string())
+                } else {
+                    n.to_string()
+                }
+            }
+            _ => n.to_string(),
+        },
         serde_json::Value::String(s) => {
-            format!("'{}'", format_literal_string(s, db_type, column_type).replace('\\', "\\\\").replace('\'', "''"))
+            let escaped = format_literal_string(s, db_type, column_type).replace('\\', "\\\\").replace('\'', "''");
+            match db_type {
+                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
+                    if column_type.is_some_and(is_mysql_bit_type) =>
+                {
+                    format!("b'{escaped}'")
+                }
+                _ => format!("'{escaped}'"),
+            }
         }
         serde_json::Value::Array(arr) => match db_type {
             DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
@@ -494,6 +508,12 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
+}
+
+fn is_mysql_bit_type(column_type: &str) -> bool {
+    let trimmed = column_type.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "bit" || lower.starts_with("bit(") || lower.starts_with("bit ")
 }
 
 pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
@@ -1624,6 +1644,8 @@ pub async fn execute_on_pool_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<db::QueryResult, String> {
+    // Read-only check: block transfer operations in readonly mode
+    crate::query::check_read_only_for_connection(state, pool_key, sql).await?;
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
@@ -1670,6 +1692,7 @@ pub async fn execute_on_pool_with_max_rows(
             );
             client.execute_query(params).await
         }
+        #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let con = con.clone();
             let sql = sql.to_string();
@@ -1713,6 +1736,7 @@ pub async fn execute_on_pool_with_max_rows(
                     Ok(db::QueryResult {
                         columns,
                         column_types: Vec::new(),
+                        column_sortables: vec![],
                         rows: result_rows,
                         affected_rows: 0,
                         execution_time_ms: start.elapsed().as_millis(),
@@ -1725,6 +1749,7 @@ pub async fn execute_on_pool_with_max_rows(
                     Ok(db::QueryResult {
                         columns: vec![],
                         column_types: Vec::new(),
+                        column_sortables: vec![],
                         rows: vec![],
                         affected_rows: affected as u64,
                         execution_time_ms: start.elapsed().as_millis(),
@@ -1737,6 +1762,7 @@ pub async fn execute_on_pool_with_max_rows(
             .await
             .map_err(|e| e.to_string())?
         }
+        #[cfg(feature = "duckdb-bundled")]
         PoolKind::ExternalTabular(ext_pool) => {
             let con = ext_pool.cache.clone();
             let sql = sql.to_string();
@@ -1777,6 +1803,7 @@ pub async fn get_columns_for_transfer(
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let connections = state.connections.read().await;
 
+    #[cfg(feature = "duckdb-bundled")]
     if let Some(PoolKind::DuckDb(con)) = connections.get(pool_key) {
         let con = con.clone();
         drop(connections);
@@ -1790,6 +1817,7 @@ pub async fn get_columns_for_transfer(
         .map_err(|e| e.to_string())?;
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     if let Some(PoolKind::ExternalTabular(ext_pool)) = connections.get(pool_key) {
         let con = ext_pool.cache.clone();
         drop(connections);
@@ -1817,6 +1845,13 @@ pub async fn get_columns_for_transfer(
         drop(connections);
         let mut client = client.lock().await;
         return db::sqlserver::get_columns(&mut client, &schema, &table).await;
+    }
+    if let Some(PoolKind::InfluxDb(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return db::influxdb_driver::get_columns(&client, &database, &table).await;
     }
     if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
         let client = client.clone();
@@ -2960,7 +2995,9 @@ where
                 rewrite_postgres_routine_schema(&object.source, &request.target_schema)
                     .unwrap_or_else(|| object.source.clone())
             }
-            db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => object.source.clone(),
+            db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => {
+                object.source.clone()
+            }
         };
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Postgres,
@@ -3109,11 +3146,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "duckdb-bundled")]
     use crate::connection::{AppState, PoolKind};
+    #[cfg(feature = "duckdb-bundled")]
+    use crate::models::connection::default_redis_key_separator;
+    #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
     use serde_json::json;
+    #[cfg(feature = "duckdb-bundled")]
     use std::sync::Arc;
 
+    #[cfg(feature = "duckdb-bundled")]
     fn duckdb_test_config(id: &str) -> crate::models::connection::ConnectionConfig {
         crate::models::connection::ConnectionConfig {
             id: id.to_string(),
@@ -3133,6 +3176,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
+            idle_timeout_secs: 60,
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -3147,11 +3191,13 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -3715,6 +3761,7 @@ mod tests {
         assert!(statements[0].contains("ON DUPLICATE KEY UPDATE"));
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     #[tokio::test]
     async fn duckdb_transfer_columns_use_requested_schema() {
         let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));

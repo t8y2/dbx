@@ -7,6 +7,21 @@ use serde::Deserialize;
 use crate::error::AppError;
 use crate::state::WebState;
 
+/// Check if a connection is read-only and return an error if so.
+async fn ensure_writable(
+    app: &dbx_core::connection::AppState,
+    connection_id: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    if let Some(name) = dbx_core::query::connection_readonly_name(app, connection_id).await {
+        return Err(AppError(format!(
+            "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
+            name, action
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MongoConnectionRequest {
@@ -159,6 +174,7 @@ pub async fn insert_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoInsertRequest>,
 ) -> Result<Json<String>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Insert").await?;
     let result = dbx_core::mongo_ops::mongo_insert_document_core(
         &state.app,
         &req.connection_id,
@@ -175,6 +191,7 @@ pub async fn insert_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoInsertDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Insert").await?;
     let result = dbx_core::mongo_ops::mongo_insert_documents_core(
         &state.app,
         &req.connection_id,
@@ -191,6 +208,7 @@ pub async fn update_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoUpdateRequest>,
 ) -> Result<Json<u64>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::mongo_ops::mongo_update_document_core(
         &state.app,
         &req.connection_id,
@@ -208,6 +226,7 @@ pub async fn update_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoUpdateDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::mongo_ops::mongo_update_documents_core(
         &state.app,
         &req.connection_id,
@@ -226,6 +245,7 @@ pub async fn delete_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result = dbx_core::mongo_ops::mongo_delete_document_core(
         &state.app,
         &req.connection_id,
@@ -242,6 +262,7 @@ pub async fn delete_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoDeleteDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result = dbx_core::mongo_ops::mongo_delete_documents_core(
         &state.app,
         &req.connection_id,

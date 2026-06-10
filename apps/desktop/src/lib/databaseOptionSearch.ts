@@ -1,8 +1,4 @@
-export function filterDatabaseOptions(
-  options: string[],
-  query: string,
-  displayName: (option: string) => string = (option) => option,
-): string[] {
+export function filterDatabaseOptions(options: string[], query: string, displayName: (option: string) => string = (option) => option): string[] {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return options;
 

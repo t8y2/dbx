@@ -1,14 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  SIDEBAR_TREE_ROW_HEIGHT,
-  SIDEBAR_TREE_PRERENDER_COUNT,
-  SIDEBAR_TREE_SCROLL_BUFFER,
-  flattenTree,
-  scrollTopForExpandedTreeNode,
-  shouldAutoScrollExpandedTreeNode,
-  shouldVirtualizeFlatTree,
-} from "../../apps/desktop/src/composables/useFlatTree.ts";
+import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, scrollTopForExpandedTreeNode, shouldAutoScrollExpandedTreeNode, shouldVirtualizeFlatTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("flattenTree preserves depth and node type for virtualized sidebar rows", () => {

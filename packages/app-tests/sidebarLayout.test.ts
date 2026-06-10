@@ -1,18 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  reconcileLayout,
-  buildTreeNodesFromLayout,
-  createGroup,
-  deleteGroup,
-  renameGroup,
-  moveConnectionToGroup,
-  reorderEntry,
-  toggleGroupCollapsed,
-  appendConnectionToLayout,
-  removeConnectionFromSidebarLayout,
-  emptyLayout,
-} from "../../apps/desktop/src/lib/sidebarLayout.ts";
+import { reconcileLayout, buildTreeNodesFromLayout, createGroup, deleteGroup, renameGroup, moveConnectionToGroup, reorderEntry, toggleGroupCollapsed, appendConnectionToLayout, removeConnectionFromSidebarLayout, emptyLayout } from "../../apps/desktop/src/lib/sidebarLayout.ts";
 import type { ConnectionConfig, SidebarLayout } from "../../apps/desktop/src/types/database.ts";
 
 function conn(id: string, name?: string): ConnectionConfig {
@@ -199,7 +187,10 @@ test("reorderEntry moves connection before another", () => {
     ],
   };
   const result = reorderEntry(layout, "c", "a", "before");
-  assert.deepEqual(result.order.map((e) => e.id), ["c", "a", "b"]);
+  assert.deepEqual(
+    result.order.map((e) => e.id),
+    ["c", "a", "b"],
+  );
 });
 
 test("reorderEntry moves connection after another", () => {
@@ -212,7 +203,10 @@ test("reorderEntry moves connection after another", () => {
     ],
   };
   const result = reorderEntry(layout, "a", "b", "after");
-  assert.deepEqual(result.order.map((e) => e.id), ["b", "a", "c"]);
+  assert.deepEqual(
+    result.order.map((e) => e.id),
+    ["b", "a", "c"],
+  );
 });
 
 test("reorderEntry moves connection inside a group", () => {

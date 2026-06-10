@@ -15,9 +15,7 @@ type ShikiHighlighter = Awaited<ReturnType<typeof import("shiki/core").createHig
 
 let highlighterPromise: Promise<ShikiHighlighter> | undefined;
 
-export async function createRedisShikiJsonHighlighter(
-  options: RedisShikiJsonHighlighterOptions,
-): Promise<RedisJsonHighlighter> {
+export async function createRedisShikiJsonHighlighter(options: RedisShikiJsonHighlighterOptions): Promise<RedisJsonHighlighter> {
   const highlighter = await getRedisShikiHighlighter();
   return (content, appearance = options.appearance()) =>
     highlighter.codeToHtml(content, {
@@ -33,15 +31,7 @@ function getRedisShikiHighlighter(): Promise<ShikiHighlighter> {
 }
 
 async function loadRedisShikiHighlighter(): Promise<ShikiHighlighter> {
-  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, json] = await Promise.all(
-    [
-      import("shiki/core"),
-      import("shiki/engine/javascript"),
-      import("shiki/themes/github-dark.mjs"),
-      import("shiki/themes/github-light.mjs"),
-      import("shiki/langs/json.mjs"),
-    ],
-  );
+  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, json] = await Promise.all([import("shiki/core"), import("shiki/engine/javascript"), import("shiki/themes/github-dark.mjs"), import("shiki/themes/github-light.mjs"), import("shiki/langs/json.mjs")]);
 
   return createHighlighterCore({
     engine: createJavaScriptRegexEngine(),

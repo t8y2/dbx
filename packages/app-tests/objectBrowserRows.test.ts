@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  buildObjectBrowserRows,
-  filterObjectBrowserRows,
-  formatObjectBrowserTimestamp,
-  sortObjectBrowserRows,
-} from "../../apps/desktop/src/lib/objectBrowserRows.ts";
+import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserTimestamp, sortObjectBrowserRows } from "../../apps/desktop/src/lib/objectBrowserRows.ts";
 
 test("builds unique row ids for overloaded routines with the same visible name", () => {
   const rows = buildObjectBrowserRows({
@@ -42,6 +37,20 @@ test("object browser rows normalize Oracle package body objects", () => {
       { id: "HR:PAYROLL:PACKAGE:0", type: "PACKAGE" },
       { id: "HR:PAYROLL:PACKAGE_BODY:0", type: "PACKAGE_BODY" },
     ],
+  );
+});
+
+test("object browser rows normalize PostgreSQL sequence objects", () => {
+  const rows = buildObjectBrowserRows({
+    objects: [{ name: "order_id_seq", object_type: "SEQUENCE", schema: "public" }],
+    database: "app",
+    fallbackSchema: "public",
+    needsSchema: true,
+  });
+
+  assert.deepEqual(
+    rows.map((row) => ({ id: row.id, type: row.type })),
+    [{ id: "public:order_id_seq:SEQUENCE:0", type: "SEQUENCE" }],
   );
 });
 

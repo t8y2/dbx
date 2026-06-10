@@ -10,22 +10,8 @@ import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode } from "@/lib/jdbcDialect";
-import {
-  findSidebarNodeForActiveTab,
-  findNodePathForActiveTab,
-  scrollTopForSidebarNode,
-  shouldScrollActiveSidebarSelection,
-} from "@/lib/sidebarActiveTabTarget";
-import {
-  SIDEBAR_TREE_ROW_HEIGHT,
-  SIDEBAR_TREE_PRERENDER_COUNT,
-  SIDEBAR_TREE_SCROLL_BUFFER,
-  flattenTree,
-  scrollTopForExpandedTreeNode,
-  shouldAutoScrollExpandedTreeNode,
-  shouldVirtualizeFlatTree,
-  type FlatTreeNode,
-} from "@/composables/useFlatTree";
+import { findSidebarNodeForActiveTab, findNodePathForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "@/lib/sidebarActiveTabTarget";
+import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, scrollTopForExpandedTreeNode, shouldAutoScrollExpandedTreeNode, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
 import TreeItem from "./TreeItem.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -156,11 +142,7 @@ const visibleNodeIndexById = computed(() => {
 });
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
-const sidebarTreeOverflowClass = computed(() =>
-  settingsStore.editorSettings.sidebarAllowHorizontalScroll
-    ? "overflow-x-auto sidebar-tree-horizontal-scroll"
-    : "overflow-x-hidden",
-);
+const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
 
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => visibleNodes.value,
@@ -389,10 +371,7 @@ async function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
 }
 
 function currentTreeScroller(): HTMLElement | null {
-  return (
-    ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ??
-    null
-  );
+  return ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ?? null;
 }
 
 async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
@@ -467,19 +446,11 @@ defineExpose({ focusSearch, createNewGroup });
             :placeholder="t('grid.search')"
             @keydown="onSearchKeydown"
           />
-          <button
-            v-if="searchQuery"
-            class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            @click="searchQuery = ''"
-          >
+          <button v-if="searchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
             <X class="h-3 w-3" />
           </button>
         </div>
-        <button
-          class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
-          :title="t('sidebar.locateActiveTab')"
-          @click="locateActiveTabInSidebar"
-        >
+        <button class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
           <Crosshair class="h-3.5 w-3.5" />
         </button>
         <LightDropdown
@@ -491,12 +462,7 @@ defineExpose({ focusSearch, createNewGroup });
           :label="t('sidebar.filterByType')"
           :trigger-title="t('sidebar.filterByType')"
           :trigger-icon="ListFilter"
-          :trigger-class="
-            [
-              'shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent',
-              hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground',
-            ].join(' ')
-          "
+          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
           trigger-icon-class="h-3.5 w-3.5"
           item-icon-class="h-3.5 w-3.5"
           content-class="w-max min-w-0"
@@ -538,13 +504,7 @@ defineExpose({ focusSearch, createNewGroup });
         />
       </template>
     </RecycleScroller>
-    <div
-      v-else-if="flatNodes.length > 0"
-      ref="plainTreeScrollerRef"
-      class="sidebar-tree min-h-0 flex-1 overflow-y-auto"
-      :class="sidebarTreeOverflowClass"
-      @click="clearSidebarSelection"
-    >
+    <div v-else-if="flatNodes.length > 0" ref="plainTreeScrollerRef" class="sidebar-tree min-h-0 flex-1 overflow-y-auto" :class="sidebarTreeOverflowClass" @click="clearSidebarSelection">
       <TreeItem
         v-for="item in flatNodes"
         :key="item.id"

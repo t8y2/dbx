@@ -9,6 +9,6 @@ test("formats markdown tables", () => {
 test("formats database cell values", () => {
   assert.equal(formatCell(null), "NULL");
   assert.equal(formatCell(undefined), "NULL");
-  assert.equal(formatCell({ ok: true }), "{\"ok\":true}");
+  assert.equal(formatCell({ ok: true }), '{"ok":true}');
   assert.equal(formatCell("hello"), "hello");
 });

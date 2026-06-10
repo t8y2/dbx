@@ -4,8 +4,17 @@ Command line interface for DBX database connections, schema inspection, safe que
 
 ## Install
 
+### npm
+
 ```bash
 npm install -g @dbx-app/cli
+```
+
+### Homebrew
+
+```bash
+brew tap t8y2/dbx
+brew install dbx-cli
 ```
 
 Requires Node.js 22.13.0 or newer.
@@ -29,17 +38,17 @@ dbx open local users
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `dbx doctor` | Show local DBX config and desktop bridge diagnostics |
-| `dbx capabilities` | Show direct-query and desktop-bridge database support |
-| `dbx connections list` | List DBX connections without printing secrets |
-| `dbx schema list <connection>` | List tables and views |
-| `dbx schema describe <connection> <table>` | Show table columns |
-| `dbx query <connection> <sql>` | Execute one SQL statement |
-| `dbx query <connection> --file ./query.sql` | Execute SQL from a file |
-| `dbx context <connection>` | Print compact schema context for prompts |
-| `dbx open <connection> <table>` | Open a table in DBX Desktop |
+| Command                                     | Description                                           |
+| ------------------------------------------- | ----------------------------------------------------- |
+| `dbx doctor`                                | Show local DBX config and desktop bridge diagnostics  |
+| `dbx capabilities`                          | Show direct-query and desktop-bridge database support |
+| `dbx connections list`                      | List DBX connections without printing secrets         |
+| `dbx schema list <connection>`              | List tables and views                                 |
+| `dbx schema describe <connection> <table>`  | Show table columns                                    |
+| `dbx query <connection> <sql>`              | Execute one SQL statement                             |
+| `dbx query <connection> --file ./query.sql` | Execute SQL from a file                               |
+| `dbx context <connection>`                  | Print compact schema context for prompts              |
+| `dbx open <connection> <table>`             | Open a table in DBX Desktop                           |
 
 ## Output
 
@@ -102,16 +111,16 @@ npm install -g @dbx-app/cli
 
 CLI JSON errors use stable codes:
 
-| Code | Meaning |
-|---|---|
-| `UNKNOWN_OPTION` | An unsupported flag was provided |
-| `INVALID_OPTION` | A flag is missing a value or has an invalid value |
-| `INVALID_ARGUMENT` | Positional arguments are missing or conflicting |
+| Code                     | Meaning                                             |
+| ------------------------ | --------------------------------------------------- |
+| `UNKNOWN_OPTION`         | An unsupported flag was provided                    |
+| `INVALID_OPTION`         | A flag is missing a value or has an invalid value   |
+| `INVALID_ARGUMENT`       | Positional arguments are missing or conflicting     |
 | `CONNECTION_STORE_ERROR` | DBX connection storage exists but could not be read |
-| `CONNECTION_NOT_FOUND` | No DBX connection matched the requested name |
-| `SQL_BLOCKED` | SQL safety rules blocked execution |
-| `DBX_NOT_RUNNING` | DBX Desktop bridge is unavailable |
-| `ERROR` | Unexpected runtime failure |
+| `CONNECTION_NOT_FOUND`   | No DBX connection matched the requested name        |
+| `SQL_BLOCKED`            | SQL safety rules blocked execution                  |
+| `DBX_NOT_RUNNING`        | DBX Desktop bridge is unavailable                   |
+| `ERROR`                  | Unexpected runtime failure                          |
 
 ## Codex
 

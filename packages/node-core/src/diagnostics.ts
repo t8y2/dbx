@@ -2,18 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { bridgePortFilePath, dbPath, appDataDir } from "./paths.js";
 import { inspectConnectionStore } from "./connections.js";
 
-export const DIRECT_QUERY_TYPES = [
-  "postgres",
-  "redshift",
-  "mysql",
-  "doris",
-  "starrocks",
-  "sqlite",
-  "rqlite",
-  "gaussdb",
-  "kwdb",
-  "opengauss",
-] as const;
+export const DIRECT_QUERY_TYPES = ["postgres", "redshift", "mysql", "doris", "starrocks", "sqlite", "rqlite", "gaussdb", "kwdb", "opengauss"] as const;
 
 export type DirectQueryType = (typeof DIRECT_QUERY_TYPES)[number];
 
@@ -31,6 +20,7 @@ export const BRIDGE_REQUIRED_TYPES = [
   "sqlserver",
   "oracle",
   "elasticsearch",
+  "etcd",
   "dameng",
   "kingbase",
   "highgo",
@@ -63,6 +53,7 @@ export const BRIDGE_REQUIRED_TYPES = [
   "xugu",
   "jdbc",
   "access",
+  "influxdb",
 ] as const;
 
 export interface DbxDiagnostics {
@@ -104,9 +95,7 @@ export async function getDbxDiagnostics(): Promise<DbxDiagnostics> {
     loadConnectionsOk: connectionStore.loadConnectionsOk,
     loadedConnectionCount: connectionStore.loadedConnectionCount,
     loadConnectionsError: connectionStore.loadConnectionsError,
-    loadConnectionsHint: connectionStore.loadConnectionsError
-      ? connectionStoreHint(connectionStore.loadConnectionsError)
-      : undefined,
+    loadConnectionsHint: connectionStore.loadConnectionsError ? connectionStoreHint(connectionStore.loadConnectionsError) : undefined,
     bridgePortFile: portFile,
     bridgePortFileExists,
     bridgeUrl,

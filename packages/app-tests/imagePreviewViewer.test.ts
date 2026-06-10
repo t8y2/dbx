@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  imagePreviewFitScale,
-  clampImagePreviewScale,
-  imagePreviewTransform,
-  nextImagePreviewScale,
-} from "../../apps/desktop/src/lib/imagePreviewViewer.ts";
+import { imagePreviewFitScale, clampImagePreviewScale, imagePreviewTransform, nextImagePreviewScale } from "../../apps/desktop/src/lib/imagePreviewViewer.ts";
 
 test("clamps image preview zoom to usable bounds", () => {
   assert.equal(clampImagePreviewScale(0.1), 0.2);
@@ -20,10 +15,7 @@ test("zooms in fixed steps from wheel direction", () => {
 });
 
 test("builds a stable CSS transform for image previews", () => {
-  assert.equal(
-    imagePreviewTransform({ scale: 1.5, offsetX: 12, offsetY: -8 }),
-    "translate(12px, -8px) scale(1.5)",
-  );
+  assert.equal(imagePreviewTransform({ scale: 1.5, offsetX: 12, offsetY: -8 }), "translate(12px, -8px) scale(1.5)");
 });
 
 test("calculates fit scale from image and viewport dimensions", () => {

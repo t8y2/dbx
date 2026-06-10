@@ -60,3 +60,4 @@ releases-*.json
 test.pdb
 portable/
 DBX_*_x64-portable.zip
+.agents/skills

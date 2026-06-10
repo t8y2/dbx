@@ -10,6 +10,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import type { ExportProgress } from "@/lib/api";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { generateDatabaseExportId } from "@/lib/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -64,21 +65,9 @@ const exportCancelled = ref(false);
 const pendingPrefillTable = ref("");
 const pendingPrefillTables = ref<string[]>([]);
 
-const sqlConnections = computed(() =>
-  store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(c.db_type)),
-);
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(c.db_type)));
 
-const canExport = computed(
-  () =>
-    connectionId.value &&
-    database.value &&
-    schema.value &&
-    !loadingTables.value &&
-    !tableError.value &&
-    (tables.value.length === 0 || selectedTables.value.length > 0) &&
-    (includeStructure.value || includeData.value || includeObjects.value) &&
-    !isExporting.value,
-);
+const canExport = computed(() => connectionId.value && database.value && schema.value && !loadingTables.value && !tableError.value && (tables.value.length === 0 || selectedTables.value.length > 0) && (includeStructure.value || includeData.value || includeObjects.value) && !isExporting.value);
 
 const selectedTableSet = computed(() => new Set(selectedTables.value));
 
@@ -93,7 +82,10 @@ async function loadDatabases(connId: string) {
   try {
     await store.ensureConnected(connId);
     const dbs = await api.listDatabases(connId);
-    const names = dbs.map((d) => d.name);
+    const names = databaseOptionsForConnection(
+      dbs.map((d) => d.name),
+      store.getConfig(connId),
+    );
     databases.value = names;
     database.value = names.length === 1 ? names[0] : "";
     schemas.value = [];
@@ -117,12 +109,7 @@ async function loadSchemas(preferredSchema = "") {
   }
 
   const schemaList = await api.listSchemas(connectionId.value, database.value);
-  const selected =
-    preferredSchema && schemaList.includes(preferredSchema)
-      ? preferredSchema
-      : schemaList.includes("public")
-        ? "public"
-        : (schemaList[0] ?? "");
+  const selected = preferredSchema && schemaList.includes(preferredSchema) ? preferredSchema : schemaList.includes("public") ? "public" : (schemaList[0] ?? "");
   schemas.value = schemaList;
   schema.value = selected;
 }
@@ -138,12 +125,7 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
     const names = tableInfos.map((table) => table.name);
     tables.value = names;
     const preferredSet = new Set(preferredTables.filter((name) => names.includes(name)));
-    selectedTables.value =
-      preferredSet.size > 0
-        ? names.filter((name) => preferredSet.has(name))
-        : preferredTable && names.includes(preferredTable)
-          ? [preferredTable]
-          : [...names];
+    selectedTables.value = preferredSet.size > 0 ? names.filter((name) => preferredSet.has(name)) : preferredTable && names.includes(preferredTable) ? [preferredTable] : [...names];
   } catch (e: any) {
     tableError.value = e?.message || String(e);
   } finally {
@@ -421,13 +403,7 @@ watch(
                 </Button>
               </div>
               <div class="max-h-40 overflow-auto space-y-1 pr-1">
-                <button
-                  v-for="table in filteredTables"
-                  :key="table"
-                  type="button"
-                  class="flex w-full min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-muted"
-                  @click="toggleTable(table)"
-                >
+                <button v-for="table in filteredTables" :key="table" type="button" class="flex w-full min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-muted" @click="toggleTable(table)">
                   <CheckSquare v-if="selectedTableSet.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
                   <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
                   <span class="truncate">{{ table }}</span>
@@ -449,11 +425,7 @@ watch(
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.includeStructure") }}
             </div>
-            <div
-              class="flex items-center gap-2 text-xs"
-              :class="includeStructure ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground/50'"
-              @click="includeStructure && (dropTableIfExists = !dropTableIfExists)"
-            >
+            <div class="flex items-center gap-2 text-xs" :class="includeStructure ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground/50'" @click="includeStructure && (dropTableIfExists = !dropTableIfExists)">
               <CheckSquare v-if="dropTableIfExists && includeStructure" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.dropTableIfExists") }}
@@ -485,11 +457,7 @@ watch(
             </div>
 
             <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
-              <div
-                class="h-full rounded-full transition-all duration-300"
-                :class="exportError ? 'bg-destructive' : exportCancelled ? 'bg-yellow-500' : 'bg-primary'"
-                :style="{ width: `${progressPercent}%` }"
-              />
+              <div class="h-full rounded-full transition-[width] duration-300" :class="exportError ? 'bg-destructive' : exportCancelled ? 'bg-yellow-500' : 'bg-primary'" :style="{ width: `${progressPercent}%` }" />
             </div>
 
             <div class="text-xs text-muted-foreground">

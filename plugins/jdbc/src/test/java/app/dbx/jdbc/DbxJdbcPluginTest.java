@@ -8,6 +8,10 @@ import org.junit.jupiter.api.Test;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -246,13 +250,71 @@ final class DbxJdbcPluginTest {
         assertEquals(true, DbxJdbcPlugin.driverQuirks(iris).skipExecutionContext());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(iris).useOracleMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(iris).caseInsensitiveSchemaMetadata());
+        assertEquals(
+            DbxJdbcPlugin.StatementMaxRowsMode.READ_LOOP_ONLY,
+            DbxJdbcPlugin.driverQuirks(iris).statementMaxRowsMode()
+        );
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).skipExecutionContext());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).useOracleMetadata());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).caseInsensitiveSchemaMetadata());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).useCatalogFallbackSql());
+        assertEquals(
+            DbxJdbcPlugin.StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS,
+            DbxJdbcPlugin.driverQuirks(h2).statementMaxRowsMode()
+        );
         assertEquals(true, DbxJdbcPlugin.driverQuirks(mysql).useCatalogFallbackSql());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
+    }
+
+    @Test
+    void irisStatementOptionsSkipDriverMaxRowsRewrite() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyStatementOptions",
+            Statement.class,
+            int.class,
+            int.class,
+            int.class,
+            DbxJdbcPlugin.JdbcDriverQuirks.class
+        );
+        method.setAccessible(true);
+        JsonNode iris = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:IRIS://127.0.0.1:1972/USER"
+            }
+            """);
+        List<String> calls = new ArrayList<>();
+
+        method.invoke(null, recordingStatement(calls), 100, 50, 30, DbxJdbcPlugin.driverQuirks(iris));
+
+        assertFalse(calls.contains("setMaxRows"), calls.toString());
+        assertEquals(true, calls.contains("setFetchSize"));
+        assertEquals(true, calls.contains("setQueryTimeout"));
+    }
+
+    @Test
+    void defaultStatementOptionsApplyDriverMaxRowsProtection() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyStatementOptions",
+            Statement.class,
+            int.class,
+            int.class,
+            int.class,
+            DbxJdbcPlugin.JdbcDriverQuirks.class
+        );
+        method.setAccessible(true);
+        JsonNode h2 = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:h2:mem:dbx_quirks"
+            }
+            """);
+        List<String> calls = new ArrayList<>();
+
+        method.invoke(null, recordingStatement(calls), 100, 50, 30, DbxJdbcPlugin.driverQuirks(h2));
+
+        assertEquals(true, calls.contains("setMaxRows"));
+        assertEquals(true, calls.contains("setFetchSize"));
+        assertEquals(true, calls.contains("setQueryTimeout"));
     }
 
     @Test
@@ -486,6 +548,23 @@ final class DbxJdbcPluginTest {
               "sql": "CREATE TABLE IF NOT EXISTS app.people (id INT PRIMARY KEY, name VARCHAR(30))"
             }
             """.formatted(CONNECTION));
+    }
+
+    private static Statement recordingStatement(List<String> calls) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> {
+                calls.add(method.getName());
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class) return false;
+                if (returnType == int.class) return 0;
+                if (returnType == long.class) return 0L;
+                if (returnType == float.class) return 0f;
+                if (returnType == double.class) return 0d;
+                return null;
+            }
+        );
     }
 
     private static JsonNode request(String method, String params) throws Exception {

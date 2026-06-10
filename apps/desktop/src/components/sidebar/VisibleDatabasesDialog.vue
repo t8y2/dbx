@@ -6,11 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import {
-  filterDatabaseNamesForConnection,
-  isSystemDatabaseName,
-  normalizeVisibleDatabaseSelection,
-} from "@/lib/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
 import * as api from "@/lib/api";
 
 const props = defineProps<{
@@ -45,9 +41,8 @@ const filteredDatabaseNames = computed(() => {
 });
 const selectedCount = computed(() => selectedNames.value.size);
 const totalCount = computed(() => listedDatabaseNames.value.length);
-const hasSystemDatabases = computed(() =>
-  databaseNames.value.some((database) => isSystemDatabaseName(connection.value?.db_type, database)),
-);
+const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value]));
+const hasSystemDatabases = computed(() => databaseNames.value.some((database) => isSystemDatabaseName(connection.value?.db_type, database)));
 
 watch(
   () => props.open,
@@ -59,9 +54,7 @@ watch(
 
 watch(showSystemDatabases, (show) => {
   if (show) return;
-  selectedNames.value = new Set(
-    [...selectedNames.value].filter((database) => !isSystemDatabaseName(connection.value?.db_type, database)),
-  );
+  selectedNames.value = new Set([...selectedNames.value].filter((database) => !isSystemDatabaseName(connection.value?.db_type, database)));
 });
 
 async function loadDatabases() {
@@ -72,13 +65,9 @@ async function loadDatabases() {
     const names = await loadDatabaseNames();
     databaseNames.value = names;
     const configured = connection.value?.visible_databases;
-    const initialSelection = Array.isArray(configured)
-      ? normalizeVisibleDatabaseSelection(configured, names)
-      : filterDatabaseNamesForConnection(names, connection.value);
+    const initialSelection = Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : filterDatabaseNamesForConnection(names, connection.value);
     selectedNames.value = new Set(initialSelection);
-    showSystemDatabases.value = initialSelection.some((database) =>
-      isSystemDatabaseName(connection.value?.db_type, database),
-    );
+    showSystemDatabases.value = initialSelection.some((database) => isSystemDatabaseName(connection.value?.db_type, database));
   } catch (e: any) {
     databaseNames.value = [];
     selectedNames.value = new Set();
@@ -126,6 +115,7 @@ async function showAllDatabases() {
 }
 
 async function saveSelection() {
+  if (!canSaveSelection.value) return;
   await connectionStore.setVisibleDatabases(props.connectionId, [...selectedNames.value]);
   emit("update:open", false);
 }
@@ -143,12 +133,7 @@ async function saveSelection() {
 
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input
-          v-model="searchText"
-          :placeholder="t('visibleDatabases.searchPlaceholder')"
-          class="h-8 border-0 px-0 shadow-none focus-visible:ring-0"
-          :disabled="isLoading || !!errorMessage"
-        />
+        <Input v-model="searchText" :placeholder="t('visibleDatabases.searchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
       </div>
 
       <div class="flex items-center justify-between text-xs text-muted-foreground">
@@ -160,26 +145,17 @@ async function saveSelection() {
           <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading" @click="clearSelection">
             {{ t("visibleDatabases.clear") }}
           </button>
-          <button
-            class="hover:text-foreground disabled:opacity-50"
-            :disabled="isLoading || !Array.isArray(connection?.visible_databases)"
-            @click="showAllDatabases"
-          >
+          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading || !Array.isArray(connection?.visible_databases)" @click="showAllDatabases">
             {{ t("visibleDatabases.showAll") }}
           </button>
         </div>
       </div>
+      <p v-if="!isLoading && !errorMessage && !canSaveSelection" class="text-xs text-destructive">
+        {{ t("visibleDatabases.emptySelection") }}
+      </p>
 
-      <label
-        v-if="hasSystemDatabases"
-        class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground"
-      >
-        <input
-          v-model="showSystemDatabases"
-          type="checkbox"
-          class="h-3.5 w-3.5 accent-primary"
-          :disabled="isLoading || !!errorMessage"
-        />
+      <label v-if="hasSystemDatabases" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
+        <input v-model="showSystemDatabases" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoading || !!errorMessage" />
         <span>{{ t("visibleDatabases.showSystemDatabases") }}</span>
       </label>
 
@@ -211,7 +187,7 @@ async function saveSelection() {
 
       <DialogFooter>
         <Button variant="outline" @click="emit('update:open', false)">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="isLoading || !!errorMessage" @click="saveSelection">
+        <Button :disabled="isLoading || !!errorMessage || !canSaveSelection" @click="saveSelection">
           {{ t("visibleDatabases.save") }}
         </Button>
       </DialogFooter>

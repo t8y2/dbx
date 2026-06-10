@@ -1,34 +1,16 @@
 import { shallowRef, onBeforeUnmount, type ShallowRef, createApp, watch } from "vue";
 import { EditorState, Compartment } from "@codemirror/state";
-import {
-  EditorView,
-  keymap,
-  drawSelection,
-  dropCursor,
-  highlightSpecialChars,
-  highlightActiveLine,
-} from "@codemirror/view";
+import { EditorView, keymap, drawSelection, dropCursor, highlightSpecialChars, highlightActiveLine } from "@codemirror/view";
 import { json } from "@codemirror/lang-json";
 import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching } from "@codemirror/language";
 import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
-import {
-  EDITOR_FONT_FAMILY_CSS_VAR,
-  EDITOR_FONT_SIZE_CSS_VAR,
-  cellDetailActiveLineColor,
-  loadEditorTheme,
-  editorFontTheme,
-} from "@/lib/editorThemes";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
 import { shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/cellDetailPresentation";
-import {
-  clampEditorFontSize,
-  createEditorZoomCommitScheduler,
-  fontSizeFromGestureScale,
-  fontSizeFromWheelDelta,
-} from "@/lib/editorZoom";
+import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
@@ -147,25 +129,19 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     zoomCommitScheduler.flush(liveFontSize);
   }
 
-  watch(
-    [() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance()],
-    async ([fontSize, fontFamily, editorTheme, appearance]) => {
-      const editor = view.value;
-      if (!editor || destroyed) return;
-      if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
-        liveFontSize = clampEditorFontSize(fontSize);
-      }
-      syncEditorFontCssVars(liveFontSize, fontFamily);
-      const theme = await loadEditorTheme(editorTheme, appearance);
-      if (!view.value || destroyed) return;
-      view.value.dispatch({
-        effects: [
-          themeComp.reconfigure(theme),
-          fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { scrollable: false })),
-        ],
-      });
-    },
-  );
+  watch([() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance()], async ([fontSize, fontFamily, editorTheme, appearance]) => {
+    const editor = view.value;
+    if (!editor || destroyed) return;
+    if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
+      liveFontSize = clampEditorFontSize(fontSize);
+    }
+    syncEditorFontCssVars(liveFontSize, fontFamily);
+    const theme = await loadEditorTheme(editorTheme, appearance);
+    if (!view.value || destroyed) return;
+    view.value.dispatch({
+      effects: [themeComp.reconfigure(theme), fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { scrollable: false }))],
+    });
+  });
 
   async function create(parent: HTMLElement, initialValue: string, columnType?: string): Promise<void> {
     if (destroyed) return;

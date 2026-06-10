@@ -5,10 +5,7 @@ import { usesTreeSchemaMode } from "@/lib/databaseCapabilities";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/api";
 
-export function databaseOptionsForConnection(
-  databaseNames: string[],
-  connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined,
-): string[] {
+export function databaseOptionsForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);
   if (names.length === 0 && usesTreeSchemaMode(connection?.db_type)) return [""];
   return names;
@@ -29,12 +26,12 @@ export function useDatabaseOptions() {
       await connectionStore.ensureConnected(connectionId);
       if (connection.db_type === "redis") {
         const dbs = await api.redisListDatabases(connectionId);
-        databaseOptions.value[connectionId] = dbs.map((db) => String(db.db));
-      } else if (connection.db_type === "mongodb") {
-        databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(
-          await api.mongoListDatabases(connectionId),
+        databaseOptions.value[connectionId] = databaseOptionsForConnection(
+          dbs.map((db) => String(db.db)),
           connection,
         );
+      } else if (connection.db_type === "mongodb") {
+        databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(await api.mongoListDatabases(connectionId), connection);
       } else {
         const dbs = await api.listDatabases(connectionId);
         databaseOptions.value[connectionId] = databaseOptionsForConnection(

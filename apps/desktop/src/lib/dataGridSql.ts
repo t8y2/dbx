@@ -1,7 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import * as api from "@/lib/api";
 
-export type GridCellValue = string | number | boolean | null;
+export type GridCellValue = string | number | boolean | null | unknown[] | { [key: string]: unknown };
 
 export interface DataGridTableMeta {
   schema?: string;
@@ -47,15 +47,7 @@ export interface DataGridCopyInsertStatementOptions {
   excludePrimaryKeys?: boolean;
 }
 
-export type DataGridContextFilterMode =
-  | "equals"
-  | "not-equals"
-  | "is-null"
-  | "is-not-null"
-  | "like"
-  | "not-like"
-  | "less-than"
-  | "greater-than";
+export type DataGridContextFilterMode = "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than";
 
 export interface DataGridContextFilterConditionOptions {
   databaseType?: DatabaseType;
@@ -89,21 +81,15 @@ export function buildDataGridCopyUpdateStatements(options: DataGridCopyUpdateSta
   return api.buildDataGridCopyUpdateStatements(options);
 }
 
-export function buildDataGridCopyInsertStatement(
-  options: DataGridCopyInsertStatementOptions,
-): Promise<string | undefined> {
+export function buildDataGridCopyInsertStatement(options: DataGridCopyInsertStatementOptions): Promise<string | undefined> {
   return api.buildDataGridCopyInsertStatement(options);
 }
 
-export function buildDataGridContextFilterCondition(
-  options: DataGridContextFilterConditionOptions,
-): Promise<string | undefined> {
+export function buildDataGridContextFilterCondition(options: DataGridContextFilterConditionOptions): Promise<string | undefined> {
   return api.buildDataGridContextFilterCondition(options);
 }
 
-export function buildDataGridColumnValueFilterCondition(
-  options: DataGridColumnValueFilterConditionOptions,
-): Promise<string | undefined> {
+export function buildDataGridColumnValueFilterCondition(options: DataGridColumnValueFilterConditionOptions): Promise<string | undefined> {
   return api.buildDataGridColumnValueFilterCondition(options);
 }
 

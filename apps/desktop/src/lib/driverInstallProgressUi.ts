@@ -31,10 +31,7 @@ export function removeDriverInstallQueue(queue: string[], dbType: string): strin
   return queue.filter((queuedDbType) => queuedDbType !== dbType);
 }
 
-export function takeNextDriverInstallQueue(
-  queue: string[],
-  isInstallable: (dbType: string) => boolean,
-): { next: string | null; queue: string[] } {
+export function takeNextDriverInstallQueue(queue: string[], isInstallable: (dbType: string) => boolean): { next: string | null; queue: string[] } {
   const remaining = [...queue];
   while (remaining.length > 0) {
     const next = remaining.shift() ?? null;

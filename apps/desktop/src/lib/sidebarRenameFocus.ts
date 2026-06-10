@@ -9,10 +9,7 @@ const scheduleAnimationFrame: FrameScheduler = (callback) => {
   return setTimeout(callback, 0) as unknown as number;
 };
 
-export function focusSidebarRenameInput(
-  getInput: () => RenameInput | undefined,
-  schedule: FrameScheduler = scheduleAnimationFrame,
-) {
+export function focusSidebarRenameInput(getInput: () => RenameInput | undefined, schedule: FrameScheduler = scheduleAnimationFrame) {
   schedule(() => {
     const input = getInput();
     input?.focus();

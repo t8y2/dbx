@@ -21,13 +21,7 @@ Other DBX connection types can be routed through DBX Desktop bridge integrations
 ## Public Modules
 
 ```ts
-import {
-  createBackend,
-  loadConnections,
-  getDbxDiagnostics,
-  evaluateSqlSafety,
-  buildSchemaContext,
-} from "@dbx-app/node-core";
+import { createBackend, loadConnections, getDbxDiagnostics, evaluateSqlSafety, buildSchemaContext } from "@dbx-app/node-core";
 ```
 
 The package is intended as a shared implementation layer for official DBX Node packages. Applications should prefer `@dbx-app/cli` for terminal workflows and `@dbx-app/mcp-server` for MCP clients.

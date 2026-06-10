@@ -27,6 +27,15 @@ pub async fn start_transfer(
     Json(body): Json<StartTransferRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
+
+    // Reject transfer early if the target connection is read-only
+    if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
+        return Err(AppError(format!(
+            "Read-only mode: target connection '{}' has read-only protection enabled. Transfer blocked.",
+            name
+        )));
+    }
+
     let transfer_id = req.transfer_id.clone();
 
     // Create a broadcast channel for progress

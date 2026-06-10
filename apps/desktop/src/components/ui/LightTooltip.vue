@@ -8,12 +8,14 @@ const props = withDefaults(
     side?: "top" | "right" | "bottom" | "left";
     sideOffset?: number;
     delay?: number;
+    openOnFocus?: boolean;
   }>(),
   {
     disabled: false,
     side: "top",
     sideOffset: 8,
     delay: 300,
+    openOnFocus: true,
   },
 );
 
@@ -147,6 +149,11 @@ function scheduleOpen() {
   timer = setTimeout(open, props.delay);
 }
 
+function scheduleFocusOpen() {
+  if (!props.openOnFocus) return;
+  scheduleOpen();
+}
+
 onBeforeUnmount(close);
 
 watch(
@@ -159,27 +166,11 @@ watch(
 </script>
 
 <template>
-  <span
-    ref="triggerRef"
-    class="contents"
-    @mouseenter="scheduleOpen"
-    @mouseleave="close"
-    @focusin="scheduleOpen"
-    @focusout="close"
-  >
+  <span ref="triggerRef" class="contents" @mouseenter="scheduleOpen" @mouseleave="close" @focusin="scheduleFocusOpen" @focusout="close">
     <slot />
   </span>
   <Teleport to="body">
-    <div
-      v-if="show"
-      class="pointer-events-none fixed z-50 rounded-md bg-foreground text-xs text-background"
-      :class="[
-        slots.content ? '' : 'inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5',
-        tooltipTransformClass,
-      ]"
-      :style="{ left: `${x}px`, top: `${y}px` }"
-      role="tooltip"
-    >
+    <div v-if="show" class="pointer-events-none fixed z-50 rounded-md bg-foreground text-xs text-background" :class="[slots.content ? '' : 'inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', tooltipTransformClass]" :style="{ left: `${x}px`, top: `${y}px` }" role="tooltip">
       <slot name="content">{{ text }}</slot>
       <span :class="[arrowClass, 'size-2.5 rotate-45 rounded-[2px] bg-foreground']" aria-hidden="true" />
     </div>

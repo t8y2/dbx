@@ -1,13 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  buildRedisKeyTree,
-  collectRedisGroupKeyRaws,
-  collectExpandedGroupIds,
-  flattenVisibleRedisKeyTree,
-  mergeKeysIntoRedisKeyTree,
-  type RedisKeyTreeNode,
-} from "../../apps/desktop/src/lib/redisKeyTree.ts";
+import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redisKeyTree.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/api.ts";
 
 function makeKey(key_display: string, key_raw: string, key_type = "string", ttl = -1): RedisKeyInfo {
@@ -19,10 +12,7 @@ function leafLabels(nodes: RedisKeyTreeNode[]): string[] {
 }
 
 test("buildRedisKeyTree groups colon-delimited keys by segment", () => {
-  const tree = buildRedisKeyTree(
-    [makeKey("a:b:c", "k1"), makeKey("a:b:d", "k2"), makeKey("a:e", "k3"), makeKey("x", "k4")],
-    0,
-  );
+  const tree = buildRedisKeyTree([makeKey("a:b:c", "k1"), makeKey("a:b:d", "k2"), makeKey("a:e", "k3"), makeKey("x", "k4")], 0);
 
   assert.equal(tree.length, 2);
   assert.equal(tree[0]?.kind, "group");
@@ -79,15 +69,7 @@ test("collectExpandedGroupIds and flattenVisibleRedisKeyTree expand all search p
 });
 
 test("collectRedisGroupKeyRaws returns every leaf key under a group", () => {
-  const tree = buildRedisKeyTree(
-    [
-      makeKey("user:profile:name", "k1"),
-      makeKey("user:profile:email", "k2"),
-      makeKey("user:settings", "k3"),
-      makeKey("session:1", "k4"),
-    ],
-    0,
-  );
+  const tree = buildRedisKeyTree([makeKey("user:profile:name", "k1"), makeKey("user:profile:email", "k2"), makeKey("user:settings", "k3"), makeKey("session:1", "k4")], 0);
 
   const userGroup = tree.find((node) => node.kind === "group" && node.label === "user");
   assert.ok(userGroup);
@@ -171,8 +153,7 @@ test("mergeKeysIntoRedisKeyTree into empty tree falls back to full build", () =>
   const merged = mergeKeysIntoRedisKeyTree([], [makeKey("a:b:c", "k1"), makeKey("x", "k2")], 0);
   const full = buildRedisKeyTree([makeKey("a:b:c", "k1"), makeKey("x", "k2")], 0);
 
-  const toStr = (nodes: RedisKeyTreeNode[]): string =>
-    JSON.stringify(nodes.map((node) => node.label));
+  const toStr = (nodes: RedisKeyTreeNode[]): string => JSON.stringify(nodes.map((node) => node.label));
 
   assert.equal(toStr(merged), toStr(full));
 });

@@ -3,6 +3,7 @@ import { test } from "vitest";
 import {
   buildTransposeRows,
   buildVisibleTransposeRows,
+  transposeRecordIndexesForMode,
   nextContextTransposeState,
   nextAppendedTransposeState,
   nextKeyboardTransposeState,
@@ -152,6 +153,42 @@ test("builds visible transpose rows from mapped source column indexes", () => {
 
   assert.equal(rows[0].values[0].display, "Ada");
   assert.equal(rows[0].values[0].valueIndex, 1);
+});
+
+test("single-row transpose only includes the active record", () => {
+  assert.deepEqual(
+    transposeRecordIndexesForMode({
+      multiRow: false,
+      activeRecordIndex: 3,
+      totalRecords: 10,
+      visibleRecordIndexes: [1, 2, 3, 4],
+    }),
+    [3],
+  );
+});
+
+test("single-row transpose clamps the active record into range", () => {
+  assert.deepEqual(
+    transposeRecordIndexesForMode({
+      multiRow: false,
+      activeRecordIndex: 12,
+      totalRecords: 10,
+      visibleRecordIndexes: [7, 8, 9],
+    }),
+    [9],
+  );
+});
+
+test("multi-row transpose keeps the visible record window", () => {
+  assert.deepEqual(
+    transposeRecordIndexesForMode({
+      multiRow: true,
+      activeRecordIndex: 3,
+      totalRecords: 10,
+      visibleRecordIndexes: [1, 2, 3, 4],
+    }),
+    [1, 2, 3, 4],
+  );
 });
 
 test("keyboard transpose opens from the selected cell row and closes when active", () => {

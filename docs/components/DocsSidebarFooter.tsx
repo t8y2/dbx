@@ -1,11 +1,10 @@
-'use client';
+"use client";
 
-import { Languages } from 'lucide-react';
-import { LanguageSelect } from 'fumadocs-ui/layouts/shared/slots/language-select';
-import { ThemeSwitch } from 'fumadocs-ui/layouts/shared/slots/theme-switch';
+import { Languages } from "lucide-react";
+import { LanguageSelect } from "fumadocs-ui/layouts/shared/slots/language-select";
+import { ThemeSwitch } from "fumadocs-ui/layouts/shared/slots/theme-switch";
 
-const iconButton =
-  'inline-flex size-8 items-center justify-center rounded-md text-fd-muted-foreground transition-colors hover:bg-fd-accent hover:text-fd-accent-foreground';
+const iconButton = "inline-flex size-8 items-center justify-center rounded-md text-fd-muted-foreground transition-colors hover:bg-fd-accent hover:text-fd-accent-foreground";
 
 function GithubIcon() {
   return (
@@ -28,7 +27,10 @@ function QQIcon() {
     <svg viewBox="0 0 120 145" fill="currentColor" className="size-4.5">
       <path d="M60.503 142.237c-12.533 0-24.038-4.195-31.445-10.46-3.762 1.124-8.574 2.932-11.61 5.175-2.6 1.918-2.275 3.874-1.807 4.663 2.056 3.47 35.273 2.216 44.862 1.136zm0 0c12.535 0 24.039-4.195 31.447-10.46 3.76 1.124 8.573 2.932 11.61 5.175 2.598 1.918 2.274 3.874 1.805 4.663-2.056 3.47-35.272 2.216-44.862 1.136zm0 0" />
       <path d="M60.576 67.119c20.698-.14 37.286-4.147 42.907-5.683 1.34-.367 2.056-1.024 2.056-1.024.005-.189.085-3.37.085-5.01C105.624 27.768 92.58.001 60.5 0 28.42.001 15.375 27.769 15.375 55.401c0 1.642.08 4.822.086 5.01 0 0 .583.615 1.65.913 5.19 1.444 22.09 5.65 43.312 5.795zm56.245 23.02c-1.283-4.129-3.034-8.944-4.808-13.568 0 0-1.02-.126-1.537.023-15.913 4.623-35.202 7.57-49.9 7.392h-.153c-14.616.175-33.774-2.737-49.634-7.315-.606-.175-1.802-.1-1.802-.1-1.774 4.624-3.525 9.44-4.808 13.568-6.119 19.69-4.136 27.838-2.627 28.02 3.239.392 12.606-14.821 12.606-14.821 0 15.459 13.957 39.195 45.918 39.413h.848c31.96-.218 45.917-23.954 45.917-39.413 0 0 9.368 15.213 12.607 14.822 1.508-.183 3.491-8.332-2.627-28.021" />
-      <path fill="#fff" d="M49.085 40.824c-4.352.197-8.07-4.76-8.304-11.063-.236-6.305 3.098-11.576 7.45-11.773 4.347-.195 8.064 4.76 8.3 11.065.238 6.306-3.097 11.577-7.446 11.771m31.133-11.063c-.233 6.302-3.951 11.26-8.303 11.063-4.35-.195-7.684-5.465-7.446-11.77.236-6.305 3.952-11.26 8.3-11.066 4.352.197 7.686 5.468 7.449 11.773" />
+      <path
+        fill="#fff"
+        d="M49.085 40.824c-4.352.197-8.07-4.76-8.304-11.063-.236-6.305 3.098-11.576 7.45-11.773 4.347-.195 8.064 4.76 8.3 11.065.238 6.306-3.097 11.577-7.446 11.771m31.133-11.063c-.233 6.302-3.951 11.26-8.303 11.063-4.35-.195-7.684-5.465-7.446-11.77.236-6.305 3.952-11.26 8.3-11.066 4.352.197 7.686 5.468 7.449 11.773"
+      />
     </svg>
   );
 }
@@ -56,40 +58,16 @@ export function DocsSidebarFooter() {
     <div className="dbx-docs-sidebar-footer">
       <div className="dbx-docs-sidebar-tools">
         <div className="flex items-center gap-1">
-          <a
-            className={iconButton}
-            href="https://github.com/t8y2/dbx"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="GitHub"
-          >
+          <a className={iconButton} href="https://github.com/t8y2/dbx" target="_blank" rel="noreferrer" aria-label="GitHub">
             <GithubIcon />
           </a>
-          <a
-            className={iconButton}
-            href="https://discord.gg/W7NyVDRt6a"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="Discord"
-          >
+          <a className={iconButton} href="https://discord.gg/W7NyVDRt6a" target="_blank" rel="noreferrer" aria-label="Discord">
             <DiscordIcon />
           </a>
-          <a
-            className={iconButton}
-            href="https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="QQ"
-          >
+          <a className={iconButton} href="https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322" target="_blank" rel="noreferrer" aria-label="QQ">
             <QQIcon />
           </a>
-          <a
-            className={iconButton}
-            href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="WeChat"
-          >
+          <a className={iconButton} href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank" rel="noreferrer" aria-label="WeChat">
             <WeChatIcon />
           </a>
         </div>

@@ -29,13 +29,7 @@ function clearError() {
 <template>
   <Popover v-if="errorMessage">
     <PopoverTrigger as-child>
-      <button
-        type="button"
-        class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-amber-500 hover:bg-amber-500/10 hover:text-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-500/40"
-        :class="triggerClass"
-        :title="t('connection.lastError')"
-        @click.stop
-      >
+      <button type="button" class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-amber-500 hover:bg-amber-500/10 hover:text-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-500/40" :class="triggerClass" :title="t('connection.lastError')" @click.stop>
         <AlertTriangle class="h-3.5 w-3.5" />
       </button>
     </PopoverTrigger>
@@ -49,12 +43,7 @@ function clearError() {
             {{ errorMessage }}
           </div>
         </div>
-        <button
-          type="button"
-          class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-          :title="t('connection.clearError')"
-          @click="clearError"
-        >
+        <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('connection.clearError')" @click="clearError">
           <X class="h-3.5 w-3.5" />
         </button>
       </div>

@@ -1,4 +1,3 @@
-use std::env;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -84,20 +83,26 @@ async fn fetch_latest_mcp_version() -> Result<String, String> {
 }
 
 fn installed_mcp_version() -> Option<String> {
-    let stdout = command_stdout("npm", &["list", "-g", MCP_PACKAGE_NAME, "--json", "--depth=0"]).ok()?;
-    let value = serde_json::from_str::<serde_json::Value>(&stdout).ok()?;
-    value
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get(MCP_PACKAGE_NAME))
-        .and_then(|package| package.get("version"))
-        .and_then(|version| version.as_str())
-        .map(ToOwned::to_owned)
+    let root = command_stdout("npm", &["root", "-g"]).ok()?;
+    let pkg_json_path = Path::new(root.trim()).join(MCP_PACKAGE_NAME).join("package.json");
+    let content = std::fs::read_to_string(pkg_json_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value.get("version")?.as_str().map(ToOwned::to_owned)
 }
 
 fn locate_mcp_bin() -> Option<String> {
-    let (command, args): (&str, &[&str]) =
-        if cfg!(windows) { ("where", &["dbx-mcp-server"]) } else { ("which", &["dbx-mcp-server"]) };
-    command_stdout(command, args).ok().and_then(first_non_empty_line)
+    if cfg!(windows) {
+        return locate_windows_command("dbx-mcp-server");
+    }
+    command_stdout("which", &["dbx-mcp-server"]).ok().and_then(first_non_empty_line)
+}
+
+#[cfg(windows)]
+fn locate_windows_command(command: &str) -> Option<String> {
+    command_stdout("where", &[command]).ok().and_then(first_non_empty_line).or_else(|| {
+        let script = format!("(Get-Command {} -ErrorAction SilentlyContinue).Source", windows_shell_quote(command));
+        command_stdout("powershell.exe", &["-NoProfile", "-Command", &script]).ok().and_then(first_non_empty_line)
+    })
 }
 
 fn command_success(command: &str, args: &[&str]) -> bool {
@@ -129,7 +134,15 @@ fn command_output(command: &str, args: &[&str]) -> Result<CommandOutput, String>
         return direct;
     }
 
-    run_command_through_user_shell(command, args).or(direct)
+    #[cfg(windows)]
+    {
+        return run_windows_command_candidates(command, args).or(direct);
+    }
+
+    #[cfg(not(windows))]
+    {
+        run_command_through_user_shell(command, args).or(direct)
+    }
 }
 
 fn run_command(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
@@ -142,8 +155,43 @@ fn run_command(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
 }
 
 #[cfg(windows)]
-fn run_command_through_user_shell(_command: &str, _args: &[&str]) -> Result<CommandOutput, String> {
-    Err("User shell fallback is not available on Windows.".to_string())
+fn run_windows_command_candidates(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
+    for candidate in windows_command_candidates(command) {
+        let output = run_command(&candidate, args);
+        if output.as_ref().is_ok_and(|output| output.success) {
+            return output;
+        }
+    }
+    run_command_through_user_shell(command, args)
+}
+
+#[cfg(windows)]
+fn windows_command_candidates(command: &str) -> Vec<String> {
+    if Path::new(command).extension().is_some() {
+        return Vec::new();
+    }
+    ["cmd", "exe", "ps1"].iter().map(|extension| format!("{command}.{extension}")).collect()
+}
+
+#[cfg(windows)]
+fn run_command_through_user_shell(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
+    let script = windows_command_script(command, args);
+    let mut output = run_command("powershell.exe", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])?;
+    output.stdout = stdout_after_shell_marker(&output.stdout);
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn windows_command_script(command: &str, args: &[&str]) -> String {
+    let mut words = Vec::with_capacity(args.len() + 1);
+    words.push(windows_shell_quote(command));
+    words.extend(args.iter().map(|arg| windows_shell_quote(arg)));
+    format!("Write-Output {}; & {}", windows_shell_quote(SHELL_COMMAND_MARKER), words.join(" "))
+}
+
+#[cfg(windows)]
+fn windows_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(not(windows))]

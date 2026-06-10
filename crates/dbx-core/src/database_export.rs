@@ -165,27 +165,34 @@ fn format_mysql_bit_literal(value: &Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Bool(value) => {
             if *value {
-                "1".to_string()
+                "b'1'".to_string()
             } else {
-                "0".to_string()
+                "b'0'".to_string()
             }
         }
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => {
+            let s = value.to_string();
+            if s == "0" || s == "1" {
+                format!("b'{s}'")
+            } else {
+                s
+            }
+        }
         Value::String(value) => {
             let trimmed = value.trim();
             if trimmed.eq_ignore_ascii_case("true") {
-                return "1".to_string();
+                return "b'1'".to_string();
             }
             if trimmed.eq_ignore_ascii_case("false") {
-                return "0".to_string();
+                return "b'0'".to_string();
             }
             if trimmed == "0" || trimmed == "1" {
-                return trimmed.to_string();
+                return format!("b'{trimmed}'");
             }
             if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'0' || byte == b'1') {
                 return format!("b'{trimmed}'");
             }
-            format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+            format!("b'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
         }
         other => format_export_sql_literal(other),
     }
@@ -832,7 +839,7 @@ mod tests {
 
         assert_eq!(
             statements,
-            vec!["INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES (1, b'1010', '1010'), (0, 3, 'off');"]
+            vec!["INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES (b'1', b'1010', '1010'), (0, 3, 'off');"]
         );
     }
 

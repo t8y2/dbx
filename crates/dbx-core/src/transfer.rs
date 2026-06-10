@@ -457,9 +457,17 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             | DatabaseType::Doris
             | DatabaseType::StarRocks => {
                 if *b {
-                    "1".to_string()
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        "b'1'".to_string()
+                    } else {
+                        "1".to_string()
+                    }
                 } else {
-                    "0".to_string()
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        "b'0'".to_string()
+                    } else {
+                        "0".to_string()
+                    }
                 }
             }
             _ => {
@@ -470,9 +478,25 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 }
             }
         },
-        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Number(n) => {
+            if column_type.is_some_and(is_mysql_bit_type) {
+                format!("b'{}'", n.to_string())
+            } else {
+                n.to_string()
+            }
+        }
         serde_json::Value::String(s) => {
-            format!("'{}'", format_literal_string(s, db_type, column_type).replace('\\', "\\\\").replace('\'', "''"))
+            if column_type.is_some_and(is_mysql_bit_type) {
+                format!(
+                    "b'{}'",
+                    format_literal_string(s, db_type, column_type).replace('\\', "\\\\").replace('\'', "''")
+                )
+            } else {
+                format!(
+                    "'{}'",
+                    format_literal_string(s, db_type, column_type).replace('\\', "\\\\").replace('\'', "''")
+                )
+            }
         }
         serde_json::Value::Array(arr) => match db_type {
             DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
@@ -483,6 +507,12 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
+}
+
+fn is_mysql_bit_type(column_type: &str) -> bool {
+    let trimmed = column_type.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "bit" || lower.starts_with("bit(") || lower.starts_with("bit ")
 }
 
 pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {

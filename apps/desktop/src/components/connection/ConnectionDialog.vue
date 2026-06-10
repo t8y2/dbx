@@ -138,6 +138,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     key_passphrase: "",
     connect_timeout_secs: 5,
     expose_lan: false,
+    use_ssh_agent: false,
   };
 }
 
@@ -154,6 +155,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     key_passphrase: hop.key_passphrase || "",
     connect_timeout_secs: Number(hop.connect_timeout_secs) || 5,
     expose_lan: !!hop.expose_lan,
+    use_ssh_agent: !!hop.use_ssh_agent,
   };
 }
 
@@ -229,6 +231,7 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
         key_passphrase: config.ssh_key_passphrase || "",
         connect_timeout_secs: config.ssh_connect_timeout_secs || 5,
         expose_lan: config.ssh_expose_lan || false,
+        use_ssh_agent: false,
       }),
     ];
   }
@@ -1701,7 +1704,7 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
     }
     if (layer.type === "ssh") {
       if (!layer.user?.trim()) throw new Error(t("connection.sshHopInvalidUser", { hop: label }));
-      if (!layer.password?.trim() && !layer.key_path?.trim()) {
+      if (!layer.password?.trim() && !layer.key_path?.trim() && !layer.use_ssh_agent) {
         throw new Error(t("connection.sshHopInvalidAuth", { hop: label }));
       }
       const timeout = Number(layer.connect_timeout_secs);
@@ -2990,6 +2993,13 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshKeyPassphrase") }}</Label>
                       <Input v-model="selectedSshLayer.key_passphrase" type="password" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <span />
+                      <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
+                        <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
+                      </label>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />

@@ -575,6 +575,7 @@ mod tests {
                 key_passphrase: "hop-passphrase".to_string(),
                 connect_timeout_secs: 5,
                 expose_lan: false,
+                use_ssh_agent: false,
             })],
             connect_timeout_secs: 5,
             query_timeout_secs: 30,

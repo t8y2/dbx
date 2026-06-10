@@ -5,6 +5,7 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use russh::client::{self, Config, Handle};
+use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::ChannelMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +49,7 @@ async fn connect_and_authenticate(
     ssh_password: &str,
     ssh_key_path: &str,
     ssh_key_passphrase: &str,
+    use_ssh_agent: bool,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
     let config =
@@ -91,11 +93,73 @@ async fn connect_and_authenticate(
         if !auth_res.success() {
             return Err("SSH password authentication failed".to_string());
         }
+    } else if use_ssh_agent {
+        match try_authenticate_with_agent(&mut session, ssh_user, &connect_timeout).await {
+            Ok(()) => {}
+            Err(agent_err) => return Err(agent_err),
+        }
     } else {
-        return Err("No SSH password or key provided".to_string());
+        return Err("No SSH authentication method provided (password, key, or ssh-agent)".to_string());
     }
 
     Ok(session)
+}
+
+/// Try to authenticate using ssh-agent identities. Returns `Ok(())` on success,
+/// or an error describing why agent auth failed (unavailable, no identities, all rejected).
+async fn try_authenticate_with_agent(
+    session: &mut Handle<SshClient>,
+    ssh_user: &str,
+    connect_timeout: &Duration,
+) -> Result<(), String> {
+    let mut agent = match AgentClient::connect_env().await {
+        Ok(a) => a,
+        Err(e) => {
+            return Err(format!("No SSH password or key provided, and ssh-agent is unavailable: {e}"));
+        }
+    };
+
+    let identities = match agent.request_identities().await {
+        Ok(ids) if ids.is_empty() => {
+            return Err("No SSH password or key provided, and ssh-agent has no identities".to_string());
+        }
+        Ok(ids) => ids,
+        Err(e) => {
+            return Err(format!("No SSH password or key provided, and ssh-agent request failed: {e}"));
+        }
+    };
+
+    let hash_alg = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+
+    let auth_result = tokio::time::timeout(*connect_timeout, async {
+        for identity in identities {
+            let result = match &identity {
+                AgentIdentity::PublicKey { key, .. } => {
+                    session.authenticate_publickey_with(ssh_user, key.clone(), hash_alg, &mut agent).await
+                }
+                AgentIdentity::Certificate { certificate, .. } => {
+                    session.authenticate_certificate_with(ssh_user, certificate.clone(), hash_alg, &mut agent).await
+                }
+            };
+
+            match result {
+                Ok(auth_res) if auth_res.success() => return Ok(()),
+                Ok(_) => continue,
+                Err(e) => {
+                    log::debug!("SSH agent identity ({}) auth failed: {e}", identity.comment());
+                    continue;
+                }
+            }
+        }
+        Err("No SSH password or key provided, and no ssh-agent identity was accepted".to_string())
+    })
+    .await;
+
+    match auth_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("No SSH password or key provided, and ssh-agent auth timed out".to_string()),
+    }
 }
 
 fn load_ssh_private_key(path: &str, passphrase: Option<&str>) -> Result<PrivateKey, String> {
@@ -342,6 +406,7 @@ async fn tunnel_reconnect_loop(
     ssh_password: String,
     ssh_key_path: String,
     ssh_key_passphrase: String,
+    use_ssh_agent: bool,
     connect_timeout_secs: u64,
     listener: TcpListener,
     remote_host: String,
@@ -375,6 +440,7 @@ async fn tunnel_reconnect_loop(
                 &ssh_password,
                 &ssh_key_path,
                 &ssh_key_passphrase,
+                use_ssh_agent,
                 connect_timeout_secs,
             )
             .await
@@ -443,6 +509,7 @@ impl TunnelManager {
         ssh_password: &str,
         ssh_key_path: &str,
         ssh_key_passphrase: &str,
+        use_ssh_agent: bool,
         connect_timeout_secs: u64,
         remote_host: &str,
         remote_port: u16,
@@ -464,6 +531,7 @@ impl TunnelManager {
             ssh_password,
             ssh_key_path,
             ssh_key_passphrase,
+            use_ssh_agent,
             connect_timeout_secs,
             remote_host,
             remote_port,
@@ -532,6 +600,7 @@ impl TunnelManager {
                 &hop.password,
                 &hop.key_path,
                 &hop.key_passphrase,
+                hop.use_ssh_agent,
                 effective_hop_timeout(hop),
                 &target_host,
                 target_port,
@@ -578,6 +647,7 @@ async fn spawn_tunnel(
     ssh_password: &str,
     ssh_key_path: &str,
     ssh_key_passphrase: &str,
+    use_ssh_agent: bool,
     connect_timeout_secs: u64,
     remote_host: &str,
     remote_port: u16,
@@ -597,6 +667,7 @@ async fn spawn_tunnel(
         ssh_password,
         ssh_key_path,
         ssh_key_passphrase,
+        use_ssh_agent,
         connect_timeout_secs,
     )
     .await?;
@@ -609,6 +680,7 @@ async fn spawn_tunnel(
         ssh_password.to_string(),
         ssh_key_path.to_string(),
         ssh_key_passphrase.to_string(),
+        use_ssh_agent,
         connect_timeout_secs,
         listener,
         remote_host.to_string(),
@@ -705,6 +777,7 @@ mod tests {
             key_passphrase: String::new(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            use_ssh_agent: false,
         }
     }
 

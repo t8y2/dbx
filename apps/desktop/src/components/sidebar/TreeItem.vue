@@ -2697,6 +2697,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   // 3. Connection Group
   if (node.type === "connection-group") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
     items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
     items.push({ label: "", separator: true });
     items.push({
@@ -2718,6 +2720,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
     if (canOpenObjectBrowser.value) {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }

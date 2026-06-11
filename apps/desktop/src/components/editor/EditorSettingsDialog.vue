@@ -276,6 +276,8 @@ const shortcutConflicts = computed(() =>
     return conflict ? [definition.id] : [];
   }),
 );
+const formatterEditorShortcutIds: ShortcutActionId[] = ["formatSql", "find", "replace", "saveSql", "acceptCompletion", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll"];
+const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
 const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts));
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
@@ -1342,6 +1344,72 @@ watch(
             </section>
 
             <section v-else-if="activeSettingsTab === 'formatter'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-3 rounded-md border border-border/70 bg-muted/10 p-3">
+                <div class="text-sm font-medium">{{ t("settings.sqlFormatterEditorShortcuts") }}</div>
+                <div class="overflow-hidden rounded-md border border-border/70 bg-background">
+                  <div v-for="definition in formatterEditorShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                    <div class="min-w-0">
+                      <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
+                    </div>
+                    <div class="min-w-0 space-y-1">
+                      <div class="flex items-center justify-end gap-1.5">
+                        <input
+                          :data-shortcut-input="definition.id"
+                          :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
+                          :style="{
+                            width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
+                          }"
+                          readonly
+                          :aria-invalid="shortcutConflicts.includes(definition.id)"
+                          :placeholder="t('settings.shortcutPressShortcut')"
+                          class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-full border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                          :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                          @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                        />
+                        <Button
+                          v-if="editingShortcutId !== definition.id"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.shortcutPressShortcut')"
+                          @click="focusShortcutInput(definition.id)"
+                        >
+                          <Pencil class="h-4 w-4" />
+                        </Button>
+                        <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
+                          {{ t("settings.cancel") }}
+                        </Button>
+                        <Button
+                          v-if="editingShortcutId !== definition.id"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.reset')"
+                          @click="resetShortcut(definition.id)"
+                        >
+                          <RotateCcw class="h-4 w-4" />
+                        </Button>
+                        <Button
+                          v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.shortcutClear')"
+                          @click="clearShortcut(definition.id)"
+                        >
+                          <X class="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
+                        {{ t("settings.shortcutConflict") }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <SqlFormatterSettingsPanel v-model="editSqlFormatter" @validity-change="(value: boolean) => (sqlFormatterConfigValid = value)" />
             </section>
 

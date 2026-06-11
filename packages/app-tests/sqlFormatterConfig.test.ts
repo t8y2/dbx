@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions, syncSqlFormatterConfigDraft, validateSqlFormatterEditorSettings } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions, syncSqlFormatterConfigDraft } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
 
-const { editor: defaultEditorSettings, ...defaultOptionSettings } = DEFAULT_SQL_FORMATTER_SETTINGS;
+const defaultOptionSettings = DEFAULT_SQL_FORMATTER_SETTINGS;
 
 test("normalizes empty formatter settings to defaults", () => {
   assert.deepEqual(normalizeSqlFormatterSettings({}), DEFAULT_SQL_FORMATTER_SETTINGS);
@@ -59,13 +59,7 @@ test("keeps valid formatter settings and clamps invalid values", () => {
       paramTypes: { named: ["#"] },
       editor: { shortcuts: [{ id: "duplicateLine", keys: { windows: "Ctrl+W", linux: "Ctrl+W", macos: "Cmd+W" }, enabled: false }] },
     }),
-    {
-      ...DEFAULT_SQL_FORMATTER_SETTINGS,
-      editor: {
-        ...defaultEditorSettings,
-        shortcuts: defaultEditorSettings.shortcuts.map((shortcut) => (shortcut.id === "duplicateLine" ? { ...shortcut, keys: { windows: "Ctrl+W", linux: "Ctrl+W", macos: "Cmd+W" }, enabled: false } : shortcut)),
-      },
-    },
+    DEFAULT_SQL_FORMATTER_SETTINGS,
   );
 });
 
@@ -84,7 +78,6 @@ test("serializes formatter config as a stable versioned envelope", () => {
           ...defaultOptionSettings,
           keywordCase: "lower",
         },
-        editor: defaultEditorSettings,
       },
       null,
       2,
@@ -114,9 +107,9 @@ test("parses valid formatter config files", () => {
         paramTypes: { named: [":"], quoted: ["@"], positional: true },
       },
       editor: {
-        scope: "sqlFormatterConfigJsonEditor",
+        scope: "legacyJsonEditorScope",
         platforms: ["windows", "macos"],
-        shortcuts: [{ id: "duplicateLine", action: "copyLineDown", keys: { windows: "Ctrl+W", linux: "Ctrl+W", macos: "Cmd+W" }, enabled: true }],
+        shortcuts: [{ id: "unknownLegacyShortcut", action: "copyLineDown", keys: { windows: "", linux: "Ctrl+W", macos: "Cmd+W" }, enabled: "yes" }],
       },
     }),
   );
@@ -137,52 +130,24 @@ test("parses valid formatter config files", () => {
     denseOperators: false,
     newlineBeforeSemicolon: true,
     paramTypes: { named: [":"], quoted: ["@"], positional: true },
-    editor: {
-      ...defaultEditorSettings,
-      platforms: ["windows", "macos"],
-      shortcuts: defaultEditorSettings.shortcuts.map((shortcut) => (shortcut.id === "duplicateLine" ? { ...shortcut, keys: { windows: "Ctrl+W", linux: "Ctrl+W", macos: "Cmd+W" } } : shortcut)),
-    },
   });
 });
 
-test("parses user-facing editor shortcut actions as known shortcut ids", () => {
-  for (const action of ["replace", "openReplacePanel"]) {
-    const result = parseSqlFormatterConfig(
-      JSON.stringify({
-        version: 1,
-        formatter: "sql-formatter",
-        options: {},
-        editor: {
-          shortcuts: [{ id: "replace", action, keys: { windows: "Ctrl+R", linux: "Ctrl+R", macos: "Cmd+R" }, enabled: true }],
-        },
-      }),
-    );
-
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      const shortcut = result.settings.editor.shortcuts.find((item) => item.id === "replace");
-      assert.equal(shortcut?.action, "openSearchPanel");
-      assert.deepEqual(shortcut?.keys, { windows: "Ctrl+R", linux: "Ctrl+R", macos: "Cmd+R" });
-    }
-  }
-});
-
-test("parses partial editor shortcut keys and fills missing platforms from defaults", () => {
+test("ignores legacy editor shortcut fields in formatter config files", () => {
   const result = parseSqlFormatterConfig(
     JSON.stringify({
       version: 1,
       formatter: "sql-formatter",
       options: {},
       editor: {
-        shortcuts: [{ id: "replace", keys: { windows: "Ctrl+R" }, enabled: true }],
+        shortcuts: [{ id: "unknown", keys: { windows: "" }, enabled: "not-a-boolean" }],
       },
     }),
   );
 
   assert.equal(result.ok, true);
   if (result.ok) {
-    const shortcut = result.settings.editor.shortcuts.find((item) => item.id === "replace");
-    assert.deepEqual(shortcut?.keys, { windows: "Ctrl+R", linux: "Ctrl+H", macos: "Cmd+Option+F" });
+    assert.deepEqual(result.settings, DEFAULT_SQL_FORMATTER_SETTINGS);
   }
 });
 
@@ -218,57 +183,6 @@ test("rejects invalid known formatter option values when parsing config files", 
   if (!invalidParamTypes.ok) assert.match(invalidParamTypes.message, /paramTypes/);
 });
 
-test("rejects invalid editor shortcut config", () => {
-  const unknownShortcut = parseSqlFormatterConfig(
-    JSON.stringify({
-      version: 1,
-      formatter: "sql-formatter",
-      options: {},
-      editor: { shortcuts: [{ id: "unknown", action: "copyLineDown", keys: { windows: "Ctrl+D", linux: "Ctrl+D", macos: "Cmd+D" }, enabled: true }] },
-    }),
-  );
-  assert.equal(unknownShortcut.ok, false);
-  if (!unknownShortcut.ok) assert.match(unknownShortcut.message, /unknown/);
-
-  const invalidKeys = parseSqlFormatterConfig(
-    JSON.stringify({
-      version: 1,
-      formatter: "sql-formatter",
-      options: {},
-      editor: { shortcuts: [{ id: "duplicateLine", action: "copyLineDown", keys: { windows: "", linux: "Ctrl+D", macos: "Cmd+D" }, enabled: true }] },
-    }),
-  );
-  assert.equal(invalidKeys.ok, false);
-  if (!invalidKeys.ok) assert.match(invalidKeys.message, /duplicateLine/);
-
-  const duplicateKeys = parseSqlFormatterConfig(
-    JSON.stringify({
-      version: 1,
-      formatter: "sql-formatter",
-      options: {},
-      editor: {
-        shortcuts: [
-          { id: "find", action: "openSearchPanel", keys: { windows: "Ctrl+D", linux: "Ctrl+F", macos: "Cmd+F" }, enabled: true },
-          { id: "duplicateLine", action: "copyLineDown", keys: { windows: "Ctrl+D", linux: "Ctrl+D", macos: "Cmd+D" }, enabled: true },
-        ],
-      },
-    }),
-  );
-  assert.equal(duplicateKeys.ok, false);
-  if (!duplicateKeys.ok) assert.match(duplicateKeys.message, /Duplicate/);
-});
-
-test("validates editor shortcut settings outside config import", () => {
-  assert.deepEqual(validateSqlFormatterEditorSettings(DEFAULT_SQL_FORMATTER_SETTINGS.editor), { ok: true });
-  assert.equal(
-    validateSqlFormatterEditorSettings({
-      ...DEFAULT_SQL_FORMATTER_SETTINGS.editor,
-      shortcuts: DEFAULT_SQL_FORMATTER_SETTINGS.editor.shortcuts.map((shortcut) => (shortcut.id === "duplicateLine" ? { ...shortcut, keys: { ...shortcut.keys, windows: "Ctrl+" } } : shortcut)),
-    }).ok,
-    false,
-  );
-});
-
 test("syncs valid JSON drafts so outer settings apply can persist them", () => {
   let synced = DEFAULT_SQL_FORMATTER_SETTINGS;
   const result = syncSqlFormatterConfigDraft(
@@ -280,7 +194,6 @@ test("syncs valid JSON drafts so outer settings apply can persist them", () => {
         keywordCase: "lower",
         tabWidth: 4,
       },
-      editor: defaultEditorSettings,
     }),
     (settings) => {
       synced = settings;
@@ -305,7 +218,6 @@ test("does not sync invalid JSON drafts", () => {
         ...defaultOptionSettings,
         keywordCase: "camel",
       },
-      editor: defaultEditorSettings,
     }),
     (settings) => {
       synced = settings;

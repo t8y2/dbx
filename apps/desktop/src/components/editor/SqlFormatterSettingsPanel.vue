@@ -3,7 +3,6 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Upload, Download, RotateCcw, WandSparkles, Save, Copy } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -14,27 +13,20 @@ import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
   SQL_FORMATTER_CONFIG_VERSION,
-  normalizeSqlFormatterEditorSettings,
   normalizeSqlFormatterSettings,
   parseSqlFormatterConfig,
   serializeSqlFormatterConfig,
-  sqlFormatterPlatformFromNavigator,
   syncSqlFormatterConfigDraft,
-  validateSqlFormatterEditorSettings,
   type SqlFormatterCase,
-  type SqlFormatterEditorShortcut,
-  type SqlFormatterEditorShortcutId,
   type SqlFormatterExpressionWidth,
   type SqlFormatterIndentStyle,
   type SqlFormatterLinesBetweenQueries,
   type SqlFormatterLogicalOperatorNewline,
   type SqlFormatterOptionSettings,
   type SqlFormatterParamTypes,
-  type SqlFormatterPlatform,
   type SqlFormatterSettings,
   type SqlFormatterTabWidth,
 } from "@/lib/sqlFormatterConfig";
-import { createSqlFormatterConfigKeymap, sqlFormatterConfigShortcutLabelKey, sqlFormatterConfigShortcutRows } from "@/lib/sqlFormatterConfigEditor";
 
 type EditorViewInstance = import("@codemirror/view").EditorView;
 type CodeMirrorModules = {
@@ -64,7 +56,6 @@ const jsonDraft = ref(serializeSqlFormatterConfig(props.modelValue));
 const jsonValidationMessage = ref("");
 const importError = ref("");
 const advancedConfigError = ref("");
-const editorShortcutError = ref("");
 const jsonEditorLoading = ref(false);
 const jsonEditorReady = ref(false);
 const jsonEditorLoadError = ref("");
@@ -73,11 +64,9 @@ const focusedAdvancedOption = ref<"paramTypes" | null>(null);
 
 let cmView: EditorViewInstance | null = null;
 let cmModules: CodeMirrorModules | null = null;
-let keymapCompartment: import("@codemirror/state").Compartment | null = null;
 let lastValidity: boolean | null = null;
 
 const settings = computed(() => normalizeSqlFormatterSettings(props.modelValue));
-const shortcutRows = computed(() => sqlFormatterConfigShortcutRows(globalThis.navigator?.platform || "", settings.value.editor));
 
 const caseOptions: { value: SqlFormatterCase; labelKey: string }[] = [
   { value: "upper", labelKey: "settings.sqlFormatterCaseUpper" },
@@ -95,14 +84,6 @@ const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[]
   { value: "tabularLeft", labelKey: "settings.sqlFormatterIndentStyleTabularLeft" },
   { value: "tabularRight", labelKey: "settings.sqlFormatterIndentStyleTabularRight" },
 ];
-
-const shortcutPlatformOptions: { value: SqlFormatterPlatform; labelKey: string }[] = [
-  { value: "windows", labelKey: "settings.sqlFormatterShortcutWindows" },
-  { value: "linux", labelKey: "settings.sqlFormatterShortcutLinux" },
-  { value: "macos", labelKey: "settings.sqlFormatterShortcutMacos" },
-];
-const currentShortcutPlatform = computed(() => sqlFormatterPlatformFromNavigator(globalThis.navigator?.platform || ""));
-const currentShortcutPlatformOption = computed(() => shortcutPlatformOptions.find((option) => option.value === currentShortcutPlatform.value) ?? shortcutPlatformOptions[0]);
 
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];
 const expressionWidthOptions: SqlFormatterExpressionWidth[] = [50, 80, 120];
@@ -129,11 +110,6 @@ const sqlFormatterConfigErrorKeys: Record<string, string> = {
   "Unsupported formatter.": "settings.sqlFormatterConfigErrorFormatter",
   "Unsupported formatter option: params.": "settings.sqlFormatterConfigErrorUnsupportedParams",
   "Config options must be a JSON object.": "settings.sqlFormatterConfigErrorOptionsObject",
-  "Config editor must be a JSON object.": "settings.sqlFormatterConfigErrorEditorObject",
-  "Unsupported editor scope.": "settings.sqlFormatterConfigErrorEditorScope",
-  "Invalid editor platforms.": "settings.sqlFormatterConfigErrorEditorPlatforms",
-  "Config editor shortcuts must be an array.": "settings.sqlFormatterConfigErrorEditorShortcutsArray",
-  "Invalid editor shortcut value.": "settings.sqlFormatterConfigErrorEditorShortcutValue",
 };
 
 function emitValidity(value: boolean) {
@@ -167,21 +143,6 @@ function localizeSqlFormatterConfigError(message: string): string {
     }
   }
 
-  const unknownShortcut = message.match(/^Unknown editor shortcut: (.+)\.$/);
-  if (unknownShortcut?.[1]) {
-    return t("settings.sqlFormatterConfigErrorUnknownEditorShortcut", { shortcut: unknownShortcut[1] });
-  }
-
-  const invalidShortcut = message.match(/^Invalid editor shortcut value: (.+)\.$/);
-  if (invalidShortcut?.[1]) {
-    return t("settings.sqlFormatterConfigErrorInvalidEditorShortcut", { shortcut: invalidShortcut[1] });
-  }
-
-  const duplicateShortcut = message.match(/^Duplicate editor shortcut: (.+)\.$/);
-  if (duplicateShortcut?.[1]) {
-    return t("settings.sqlFormatterConfigErrorDuplicateEditorShortcut", { shortcut: duplicateShortcut[1] });
-  }
-
   return t("settings.sqlFormatterConfigErrorInvalidConfig");
 }
 
@@ -204,13 +165,6 @@ function updateSettings(next: unknown) {
   importError.value = "";
   advancedConfigError.value = "";
   emit("update:modelValue", normalizeSqlFormatterSettings(next));
-}
-
-function validateEditorShortcuts(value = settings.value.editor): boolean {
-  const result = validateSqlFormatterEditorSettings(value);
-  editorShortcutError.value = result.ok ? "" : localizeSqlFormatterConfigError(result.message);
-  emitValidity(activeMode.value === "form" ? result.ok : !jsonValidationMessage.value);
-  return result.ok;
 }
 
 function updateOption<K extends keyof SqlFormatterSettings>(key: K, value: SqlFormatterSettings[K]) {
@@ -308,37 +262,6 @@ function applyAdvancedJsonOption() {
   advancedConfigError.value = "";
 }
 
-function updateEditorShortcut(id: SqlFormatterEditorShortcutId, updater: (shortcut: SqlFormatterEditorShortcut) => SqlFormatterEditorShortcut) {
-  const editor = normalizeSqlFormatterEditorSettings(settings.value.editor);
-  const next = {
-    ...settings.value,
-    editor: {
-      ...editor,
-      shortcuts: editor.shortcuts.map((shortcut) => (shortcut.id === id ? updater({ ...shortcut, keys: { ...shortcut.keys } }) : shortcut)),
-    },
-  };
-  updateSettings(next);
-  validateEditorShortcuts(next.editor);
-}
-
-function updateEditorShortcutEnabled(id: SqlFormatterEditorShortcutId, enabled: boolean) {
-  updateEditorShortcut(id, (shortcut) => ({ ...shortcut, enabled }));
-}
-
-function updateEditorShortcutKey(id: SqlFormatterEditorShortcutId, platform: SqlFormatterPlatform, value: string) {
-  updateEditorShortcut(id, (shortcut) => ({
-    ...shortcut,
-    keys: {
-      ...shortcut.keys,
-      [platform]: value,
-    },
-  }));
-}
-
-function shortcutLabelKey(id: SqlFormatterEditorShortcutId): string {
-  return sqlFormatterConfigShortcutLabelKey(id);
-}
-
 function importConfig() {
   importError.value = "";
   fileInputRef.value?.click();
@@ -425,7 +348,6 @@ async function loadCodeMirrorModules(): Promise<CodeMirrorModules> {
 function destroyJsonEditor() {
   cmView?.destroy();
   cmView = null;
-  keymapCompartment = null;
   jsonEditorReady.value = false;
   jsonEditorLoadError.value = "";
 }
@@ -434,34 +356,7 @@ function jsonEditorKeymapExtension(modules: CodeMirrorModules) {
   const { keymap } = modules.view;
   const commands = modules.commands;
   const search = modules.search;
-  const customKeymap = createSqlFormatterConfigKeymap(
-    {
-      indentMore: commands.indentMore,
-      indentLess: commands.indentLess,
-      copyLineDown: commands.copyLineDown,
-      copyLineUp: commands.copyLineUp,
-      deleteLine: commands.deleteLine,
-      moveLineUp: commands.moveLineUp,
-      moveLineDown: commands.moveLineDown,
-      undo: commands.undo,
-      redo: commands.redo,
-      selectAll: commands.selectAll,
-      openSearchPanel: search.openSearchPanel,
-    },
-    {
-      apply: applyJsonDraft,
-      formatJson: formatJsonDraft,
-    },
-    settings.value.editor,
-  );
-  return keymap.of([...customKeymap, ...search.searchKeymap, ...commands.historyKeymap, ...commands.defaultKeymap]);
-}
-
-function reconfigureJsonEditorKeymap() {
-  if (!cmView || !cmModules || !keymapCompartment) return;
-  cmView.dispatch({
-    effects: keymapCompartment.reconfigure(jsonEditorKeymapExtension(cmModules)),
-  });
+  return keymap.of([...search.searchKeymap, ...commands.historyKeymap, ...commands.defaultKeymap]);
 }
 
 async function initJsonEditor() {
@@ -473,11 +368,10 @@ async function initJsonEditor() {
     if (activeMode.value !== "json" || cmView || !jsonEditorRef.value) return;
 
     const { EditorView, lineNumbers, highlightActiveLine, highlightActiveLineGutter } = modules.view;
-    const { EditorState, Compartment } = modules.state;
+    const { EditorState } = modules.state;
     const { json } = modules.langJson;
     const commands = modules.commands;
     const search = modules.search;
-    keymapCompartment = new Compartment();
 
     const state = EditorState.create({
       doc: jsonDraft.value,
@@ -488,7 +382,7 @@ async function initJsonEditor() {
         commands.history(),
         search.search({ top: true }),
         json(),
-        keymapCompartment.of(jsonEditorKeymapExtension(modules)),
+        jsonEditorKeymapExtension(modules),
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
           if (!update.docChanged) return;
@@ -543,15 +437,6 @@ watch(
 );
 
 watch(
-  () => settings.value.editor,
-  (value) => {
-    validateEditorShortcuts(value);
-    if (activeMode.value === "json") reconfigureJsonEditorKeymap();
-  },
-  { deep: true, immediate: true },
-);
-
-watch(
   () => props.modelValue,
   (value) => {
     if (activeMode.value === "json") {
@@ -578,7 +463,6 @@ watch(
       await initJsonEditor();
       return;
     }
-    validateEditorShortcuts();
     destroyJsonEditor();
   },
   { immediate: true },
@@ -794,27 +678,6 @@ onBeforeUnmount(() => {
             {{ advancedConfigError }}
           </p>
         </div>
-
-        <div class="space-y-3 rounded-md border border-border/70 bg-muted/10 p-3">
-          <div class="text-sm font-medium">{{ t("settings.sqlFormatterEditorShortcuts") }}</div>
-          <div class="overflow-x-auto rounded-md border bg-background">
-            <div class="grid min-w-[420px] grid-cols-[minmax(10rem,1fr)_5rem_minmax(12rem,1.2fr)] items-center gap-2 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
-              <span>{{ t("settings.sqlFormatterShortcutAction") }}</span>
-              <span class="text-center">{{ t("settings.sqlFormatterShortcutEnabled") }}</span>
-              <span>{{ t(currentShortcutPlatformOption.labelKey) }}</span>
-            </div>
-            <div v-for="shortcut in settings.editor.shortcuts" :key="shortcut.id" class="grid min-w-[420px] grid-cols-[minmax(10rem,1fr)_5rem_minmax(12rem,1.2fr)] items-center gap-2 border-b px-3 py-2 text-xs last:border-b-0">
-              <span class="min-w-0 truncate text-muted-foreground">{{ t(shortcutLabelKey(shortcut.id)) }}</span>
-              <div class="flex justify-center">
-                <Switch :model-value="shortcut.enabled" @update:model-value="(value: boolean) => updateEditorShortcutEnabled(shortcut.id, value)" />
-              </div>
-              <Input :model-value="shortcut.keys[currentShortcutPlatform]" class="h-8 font-mono text-xs" :disabled="!shortcut.enabled" @update:model-value="(value: string | number) => updateEditorShortcutKey(shortcut.id, currentShortcutPlatform, String(value))" />
-            </div>
-          </div>
-          <p v-if="editorShortcutError" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-            {{ editorShortcutError }}
-          </p>
-        </div>
       </TabsContent>
 
       <TabsContent value="json" class="m-0 flex min-h-0 flex-col gap-3 pt-2">
@@ -851,15 +714,6 @@ onBeforeUnmount(() => {
         <p v-if="jsonValidationMessage" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {{ jsonValidationMessage }}
         </p>
-
-        <div class="grid gap-1 rounded-md border border-border/70 bg-muted/20 p-2 sm:grid-cols-2">
-          <div v-for="row in shortcutRows" :key="row.id" class="flex min-w-0 items-center justify-between gap-2 rounded px-1.5 py-1 text-xs">
-            <span class="truncate text-muted-foreground">{{ t(row.labelKey) }}</span>
-            <span class="shrink-0 rounded border bg-background px-1.5 py-0.5 font-mono text-[11px]">
-              {{ row.shortcut }}
-            </span>
-          </div>
-        </div>
       </TabsContent>
     </Tabs>
   </div>

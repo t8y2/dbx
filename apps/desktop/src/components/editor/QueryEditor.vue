@@ -31,7 +31,7 @@ import {
 } from "@/lib/queryEditorTableDrop";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme } from "@/lib/editorThemes";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editorZoom";
-import { shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
+import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
 import { selectionMatchOccurrences } from "@/lib/codemirrorSelectionMatches";
 import { isSchemaAware, isSingleDatabase } from "@/lib/databaseFeatureSupport";
@@ -165,6 +165,15 @@ let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").comple
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
 let codeMirrorIndentMore: typeof import("@codemirror/commands").indentMore | null = null;
+let codeMirrorIndentLess: typeof import("@codemirror/commands").indentLess | null = null;
+let codeMirrorCopyLineDown: typeof import("@codemirror/commands").copyLineDown | null = null;
+let codeMirrorCopyLineUp: typeof import("@codemirror/commands").copyLineUp | null = null;
+let codeMirrorDeleteLine: typeof import("@codemirror/commands").deleteLine | null = null;
+let codeMirrorMoveLineUp: typeof import("@codemirror/commands").moveLineUp | null = null;
+let codeMirrorMoveLineDown: typeof import("@codemirror/commands").moveLineDown | null = null;
+let codeMirrorUndo: typeof import("@codemirror/commands").undo | null = null;
+let codeMirrorRedo: typeof import("@codemirror/commands").redo | null = null;
+let codeMirrorSelectAll: typeof import("@codemirror/commands").selectAll | null = null;
 let codeMirrorInsertNewlineKeepIndent: typeof import("@codemirror/commands").insertNewlineKeepIndent | null = null;
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
 let semanticDiagnostics: SqlSemanticDiagnostic[] = [];
@@ -340,8 +349,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => [
 ]);
 
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
-  const shortcuts = settingsStore.editorSettings.shortcuts;
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
+  const binding = (shortcut: string, run: (view: EditorViewType) => boolean) => (shortcut ? [{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run }] : []);
   return [
     Prec?.high(
       codeMirrorKeymap.of([
@@ -350,37 +360,36 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           run: codeMirrorInsertNewlineKeepIndent ?? undefined,
           shift: codeMirrorInsertNewlineKeepIndent ?? undefined,
         },
-        {
-          key: shortcutToCodeMirrorKey(shortcuts.find),
-          preventDefault: true,
-          run: openSearch,
-        },
-        {
-          key: shortcutToCodeMirrorKey(shortcuts.replace),
-          preventDefault: true,
-          run: openReplace,
-        },
-        {
-          key: shortcutToCodeMirrorKey(shortcuts.executeSql),
-          preventDefault: true,
-          run: executeCurrentSql,
-        },
-        {
-          key: shortcutToCodeMirrorKey(shortcuts.saveSql),
-          preventDefault: true,
-          run: () => {
-            emit("save");
-            return true;
-          },
-        },
+        ...binding(shortcuts.find, openSearch),
+        ...binding(shortcuts.replace, openReplace),
+        ...binding(shortcuts.executeSql, executeCurrentSql),
+        ...binding(shortcuts.saveSql, () => {
+          emit("save");
+          return true;
+        }),
+        ...binding(shortcuts.formatSql, () => {
+          void formatCurrentSql();
+          return true;
+        }),
+        ...binding(shortcuts.indentMore, (view) => codeMirrorIndentMore?.(view) ?? false),
+        ...binding(shortcuts.indentLess, (view) => codeMirrorIndentLess?.(view) ?? false),
+        ...binding(shortcuts.duplicateLine, (view) => codeMirrorCopyLineDown?.(view) ?? false),
+        ...binding(shortcuts.deleteLine, (view) => codeMirrorDeleteLine?.(view) ?? false),
+        ...binding(shortcuts.moveLineUp, (view) => codeMirrorMoveLineUp?.(view) ?? false),
+        ...binding(shortcuts.moveLineDown, (view) => codeMirrorMoveLineDown?.(view) ?? false),
+        ...binding(shortcuts.copyLineUp, (view) => codeMirrorCopyLineUp?.(view) ?? false),
+        ...binding(shortcuts.copyLineDown, (view) => codeMirrorCopyLineDown?.(view) ?? false),
+        ...binding(shortcuts.undo, (view) => codeMirrorUndo?.(view) ?? false),
+        ...binding(shortcuts.redo, (view) => codeMirrorRedo?.(view) ?? false),
+        ...binding(shortcuts.selectAll, (view) => codeMirrorSelectAll?.(view) ?? false),
       ]),
     ) ?? [],
-    codeMirrorKeymap.of([
-      {
-        key: shortcutToCodeMirrorKey(shortcuts.acceptCompletion),
-        run: (view) => codeMirrorAcceptCompletion?.(view) ?? false,
-      },
-    ]),
+    codeMirrorKeymap.of(
+      binding(shortcuts.acceptCompletion, (view) => codeMirrorAcceptCompletion?.(view) ?? false).map((item) => ({
+        ...item,
+        preventDefault: false,
+      })),
+    ),
   ];
 }
 
@@ -719,6 +728,7 @@ function scheduleSemanticDiagnostics(delay = 500) {
 }
 
 async function formatCurrentSql() {
+  if (props.readOnly) return;
   const currentView = view.value;
   if (!currentView) return;
 
@@ -1342,7 +1352,7 @@ onMounted(async () => {
     { EditorState, Compartment, Prec, StateEffect, StateField },
     { sql, MSSQL, MySQL, PostgreSQL, SQLDialect },
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap },
-    { indentMore, insertNewlineKeepIndent, history, defaultKeymap, historyKeymap },
+    { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, defaultHighlightStyle, foldKeymap },
     { searchKeymap },
   ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/autocomplete"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
@@ -1361,6 +1371,15 @@ onMounted(async () => {
   codeMirrorAcceptCompletion = acceptCompletion;
   codeMirrorStartCompletion = startCompletion;
   codeMirrorIndentMore = indentMore;
+  codeMirrorIndentLess = indentLess;
+  codeMirrorCopyLineDown = copyLineDown;
+  codeMirrorCopyLineUp = copyLineUp;
+  codeMirrorDeleteLine = deleteLine;
+  codeMirrorMoveLineUp = moveLineUp;
+  codeMirrorMoveLineDown = moveLineDown;
+  codeMirrorUndo = undo;
+  codeMirrorRedo = redo;
+  codeMirrorSelectAll = selectAll;
   codeMirrorInsertNewlineKeepIndent = insertNewlineKeepIndent;
 
   const diagnosticTheme = EditorView.baseTheme({

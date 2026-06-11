@@ -635,6 +635,8 @@ fn parse_cluster_slot_master(value: RedisRawValue, fallback_host: &str) -> Resul
 }
 
 pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
+    // Strip trailing semicolons so commands like "HGETALL aaa;" work naturally
+    let command_text = command_text.trim_end().trim_end_matches(';');
     let mut argv = Vec::new();
     let mut current = String::new();
     let mut chars = command_text.chars().peekable();

@@ -22,6 +22,7 @@ import {
   parseMongoWriteCommand,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongoShellCommand";
+import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
 import { supportsDatabaseFeature } from "@/lib/databaseCapabilities";
 import { editablePrimaryKeys } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
@@ -693,9 +694,9 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string) {
+  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean }) {
     if (!activeTabId.value) return;
-    await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined });
+    await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined, ...options });
   }
 
   type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryEditabilityReason" | "tableMeta">;
@@ -896,6 +897,7 @@ export const useQueryStore = defineStore("query", () => {
       mongoSafety?: MongoAggregateSafetyOptions;
       preserveResultDuringExecution?: boolean;
       preserveTotalRowCountDuringExecution?: boolean;
+      skipRedisSafetyCheck?: boolean;
     },
   ) {
     const tab = tabs.value.find((t) => t.id === id);
@@ -943,6 +945,30 @@ export const useQueryStore = defineStore("query", () => {
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
       await previousResultSessionClose;
+
+      // Redis command execution
+      if (conn?.db_type === "redis") {
+        await connStore.ensureConnected(tab.connectionId);
+        const redisDb = Number(tab.database) || 0;
+        console.info("[DBX][executeTabSql:redis:start]", { traceId, db: redisDb, sql });
+        const result = await api.redisExecuteCommand(tab.connectionId, redisDb, sql, options?.skipRedisSafetyCheck);
+        console.info("[DBX][executeTabSql:redis:done]", { traceId, elapsed: elapsed() });
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.executionId === executionId) {
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          current.result = markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt));
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = options?.resultSortedSql;
+        }
+        return;
+      }
+
       if (tab.mode === "query") {
         const pagination = options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 };
         const plan = await api.prepareQueryPaginationExecutionPlan({

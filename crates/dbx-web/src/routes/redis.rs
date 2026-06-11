@@ -152,6 +152,7 @@ pub struct RedisCommandRequest {
     pub connection_id: String,
     pub db: u32,
     pub command: String,
+    pub skip_safety_check: Option<bool>,
 }
 
 pub async fn list_databases(
@@ -438,8 +439,14 @@ pub async fn execute_command(
             )));
         }
     }
-    let result = dbx_core::redis_ops::redis_execute_command_core(&state.app, &req.connection_id, req.db, &req.command)
-        .await
-        .map_err(AppError)?;
+    let result = dbx_core::redis_ops::redis_execute_command_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.command,
+        req.skip_safety_check.unwrap_or(false),
+    )
+    .await
+    .map_err(AppError)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }

@@ -656,6 +656,7 @@ pub async fn redis_execute_command_core(
     connection_id: &str,
     db: u32,
     command: &str,
+    skip_safety_check: bool,
 ) -> Result<RedisCommandResult, String> {
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
@@ -663,7 +664,7 @@ pub async fn redis_execute_command_core(
             RedisConnection::Direct(con) => {
                 let mut con = con.lock().await;
                 redis_driver::select_db(&mut *con, db).await?;
-                redis_driver::execute_command(&mut *con, command).await
+                redis_driver::execute_command(&mut *con, command, skip_safety_check).await
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
@@ -673,7 +674,7 @@ pub async fn redis_execute_command_core(
                     }
                 }
                 let mut con = cluster.connection.lock().await;
-                redis_driver::execute_command(&mut *con, command).await
+                redis_driver::execute_command(&mut *con, command, skip_safety_check).await
             }
         },
         _ => Err("Not a Redis connection".to_string()),

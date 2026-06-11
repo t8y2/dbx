@@ -43,6 +43,7 @@
     sqlSaveFailed: "儲存檔案失敗：{message}",
     driverManager: "驅動程式管理器",
     updatableDriverCount: "可更新驅動程式數量",
+    blockDangerousRedisCommands: "攔截危險命令",
   },
   updates: {
     title: "更新",
@@ -1338,6 +1339,7 @@
     wordWrap: "自動換行",
     clearHistory: "清除命令歷史",
     historyCleared: "Redis 命令歷史已清除",
+    blockedCommand: "命令 {command} 因安全原因已被攔截。點擊工具列盾牌圖示可關閉攔截。",
   },
   mongo: {
     documents: "{count} 個文件",

@@ -45,6 +45,7 @@
     sqlSaveFailed: "Failed to save file: {message}",
     driverManager: "Driver Manager",
     updatableDriverCount: "Updatable driver count",
+    blockDangerousRedisCommands: "Block dangerous commands",
   },
   updates: {
     title: "Updates",
@@ -1465,6 +1466,7 @@
     jsonFormatError: "Invalid JSON format",
     clearHistory: "Clear command history",
     historyCleared: "Redis command history cleared",
+    blockedCommand: "Command {command} is blocked for safety. Disable the shield icon in the toolbar to allow.",
   },
   mongo: {
     documents: "{count} documents",

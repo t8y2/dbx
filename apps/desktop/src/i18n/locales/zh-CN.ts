@@ -45,6 +45,7 @@
     sqlSaveFailed: "保存文件失败：{message}",
     driverManager: "驱动管理",
     updatableDriverCount: "可更新驱动数量",
+    blockDangerousRedisCommands: "拦截危险命令",
   },
   updates: {
     title: "更新",
@@ -1464,6 +1465,7 @@
     jsonFormatError: "JSON 格式不合法",
     clearHistory: "清除命令历史",
     historyCleared: "Redis 命令历史已清除",
+    blockedCommand: "命令 {command} 因安全原因已被拦截。点击工具栏盾牌图标可关闭拦截。",
   },
   mongo: {
     documents: "{count} 个文档",

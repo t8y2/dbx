@@ -43,6 +43,7 @@
     sqlSaveFailed: "Error al guardar el archivo: {message}",
     driverManager: "Administrador de drivers",
     updatableDriverCount: "Cantidad de drivers actualizables",
+    blockDangerousRedisCommands: "Bloquear comandos peligrosos",
   },
   updates: {
     title: "Actualizaciones",
@@ -1249,6 +1250,7 @@
     wordWrap: "Ajuste de línea",
     clearHistory: "Borrar historial de comandos",
     historyCleared: "Historial de comandos Redis borrado",
+    blockedCommand: "El comando {command} está bloqueado por seguridad. Desactiva el icono de escudo en la barra de herramientas para permitirlo.",
   },
   mongo: {
     documents: "{count} documentos",

@@ -1070,8 +1070,8 @@ export async function redisFlushDb(connectionId: string, db: number): Promise<vo
   return invoke("redis_flush_db", { connectionId, db });
 }
 
-export async function redisExecuteCommand(connectionId: string, db: number, command: string): Promise<RedisCommandResult> {
-  return invoke("redis_execute_command", { connectionId, db, command });
+export async function redisExecuteCommand(connectionId: string, db: number, command: string, skipSafetyCheck?: boolean): Promise<RedisCommandResult> {
+  return invoke("redis_execute_command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
 export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number): Promise<RedisValue> {

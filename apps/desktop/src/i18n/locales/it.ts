@@ -43,6 +43,7 @@
     sqlSaveFailed: "Impossibile salvare il file: {message}",
     driverManager: "Gestione Driver",
     updatableDriverCount: "Driver aggiornabili",
+    blockDangerousRedisCommands: "Blocca comandi pericolosi",
   },
   updates: {
     title: "Aggiornamenti",
@@ -1361,6 +1362,7 @@
     wordWrap: "A capo automatico",
     clearHistory: "Cancella cronologia comandi",
     historyCleared: "Cronologia comandi Redis cancellata",
+    blockedCommand: "Il comando {command} è bloccato per sicurezza. Disattiva l'icona scudo nella barra degli strumenti per consentirlo.",
   },
   mongo: {
     documents: "{count} documenti",

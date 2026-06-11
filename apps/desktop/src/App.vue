@@ -185,12 +185,15 @@ async function resolveActiveExecutableSql() {
     : "";
 }
 
+const blockDangerousRedisCommands = ref(true);
+
 const { dangerSql, pendingDangerSql, showDangerDialog, suppressDangerConfirm, tryExecute, doExecute, cancelActiveExecution, tryExplain, onDangerConfirm, explainMode } = useSqlExecution({
   activeTab,
   activeConnection,
   executableSql,
   resolveExecutableSql: resolveActiveExecutableSql,
   activeOutputView,
+  blockDangerousRedisCommands,
 });
 
 const dialogs = useDialogSources();
@@ -1038,7 +1041,9 @@ onUnmounted(() => {
                   :active-connection="activeConnection"
                   :executable-sql="executableSql"
                   :explain-mode="explainMode"
+                  :block-dangerous-redis-commands="blockDangerousRedisCommands"
                   @update:explain-mode="(m: 'explain' | 'autotrace') => (explainMode = m)"
+                  @update:block-dangerous-redis-commands="(v: boolean) => (blockDangerousRedisCommands = v)"
                   @execute="tryExecute()"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"

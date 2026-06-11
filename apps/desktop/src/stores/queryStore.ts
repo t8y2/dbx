@@ -957,7 +957,7 @@ export const useQueryStore = defineStore("query", () => {
         if (current?.executionId === executionId) {
           current.results = undefined;
           current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt));
+          current.result = markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command));
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;

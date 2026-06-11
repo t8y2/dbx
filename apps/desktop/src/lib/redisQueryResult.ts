@@ -1,12 +1,30 @@
 import type { QueryResult } from "@/types/database";
 import { formatRedisCommandResult } from "@/lib/redisValuePresentation";
 
-export function redisCommandResultToQueryResult(value: unknown, elapsedMs: number): QueryResult {
+const KEY_VALUE_COMMANDS = new Set(["HGETALL"]);
+
+function isKeyValueCommand(command: string): boolean {
+  return KEY_VALUE_COMMANDS.has(command.toUpperCase().trim());
+}
+
+export function redisCommandResultToQueryResult(value: unknown, elapsedMs: number, command?: string): QueryResult {
+  if (Array.isArray(value) && command && isKeyValueCommand(command)) {
+    const rows: (string | number | boolean | null)[][] = [];
+    for (let i = 0; i + 1 < value.length; i += 2) {
+      rows.push([formatRedisCommandResult(value[i]), formatRedisCommandResult(value[i + 1])]);
+    }
+    return {
+      columns: ["field", "value"],
+      rows,
+      affected_rows: value.length / 2,
+      execution_time_ms: Math.max(0, Math.round(elapsedMs)),
+    };
+  }
   if (Array.isArray(value)) {
-    const rows = value.map((item) => [formatRedisCommandResult(item)]);
+    const rows: (string | number | boolean | null)[][] = value.map((item, i) => [i + 1, formatRedisCommandResult(item)]);
     return {
       columns: ["(index)", "value"],
-      rows: rows.map((row, i) => [i + 1, row[0]!]),
+      rows,
       affected_rows: value.length,
       execution_time_ms: Math.max(0, Math.round(elapsedMs)),
     };

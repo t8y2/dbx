@@ -56,6 +56,10 @@ const connectionOptionIds = computed(() => connectionStore.connections.map((conn
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
+const supportsExplain = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "etcd";
+});
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
@@ -121,7 +125,7 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : t("toolbar.executeShortcut") }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <Tooltip v-if="supportsExplain">
         <TooltipTrigger as-child>
           <Button
             :variant="activeTab.isExplaining ? 'destructive' : 'ghost'"

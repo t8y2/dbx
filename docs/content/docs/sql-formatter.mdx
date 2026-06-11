@@ -1,0 +1,225 @@
+---
+title: SQL Formatter
+description: Configure SQL formatting options, import and export JSON config, and customize JSON config editor shortcuts.
+---
+
+DBX SQL formatter settings live in **Settings → SQL Formatter**.
+
+- `options` controls formatting output such as keyword case, indentation, line breaks, and parameter types.
+- `editor` controls shortcuts used inside the SQL formatter JSON config editor.
+
+## Form And JSON
+
+Use the form for common options. Use JSON mode to copy, paste, import, export, or edit the full config.
+
+When the JSON config is valid, DBX syncs it back to the form. Invalid JSON shows an error and cannot be applied.
+
+## Shortcut Platform
+
+The config file can store Windows, Linux, and macOS shortcuts at the same time.
+
+The form only shows the current system column. For example, macOS shows only macOS shortcuts. Import and export still preserve all platform keys.
+
+## Full Template JSON
+
+```json
+{
+  "version": 1,
+  "formatter": "sql-formatter",
+  "name": "DBX SQL Formatter Config",
+  "description": "SQL formatter options and SQL formatter JSON config editor shortcut template.",
+  "options": {
+    "keywordCase": "upper",
+    "dataTypeCase": "preserve",
+    "functionCase": "preserve",
+    "identifierCase": "preserve",
+    "indentStyle": "standard",
+    "useTabs": false,
+    "tabWidth": 2,
+    "logicalOperatorNewline": "before",
+    "expressionWidth": 80,
+    "linesBetweenQueries": 1,
+    "denseOperators": false,
+    "newlineBeforeSemicolon": false,
+    "paramTypes": null
+  },
+  "editor": {
+    "scope": "sqlFormatterConfigJsonEditor",
+    "platforms": ["windows", "linux", "macos"],
+    "shortcuts": [
+      {
+        "id": "find",
+        "action": "openSearchPanel",
+        "label": "Find",
+        "keys": {
+          "windows": "Ctrl+F",
+          "linux": "Ctrl+F",
+          "macos": "Cmd+F"
+        },
+        "enabled": true
+      },
+      {
+        "id": "replace",
+        "action": "openSearchPanel",
+        "label": "Replace",
+        "keys": {
+          "windows": "Ctrl+H",
+          "linux": "Ctrl+H",
+          "macos": "Cmd+Option+F"
+        },
+        "enabled": true
+      },
+      {
+        "id": "indentMore",
+        "action": "indentMore",
+        "label": "Indent more",
+        "keys": {
+          "windows": "Tab",
+          "linux": "Tab",
+          "macos": "Tab"
+        },
+        "enabled": true
+      },
+      {
+        "id": "indentLess",
+        "action": "indentLess",
+        "label": "Indent less",
+        "keys": {
+          "windows": "Shift+Tab",
+          "linux": "Shift+Tab",
+          "macos": "Shift+Tab"
+        },
+        "enabled": true
+      },
+      {
+        "id": "duplicateLine",
+        "action": "copyLineDown",
+        "label": "Duplicate current line",
+        "keys": {
+          "windows": "Ctrl+D",
+          "linux": "Ctrl+D",
+          "macos": "Cmd+D"
+        },
+        "enabled": true
+      },
+      {
+        "id": "deleteLine",
+        "action": "deleteLine",
+        "label": "Delete current line",
+        "keys": {
+          "windows": "Ctrl+Shift+K",
+          "linux": "Ctrl+Shift+K",
+          "macos": "Cmd+Shift+K"
+        },
+        "enabled": true
+      },
+      {
+        "id": "moveLineUp",
+        "action": "moveLineUp",
+        "label": "Move line up",
+        "keys": {
+          "windows": "Alt+Up",
+          "linux": "Alt+Up",
+          "macos": "Option+Up"
+        },
+        "enabled": true
+      },
+      {
+        "id": "moveLineDown",
+        "action": "moveLineDown",
+        "label": "Move line down",
+        "keys": {
+          "windows": "Alt+Down",
+          "linux": "Alt+Down",
+          "macos": "Option+Down"
+        },
+        "enabled": true
+      },
+      {
+        "id": "copyLineUp",
+        "action": "copyLineUp",
+        "label": "Copy line up",
+        "keys": {
+          "windows": "Shift+Alt+Up",
+          "linux": "Shift+Alt+Up",
+          "macos": "Shift+Option+Up"
+        },
+        "enabled": true
+      },
+      {
+        "id": "copyLineDown",
+        "action": "copyLineDown",
+        "label": "Copy line down",
+        "keys": {
+          "windows": "Shift+Alt+Down",
+          "linux": "Shift+Alt+Down",
+          "macos": "Shift+Option+Down"
+        },
+        "enabled": true
+      },
+      {
+        "id": "undo",
+        "action": "undo",
+        "label": "Undo",
+        "keys": {
+          "windows": "Ctrl+Z",
+          "linux": "Ctrl+Z",
+          "macos": "Cmd+Z"
+        },
+        "enabled": true
+      },
+      {
+        "id": "redo",
+        "action": "redo",
+        "label": "Redo",
+        "keys": {
+          "windows": "Ctrl+Y",
+          "linux": "Ctrl+Shift+Z",
+          "macos": "Cmd+Shift+Z"
+        },
+        "enabled": true
+      },
+      {
+        "id": "selectAll",
+        "action": "selectAll",
+        "label": "Select all",
+        "keys": {
+          "windows": "Ctrl+A",
+          "linux": "Ctrl+A",
+          "macos": "Cmd+A"
+        },
+        "enabled": true
+      },
+      {
+        "id": "formatJson",
+        "action": "formatJson",
+        "label": "Format JSON config",
+        "keys": {
+          "windows": "Shift+Alt+F",
+          "linux": "Shift+Alt+F",
+          "macos": "Shift+Cmd+F"
+        },
+        "enabled": true
+      },
+      {
+        "id": "applyConfig",
+        "action": "applyJsonDraft",
+        "label": "Apply JSON config",
+        "keys": {
+          "windows": "Ctrl+S",
+          "linux": "Ctrl+S",
+          "macos": "Cmd+S"
+        },
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+## Compatibility
+
+- `version` is currently `1`.
+- `formatter` is currently `sql-formatter`.
+- `params` replacement is not executed by SQL formatting. Use `paramTypes` when parameter recognition is needed.
+- Legacy templates that use `openReplacePanel` for the `replace` action are accepted and normalized on import.

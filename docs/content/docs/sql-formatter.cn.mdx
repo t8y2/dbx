@@ -1,0 +1,225 @@
+---
+title: SQL 格式化
+description: 配置 SQL 格式化选项、导入导出 JSON 配置，并定制 JSON 配置编辑器快捷键。
+---
+
+DBX 的 SQL 格式化配置位于**设置 → SQL 格式化**。配置分为两部分：
+
+- `options`：控制 SQL 格式化结果，例如关键字大小写、缩进、操作符换行和参数类型。
+- `editor`：控制 SQL 格式化 JSON 配置编辑器中的快捷键。
+
+## 表单与 JSON
+
+表单模式适合修改常用选项。JSON 模式适合复制、粘贴、导入或批量修改完整配置。
+
+JSON 配置合法时，DBX 会把配置同步回表单；配置无效时，会显示具体错误并阻止应用。
+
+## 快捷键平台
+
+快捷键配置文件可以同时保存 Windows、Linux 和 macOS 三个平台的按键。
+
+表单中只显示当前系统的平台列。例如在 macOS 上只显示 macOS 快捷键，避免三端配置同时挤在一个表格里。导入和导出仍会保留完整三端配置，便于在不同系统间迁移。
+
+## 完整模板 JSON
+
+```json
+{
+  "version": 1,
+  "formatter": "sql-formatter",
+  "name": "DBX SQL 格式化配置",
+  "description": "SQL 格式化选项，以及 SQL 格式化 JSON 配置编辑器快捷键模板。",
+  "options": {
+    "keywordCase": "upper",
+    "dataTypeCase": "preserve",
+    "functionCase": "preserve",
+    "identifierCase": "preserve",
+    "indentStyle": "standard",
+    "useTabs": false,
+    "tabWidth": 2,
+    "logicalOperatorNewline": "before",
+    "expressionWidth": 80,
+    "linesBetweenQueries": 1,
+    "denseOperators": false,
+    "newlineBeforeSemicolon": false,
+    "paramTypes": null
+  },
+  "editor": {
+    "scope": "sqlFormatterConfigJsonEditor",
+    "platforms": ["windows", "linux", "macos"],
+    "shortcuts": [
+      {
+        "id": "find",
+        "action": "openSearchPanel",
+        "label": "查找",
+        "keys": {
+          "windows": "Ctrl+F",
+          "linux": "Ctrl+F",
+          "macos": "Cmd+F"
+        },
+        "enabled": true
+      },
+      {
+        "id": "replace",
+        "action": "openSearchPanel",
+        "label": "替换",
+        "keys": {
+          "windows": "Ctrl+H",
+          "linux": "Ctrl+H",
+          "macos": "Cmd+Option+F"
+        },
+        "enabled": true
+      },
+      {
+        "id": "indentMore",
+        "action": "indentMore",
+        "label": "增加缩进",
+        "keys": {
+          "windows": "Tab",
+          "linux": "Tab",
+          "macos": "Tab"
+        },
+        "enabled": true
+      },
+      {
+        "id": "indentLess",
+        "action": "indentLess",
+        "label": "减少缩进",
+        "keys": {
+          "windows": "Shift+Tab",
+          "linux": "Shift+Tab",
+          "macos": "Shift+Tab"
+        },
+        "enabled": true
+      },
+      {
+        "id": "duplicateLine",
+        "action": "copyLineDown",
+        "label": "复制当前行",
+        "keys": {
+          "windows": "Ctrl+D",
+          "linux": "Ctrl+D",
+          "macos": "Cmd+D"
+        },
+        "enabled": true
+      },
+      {
+        "id": "deleteLine",
+        "action": "deleteLine",
+        "label": "删除当前行",
+        "keys": {
+          "windows": "Ctrl+Shift+K",
+          "linux": "Ctrl+Shift+K",
+          "macos": "Cmd+Shift+K"
+        },
+        "enabled": true
+      },
+      {
+        "id": "moveLineUp",
+        "action": "moveLineUp",
+        "label": "当前行上移",
+        "keys": {
+          "windows": "Alt+Up",
+          "linux": "Alt+Up",
+          "macos": "Option+Up"
+        },
+        "enabled": true
+      },
+      {
+        "id": "moveLineDown",
+        "action": "moveLineDown",
+        "label": "当前行下移",
+        "keys": {
+          "windows": "Alt+Down",
+          "linux": "Alt+Down",
+          "macos": "Option+Down"
+        },
+        "enabled": true
+      },
+      {
+        "id": "copyLineUp",
+        "action": "copyLineUp",
+        "label": "向上复制当前行",
+        "keys": {
+          "windows": "Shift+Alt+Up",
+          "linux": "Shift+Alt+Up",
+          "macos": "Shift+Option+Up"
+        },
+        "enabled": true
+      },
+      {
+        "id": "copyLineDown",
+        "action": "copyLineDown",
+        "label": "向下复制当前行",
+        "keys": {
+          "windows": "Shift+Alt+Down",
+          "linux": "Shift+Alt+Down",
+          "macos": "Shift+Option+Down"
+        },
+        "enabled": true
+      },
+      {
+        "id": "undo",
+        "action": "undo",
+        "label": "撤销",
+        "keys": {
+          "windows": "Ctrl+Z",
+          "linux": "Ctrl+Z",
+          "macos": "Cmd+Z"
+        },
+        "enabled": true
+      },
+      {
+        "id": "redo",
+        "action": "redo",
+        "label": "重做",
+        "keys": {
+          "windows": "Ctrl+Y",
+          "linux": "Ctrl+Shift+Z",
+          "macos": "Cmd+Shift+Z"
+        },
+        "enabled": true
+      },
+      {
+        "id": "selectAll",
+        "action": "selectAll",
+        "label": "全选",
+        "keys": {
+          "windows": "Ctrl+A",
+          "linux": "Ctrl+A",
+          "macos": "Cmd+A"
+        },
+        "enabled": true
+      },
+      {
+        "id": "formatJson",
+        "action": "formatJson",
+        "label": "格式化 JSON 配置",
+        "keys": {
+          "windows": "Shift+Alt+F",
+          "linux": "Shift+Alt+F",
+          "macos": "Shift+Cmd+F"
+        },
+        "enabled": true
+      },
+      {
+        "id": "applyConfig",
+        "action": "applyJsonDraft",
+        "label": "应用 JSON 配置",
+        "keys": {
+          "windows": "Ctrl+S",
+          "linux": "Ctrl+S",
+          "macos": "Cmd+S"
+        },
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+## 兼容说明
+
+- `version` 当前固定为 `1`。
+- `formatter` 当前固定为 `sql-formatter`。
+- `params` 参数替换不会被 SQL 格式化执行；需要参数识别时使用 `paramTypes`。
+- 旧模板中的 `replace` 动作如果写成 `openReplacePanel`，导入时会自动兼容并归一化。

@@ -313,7 +313,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   cellDetailDrawerWidth: 320,
   cellDetailPanelLayout: "bottom",
   shortcuts: normalizeShortcutSettings(),
-  sqlFormatter: { ...DEFAULT_SQL_FORMATTER_SETTINGS },
+  sqlFormatter: normalizeSqlFormatterSettings(DEFAULT_SQL_FORMATTER_SETTINGS),
   sidebarActivation: "single",
   sidebarObjectDisplay: "grouped",
   autoSelectActiveSidebarNode: false,

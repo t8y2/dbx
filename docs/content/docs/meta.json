@@ -29,6 +29,7 @@
     "---Settings---",
     "plugins",
     "driver-management",
+    "sql-formatter",
     "keyboard-shortcuts",
     "connection-import",
     "config-export",

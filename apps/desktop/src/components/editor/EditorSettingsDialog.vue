@@ -830,6 +830,13 @@ async function downloadWebDavSnapshot() {
   });
 }
 
+const oldPassword = ref("");
+const newPassword = ref("");
+const confirmNewPassword = ref("");
+const passwordMessage = ref("");
+const passwordError = ref(false);
+const changingPassword = ref(false);
+
 watch(
   () => props.open,
   async (open) => {
@@ -867,13 +874,6 @@ watch(activeSettingsTab, (tab) => {
 onMounted(() => {
   void refreshWebDavPasswordStatus();
 });
-
-const oldPassword = ref("");
-const newPassword = ref("");
-const confirmNewPassword = ref("");
-const passwordMessage = ref("");
-const passwordError = ref(false);
-const changingPassword = ref(false);
 
 async function changePassword() {
   if (newPassword.value !== confirmNewPassword.value) {

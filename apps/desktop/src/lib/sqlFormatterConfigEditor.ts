@@ -1,4 +1,5 @@
 import type { Command, KeyBinding } from "@codemirror/view";
+import { normalizeSqlFormatterEditorSettings, sqlFormatterPlatformFromNavigator, sqlFormatterShortcutDisplayKeyToCodeMirrorKey, type SqlFormatterEditorSettings, type SqlFormatterEditorShortcutAction, type SqlFormatterEditorShortcutId } from "@/lib/sqlFormatterConfig";
 
 export interface SqlFormatterConfigEditorCommands {
   indentMore: Command;
@@ -8,6 +9,9 @@ export interface SqlFormatterConfigEditorCommands {
   deleteLine: Command;
   moveLineUp: Command;
   moveLineDown: Command;
+  undo: Command;
+  redo: Command;
+  selectAll: Command;
   openSearchPanel: Command;
 }
 
@@ -16,20 +20,75 @@ export interface SqlFormatterConfigEditorActions {
   formatJson: Command;
 }
 
-export function createSqlFormatterConfigKeymap(commands: SqlFormatterConfigEditorCommands, actions: SqlFormatterConfigEditorActions): KeyBinding[] {
-  return [
-    { key: "Tab", run: commands.indentMore },
-    { key: "Shift-Tab", run: commands.indentLess },
-    { key: "Mod-d", run: commands.copyLineDown },
-    { key: "Shift-Mod-k", run: commands.deleteLine },
-    { key: "Alt-ArrowUp", run: commands.moveLineUp },
-    { key: "Alt-ArrowDown", run: commands.moveLineDown },
-    { key: "Shift-Alt-ArrowUp", run: commands.copyLineUp },
-    { key: "Shift-Alt-ArrowDown", run: commands.copyLineDown },
-    { key: "Ctrl-h", mac: "Mod-Alt-f", run: commands.openSearchPanel, preventDefault: true },
-    { key: "Shift-Alt-f", mac: "Shift-Mod-f", run: actions.formatJson, preventDefault: true },
-    { key: "Mod-s", run: actions.apply, preventDefault: true },
-  ];
+const shortcutLabelKeys: Record<SqlFormatterEditorShortcutId, string> = {
+  find: "settings.sqlFormatterShortcutFind",
+  replace: "settings.sqlFormatterShortcutReplace",
+  indentMore: "settings.sqlFormatterShortcutIndentMore",
+  indentLess: "settings.sqlFormatterShortcutIndentLess",
+  duplicateLine: "settings.sqlFormatterShortcutDuplicateLine",
+  deleteLine: "settings.sqlFormatterShortcutDeleteLine",
+  moveLineUp: "settings.sqlFormatterShortcutMoveLineUp",
+  moveLineDown: "settings.sqlFormatterShortcutMoveLineDown",
+  copyLineUp: "settings.sqlFormatterShortcutCopyLineUp",
+  copyLineDown: "settings.sqlFormatterShortcutCopyLineDown",
+  undo: "settings.sqlFormatterShortcutUndo",
+  redo: "settings.sqlFormatterShortcutRedo",
+  selectAll: "settings.sqlFormatterShortcutSelectAll",
+  formatJson: "settings.sqlFormatterShortcutFormatJson",
+  applyConfig: "settings.sqlFormatterShortcutApply",
+};
+
+export function sqlFormatterConfigShortcutLabelKey(id: SqlFormatterEditorShortcutId): string {
+  return shortcutLabelKeys[id];
+}
+
+function commandForAction(commands: SqlFormatterConfigEditorCommands, actions: SqlFormatterConfigEditorActions, action: SqlFormatterEditorShortcutAction): Command {
+  switch (action) {
+    case "indentMore":
+      return commands.indentMore;
+    case "indentLess":
+      return commands.indentLess;
+    case "copyLineDown":
+      return commands.copyLineDown;
+    case "copyLineUp":
+      return commands.copyLineUp;
+    case "deleteLine":
+      return commands.deleteLine;
+    case "moveLineUp":
+      return commands.moveLineUp;
+    case "moveLineDown":
+      return commands.moveLineDown;
+    case "undo":
+      return commands.undo;
+    case "redo":
+      return commands.redo;
+    case "selectAll":
+      return commands.selectAll;
+    case "openSearchPanel":
+      return commands.openSearchPanel;
+    case "formatJson":
+      return actions.formatJson;
+    case "applyJsonDraft":
+      return actions.apply;
+  }
+}
+
+export function createSqlFormatterConfigKeymap(commands: SqlFormatterConfigEditorCommands, actions: SqlFormatterConfigEditorActions, editorSettings?: SqlFormatterEditorSettings): KeyBinding[] {
+  const settings = normalizeSqlFormatterEditorSettings(editorSettings);
+  const platforms = new Set(settings.platforms);
+
+  return settings.shortcuts
+    .filter((shortcut) => shortcut.enabled)
+    .map((shortcut) => {
+      const binding: KeyBinding = {
+        run: commandForAction(commands, actions, shortcut.action),
+        preventDefault: true,
+      };
+      if (platforms.has("windows")) binding.win = sqlFormatterShortcutDisplayKeyToCodeMirrorKey(shortcut.keys.windows) ?? undefined;
+      if (platforms.has("linux")) binding.linux = sqlFormatterShortcutDisplayKeyToCodeMirrorKey(shortcut.keys.linux) ?? undefined;
+      if (platforms.has("macos")) binding.mac = sqlFormatterShortcutDisplayKeyToCodeMirrorKey(shortcut.keys.macos) ?? undefined;
+      return binding;
+    });
 }
 
 export interface SqlFormatterConfigShortcutRow {
@@ -38,37 +97,14 @@ export interface SqlFormatterConfigShortcutRow {
   shortcut: string;
 }
 
-function modLabel(platform = globalThis.navigator?.platform || ""): "Cmd" | "Ctrl" {
-  return platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl";
-}
+export function sqlFormatterConfigShortcutRows(platform = globalThis.navigator?.platform || "", editorSettings?: SqlFormatterEditorSettings): SqlFormatterConfigShortcutRow[] {
+  const platformKey = sqlFormatterPlatformFromNavigator(platform);
 
-function altLabel(platform = globalThis.navigator?.platform || ""): "Option" | "Alt" {
-  return platform.toLowerCase().includes("mac") ? "Option" : "Alt";
-}
-
-export function sqlFormatterConfigShortcutRows(platform = globalThis.navigator?.platform || ""): SqlFormatterConfigShortcutRow[] {
-  const isMac = platform.toLowerCase().includes("mac");
-  const mod = modLabel(platform);
-  const alt = altLabel(platform);
-
-  return [
-    { id: "find", labelKey: "settings.sqlFormatterShortcutFind", shortcut: `${mod}+F` },
-    {
-      id: "replace",
-      labelKey: "settings.sqlFormatterShortcutReplace",
-      shortcut: isMac ? "Cmd+Option+F" : "Ctrl+H",
-    },
-    { id: "indentMore", labelKey: "settings.sqlFormatterShortcutIndentMore", shortcut: "Tab" },
-    { id: "indentLess", labelKey: "settings.sqlFormatterShortcutIndentLess", shortcut: "Shift+Tab" },
-    { id: "duplicateLine", labelKey: "settings.sqlFormatterShortcutDuplicateLine", shortcut: `${mod}+D` },
-    { id: "deleteLine", labelKey: "settings.sqlFormatterShortcutDeleteLine", shortcut: `${mod}+Shift+K` },
-    { id: "moveLine", labelKey: "settings.sqlFormatterShortcutMoveLine", shortcut: `${alt}+Up/Down` },
-    { id: "copyLine", labelKey: "settings.sqlFormatterShortcutCopyLine", shortcut: `Shift+${alt}+Up/Down` },
-    {
-      id: "formatJson",
-      labelKey: "settings.sqlFormatterShortcutFormatJson",
-      shortcut: isMac ? "Shift+Cmd+F" : "Shift+Alt+F",
-    },
-    { id: "apply", labelKey: "settings.sqlFormatterShortcutApply", shortcut: `${mod}+S` },
-  ];
+  return normalizeSqlFormatterEditorSettings(editorSettings)
+    .shortcuts.filter((shortcut) => shortcut.enabled)
+    .map((shortcut) => ({
+      id: shortcut.id,
+      labelKey: shortcutLabelKeys[shortcut.id],
+      shortcut: shortcut.keys[platformKey],
+    }));
 }

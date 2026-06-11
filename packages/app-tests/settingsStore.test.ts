@@ -296,18 +296,7 @@ test("normalizeEditorSettings keeps valid UI scales with two-decimal precision",
 });
 
 test("defaults SQL formatter settings", () => {
-  assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sqlFormatter, {
-    keywordCase: "upper",
-    dataTypeCase: "preserve",
-    functionCase: "preserve",
-    useTabs: false,
-    tabWidth: 2,
-    logicalOperatorNewline: "before",
-    expressionWidth: 50,
-    linesBetweenQueries: 1,
-    denseOperators: false,
-    newlineBeforeSemicolon: false,
-  });
+  assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
   assert.deepEqual(normalizeEditorSettings({}).sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);
 });
 
@@ -328,6 +317,7 @@ test("normalizes saved SQL formatter settings", () => {
       },
     } as any).sqlFormatter,
     {
+      ...DEFAULT_SQL_FORMATTER_SETTINGS,
       keywordCase: "lower",
       functionCase: "upper",
       dataTypeCase: "upper",

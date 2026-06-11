@@ -19,7 +19,7 @@ function formatterLanguage(dialect: SqlFormatDialect) {
   }
 }
 
-export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "generic", settings: SqlFormatterSettings = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
+export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
   if (!sql.trim()) return sql;
   if (sql.length > MAX_SQL_FORMAT_CHARS) {
     throw new Error("SQL is too large to format safely.");

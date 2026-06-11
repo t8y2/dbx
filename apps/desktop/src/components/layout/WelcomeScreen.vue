@@ -5,15 +5,26 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connectionPresentation";
 import type { ConnectionConfig } from "@/types/database";
 
+export interface WelcomeSavedSqlHistoryItem {
+  id: string;
+  name: string;
+  connectionName: string;
+  database?: string;
+  folderName?: string;
+  openCount?: number;
+}
+
 defineProps<{
   connectionStats: { total: number; connected: number; types: number };
   recentConnections: ConnectionConfig[];
+  savedSqlHistoryItems: WelcomeSavedSqlHistoryItem[];
   appVersion: string;
   hasConnections: boolean;
 }>();
 
 const emit = defineEmits<{
   "open-connection-query": [connectionId: string];
+  "open-saved-sql": [fileId: string];
   "new-connection": [];
   "new-query": [];
   "show-history": [];
@@ -79,6 +90,30 @@ const { t } = useI18n();
               <Search class="mr-1 inline h-3.5 w-3.5" />
               {{ t("welcome.tip") }}
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rounded-lg border">
+        <div class="flex items-center justify-between border-b px-4 py-3">
+          <div class="flex items-center gap-2 text-sm font-medium"><History class="h-4 w-4" /> {{ t("welcome.sqlHistory") }}</div>
+        </div>
+        <div class="divide-y">
+          <button v-for="item in savedSqlHistoryItems" :key="item.id" class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40" @click="emit('open-saved-sql', item.id)">
+            <History class="h-4 w-4 text-muted-foreground" />
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-sm font-medium">{{ item.name }}</div>
+              <div class="truncate text-xs text-muted-foreground">
+                <span>{{ item.connectionName }}</span>
+                <span v-if="item.database"> · {{ item.database }}</span>
+                <span v-if="item.folderName"> · {{ item.folderName }}</span>
+                <span v-if="item.openCount"> · {{ t("welcome.sqlHistoryOpenCount", { count: item.openCount }) }}</span>
+              </div>
+            </div>
+            <FilePlus2 class="h-4 w-4 text-muted-foreground" />
+          </button>
+          <div v-if="savedSqlHistoryItems.length === 0" class="px-4 py-8 text-sm text-muted-foreground">
+            {{ t("welcome.sqlHistoryEmpty") }}
           </div>
         </div>
       </div>

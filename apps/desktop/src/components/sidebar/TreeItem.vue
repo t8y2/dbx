@@ -53,6 +53,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
@@ -103,6 +104,7 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { copyToClipboard } from "@/lib/clipboard";
 import { hasEnabledTransportLayers } from "@/lib/connectionTransport";
 import { formatShortcut } from "@/lib/shortcutRegistry";
+import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSqlHistory";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import VisibleDatabasesDialog from "@/components/sidebar/VisibleDatabasesDialog.vue";
@@ -126,6 +128,7 @@ function isLabelTruncated(): boolean {
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const savedSqlStore = useSavedSqlStore();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
 
@@ -2529,6 +2532,60 @@ function copyStructureAsSubmenu(): ContextMenuItem {
   };
 }
 
+function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | null {
+  if (!node.connectionId) return null;
+  if (node.type === "connection") {
+    return { connectionId: node.connectionId };
+  }
+  if ((node.type === "database" || node.type === "schema") && hasTreeNodeDatabaseContext(node)) {
+    return {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: node.type === "schema" ? node.schema : undefined,
+    };
+  }
+  if ((node.type === "table" || node.type === "view") && hasTreeNodeDatabaseContext(node)) {
+    return {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: node.schema,
+      tableName: node.label,
+    };
+  }
+  return null;
+}
+
+function openSavedSqlHistoryFile(fileId: string) {
+  const file = savedSqlStore.getFile(fileId);
+  if (!file) return;
+  queryStore.openSavedSql(file);
+  connectionStore.activeConnectionId = file.connectionId;
+  void savedSqlStore.recordFileUsage(file.id);
+}
+
+function savedSqlHistorySubmenu(): ContextMenuItem | null {
+  const scope = savedSqlHistoryScopeForNode(props.node);
+  if (!scope) return null;
+  const files = rankSavedSqlHistory(savedSqlStore.allFiles, { ...scope, limit: 10 });
+  return {
+    label: t("contextMenu.sqlHistory"),
+    icon: ScrollText,
+    children:
+      files.length > 0
+        ? files.map((file) => ({
+            label: file.name,
+            action: () => openSavedSqlHistoryFile(file.id),
+            icon: FileCode,
+          }))
+        : [
+            {
+              label: t("contextMenu.noSqlHistory"),
+              disabled: true,
+            },
+          ],
+  };
+}
+
 function treeItemMenuItems(): ContextMenuItem[] {
   const node = props.node;
   const items: ContextMenuItem[] = [];
@@ -2554,6 +2611,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("contextMenu.closeConnection"), action: disconnectConnection, icon: Unplug });
     }
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    const sqlHistoryMenu = savedSqlHistorySubmenu();
+    if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (supportsDatabaseUserAdmin(currentDatabaseType())) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
@@ -2641,6 +2700,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    const sqlHistoryMenu = savedSqlHistorySubmenu();
+    if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (node.type === "database") {
       if (!isNodeDefaultDatabase.value) {
         items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
@@ -2758,6 +2819,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
       });
     }
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    const sqlHistoryMenu = savedSqlHistorySubmenu();
+    if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (canOpenDiagram.value) {
       items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
     }

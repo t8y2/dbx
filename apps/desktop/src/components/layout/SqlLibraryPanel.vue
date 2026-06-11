@@ -439,6 +439,7 @@ function openFile(file: SavedSqlFile) {
   if (suppressNextRowClick.value) return;
   queryStore.openSavedSql(file);
   connectionStore.activeConnectionId = file.connectionId;
+  void savedSqlStore.recordFileUsage(file.id);
 }
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);

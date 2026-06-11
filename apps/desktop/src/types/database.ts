@@ -466,6 +466,8 @@ export interface SavedSqlFile {
   schema?: string;
   sql: string;
   orderIndex?: number;
+  openCount?: number;
+  openedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

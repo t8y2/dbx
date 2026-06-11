@@ -144,6 +144,8 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         schema_name TEXT,
         sql_text TEXT NOT NULL DEFAULT '',
         order_index INTEGER NOT NULL DEFAULT 0,
+        open_count INTEGER NOT NULL DEFAULT 0,
+        opened_at TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -208,7 +210,11 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
 
 fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
     const FOLDER_COLUMNS: &[(&str, &str)] = &[("order_index", "INTEGER NOT NULL DEFAULT 0")];
-    const FILE_COLUMNS: &[(&str, &str)] = &[("order_index", "INTEGER NOT NULL DEFAULT 0")];
+    const FILE_COLUMNS: &[(&str, &str)] = &[
+        ("order_index", "INTEGER NOT NULL DEFAULT 0"),
+        ("open_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("opened_at", "TEXT"),
+    ];
 
     ensure_table_columns(conn, "saved_sql_folders", FOLDER_COLUMNS)?;
     ensure_table_columns(conn, "saved_sql_files", FILE_COLUMNS)?;
@@ -871,8 +877,8 @@ impl Storage {
             for file in &library.files {
                 tx.execute(
                     "INSERT INTO saved_sql_files \
-                     (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         file.id,
                         file.connection_id,
@@ -882,6 +888,8 @@ impl Storage {
                         file.schema,
                         file.sql,
                         file.order_index,
+                        file.open_count,
+                        file.opened_at,
                         file.created_at,
                         file.updated_at
                     ],
@@ -919,7 +927,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -934,8 +942,10 @@ impl Storage {
                         schema: row.get(5)?,
                         sql: row.get(6)?,
                         order_index: row.get(7)?,
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
+                        open_count: row.get(8)?,
+                        opened_at: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -989,8 +999,8 @@ impl Storage {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
@@ -999,6 +1009,8 @@ impl Storage {
                  schema_name = excluded.schema_name, \
                  sql_text = excluded.sql_text, \
                  order_index = excluded.order_index, \
+                 open_count = excluded.open_count, \
+                 opened_at = excluded.opened_at, \
                  updated_at = excluded.updated_at",
                 params![
                     file.id,
@@ -1009,6 +1021,8 @@ impl Storage {
                     file.schema,
                     file.sql,
                     file.order_index,
+                    file.open_count,
+                    file.opened_at,
                     file.created_at,
                     file.updated_at
                 ],

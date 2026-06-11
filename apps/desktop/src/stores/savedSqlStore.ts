@@ -187,6 +187,24 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     await syncToLocalDirectory();
   }
 
+  async function recordFileUsage(id: string) {
+    const existing = getFile(id);
+    if (!existing) return;
+    try {
+      const saved = await api.saveSavedSqlFile({
+        ...existing,
+        openCount: (existing.openCount ?? 0) + 1,
+        openedAt: nowIso(),
+      });
+      files.value = files.value.map((file) => (file.id === id ? saved : file));
+      bumpVersion();
+      return saved;
+    } catch (error) {
+      console.warn("[DBX][saved-sql:usage:error]", error);
+      return existing;
+    }
+  }
+
   async function deleteFile(id: string) {
     await api.deleteSavedSqlFile(id);
     files.value = files.value.filter((file) => file.id !== id);
@@ -340,6 +358,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     deleteFolder,
     saveFile,
     renameFile,
+    recordFileUsage,
     deleteFile,
     reorderFolders,
     reorderFiles,

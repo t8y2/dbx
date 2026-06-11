@@ -30,6 +30,7 @@ import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/api";
+import { connectionRedactedNameLabel } from "@/lib/connectionPresentation";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/newQueryContext";
 import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/objectSourceEditor";
@@ -61,6 +62,7 @@ import { classifyAiSqlExecution } from "@/lib/aiSqlExecutionPolicy";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/agentDriverUpdateBadge";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
+import { rankSavedSqlHistory } from "@/lib/savedSqlHistory";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -215,6 +217,20 @@ const connectionStats = computed(() => ({
   types: new Set(connectionStore.connections.map((c) => c.driver_profile || c.db_type)).size,
 }));
 const recentConnections = computed(() => connectionStore.connections.slice(0, 5));
+const savedSqlHistoryItems = computed(() => {
+  const folderById = new Map(savedSqlStore.allFolders.map((folder) => [folder.id, folder.name]));
+  return rankSavedSqlHistory(savedSqlStore.allFiles, { limit: 6 }).map((file) => {
+    const connection = connectionStore.getConfig(file.connectionId);
+    return {
+      id: file.id,
+      name: file.name,
+      connectionName: connection ? connectionRedactedNameLabel(connection) : t("welcome.unknownConnection"),
+      database: file.database,
+      folderName: file.folderId ? folderById.get(file.folderId) : undefined,
+      openCount: file.openCount ?? 0,
+    };
+  });
+});
 const saveSqlFolders = computed(() => {
   return savedSqlStore.allFolders;
 });
@@ -617,6 +633,15 @@ async function openConnectionQuery(connectionId: string) {
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
+}
+
+function openSavedSqlFromWelcome(fileId: string) {
+  const file = savedSqlStore.getFile(fileId);
+  if (!file) return;
+  queryStore.openSavedSql(file);
+  connectionStore.activeConnectionId = file.connectionId;
+  void savedSqlStore.recordFileUsage(file.id);
+  toast(t("welcome.fileOpened", { name: file.name }), 2000);
 }
 
 async function onClickTable(tableName: string) {
@@ -1088,9 +1113,11 @@ onUnmounted(() => {
                 v-else
                 :connection-stats="connectionStats"
                 :recent-connections="recentConnections"
+                :saved-sql-history-items="savedSqlHistoryItems"
                 :app-version="appVersion"
                 :has-connections="connectionStore.connections.length > 0"
                 @open-connection-query="openConnectionQuery"
+                @open-saved-sql="openSavedSqlFromWelcome"
                 @new-connection="showConnectionDialog = true"
                 @new-query="newQuery"
                 @show-history="showHistory = true"

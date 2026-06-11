@@ -167,24 +167,32 @@ pub struct DataCompareFromTablesPreparation {
 }
 
 pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<DataComparePreparation, String> {
+    let DataComparePreparationOptions {
+        table_name,
+        schema,
+        columns,
+        key_columns,
+        column_info,
+        source_rows,
+        target_rows,
+        database_type,
+    } = options;
     let result = compare_data_rows(CompareDataRowsOptions {
-        columns: options.columns.clone(),
-        key_columns: options.key_columns.clone(),
-        source_rows: options.source_rows,
-        target_rows: options.target_rows,
+        columns: columns.clone(),
+        key_columns: key_columns.clone(),
+        source_rows,
+        target_rows,
     })?;
-    let sync_plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
-        tables: vec![DataCompareSyncPlanTableOptions {
-            table_name: options.table_name,
-            schema: options.schema,
-            columns: options.columns,
-            key_columns: options.key_columns,
-            column_info: options.column_info,
-            diff: result.clone(),
-            database_type: options.database_type,
-            pre_sync_statements: Vec::new(),
-        }],
-    });
+    let sync_plan = build_data_compare_sync_plan_from_refs(&[DataCompareSyncPlanTableRef {
+        table_name: &table_name,
+        schema: schema.as_deref(),
+        columns: &columns,
+        key_columns: &key_columns,
+        column_info: &column_info,
+        diff: &result,
+        database_type,
+        pre_sync_statements: &[],
+    }]);
     Ok(DataComparePreparation { result, sync_statements: sync_plan.sync_statements, sync_sql: sync_plan.sync_sql })
 }
 
@@ -348,18 +356,17 @@ pub async fn prepare_data_compare_missing_target(
         .map(|statement| format!("{statement};")),
     );
 
-    let sync_plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
-        tables: vec![DataCompareSyncPlanTableOptions {
-            table_name: options.target_table,
-            schema: Some(options.target_schema),
-            columns: column_names,
-            key_columns: options.key_columns,
-            column_info: source_columns.iter().cloned().map(data_grid_column_info).collect(),
-            diff: result.clone(),
-            database_type: Some(target_database_type),
-            pre_sync_statements: pre_sync_statements.clone(),
-        }],
-    });
+    let column_info = source_columns.iter().cloned().map(data_grid_column_info).collect::<Vec<_>>();
+    let sync_plan = build_data_compare_sync_plan_from_refs(&[DataCompareSyncPlanTableRef {
+        table_name: &options.target_table,
+        schema: Some(&options.target_schema),
+        columns: &column_names,
+        key_columns: &options.key_columns,
+        column_info: &column_info,
+        diff: &result,
+        database_type: Some(target_database_type),
+        pre_sync_statements: &pre_sync_statements,
+    }]);
 
     Ok(DataCompareFromTablesPreparation {
         result,
@@ -374,16 +381,46 @@ pub async fn prepare_data_compare_missing_target(
 }
 
 pub fn build_data_compare_sync_plan(options: DataCompareSyncPlanOptions) -> DataCompareSyncPlan {
+    let tables = options
+        .tables
+        .iter()
+        .map(|table| DataCompareSyncPlanTableRef {
+            table_name: &table.table_name,
+            schema: table.schema.as_deref(),
+            columns: &table.columns,
+            key_columns: &table.key_columns,
+            column_info: &table.column_info,
+            diff: &table.diff,
+            database_type: table.database_type,
+            pre_sync_statements: &table.pre_sync_statements,
+        })
+        .collect::<Vec<_>>();
+    build_data_compare_sync_plan_from_refs(&tables)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DataCompareSyncPlanTableRef<'a> {
+    table_name: &'a str,
+    schema: Option<&'a str>,
+    columns: &'a [String],
+    key_columns: &'a [String],
+    column_info: &'a [DataGridColumnInfo],
+    diff: &'a DataCompareResult,
+    database_type: Option<DatabaseType>,
+    pre_sync_statements: &'a [String],
+}
+
+fn build_data_compare_sync_plan_from_refs(tables: &[DataCompareSyncPlanTableRef<'_>]) -> DataCompareSyncPlan {
     let mut sync_statements = Vec::new();
     let mut insert_count = 0;
     let mut update_count = 0;
     let mut delete_count = 0;
 
-    for table in options.tables {
+    for table in tables {
         insert_count += table.diff.added.len();
         update_count += table.diff.modified.len();
         delete_count += table.diff.removed.len();
-        sync_statements.extend(table.pre_sync_statements);
+        sync_statements.extend(table.pre_sync_statements.iter().cloned());
         sync_statements.extend(generate_data_sync_statements(&GenerateDataSyncSqlOptions {
             table_name: table.table_name,
             schema: table.schema,
@@ -402,10 +439,10 @@ pub fn build_data_compare_sync_plan(options: DataCompareSyncPlanOptions) -> Data
 
 fn missing_target_diff(columns: &[String], key_columns: &[String], source_rows: Vec<Vec<Value>>) -> DataCompareResult {
     let added = source_rows
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(index, row)| {
-            let values = row_object(columns, row);
+            let values = row_object_owned(columns, row);
             let key = if key_columns.is_empty() { index.to_string() } else { key_for(&values, key_columns) };
             DataCompareRow { key, key_values: key_values(&values, key_columns), values }
         })
@@ -419,124 +456,111 @@ pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareR
         return Err("At least one key column is required for data comparison".to_string());
     }
 
-    let source_rows = parallel_compare_rows(&options.columns, &options.key_columns, &options.source_rows);
-    let target_rows = parallel_compare_rows(&options.columns, &options.key_columns, &options.target_rows);
-    let (source, source_order) = collect_compare_rows(source_rows, "source")?;
-    let (target, target_order) = collect_compare_rows(target_rows, "target")?;
+    let column_indexes = column_index_map(&options.columns);
+    let (source, source_order) =
+        collect_compare_rows(&options.columns, &options.key_columns, &column_indexes, options.source_rows, "source")?;
+    let (target, target_order) =
+        collect_compare_rows(&options.columns, &options.key_columns, &column_indexes, options.target_rows, "target")?;
     let key_columns: HashSet<&str> = options.key_columns.iter().map(String::as_str).collect();
-
-    let source_diffs = source_order
-        .par_iter()
-        .map(|key| {
-            let source_values = source.get(key).expect("source key should exist");
-            let Some(target_values) = target.get(key) else {
-                return Some(SourceDiff::Added(DataCompareRow {
-                    key: key.clone(),
-                    key_values: key_values(source_values, &options.key_columns),
-                    values: source_values.clone(),
-                }));
-            };
-
-            let changes: Vec<DataCompareChangedCell> = options
-                .columns
-                .iter()
-                .filter(|column| !key_columns.contains(column.as_str()))
-                .filter(|column| value_for(source_values, column) != value_for(target_values, column))
-                .map(|column| DataCompareChangedCell {
-                    column: column.clone(),
-                    source: value_for(source_values, column),
-                    target: value_for(target_values, column),
-                })
-                .collect();
-
-            if changes.is_empty() {
-                None
-            } else {
-                Some(SourceDiff::Modified(DataCompareModifiedRow {
-                    key: key.clone(),
-                    key_values: key_values(source_values, &options.key_columns),
-                    source_values: source_values.clone(),
-                    target_values: target_values.clone(),
-                    changes,
-                }))
-            }
-        })
-        .collect::<Vec<_>>();
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
-    for diff in source_diffs.into_iter().flatten() {
-        match diff {
-            SourceDiff::Added(row) => added.push(row),
-            SourceDiff::Modified(row) => modified.push(row),
+
+    for key in &source_order {
+        let source_values = source.get(key).expect("source key should exist");
+        let Some(target_values) = target.get(key) else {
+            added.push(DataCompareRow {
+                key: key.clone(),
+                key_values: key_values_for_row(source_values, &options.key_columns, &column_indexes),
+                values: row_object(&options.columns, source_values),
+            });
+            continue;
+        };
+
+        let changes = options
+            .columns
+            .iter()
+            .filter(|column| !key_columns.contains(column.as_str()))
+            .filter_map(|column| {
+                let index = column_indexes.get(column.as_str()).copied()?;
+                let source_value = row_value(source_values, index);
+                let target_value = row_value(target_values, index);
+                (source_value != target_value).then(|| DataCompareChangedCell {
+                    column: column.clone(),
+                    source: source_value.clone(),
+                    target: target_value.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if !changes.is_empty() {
+            modified.push(DataCompareModifiedRow {
+                key: key.clone(),
+                key_values: key_values_for_row(source_values, &options.key_columns, &column_indexes),
+                source_values: row_object(&options.columns, source_values),
+                target_values: row_object(&options.columns, target_values),
+                changes,
+            });
         }
     }
 
-    let removed = target_order
-        .par_iter()
-        .map(|key| {
-            target.get(key).filter(|_| !source.contains_key(key)).map(|target_values| DataCompareRow {
+    let mut removed = Vec::new();
+    for key in &target_order {
+        if let Some(target_values) = target.get(key).filter(|_| !source.contains_key(key)) {
+            removed.push(DataCompareRow {
                 key: key.clone(),
-                key_values: key_values(target_values, &options.key_columns),
-                values: target_values.clone(),
-            })
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flatten()
-        .collect();
+                key_values: key_values_for_row(target_values, &options.key_columns, &column_indexes),
+                values: row_object(&options.columns, target_values),
+            });
+        }
+    }
 
     Ok(DataCompareResult { added, removed, modified })
 }
 
-#[derive(Debug)]
-struct CompareRow {
-    key: String,
-    values: HashMap<String, Value>,
-}
+static NULL_VALUE: Value = Value::Null;
 
-#[derive(Debug)]
-enum SourceDiff {
-    Added(DataCompareRow),
-    Modified(DataCompareModifiedRow),
-}
-
-type CompareRowValues = HashMap<String, Value>;
+type CompareRowValues = Vec<Value>;
 type CompareRowMap = HashMap<String, CompareRowValues>;
 
-fn parallel_compare_rows(columns: &[String], key_columns: &[String], rows: &[Vec<Value>]) -> Vec<CompareRow> {
-    rows.par_iter()
-        .map(|row| {
-            let values = row_object(columns, row);
-            let key = key_for(&values, key_columns);
-            CompareRow { key, values }
-        })
-        .collect()
+fn column_index_map<'a>(columns: &'a [String]) -> HashMap<&'a str, usize> {
+    let mut indexes = HashMap::with_capacity(columns.len());
+    for (index, column) in columns.iter().enumerate() {
+        indexes.insert(column.as_str(), index);
+    }
+    indexes
 }
 
-fn collect_compare_rows(rows: Vec<CompareRow>, label: &str) -> Result<(CompareRowMap, Vec<String>), String> {
+fn collect_compare_rows(
+    columns: &[String],
+    key_columns: &[String],
+    column_indexes: &HashMap<&str, usize>,
+    rows: Vec<Vec<Value>>,
+    label: &str,
+) -> Result<(CompareRowMap, Vec<String>), String> {
     let mut items = HashMap::with_capacity(rows.len());
     let mut order = Vec::with_capacity(rows.len());
 
     for row in rows {
-        if items.contains_key(&row.key) {
-            return Err(format!("Duplicate {label} key: {}", row.key));
+        let key = key_for_row(&row, key_columns, column_indexes);
+        if items.contains_key(&key) {
+            return Err(format!("Duplicate {label} key: {key}"));
         }
-        order.push(row.key.clone());
-        items.insert(row.key, row.values);
+        order.push(key.clone());
+        items.insert(key, normalize_row_len(row, columns.len()));
     }
 
     Ok((items, order))
 }
 
-#[derive(Debug, Clone)]
-struct GenerateDataSyncSqlOptions {
-    table_name: String,
-    schema: Option<String>,
-    columns: Vec<String>,
-    key_columns: Vec<String>,
-    column_info: Vec<DataGridColumnInfo>,
-    diff: DataCompareResult,
+#[derive(Debug, Clone, Copy)]
+struct GenerateDataSyncSqlOptions<'a> {
+    table_name: &'a str,
+    schema: Option<&'a str>,
+    columns: &'a [String],
+    key_columns: &'a [String],
+    column_info: &'a [DataGridColumnInfo],
+    diff: &'a DataCompareResult,
     database_type: Option<DatabaseType>,
 }
 
@@ -548,31 +572,79 @@ fn row_object(columns: &[String], row: &[Value]) -> HashMap<String, Value> {
         .collect()
 }
 
+fn row_object_owned(columns: &[String], row: Vec<Value>) -> HashMap<String, Value> {
+    let mut values = HashMap::with_capacity(columns.len());
+    let mut row_values = row.into_iter();
+    for column in columns {
+        values.insert(column.clone(), row_values.next().unwrap_or(Value::Null));
+    }
+    values
+}
+
 fn key_for(row: &HashMap<String, Value>, key_columns: &[String]) -> String {
     key_columns.iter().map(|column| json_stringify(&value_for(row, column))).collect::<Vec<_>>().join("\u{001f}")
+}
+
+fn key_for_row(row: &[Value], key_columns: &[String], column_indexes: &HashMap<&str, usize>) -> String {
+    key_columns
+        .iter()
+        .map(|column| {
+            column_indexes
+                .get(column.as_str())
+                .map(|index| json_stringify(row_value(row, *index)))
+                .unwrap_or_else(|| json_stringify(&NULL_VALUE))
+        })
+        .collect::<Vec<_>>()
+        .join("\u{001f}")
 }
 
 fn key_values(row: &HashMap<String, Value>, key_columns: &[String]) -> HashMap<String, Value> {
     key_columns.iter().map(|column| (column.clone(), value_for(row, column))).collect()
 }
 
+fn key_values_for_row(
+    row: &[Value],
+    key_columns: &[String],
+    column_indexes: &HashMap<&str, usize>,
+) -> HashMap<String, Value> {
+    key_columns
+        .iter()
+        .map(|column| {
+            let value =
+                column_indexes.get(column.as_str()).map(|index| row_value(row, *index).clone()).unwrap_or(Value::Null);
+            (column.clone(), value)
+        })
+        .collect()
+}
+
 fn value_for(row: &HashMap<String, Value>, column: &str) -> Value {
     row.get(column).cloned().unwrap_or(Value::Null)
+}
+
+fn row_value(row: &[Value], index: usize) -> &Value {
+    row.get(index).unwrap_or(&NULL_VALUE)
+}
+
+fn normalize_row_len(mut row: Vec<Value>, column_len: usize) -> Vec<Value> {
+    if row.len() < column_len {
+        row.resize(column_len, Value::Null);
+    }
+    row
 }
 
 fn json_stringify(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
-fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions) -> Vec<String> {
-    let table = qualified_table_name(options.database_type, options.schema.as_deref(), &options.table_name);
+fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Vec<String> {
+    let table = qualified_table_name(options.database_type, options.schema, options.table_name);
     let columns = options
         .columns
         .iter()
         .map(|column| quote_table_identifier(options.database_type, column))
         .collect::<Vec<_>>()
         .join(", ");
-    let column_info = options.column_info.as_slice();
+    let column_info = options.column_info;
     let added = options
         .diff
         .added
@@ -956,6 +1028,67 @@ mod tests {
         assert_eq!(plan.update_count, 1);
         assert_eq!(plan.delete_count, 0);
         assert_eq!(plan.statement_count, 2);
+    }
+
+    #[test]
+    fn borrowed_sync_plan_builder_matches_owned_plan() {
+        let columns = vec!["id".to_string(), "name".to_string()];
+        let key_columns = vec!["id".to_string()];
+        let column_info = Vec::new();
+        let pre_sync_statements = vec!["CREATE TABLE \"public\".\"users\" (\"id\" integer);".to_string()];
+        let diff = DataCompareResult {
+            added: vec![DataCompareRow {
+                key: "1".to_string(),
+                key_values: HashMap::from([(String::from("id"), json!(1))]),
+                values: HashMap::from([(String::from("id"), json!(1)), (String::from("name"), json!("Ada"))]),
+            }],
+            removed: vec![DataCompareRow {
+                key: "3".to_string(),
+                key_values: HashMap::from([(String::from("id"), json!(3))]),
+                values: HashMap::from([(String::from("id"), json!(3)), (String::from("name"), json!("Cara"))]),
+            }],
+            modified: vec![DataCompareModifiedRow {
+                key: "2".to_string(),
+                key_values: HashMap::from([(String::from("id"), json!(2))]),
+                source_values: HashMap::from([(String::from("id"), json!(2)), (String::from("name"), json!("Bob"))]),
+                target_values: HashMap::from([(String::from("id"), json!(2)), (String::from("name"), json!("Bobby"))]),
+                changes: vec![DataCompareChangedCell {
+                    column: "name".to_string(),
+                    source: json!("Bob"),
+                    target: json!("Bobby"),
+                }],
+            }],
+        };
+
+        let owned_plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "users".to_string(),
+                schema: Some("public".to_string()),
+                columns: columns.clone(),
+                key_columns: key_columns.clone(),
+                column_info: column_info.clone(),
+                diff: diff.clone(),
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: pre_sync_statements.clone(),
+            }],
+        });
+        let borrowed_plan = build_data_compare_sync_plan_from_refs(&[DataCompareSyncPlanTableRef {
+            table_name: "users",
+            schema: Some("public"),
+            columns: &columns,
+            key_columns: &key_columns,
+            column_info: &column_info,
+            diff: &diff,
+            database_type: Some(DatabaseType::Postgres),
+            pre_sync_statements: &pre_sync_statements,
+        }]);
+
+        assert_eq!(borrowed_plan.insert_count, owned_plan.insert_count);
+        assert_eq!(borrowed_plan.update_count, owned_plan.update_count);
+        assert_eq!(borrowed_plan.delete_count, owned_plan.delete_count);
+        assert_eq!(borrowed_plan.statement_count, owned_plan.statement_count);
+        assert_eq!(borrowed_plan.sync_statements, owned_plan.sync_statements);
+        assert_eq!(borrowed_plan.sync_sql, owned_plan.sync_sql);
     }
 
     #[test]

@@ -47,6 +47,8 @@ export interface DesktopSettings {
 
 export type DesktopIconTheme = "default" | "black";
 
+export type InterfaceLayout = "separated" | "classic";
+
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
   icon_theme: "default",

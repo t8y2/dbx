@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, shallowRef, computed, onMounted } from "vue";
+import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
 import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, Loader2, Moon, PackageSearch, Pencil, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
@@ -28,6 +28,7 @@ import {
   type AiAuthMethod,
   type EditorTheme,
   type DesktopIconTheme,
+  type InterfaceLayout,
   type DisconnectTabHandlingMode,
   type CustomThemeColors,
   type CustomTheme,
@@ -146,6 +147,51 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
+const iconThemeDescTruncated = ref({ default: false, black: false });
+const iconThemeDescRef = {
+  default: ref<HTMLElement | null>(null),
+  black: ref<HTMLElement | null>(null),
+};
+const layoutDescTruncated = ref({ separated: false, classic: false });
+const layoutDescRefs = {
+  separated: ref<HTMLElement | null>(null),
+  classic: ref<HTMLElement | null>(null),
+};
+
+function setLayoutDescRef(layout: InterfaceLayout, el: unknown) {
+  layoutDescRefs[layout].value = el instanceof HTMLElement ? el : null;
+}
+
+function setIconThemeDescRef(theme: DesktopIconTheme, el: unknown) {
+  iconThemeDescRef[theme].value = el instanceof HTMLElement ? el : null;
+}
+
+function checkIconThemeDescTruncation() {
+  nextTick(() => {
+    if (iconThemeDescRef.default.value) {
+      iconThemeDescTruncated.value.default = iconThemeDescRef.default.value.scrollWidth > iconThemeDescRef.default.value.clientWidth;
+    }
+    if (iconThemeDescRef.black.value) {
+      iconThemeDescTruncated.value.black = iconThemeDescRef.black.value.scrollWidth > iconThemeDescRef.black.value.clientWidth;
+    }
+  });
+}
+
+function checkLayoutDescTruncation() {
+  nextTick(() => {
+    if (layoutDescRefs.separated.value) {
+      layoutDescTruncated.value.separated = layoutDescRefs.separated.value.scrollWidth > layoutDescRefs.separated.value.clientWidth;
+    }
+    if (layoutDescRefs.classic.value) {
+      layoutDescTruncated.value.classic = layoutDescRefs.classic.value.scrollWidth > layoutDescRefs.classic.value.clientWidth;
+    }
+  });
+}
+
+function handleResize() {
+  checkIconThemeDescTruncation();
+  checkLayoutDescTruncation();
+}
 
 function openAddSnippetDialog() {
   snippetEditingId.value = null;
@@ -568,7 +614,7 @@ function clearShortcut(actionId: ShortcutActionId) {
   editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
 }
 
-function setAppLayout(value: "separated" | "classic") {
+function setAppLayout(value: InterfaceLayout) {
   editAppLayout.value = value;
 }
 
@@ -919,10 +965,19 @@ watch(webdavRememberPassword, (val) => {
 
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (activeSettingsTab.value === "appearance") {
+    checkLayoutDescTruncation();
+    checkIconThemeDescTruncation();
+  }
 });
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
+  window.addEventListener("resize", handleResize);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("resize", handleResize);
 });
 
 async function changePassword() {
@@ -1552,39 +1607,76 @@ watch(
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('separated')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutSeparatedDescription") }}</div>
-                    </div>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div class="w-full min-w-0 text-left">
+                            <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
+                            <div :ref="(el) => setLayoutDescRef('separated', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutSeparatedDescription") }}</div>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent v-if="layoutDescTruncated.separated" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.appLayoutSeparatedDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </Button>
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('classic')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutClassicDescription") }}</div>
-                    </div>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div class="w-full min-w-0 text-left">
+                            <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
+                            <div :ref="(el) => setLayoutDescRef('classic', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutClassicDescription") }}</div>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent v-if="layoutDescTruncated.classic" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.appLayoutClassicDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </Button>
                 </div>
               </div>
 
-              <div v-if="!isWeb" class="space-y-2">
+              <!-- <div v-if="!isWeb" class="space-y-2"> -->
+              <div class="space-y-2">
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
-                    <div class="flex items-center gap-3 text-left">
+                    <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
-                      <div>
-                        <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
-                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeDefaultDescription") }}</div>
-                      </div>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <div class="w-full min-w-0 text-left">
+                              <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
+                              <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeDefaultDescription") }}</div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent v-if="iconThemeDescTruncated.default" class="max-w-[320px] text-xs leading-relaxed">
+                            {{ t("settings.iconThemeDefaultDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   </Button>
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
-                    <div class="flex items-center gap-3 text-left">
-                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert" />
-                      <div>
-                        <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
-                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeBlackDescription") }}</div>
-                      </div>
+                    <div class="flex items-center gap-3 text-left w-full min-w-0">
+                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert shrink-0" />
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <div class="w-full min-w-0 text-left">
+                              <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
+                              <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeBlackDescription") }}</div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent v-if="iconThemeDescTruncated.black" class="max-w-[320px] text-xs leading-relaxed">
+                            {{ t("settings.iconThemeBlackDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   </Button>
                 </div>

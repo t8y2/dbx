@@ -1153,6 +1153,12 @@ pub struct StreamingToolCallAccumulator {
     ordered_indices: Vec<u32>,
 }
 
+impl Default for StreamingToolCallAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamingToolCallAccumulator {
     pub fn new() -> Self {
         Self { calls: std::collections::HashMap::new(), ordered_indices: Vec::new() }
@@ -1219,7 +1225,7 @@ async fn stream_claude_with_tools(
             if !pending_tool_results.is_empty() {
                 messages.push(json!({
                     "role": "user",
-                    "content": pending_tool_results.drain(..).collect::<Vec<_>>()
+                    "content": std::mem::take(&mut pending_tool_results)
                 }));
             }
             if m.role == "assistant" && !m.tool_calls.is_empty() {
@@ -1241,7 +1247,7 @@ async fn stream_claude_with_tools(
     if !pending_tool_results.is_empty() {
         messages.push(json!({
             "role": "user",
-            "content": pending_tool_results.drain(..).collect::<Vec<_>>()
+            "content": std::mem::take(&mut pending_tool_results)
         }));
     }
 
@@ -1515,7 +1521,7 @@ async fn stream_gemini_with_tools(
                 .tool_call_id
                 .as_deref()
                 .and_then(|s| s.strip_prefix("gemini-tc-"))
-                .and_then(|s| s.rsplitn(2, '-').nth(1))
+                .and_then(|s| s.rsplit_once('-').map(|(_, name)| name))
                 .unwrap_or("unknown");
             pending_function_responses.push(json!({
                 "functionResponse": {
@@ -1528,7 +1534,7 @@ async fn stream_gemini_with_tools(
             if !pending_function_responses.is_empty() {
                 contents.push(json!({
                     "role": "user",
-                    "parts": pending_function_responses.drain(..).collect::<Vec<_>>()
+                    "parts": std::mem::take(&mut pending_function_responses)
                 }));
             }
             if m.role == "assistant" && !m.tool_calls.is_empty() {
@@ -1550,7 +1556,7 @@ async fn stream_gemini_with_tools(
     if !pending_function_responses.is_empty() {
         contents.push(json!({
             "role": "user",
-            "parts": pending_function_responses.drain(..).collect::<Vec<_>>()
+            "parts": std::mem::take(&mut pending_function_responses)
         }));
     }
 

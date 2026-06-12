@@ -1398,9 +1398,7 @@ fn bracket_ipv6(host: &str) -> String {
 
 fn kafka_connection_url(config: &ConnectionConfig, host: &str, port: u16, include_credentials: bool) -> String {
     let bootstrap = config.kafka_bootstrap_servers();
-    let authority = if bootstrap.contains(',') {
-        bootstrap
-    } else if bootstrap.contains(':') {
+    let authority = if bootstrap.contains(',') || bootstrap.contains(':') {
         bootstrap
     } else {
         let host = bracket_ipv6(host.trim());

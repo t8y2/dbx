@@ -19,8 +19,6 @@ use crate::models::connection::ConnectionConfig;
 
 use super::{connection_timeout, with_connection_timeout};
 
-const DEFAULT_KAFKA_PORT: u16 = 9092;
-
 pub struct KafkaConnectionHandle {
     admin: Arc<AdminClient<DefaultClientContext>>,
     config: ConnectionConfig,
@@ -1004,7 +1002,7 @@ fn message_to_record(message: &impl Message) -> KafkaMessageRecord {
                 .iter()
                 .map(|header| {
                     let key = header.key.to_string();
-                    let value = header.value.map(|bytes| payload_to_text(bytes)).unwrap_or_default();
+                    let value = header.value.map(payload_to_text).unwrap_or_default();
                     (key, value)
                 })
                 .collect()
@@ -1076,6 +1074,7 @@ fn expand_cert_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const DEFAULT_KAFKA_PORT: u16 = 9092;
     use crate::models::connection::{
         default_connect_timeout_secs, default_idle_timeout_secs, default_kafka_consumer_group,
         default_query_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType,

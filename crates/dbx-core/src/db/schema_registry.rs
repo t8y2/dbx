@@ -104,7 +104,7 @@ pub async fn list_subjects(config: &ConnectionConfig, prefix: Option<&str>) -> R
     let value = registry_get_json(config, &path).await?;
     let subjects = value.as_array().ok_or_else(|| "Schema Registry subjects response must be an array".to_string())?;
     let mut names = subjects.iter().filter_map(|item| item.as_str().map(str::to_string)).collect::<Vec<_>>();
-    names.sort_by(|left, right| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()));
+    names.sort_by_key(|name| name.to_ascii_lowercase());
     Ok(names)
 }
 
@@ -324,7 +324,7 @@ fn hex_preview(bytes: &[u8], max: usize) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     if bytes.len() > max {
-        out.push_str("…");
+        out.push('…');
     }
     out
 }

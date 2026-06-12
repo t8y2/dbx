@@ -523,7 +523,7 @@ static NULL_VALUE: Value = Value::Null;
 type CompareRowValues = Vec<Value>;
 type CompareRowMap = HashMap<String, CompareRowValues>;
 
-fn column_index_map<'a>(columns: &'a [String]) -> HashMap<&'a str, usize> {
+fn column_index_map(columns: &[String]) -> HashMap<&str, usize> {
     let mut indexes = HashMap::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
         indexes.insert(column.as_str(), index);
@@ -688,7 +688,7 @@ fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Ve
                 .join(", ");
             format!(
                 "UPDATE {table} SET {assignments} WHERE {};",
-                where_by_key(&row.key_values, &options.key_columns, options.database_type, column_info)
+                where_by_key(&row.key_values, options.key_columns, options.database_type, column_info)
             )
         })
         .collect::<Vec<_>>();
@@ -699,7 +699,7 @@ fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Ve
         .map(|row| {
             format!(
                 "DELETE FROM {table} WHERE {};",
-                where_by_key(&row.key_values, &options.key_columns, options.database_type, column_info)
+                where_by_key(&row.key_values, options.key_columns, options.database_type, column_info)
             )
         })
         .collect::<Vec<_>>();

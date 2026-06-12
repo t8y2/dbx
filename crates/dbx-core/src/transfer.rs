@@ -481,7 +481,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
         serde_json::Value::Number(n) => match db_type {
             DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
                 if column_type.is_some_and(is_mysql_bit_type) {
-                    format!("b'{}'", n.to_string())
+                    format!("b'{n}'")
                 } else {
                     n.to_string()
                 }

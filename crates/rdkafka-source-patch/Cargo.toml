@@ -1,0 +1,9 @@
+[package]
+name = "rdkafka-source-patch"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Patches vendored librdkafka before rdkafka-sys cmake build"
+
+[lib]
+path = "lib.rs"

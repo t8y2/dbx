@@ -1962,6 +1962,7 @@ dependencies = [
  "portpicker",
  "rayon",
  "rdkafka",
+ "rdkafka-source-patch",
  "redis",
  "regex",
  "reqwest 0.12.28",
@@ -6285,6 +6286,10 @@ dependencies = [
  "slab",
  "tokio",
 ]
+
+[[package]]
+name = "rdkafka-source-patch"
+version = "0.1.0"
 
 [[package]]
 name = "rdkafka-sys"

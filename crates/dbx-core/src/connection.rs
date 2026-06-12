@@ -1525,7 +1525,7 @@ mod tests {
         config.db_type = DatabaseType::Oracle;
         config.driver_profile = Some("oracle".to_string());
 
-        assert!(should_retry_oracle_with_10g_driver(
+        assert!(!should_retry_oracle_with_10g_driver(
             &config,
             "Agent RPC error (-1): ORA-28040: No matching authentication protocol"
         ));

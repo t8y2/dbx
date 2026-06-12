@@ -20,7 +20,8 @@ use tokio_postgres::{Row, SimpleQueryMessage};
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, QueryResult, TableInfo, TriggerInfo,
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, OwnerInfo, QueryResult, RuleInfo,
+    SequenceInfo, TableInfo, TriggerInfo,
 };
 
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
@@ -488,20 +489,6 @@ fn format_pg_timestamptz(value: DateTime<Local>) -> String {
     value.to_rfc3339()
 }
 
-/// Render PostgreSQL's internal `"char"` type (OID 18) as the character it
-/// stores, matching psql's `charout`. The driver decodes this single-byte type
-/// as i8; emitting the numeric value would leak the raw ASCII code (issue #669).
-/// A zero byte maps to an empty string; any other byte is interpreted as a
-/// Latin-1 code point so the result is always valid UTF-8 and never panics.
-fn pg_char_to_json(byte: i8) -> serde_json::Value {
-    let b = byte as u8;
-    if b == 0 {
-        serde_json::Value::String(String::new())
-    } else {
-        serde_json::Value::String(char::from(b).to_string())
-    }
-}
-
 fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
     let upper = type_name.to_uppercase();
 
@@ -553,14 +540,6 @@ fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value
 
     if matches!(upper.as_str(), "OID" | "XID" | "CID") {
         return pg_system_u32_to_json(row, idx).unwrap_or(serde_json::Value::Null);
-    }
-
-    // PostgreSQL's internal "char" type (OID 18, e.g. pg_depend.deptype) is a
-    // single byte the driver decodes as i8. Without this branch it falls through
-    // to the i8 arm below and surfaces the raw ASCII code (110 for 'n') instead
-    // of the character. SQL CHAR(n) is a different type ("bpchar"), unaffected.
-    if upper == "CHAR" {
-        return row.try_get::<_, i8>(idx).map(pg_char_to_json).unwrap_or(serde_json::Value::Null);
     }
 
     if upper.starts_with('_') {
@@ -686,14 +665,14 @@ async fn execute_select_prepared(
 
     Ok(QueryResult {
         columns,
-        column_sortables: vec![],
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
         truncated,
         session_id: None,
         has_more: false,
-        column_types,
     })
 }
 
@@ -737,14 +716,14 @@ async fn execute_select_text(
 
     Ok(QueryResult {
         columns,
-        column_sortables: vec![],
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
         truncated,
         session_id: None,
         has_more: false,
-        column_types: Vec::new(),
     })
 }
 
@@ -785,7 +764,7 @@ pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, Stri
             mgr_config,
         );
         let pool = Pool::builder(mgr)
-            .max_size(1)
+            .max_size(4)
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(timeout))
             .build()
@@ -1114,7 +1093,6 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
-    let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let stmt = client.prepare_cached(postgres_tables_sql()).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
@@ -1154,7 +1132,6 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
          WHEN 'm' THEN 'VIEW' \
-         WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
        obj_description(c.oid) AS object_comment, \
@@ -1166,7 +1143,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        ) AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
@@ -1175,7 +1152,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
      LEFT JOIN LATERAL pg_stat_file( \
        CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
      ) stat ON true \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
      UNION ALL \
      SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
@@ -1196,7 +1173,6 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
          WHEN 'm' THEN 'VIEW' \
-         WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
        obj_description(c.oid) AS object_comment, \
@@ -1204,13 +1180,13 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        NULL::text AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
      UNION ALL \
      SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
@@ -1223,115 +1199,18 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind IN ('p','f') \
-     ORDER BY sort_order, object_name"
-}
-
-fn list_objects_legacy_routines_sql(include_timestamps: bool) -> &'static str {
-    if include_timestamps {
-        return "SELECT c.relname AS object_name, \
-       CASE c.relkind \
-         WHEN 'v' THEN 'VIEW' \
-         WHEN 'm' THEN 'VIEW' \
-         WHEN 'S' THEN 'SEQUENCE' \
-         ELSE 'TABLE' \
-       END AS object_type, \
-       obj_description(c.oid) AS object_comment, \
-       stat.creation::text AS created_at, \
-       COALESCE( \
-         CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
-           THEN pg_xact_commit_timestamp(c.xmin)::text END, \
-         stat.modification::text \
-       ) AS updated_at, \
-       CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
-       CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
-     FROM pg_catalog.pg_class c \
-     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
-     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
-     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     LEFT JOIN LATERAL pg_stat_file( \
-       CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
-     ) stat ON true \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
-     UNION ALL \
-     SELECT p.proname AS object_name, \
-       CASE WHEN EXISTS ( \
-         SELECT 1 FROM information_schema.routines r \
-         WHERE r.specific_schema = n.nspname \
-           AND r.routine_name = p.proname \
-           AND upper(r.routine_type) = 'PROCEDURE' \
-       ) THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
-       obj_description(p.oid) AS object_comment, \
-       NULL::text AS created_at, \
-       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
-         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
-       NULL::text AS parent_schema, \
-       NULL::text AS parent_name, \
-       CASE WHEN EXISTS ( \
-         SELECT 1 FROM information_schema.routines r \
-         WHERE r.specific_schema = n.nspname \
-           AND r.routine_name = p.proname \
-           AND upper(r.routine_type) = 'PROCEDURE' \
-       ) THEN 2 ELSE 3 END AS sort_order \
-     FROM pg_catalog.pg_proc p \
-     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow \
-     ORDER BY sort_order, object_name";
-    }
-
-    "SELECT c.relname AS object_name, \
-       CASE c.relkind \
-         WHEN 'v' THEN 'VIEW' \
-         WHEN 'm' THEN 'VIEW' \
-         WHEN 'S' THEN 'SEQUENCE' \
-         ELSE 'TABLE' \
-       END AS object_type, \
-       obj_description(c.oid) AS object_comment, \
-       NULL::text AS created_at, \
-       NULL::text AS updated_at, \
-       CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
-       CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
-     FROM pg_catalog.pg_class c \
-     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
-     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
-     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
-     UNION ALL \
-     SELECT p.proname AS object_name, \
-       CASE WHEN EXISTS ( \
-         SELECT 1 FROM information_schema.routines r \
-         WHERE r.specific_schema = n.nspname \
-           AND r.routine_name = p.proname \
-           AND upper(r.routine_type) = 'PROCEDURE' \
-       ) THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
-       obj_description(p.oid) AS object_comment, \
-       NULL::text AS created_at, \
-       NULL::text AS updated_at, \
-       NULL::text AS parent_schema, \
-       NULL::text AS parent_name, \
-       CASE WHEN EXISTS ( \
-         SELECT 1 FROM information_schema.routines r \
-         WHERE r.specific_schema = n.nspname \
-           AND r.routine_name = p.proname \
-           AND upper(r.routine_type) = 'PROCEDURE' \
-       ) THEN 2 ELSE 3 END AS sort_order \
-     FROM pg_catalog.pg_proc p \
-     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow \
      ORDER BY sort_order, object_name"
 }
 
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let rows = match client.prepare_cached(list_objects_sql(true)).await {
-        Ok(stmt) => match client.query(&stmt, &[&schema]).await {
-            Ok(rows) => rows,
-            Err(_) => query_list_objects_fallbacks(&client, schema).await?,
-        },
-        Err(_) => query_list_objects_fallbacks(&client, schema).await?,
+    let stmt = client.prepare_cached(list_objects_sql(true)).await.map_err(|e| e.to_string())?;
+    let rows = match client.query(&stmt, &[&schema]).await {
+        Ok(rows) => rows,
+        Err(_) => {
+            let stmt = client.prepare_cached(list_objects_sql(false)).await.map_err(|e| e.to_string())?;
+            client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?
+        }
     };
 
     Ok(rows
@@ -1347,22 +1226,6 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
-}
-
-async fn query_list_objects_fallbacks(
-    client: &deadpool_postgres::Object,
-    schema: &str,
-) -> Result<Vec<tokio_postgres::Row>, String> {
-    for sql in
-        [list_objects_sql(false), list_objects_legacy_routines_sql(true), list_objects_legacy_routines_sql(false)]
-    {
-        if let Ok(stmt) = client.prepare_cached(sql).await {
-            if let Ok(rows) = client.query(&stmt, &[&schema]).await {
-                return Ok(rows);
-            }
-        }
-    }
-    Err("failed to list PostgreSQL objects with compatible metadata queries".to_string())
 }
 
 pub async fn list_schemas(pool: &Pool) -> Result<Vec<String>, String> {
@@ -1493,7 +1356,6 @@ async fn get_columns_with_sql(
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
     match get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, schema, table).await {
         Ok(columns) => Ok(columns),
@@ -1546,17 +1408,18 @@ pub async fn execute_query_with_max_rows(
     } else {
         let client = pool.get().await.map_err(|e| e.to_string())?;
         let affected = client.execute(sql, &[]).await.map_err(pg_error_to_string)?;
+        clear_postgres_caches_after_ddl(pool, Some(&client), sql);
 
         Ok(QueryResult {
             columns: vec![],
-            column_sortables: vec![],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
             truncated: false,
             session_id: None,
             has_more: false,
-            column_types: Vec::new(),
         })
     }
 }
@@ -1598,6 +1461,9 @@ pub async fn execute_query_with_schema_and_max_rows(
 
     let query_start = Instant::now();
     let result = execute_query_with_max_rows_inner(&client, sql, max_rows).await;
+    if result.is_ok() {
+        clear_postgres_caches_after_ddl(pool, Some(&client), sql);
+    }
     log::info!(
         "[postgres][execute_with_schema:query:done] elapsed_ms={} total_ms={} ok={}",
         query_start.elapsed().as_millis(),
@@ -1636,14 +1502,14 @@ async fn execute_query_with_max_rows_inner(
 
         Ok(QueryResult {
             columns: vec![],
-            column_sortables: vec![],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: start.elapsed().as_millis(),
             truncated: false,
             session_id: None,
             has_more: false,
-            column_types: Vec::new(),
         })
     }
 }
@@ -1688,28 +1554,6 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indkey \
              ORDER BY i.relname";
 
-const POSTGRES_INDEXES_OPENGAUSS_SQL: &str = "SELECT i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) ORDER BY k.n) AS columns, \
-             ix.indisunique AS is_unique, \
-             ix.indisprimary AS is_primary, \
-             pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
-             am.amname AS index_type, \
-             NULL::smallint AS nkeyatts, \
-             ix.indkey AS indkey, \
-             obj_description(i.oid, 'pg_class') AS index_comment \
-             FROM pg_index ix \
-             JOIN pg_class t ON t.oid = ix.indrelid \
-             JOIN pg_class i ON i.oid = ix.indexrelid \
-             JOIN pg_namespace n ON n.oid = t.relnamespace \
-             JOIN pg_am am ON am.oid = i.relam \
-             JOIN LATERAL ( \
-                 SELECT unnest(ix.indkey) AS attnum, generate_series(1, array_length(ix.indkey, 1)) AS n \
-             ) AS k ON true \
-             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
-             WHERE n.nspname = $1 AND t.relname = $2 \
-             GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indkey \
-             ORDER BY i.relname";
-
 async fn list_indexes_with_sql(
     client: &deadpool_postgres::Client,
     sql: &str,
@@ -1748,21 +1592,14 @@ pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<
         Err(primary_error) => match list_indexes_with_sql(&client, POSTGRES_INDEXES_COMPAT_SQL, schema, table).await {
             Ok(indexes) => Ok(indexes),
             Err(fallback_error) => {
-                match list_indexes_with_sql(&client, POSTGRES_INDEXES_OPENGAUSS_SQL, schema, table).await {
-                    Ok(indexes) => Ok(indexes),
-                    Err(opengauss_error) => {
-                        let primary_message = pg_error_to_string(primary_error);
-                        let fallback_message = pg_error_to_string(fallback_error);
-                        let opengauss_message = pg_error_to_string(opengauss_error);
-                        log::debug!(
-                        "[postgres][list_indexes:opengauss-failed] primary_error={} fallback_error={} opengauss_error={}",
-                        primary_message,
-                        fallback_message,
-                        opengauss_message
-                    );
-                        Err(opengauss_message)
-                    }
-                }
+                let primary_message = pg_error_to_string(primary_error);
+                let fallback_message = pg_error_to_string(fallback_error);
+                log::debug!(
+                    "[postgres][list_indexes:compat-failed] primary_error={} fallback_error={}",
+                    primary_message,
+                    fallback_message
+                );
+                Err(fallback_message)
             }
         },
     }
@@ -1833,6 +1670,170 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
         .collect())
 }
 
+pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInfo>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    // Use pg_proc + pg_get_functiondef() instead of information_schema.routines
+    // for reliable function definition retrieval (information_schema.routines.routine_definition
+    // is NULL for non-SQL functions like plpgsql)
+    let stmt = client
+        .prepare_cached(
+            "SELECT p.proname, \
+                    CASE p.prokind WHEN 'f' THEN 'FUNCTION' WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
+                    COALESCE(pg_get_function_result(p.oid), ''), \
+                    pg_get_functiondef(p.oid), \
+                    COALESCE(pg_get_function_arguments(p.oid), '') \
+             FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') \
+             ORDER BY p.proname",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let def: String = row.get::<_, String>(3);
+            // Remove schema qualification from CREATE FUNCTION statement
+            // to avoid false differences when comparing across schemas.
+            // Handle both "schema.name" and schema.name formats.
+            let normalized_def = def
+                .replace(&format!("CREATE OR REPLACE FUNCTION \"{}\".", schema), "CREATE OR REPLACE FUNCTION ")
+                .replace(&format!("CREATE OR REPLACE FUNCTION {}.", schema), "CREATE OR REPLACE FUNCTION ");
+            FunctionInfo {
+                name: row.get::<_, String>(0),
+                function_type: row.get::<_, String>(1),
+                data_type: row.get::<_, String>(2),
+                definition: normalized_def,
+                arguments: row.get::<_, String>(4),
+            }
+        })
+        .collect())
+}
+
+pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    // Use pg_class + pg_sequence + pg_namespace instead of pg_sequences view
+    // for better compatibility and permission handling
+    let stmt = client
+        .prepare_cached(
+            "SELECT c.relname, \
+              COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
+              COALESCE(s.seqstart::text, '1'), \
+              COALESCE(s.seqmin::text, '1'), \
+              COALESCE(s.seqmax::text, '9223372036854775807'), \
+              COALESCE(s.seqincrement::text, '1'), \
+              CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+             WHERE c.relkind = 'S' AND n.nspname = $1 \
+             ORDER BY c.relname",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+
+    let mut sequences: Vec<SequenceInfo> = rows
+        .iter()
+        .map(|row| SequenceInfo {
+            name: row.get::<_, String>(0),
+            data_type: row.get::<_, String>(1),
+            start_value: row.get::<_, String>(2),
+            min_value: row.get::<_, String>(3),
+            max_value: row.get::<_, String>(4),
+            increment: row.get::<_, String>(5),
+            cycle: row.get::<_, String>(6) == "YES",
+            last_value: None,
+        })
+        .collect();
+
+    if with_last_values {
+        // Batch query: get last values for all sequences in one query
+        let sql = "SELECT c.relname, pg_sequence_last_value(c.oid) \
+                   FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   WHERE c.relkind = 'S' AND n.nspname = $1";
+        if let Ok(stmt) = client.prepare_cached(sql).await {
+            if let Ok(rows) = client.query(&stmt, &[&schema]).await {
+                for row in rows {
+                    let name: String = row.get(0);
+                    if let Ok(val) = row.try_get::<_, i64>(1) {
+                        if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
+                            seq.last_value = Some(val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(sequences)
+}
+
+pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let stmt = client
+        .prepare_cached(
+            "SELECT schemaname, tablename, rulename, definition \
+             FROM pg_rules \
+             WHERE schemaname = $1 \
+             ORDER BY rulename",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| RuleInfo {
+            name: row.get::<_, String>(2),
+            table_name: row.get::<_, String>(1),
+            definition: row.get::<_, String>(3),
+        })
+        .collect())
+}
+
+pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    // Filter relkind to exclude indexes, toast tables, and other system objects
+    // for better performance on large databases
+    let stmt = client
+        .prepare_cached(
+            "SELECT n.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 \
+               AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let relkind: String = row.get(2);
+            let object_type = match relkind.as_str() {
+                "r" => "TABLE",
+                "v" => "VIEW",
+                "m" => "MATERIALIZED VIEW",
+                "S" => "SEQUENCE",
+                "f" => "FOREIGN TABLE",
+                "p" => "PARTITIONED TABLE",
+                "I" => "PARTITIONED INDEX",
+                _ => &relkind,
+            };
+            OwnerInfo {
+                object_name: row.get::<_, String>(1),
+                object_type: object_type.to_string(),
+                owner: row.get::<_, String>(3),
+            }
+        })
+        .collect())
+}
+
 /// Execute multiple SQL statements in a single round-trip using batch_execute.
 /// Best for DDL scripts where per-statement affected-row counts are not needed.
 pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), String> {
@@ -1841,7 +1842,27 @@ pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), Str
         return Ok(());
     }
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    client.batch_execute(&combined).await.map_err(pg_error_to_string)
+    client.batch_execute(&combined).await.map_err(pg_error_to_string)?;
+    clear_postgres_caches_after_ddl(pool, Some(&client), &combined);
+    Ok(())
+}
+
+fn clear_postgres_caches_after_ddl(pool: &Pool, client: Option<&deadpool_postgres::Client>, sql: &str) {
+    if !invalidates_postgres_statement_cache(sql) {
+        return;
+    }
+    pool.manager().statement_caches.clear();
+    if let Some(client) = client {
+        client.clear_type_cache();
+    }
+}
+
+fn invalidates_postgres_statement_cache(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    starts_with_executable_sql_keyword(
+        trimmed,
+        &["ALTER", "CREATE", "DROP", "TRUNCATE", "COMMENT", "REINDEX", "VACUUM"],
+    )
 }
 
 /// Export data via COPY TO STDOUT. `sql` must be a complete COPY statement, e.g.
@@ -1888,25 +1909,6 @@ mod tests {
         assert!(PgSystemU32::accepts(&Type::CID));
         assert!(!PgSystemU32::accepts(&Type::OID));
         assert!(!PgSystemU32::accepts(&Type::INT4));
-    }
-
-    #[test]
-    fn pg_char_type_renders_byte_as_character() {
-        // The internal "char" type (OID 18, e.g. pg_depend.deptype) is decoded
-        // as i8; we must surface the character, not the ASCII code (issue #669).
-        assert_eq!(Type::CHAR.name(), "char");
-        assert!(i8::accepts(&Type::CHAR));
-        // SQL CHAR(n)/character(n) is a different type ("bpchar") and must not
-        // be routed through the "char" branch.
-        assert_eq!(Type::BPCHAR.name(), "bpchar");
-
-        assert_eq!(pg_char_to_json(b'n' as i8), serde_json::Value::String("n".into()));
-        assert_eq!(pg_char_to_json(b'a' as i8), serde_json::Value::String("a".into()));
-        assert_eq!(pg_char_to_json(b'i' as i8), serde_json::Value::String("i".into()));
-        // A zero byte renders as an empty string (matches psql's charout).
-        assert_eq!(pg_char_to_json(0), serde_json::Value::String(String::new()));
-        // High bytes stay valid UTF-8 (Latin-1) and never panic.
-        assert_eq!(pg_char_to_json(-1), serde_json::Value::String("\u{00ff}".into()));
     }
 
     #[test]
@@ -2010,7 +2012,7 @@ mod tests {
         let escaped = pg_quote_ident(malicious);
         // Double quotes should be doubled, not breaking out
         assert_eq!(escaped, r#""public""; DROP TABLE users; --""#);
-        assert!(escaped.matches('"').count().is_multiple_of(2), "quote count should be even");
+        assert!(escaped.matches('"').count() % 2 == 0, "quote count should be even");
     }
 
     // --- query_result_row_limit ---
@@ -2227,14 +2229,6 @@ mod tests {
     }
 
     #[test]
-    fn postgres_index_metadata_has_opengauss_compatible_fallback() {
-        assert!(!POSTGRES_INDEXES_OPENGAUSS_SQL.contains("WITH ORDINALITY"));
-        assert!(POSTGRES_INDEXES_OPENGAUSS_SQL.contains("generate_series"));
-        assert!(POSTGRES_INDEXES_OPENGAUSS_SQL.contains("array_length"));
-        assert!(POSTGRES_INDEXES_OPENGAUSS_SQL.contains("NULL::smallint AS nkeyatts"));
-    }
-
-    #[test]
     fn list_objects_sql_includes_routines() {
         let sql = list_objects_sql(true);
         assert!(sql.contains("pg_catalog.pg_class"));
@@ -2247,8 +2241,6 @@ mod tests {
         assert!(sql.contains("pg_xact_commit_timestamp"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
-        assert!(sql.contains("'SEQUENCE'"));
-        assert!(sql.contains("'S'"));
     }
 
     #[test]
@@ -2272,20 +2264,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_list_objects_sql_avoids_pg11_prokind() {
-        let sql = list_objects_legacy_routines_sql(false);
-
-        assert!(sql.contains("pg_catalog.pg_proc"));
-        assert!(sql.contains("information_schema.routines"));
-        assert!(sql.contains("'PROCEDURE'"));
-        assert!(sql.contains("'FUNCTION'"));
-        assert!(sql.contains("NOT p.proisagg"));
-        assert!(sql.contains("NOT p.proiswindow"));
-        assert!(!sql.contains("p.prokind"));
-        assert!(sql.contains("'SEQUENCE'"));
-    }
-
-    #[test]
     fn transaction_recovery_statement_detection_matches_common_postgres_commands() {
         assert!(is_transaction_recovery_statement("ROLLBACK"));
         assert!(is_transaction_recovery_statement("rollback work"));
@@ -2299,6 +2277,25 @@ mod tests {
         assert!(!is_transaction_recovery_statement("SELECT 1"));
         assert!(!is_transaction_recovery_statement("BEGIN"));
         assert!(!is_transaction_recovery_statement("UPDATE users SET name = 'dbx'"));
+    }
+
+    #[test]
+    fn postgres_ddl_detection_covers_schema_changing_statements() {
+        assert!(invalidates_postgres_statement_cache("ALTER TABLE users ADD COLUMN email text"));
+        assert!(invalidates_postgres_statement_cache("  CREATE INDEX idx_users_email ON users(email)"));
+        assert!(invalidates_postgres_statement_cache("COMMENT ON COLUMN users.email IS 'Email'"));
+        assert!(invalidates_postgres_statement_cache("DROP TABLE users"));
+        assert!(invalidates_postgres_statement_cache("TRUNCATE users"));
+        assert!(invalidates_postgres_statement_cache("REINDEX TABLE users"));
+        assert!(invalidates_postgres_statement_cache("VACUUM users"));
+    }
+
+    #[test]
+    fn postgres_ddl_detection_ignores_regular_dml_and_selects() {
+        assert!(!invalidates_postgres_statement_cache("SELECT * FROM users"));
+        assert!(!invalidates_postgres_statement_cache("UPDATE users SET name = 'Ada'"));
+        assert!(!invalidates_postgres_statement_cache("INSERT INTO users(name) VALUES ('Ada')"));
+        assert!(!invalidates_postgres_statement_cache("DELETE FROM users WHERE id = 1"));
     }
 
     // --- execute_batch ---
@@ -2316,14 +2313,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_batch_whitespace_only_is_filtered() {
-        let statements = ["  ".to_string(), "\t\n".to_string(), "".to_string()];
+        let statements = vec!["  ".to_string(), "\t\n".to_string(), "".to_string()];
         let combined = statements.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";\n");
         assert!(combined.is_empty());
     }
 
     #[test]
     fn execute_batch_joins_with_semicolons() {
-        let statements = ["SELECT 1".to_string(), "SELECT 2".to_string()];
+        let statements = vec!["SELECT 1".to_string(), "SELECT 2".to_string()];
         let combined = statements.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";\n");
         assert_eq!(combined, "SELECT 1;\nSELECT 2");
     }

@@ -116,3 +116,43 @@ pub struct TriggerInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionInfo {
+    pub name: String,
+    pub function_type: String,
+    pub data_type: String,
+    pub definition: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceInfo {
+    pub name: String,
+    pub data_type: String,
+    pub start_value: String,
+    pub min_value: String,
+    pub max_value: String,
+    pub increment: String,
+    pub cycle: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleInfo {
+    pub name: String,
+    pub table_name: String,
+    pub definition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerInfo {
+    pub object_name: String,
+    pub object_type: String,
+    pub owner: String,
+}

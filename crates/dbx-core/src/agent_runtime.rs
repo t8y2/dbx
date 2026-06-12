@@ -33,9 +33,9 @@ pub async fn spawn_connection_client(
     db_type: &DatabaseType,
     driver_profile: Option<&str>,
 ) -> Result<AgentDriverClient, String> {
-    let key = db_type_to_agent_key(db_type, driver_profile)
+    let keys = runtime_agent_key_candidates(db_type, driver_profile)
         .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
-    spawn_client_for_key(manager, key).await
+    spawn_first_available_client(manager, &keys).await
 }
 
 pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
@@ -45,9 +45,9 @@ pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
     method: &str,
     params: serde_json::Value,
 ) -> Result<T, String> {
-    let key = db_type_to_agent_key(db_type, driver_profile)
-        .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?
-        .to_string();
+    let keys = runtime_agent_key_candidates(db_type, driver_profile)
+        .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
+    let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]).to_string();
 
     let mut daemons = manager.daemons.lock().await;
 
@@ -80,17 +80,42 @@ pub async fn call_daemon_method<T: DeserializeOwned + Send + 'static>(
     call_daemon(manager, db_type, driver_profile, method.as_str(), params).await
 }
 
+fn runtime_agent_key_candidates(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<Vec<&'static str>> {
+    let primary = db_type_to_agent_key(db_type, driver_profile)?;
+    if *db_type == DatabaseType::Oracle {
+        return match driver_profile {
+            Some("oracle-legacy") => Some(vec![primary, "oracle-legacy"]),
+            Some("oracle-10g") => Some(vec![primary, "oracle-10g"]),
+            _ => Some(vec![primary]),
+        };
+    }
+    Some(vec![primary])
+}
+
+fn first_installed_agent_key<'a>(manager: &AgentManager, keys: &'a [&'static str]) -> Option<&'a str> {
+    keys.iter().copied().find(|key| manager.is_driver_installed(key))
+}
+
+async fn spawn_first_available_client(
+    manager: &AgentManager,
+    keys: &[&'static str],
+) -> Result<AgentDriverClient, String> {
+    let mut last_error = None;
+    for key in keys {
+        match spawn_client_for_key(manager, key).await {
+            Ok(client) => return Ok(client),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "No agent driver candidates available".to_string()))
+}
+
 async fn spawn_client_for_key(manager: &AgentManager, key: &str) -> Result<AgentDriverClient, String> {
     let state = manager.load_state();
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
 
-    if !manager.is_driver_installed(key) {
-        return Err(format!("{key} driver is not installed. Please install it from the Driver Manager."));
-    }
-
-    let java = manager.resolve_java_runtime(&state, jre_key)?.to_string_lossy().to_string();
-    let jar = manager.driver_jar_path(key).to_string_lossy().to_string();
-    let mut client = AgentDriverClient::spawn(&java, &jar).await?;
+    let launch = manager.resolve_agent_launch_spec(&state, key, jre_key)?;
+    let mut client = AgentDriverClient::spawn(launch).await?;
     client.try_optional_handshake(manager.agent_app_version()).await;
     Ok(client)
 }

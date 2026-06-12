@@ -81,6 +81,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   const files = ref<SavedSqlFile[]>([]);
   const isLoaded = ref(false);
   let pendingSync: Promise<void> | null = null;
+  const pendingFolderCreates = new Map<string, Promise<SavedSqlFolder>>();
 
   const version = ref(0);
   function bumpVersion() {
@@ -125,26 +126,45 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return sortFilesByOrder(files.value.filter((file) => file.connectionId === connectionId && (file.folderId || "") === (folderId || "")));
   }
 
+  function folderCreateKey(connectionId: string, name: string, parentFolderId?: string) {
+    return JSON.stringify([connectionId, parentFolderId || "", name]);
+  }
+
   function getFile(id: string) {
     return files.value.find((file) => file.id === id);
   }
 
   async function createFolder(connectionId: string, name: string, parentFolderId?: string) {
-    const timestamp = nowIso();
-    const folder: SavedSqlFolder = {
-      id: uuid(),
-      connectionId,
-      parentFolderId: parentFolderId || undefined,
-      name,
-      orderIndex: maxOrderIndex(folders.value.filter((item) => item.connectionId === connectionId && (item.parentFolderId || "") === (parentFolderId || ""))) + 1,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const saved = await api.saveSavedSqlFolder(folder);
-    folders.value = [...folders.value.filter((item) => item.id !== saved.id), saved];
-    bumpVersion();
-    await syncToLocalDirectory();
-    return saved;
+    const key = folderCreateKey(connectionId, name, parentFolderId);
+    const pending = pendingFolderCreates.get(key);
+    if (pending) return pending;
+
+    const createPromise = (async () => {
+      const timestamp = nowIso();
+      const folder: SavedSqlFolder = {
+        id: uuid(),
+        connectionId,
+        parentFolderId: parentFolderId || undefined,
+        name,
+        orderIndex: maxOrderIndex(folders.value.filter((item) => item.connectionId === connectionId && (item.parentFolderId || "") === (parentFolderId || ""))) + 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      const saved = await api.saveSavedSqlFolder(folder);
+      folders.value = [...folders.value.filter((item) => item.id !== saved.id), saved];
+      bumpVersion();
+      await syncToLocalDirectory();
+      return saved;
+    })();
+
+    pendingFolderCreates.set(key, createPromise);
+    try {
+      return await createPromise;
+    } finally {
+      if (pendingFolderCreates.get(key) === createPromise) {
+        pendingFolderCreates.delete(key);
+      }
+    }
   }
 
   async function renameFolder(id: string, name: string) {

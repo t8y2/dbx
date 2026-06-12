@@ -276,6 +276,37 @@ export interface TriggerInfo {
   statement?: string | null;
 }
 
+export interface FunctionInfo {
+  name: string;
+  function_type: string;
+  data_type: string;
+  definition: string;
+  arguments: string;
+}
+
+export interface SequenceInfo {
+  name: string;
+  data_type: string;
+  start_value: string;
+  min_value: string;
+  max_value: string;
+  increment: string;
+  cycle: boolean;
+  last_value?: string | null;
+}
+
+export interface RuleInfo {
+  name: string;
+  table_name: string;
+  definition: string;
+}
+
+export interface OwnerInfo {
+  object_name: string;
+  object_type: string;
+  owner: string;
+}
+
 export interface QueryResult {
   columns: string[];
   /**

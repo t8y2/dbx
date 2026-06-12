@@ -1566,7 +1566,7 @@
     },
   },
   diff: {
-    title: "Comparar Bancos de Dados",
+    title: "Comparar Esquemas",
     source: "Origem",
     target: "Destino",
     selectConnection: "Selecionar conexão",

@@ -169,6 +169,12 @@ pub(super) fn build_create_index_statements(
     } else {
         String::new()
     };
+    let comment = clean(&index.comment);
+    let comment_clause = if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Mysql {
+        format!(" COMMENT {}", quote_string(&comment))
+    } else {
+        String::new()
+    };
     let filter = clean(&index.filter);
     let supports_where = capabilities.index_filter
         && matches!(dialect, StructureDialect::Postgres | StructureDialect::SqlServer | StructureDialect::Sqlite);
@@ -180,17 +186,18 @@ pub(super) fn build_create_index_statements(
         )
     } else {
         format!(
-            "CREATE {unique}{type_prefix}INDEX {}{using_clause} ON {table} ({cols}){include_clause}{where_clause};",
+            "CREATE {unique}{type_prefix}INDEX {}{using_clause} ON {table} ({cols}){include_clause}{where_clause}{comment_clause};",
             quote_ident(dialect, &name)
         )
     };
     let mut statements = vec![create_sql];
 
-    let comment = clean(&index.comment);
     if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Postgres {
         statements.push(format!("COMMENT ON INDEX {} IS {};", quote_ident(dialect, &name), quote_string(&comment)));
     } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::SqlServer {
         statements.extend(build_sqlserver_index_comment_sql(table, schema, table_name, &name, &comment));
+    } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Mysql {
+        // MySQL comment is embedded inline in the CREATE INDEX statement above
     } else if !comment.is_empty() && capabilities.index_comment {
         warnings.push(format!("Index comments are not supported for {} from this editor.", dialect_label(dialect)));
     }

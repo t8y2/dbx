@@ -300,18 +300,6 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 1521,
-      "driverProfiles": [
-        {
-          "profile": "oracle-legacy",
-          "label": "Oracle Legacy",
-          "agentKey": "oracle-legacy"
-        },
-        {
-          "profile": "oracle-10g",
-          "label": "Oracle 10g",
-          "agentKey": "oracle-10g"
-        }
-      ],
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,

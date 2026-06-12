@@ -18,8 +18,8 @@ pub struct AgentDriverProfile {
 }
 
 const ORACLE_PROFILES: &[AgentDriverProfile] = &[
-    AgentDriverProfile { profile: "oracle-legacy", key: "oracle-legacy", label: "Oracle Legacy", store_visible: true },
-    AgentDriverProfile { profile: "oracle-10g", key: "oracle-10g", label: "Oracle 10g", store_visible: true },
+    AgentDriverProfile { profile: "oracle-legacy", key: "oracle", label: "Oracle", store_visible: false },
+    AgentDriverProfile { profile: "oracle-10g", key: "oracle", label: "Oracle", store_visible: false },
 ];
 
 const GBASE_PROFILES: &[AgentDriverProfile] =

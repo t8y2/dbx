@@ -112,8 +112,8 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
-    assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle-legacy"));
-    assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle-10g"));
+    assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
+    assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Postgres, None), None);
 }
 

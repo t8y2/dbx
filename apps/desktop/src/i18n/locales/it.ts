@@ -1555,7 +1555,7 @@
     },
   },
   diff: {
-    title: "Confronta Database",
+    title: "Confronta Schemi",
     source: "Sorgente",
     target: "Destinazione",
     selectConnection: "Seleziona connessione",

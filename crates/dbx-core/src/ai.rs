@@ -173,6 +173,32 @@ pub struct AiModelInfo {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+/// Ensure the endpoint has an OpenAI API version prefix (`/v1`) when the user
+/// entered a bare origin without any path.  This handles the common mistake of
+/// entering a host like `https://api.example.com` without the `/v1` path that
+/// most OpenAI-compatible providers require.
+///
+/// Strategy (mirrors CC-Switch):
+/// 1. Already ends with `/v1` → return as-is.
+/// 2. Pure origin (no path after host) → append `/v1`.
+/// 3. Has a custom path → leave it alone (user probably knows what they're doing).
+fn ensure_openai_version_prefix(endpoint: &str) -> String {
+    let ep = endpoint.trim().trim_end_matches('/');
+    if ep.ends_with("/v1") {
+        return ep.to_string();
+    }
+    // Check whether the URL is a bare origin with no path segment.
+    let origin_only = match ep.split_once("://") {
+        Some((_scheme, rest)) => !rest.contains('/'),
+        None => !ep.contains('/'),
+    };
+    if origin_only {
+        format!("{ep}/v1")
+    } else {
+        ep.to_string()
+    }
+}
+
 pub fn resolve_endpoint(config: &AiConfig) -> String {
     let ep = config.endpoint.trim().trim_end_matches('/');
     if matches!(config.provider, AiProvider::Gemini) {
@@ -193,10 +219,11 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
         | AiProvider::Custom => {
+            let base = ensure_openai_version_prefix(ep);
             if config.api_style == AiApiStyle::Responses {
-                format!("{ep}/responses")
+                format!("{base}/responses")
             } else {
-                format!("{ep}/chat/completions")
+                format!("{base}/chat/completions")
             }
         }
         AiProvider::Gemini => unreachable!(),
@@ -231,6 +258,8 @@ pub fn resolve_model_list_endpoint(config: &AiConfig) -> Result<String, String> 
         .or_else(|| ep.strip_suffix("/messages"))
         .unwrap_or(ep)
         .trim_end_matches('/');
+
+    let base = ensure_openai_version_prefix(&base);
 
     Ok(format!("{base}/models"))
 }
@@ -1883,6 +1912,59 @@ mod tests {
             enable_thinking: true,
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
+    }
+
+    #[test]
+    fn auto_adds_v1_to_openai_compatible_endpoints() {
+        // Endpoint without /v1 — auto add
+        let config = AiConfig {
+            provider: AiProvider::OpenaiCompatible,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.example.com".to_string(),
+            model: "test-model".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: true,
+        };
+        assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
+
+        // Endpoint with /v1 already present — no change
+        let config_v1 = AiConfig { endpoint: "https://api.example.com/v1".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&config_v1), "https://api.example.com/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&config_v1).unwrap(), "https://api.example.com/v1/models");
+
+        // Endpoint with /v2 — no change
+        let config_v2 = AiConfig { endpoint: "https://api.example.com/v2".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&config_v2), "https://api.example.com/v2/chat/completions");
+
+        // Full path already specified — no change
+        let config_full =
+            AiConfig { endpoint: "https://api.openai.com/v1/chat/completions".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&config_full), "https://api.openai.com/v1/chat/completions");
+
+        // Responses API style with /v1 missing
+        let config_responses = AiConfig { api_style: AiApiStyle::Responses, ..config.clone() };
+        assert_eq!(resolve_endpoint(&config_responses), "https://api.example.com/v1/responses");
+
+        // Ollama preset already has /v1 — no change
+        let ollama = AiConfig {
+            provider: AiProvider::Ollama,
+            endpoint: "http://localhost:11434/v1".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
+
+        // Custom path without /v1 — left alone (CC-Switch strategy: only bare origin gets auto /v1)
+        let custom_path = AiConfig { endpoint: "https://my-gateway.com/api".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&custom_path), "https://my-gateway.com/api/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&custom_path).unwrap(), "https://my-gateway.com/api/models");
+
+        // Bare host with port — add /v1
+        let bare_with_port = AiConfig { endpoint: "http://localhost:8080".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&bare_with_port), "http://localhost:8080/v1/chat/completions");
     }
 
     #[test]

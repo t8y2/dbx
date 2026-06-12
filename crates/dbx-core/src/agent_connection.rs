@@ -193,18 +193,13 @@ pub fn oracle_error_with_driver_hint(config: &ConnectionConfig, err: &str) -> St
     if config.db_type != DatabaseType::Oracle {
         return err.to_string();
     }
-    if matches!(config.driver_profile.as_deref(), Some("oracle-legacy" | "oracle-10g")) {
-        return err.to_string();
-    }
 
     let normalized = err.to_lowercase();
     if !normalized.contains("ora-12541") && !err.contains("没有监听程序") {
         return err.to_string();
     }
 
-    format!(
-        "{err}\n\nOracle listener was not reachable with the current driver. If the host and port are correct, try switching Version to Oracle 11g-19c or Oracle 10g."
-    )
+    format!("{err}\n\nOracle listener was not reachable. If the host and port are correct, try switching between Service Name and SID.")
 }
 
 pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) -> Vec<ConnectionConfig> {
@@ -356,11 +351,7 @@ pub fn oracle_auth_fallback_profiles(config: &ConnectionConfig, err: &str) -> Ve
     if !normalized.contains("ora-28040") && !normalized.contains("no matching authentication protocol") {
         return Vec::new();
     }
-    match config.driver_profile.as_deref() {
-        Some("oracle-10g") => Vec::new(),
-        Some("oracle-legacy") => vec!["oracle-10g"],
-        _ => vec!["oracle-legacy", "oracle-10g"],
-    }
+    Vec::new()
 }
 
 pub fn oracle_alternate_connect_config(config: &ConnectionConfig, err: &str) -> Option<ConnectionConfig> {
@@ -637,17 +628,17 @@ mod tests {
         let hinted = oracle_error_with_driver_hint(&cfg, err);
 
         assert!(hinted.starts_with(err));
-        assert!(hinted.contains("Oracle 11g-19c"));
-        assert!(hinted.contains("Oracle 10g"));
+        assert!(hinted.contains("Service Name"));
+        assert!(hinted.contains("SID"));
     }
 
     #[test]
-    fn oracle_listener_error_hint_skips_legacy_profiles_and_other_databases() {
+    fn oracle_listener_error_hint_skips_other_databases() {
         let err = "Agent RPC error (-1): ORA-12541: TNS:no listener";
         let mut cfg = config(DatabaseType::Oracle, Some("ORCL"));
         cfg.driver_profile = Some("oracle-legacy".to_string());
 
-        assert_eq!(oracle_error_with_driver_hint(&cfg, err), err);
+        assert!(oracle_error_with_driver_hint(&cfg, err).contains("Service Name"));
 
         cfg.db_type = DatabaseType::OceanbaseOracle;
         cfg.driver_profile = None;
@@ -767,20 +758,14 @@ mod tests {
     }
 
     #[test]
-    fn oracle_auth_errors_use_legacy_then_10g_fallbacks() {
+    fn oracle_auth_errors_do_not_switch_driver_profiles() {
         let mut cfg = config(DatabaseType::Oracle, Some("ORCL"));
         cfg.driver_profile = Some("oracle".to_string());
 
-        assert_eq!(
-            oracle_auth_fallback_profiles(&cfg, "ORA-28040: No matching authentication protocol"),
-            vec!["oracle-legacy", "oracle-10g"]
-        );
+        assert!(oracle_auth_fallback_profiles(&cfg, "ORA-28040: No matching authentication protocol").is_empty());
 
         cfg.driver_profile = Some("oracle-legacy".to_string());
-        assert_eq!(
-            oracle_auth_fallback_profiles(&cfg, "ORA-28040: No matching authentication protocol"),
-            vec!["oracle-10g"]
-        );
+        assert!(oracle_auth_fallback_profiles(&cfg, "ORA-28040: No matching authentication protocol").is_empty());
 
         cfg.driver_profile = Some("oracle-10g".to_string());
         assert!(oracle_auth_fallback_profiles(&cfg, "ORA-28040: No matching authentication protocol").is_empty());

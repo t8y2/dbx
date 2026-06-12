@@ -11,6 +11,10 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  FunctionInfo,
+  SequenceInfo,
+  RuleInfo,
+  OwnerInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
@@ -47,7 +51,7 @@ import type { AiConfig } from "@/stores/settingsStore";
 import type { QueryEditability } from "@/lib/sqlAnalysis";
 import type { DataGridColumnValueFilterConditionOptions, DataGridContextFilterConditionOptions, DataGridCountSqlOptions, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridSaveStatementOptions, HiveTablePropertiesSqlOptions } from "@/lib/dataGridSql";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataCompare";
-import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff } from "@/lib/schemaDiff";
+import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schemaDiff";
 import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, TableStructureChangeSql } from "@/lib/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/databaseSearch";
@@ -770,8 +774,33 @@ export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): 
   return invoke("prepare_schema_diff", { options });
 }
 
-export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string): Promise<string> {
-  return invoke("generate_schema_sync_sql", { diffs, databaseType, targetSchema });
+export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean): Promise<string> {
+  return invoke("generate_schema_sync_sql", {
+    diffs,
+    databaseType,
+    targetSchema,
+    functionDiffs: functionDiffs ?? [],
+    sequenceDiffs: sequenceDiffs ?? [],
+    ruleDiffs: ruleDiffs ?? [],
+    ownerDiffs: ownerDiffs ?? [],
+    cascadeDelete: cascadeDelete ?? false,
+  });
+}
+
+export async function listFunctions(connectionId: string, database: string, schema: string): Promise<FunctionInfo[]> {
+  return invoke("list_functions", { connectionId, database, schema });
+}
+
+export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
+  return invoke("list_sequences", { connectionId, database, schema, withLastValues });
+}
+
+export async function listRules(connectionId: string, database: string, schema: string): Promise<RuleInfo[]> {
+  return invoke("list_rules", { connectionId, database, schema });
+}
+
+export async function listOwners(connectionId: string, database: string, schema: string): Promise<OwnerInfo[]> {
+  return invoke("list_owners", { connectionId, database, schema });
 }
 
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {

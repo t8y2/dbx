@@ -950,6 +950,18 @@ const aiCredentialPlaceholder = computed(() => {
   if (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer") return "ANTHROPIC_AUTH_TOKEN";
   return "";
 });
+const aiEndpointPlaceholder = computed(() => {
+  if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
+    return "https://api.example.com/v1";
+  }
+  return "https://api.openai.com/v1";
+});
+const aiEndpointHint = computed(() => {
+  if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
+    return "大多数 OpenAI 兼容 API 需要 /v1 路径前缀";
+  }
+  return "";
+});
 const aiSupportsApiStyle = computed(() => aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom");
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
 const aiCanListModels = computed(() => aiModelListSupported.value && !!aiEditEndpoint.value.trim() && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
@@ -2097,9 +2109,12 @@ watch(
                   <Input v-model="aiEditApiKey" type="password" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
-                  <Label class="text-right text-xs">Endpoint</Label>
-                  <Input v-model="aiEditEndpoint" placeholder="https://api.openai.com/v1" autocomplete="off" class="col-span-2 h-8 text-xs" />
+                <div class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">Endpoint</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
+                    <p v-if="aiEndpointHint" class="text-[11px] text-muted-foreground">{{ aiEndpointHint }}</p>
+                  </div>
                 </div>
 
                 <div class="grid grid-cols-3 items-start gap-3">

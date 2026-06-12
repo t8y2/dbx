@@ -118,6 +118,61 @@ fn builds_mysql_column_and_index_changes() {
 }
 
 #[test]
+fn mysql_create_index_with_comment() {
+    let mut col = column("name");
+    col.data_type = "varchar(120)".to_string();
+    let mut idx = index("idx_users_name", &["name"]);
+    idx.comment = "Search index".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` ADD COLUMN `name` varchar(120);",
+            "CREATE INDEX `idx_users_name` ON `users` (`name`) COMMENT 'Search index';",
+        ]
+    );
+}
+
+#[test]
+fn mysql_create_unique_index_with_comment_and_btree() {
+    let mut idx = index("uniq_users_email", &["email"]);
+    idx.is_unique = true;
+    idx.index_type = "BTREE".to_string();
+    idx.comment = "Unique email index".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE UNIQUE INDEX `uniq_users_email` USING BTREE ON `users` (`email`) COMMENT 'Unique email index';",]
+    );
+}
+
+#[test]
 fn mysql_add_timestamp_column_drops_invalid_precision() {
     let mut created_at = column("created_at");
     created_at.data_type = "timestamp(255)".to_string();

@@ -364,8 +364,6 @@ const driverProfiles: Record<
   },
   sqlserver: { type: "sqlserver", port: 1433, user: "sa", label: "SQL Server", icon: "sqlserver" },
   oracle: { type: "oracle", port: 1521, user: "system", label: "Oracle", icon: "oracle" },
-  "oracle-legacy": { type: "oracle", port: 1521, user: "system", label: "Oracle Legacy", icon: "oracle" },
-  "oracle-10g": { type: "oracle", port: 1521, user: "system", label: "Oracle 10g", icon: "oracle" },
   elasticsearch: {
     type: "elasticsearch",
     port: 9200,
@@ -480,6 +478,7 @@ const driverProfiles: Record<
 };
 
 function profileForConfig(config: ConnectionConfig) {
+  if (config.db_type === "oracle") return "oracle";
   if (config.driver_profile && driverProfiles[config.driver_profile]) {
     if (config.driver_profile === "oceanbase-oracle") return "oceanbase";
     return config.driver_profile;
@@ -718,8 +717,6 @@ const iconTypeMap: Record<string, string> = {
   clickhouse: "clickhouse",
   sqlserver: "sqlserver",
   oracle: "oracle",
-  "oracle-legacy": "oracle",
-  "oracle-10g": "oracle",
   elasticsearch: "elasticsearch",
   mariadb: "mariadb",
   tidb: "tidb",
@@ -2734,20 +2731,6 @@ function openExternalUrl(url: string) {
                       {{ t("connection.driverInstallHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore')">{{ t("toolbar.driverManager") }}</a
                       >{{ t("connection.driverInstallHintSuffix") }}
                     </p>
-                  </div>
-
-                  <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.version") }}</Label>
-                    <Select :model-value="selectedType === 'oracle-legacy' || selectedType === 'oracle-10g' ? selectedType : 'oracle'" @update:model-value="(val) => applyProfile(String(val), true)">
-                      <SelectTrigger class="col-span-3 h-8 text-sm">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="oracle">Oracle 19c+</SelectItem>
-                        <SelectItem value="oracle-legacy">Oracle 11g-19c</SelectItem>
-                        <SelectItem value="oracle-10g">Oracle 10g</SelectItem>
-                      </SelectContent>
-                    </Select>
                   </div>
 
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">

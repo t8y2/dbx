@@ -66,6 +66,7 @@ const mysqlCapabilities = capabilities({
   dropIndex: true,
   rebuildIndex: true,
   indexType: true,
+  indexComment: true,
   alterPrimaryKey: true,
 });
 

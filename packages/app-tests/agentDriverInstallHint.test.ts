@@ -22,7 +22,7 @@ test("does not show agent driver install hints for built-in database types", () 
   assert.equal(showAgentDriverInstallHint("mysql", [{ db_type: "informix", installed: false }]), false);
 });
 
-test("uses the selected Oracle driver profile for install hints", () => {
+test("uses the unified Oracle driver for legacy Oracle profiles", () => {
   assert.equal(
     showAgentDriverInstallHint(
       "oracle",
@@ -33,7 +33,7 @@ test("uses the selected Oracle driver profile for install hints", () => {
       ],
       "oracle-10g",
     ),
-    false,
+    true,
   );
   assert.equal(
     showAgentDriverInstallHint(

@@ -649,25 +649,25 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         return execute_search_query(client, search_query, start).await;
     }
 
-    // `SELECT *` with clauses our simple parser doesn't cover (WHERE, IN,
-    // BETWEEN, LIKE, ...). Translate the SQL to an ES `_search` body
-    // ourselves rather than going through ES's `_sql` endpoint — `_sql`
-    // refuses several common shapes (LIKE on a `text` field with no
-    // `.keyword`, `SELECT *` returning an array field like `host.ip`, ...)
-    // that translate cleanly to raw DSL. Adapt first so that hyphenated
-    // index names (`aifanfan-python-bot-logs-*`) and `@timestamp`-style
-    // identifiers come out as double-quoted identifiers sqlparser will
-    // accept.
-    let adapted_for_translator = adapt_elasticsearch_sql_query(input);
-    match crate::db::elasticsearch_sql::translate_select_star(&adapted_for_translator) {
-        Ok(Some(translated)) => {
-            return execute_translated_select_star(client, translated, start).await;
-        }
-        Ok(None) => {}
-        Err(message) => return Err(format!("Elasticsearch SQL error: {message}")),
-    }
-
     if is_elasticsearch_sql_query(input) {
+        // `SELECT *` with clauses our simple parser doesn't cover (WHERE, IN,
+        // BETWEEN, LIKE, ...). Translate the SQL to an ES `_search` body
+        // ourselves rather than going through ES's `_sql` endpoint — `_sql`
+        // refuses several common shapes (LIKE on a `text` field with no
+        // `.keyword`, `SELECT *` returning an array field like `host.ip`, ...)
+        // that translate cleanly to raw DSL. Adapt first so that hyphenated
+        // index names (`aifanfan-python-bot-logs-*`) and `@timestamp`-style
+        // identifiers come out as double-quoted identifiers sqlparser will
+        // accept.
+        let adapted_for_translator = adapt_elasticsearch_sql_query(input);
+        match crate::db::elasticsearch_sql::translate_select_star(&adapted_for_translator) {
+            Ok(Some(translated)) => {
+                return execute_translated_select_star(client, translated, start).await;
+            }
+            Ok(None) => {}
+            Err(message) => return Err(format!("Elasticsearch SQL error: {message}")),
+        }
+
         return execute_sql_query(client, input, start).await;
     }
 
@@ -1434,6 +1434,15 @@ mod tests {
             redact_elasticsearch_url("https://elastic:secret@localhost:9200"),
             "https://user:password@localhost:9200"
         );
+    }
+
+    #[test]
+    fn elasticsearch_sql_detection_does_not_treat_rest_methods_as_sql() {
+        assert!(super::is_elasticsearch_sql_query("SELECT * FROM index_task_v1"));
+        assert!(super::is_elasticsearch_sql_query(" select count(*) from index_task_v1"));
+        assert!(!super::is_elasticsearch_sql_query("GET /index_task_v1/_mapping"));
+        assert!(!super::is_elasticsearch_sql_query("POST /index_task_v1/_search\n{}"));
+        assert!(!super::is_elasticsearch_sql_query("DELETE /index_task_v1/_doc/1"));
     }
 
     #[test]

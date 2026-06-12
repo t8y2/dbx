@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import type { CustomTheme, CustomThemeColors } from "@/stores/settingsStore";
-import { DEFAULT_CUSTOM_THEME_COLORS } from "@/stores/settingsStore";
+import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { Plus, Trash2, Copy, Pencil, ChevronDown, Palette } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useI18n } from "vue-i18n";
@@ -367,6 +367,7 @@ function handleAddTheme() {
     id,
     name,
     colors: { ...DEFAULT_CUSTOM_THEME_COLORS },
+    ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
   });
   activeEditId.value = id;
 }
@@ -388,6 +389,7 @@ function handleDuplicateTheme(theme: CustomTheme) {
     id,
     name: `${theme.name}${t("settings.customThemeCopySuffix")}`,
     colors: { ...theme.colors },
+    ddlColors: { ...(theme.ddlColors ?? DEFAULT_CUSTOM_THEME_DDL_COLORS) },
   });
   activeEditId.value = id;
 }

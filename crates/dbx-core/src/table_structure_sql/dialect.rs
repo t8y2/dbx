@@ -78,6 +78,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             drop_index: true,
             rebuild_index: true,
             index_type: true,
+            index_comment: true,
             alter_primary_key: true,
             ..base
         },

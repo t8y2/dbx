@@ -5,6 +5,10 @@ use duckdb::types::{TimeUnit, Value, ValueRef};
 use mysql_async::prelude::Queryable;
 use std::future::Future;
 use std::time::Duration;
+#[cfg(feature = "duckdb-bundled")]
+use tokio::task::JoinHandle;
+#[cfg(feature = "duckdb-bundled")]
+use tokio::time::sleep;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +22,8 @@ use crate::sql::{split_sql_batches, split_sql_statements};
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
+#[cfg(feature = "duckdb-bundled")]
+const DUCKDB_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Check read-only protection for a connection, blocking write SQL statements.
 /// Only clones the connection name when read-only mode is active, avoiding
@@ -384,6 +390,60 @@ pub fn duckdb_execute_with_max_rows(
 }
 
 #[cfg(feature = "duckdb-bundled")]
+async fn wait_for_duckdb_task_with_interrupt(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    interrupt_handle: std::sync::Arc<duckdb::InterruptHandle>,
+    mut task: JoinHandle<Result<db::QueryResult, String>>,
+) -> Result<db::QueryResult, String> {
+    match (cancel_token, timeout_duration) {
+        (Some(token), Some(duration)) => {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    interrupt_handle.interrupt();
+                    drain_interrupted_duckdb_task(&mut task).await;
+                    Err(canceled_error())
+                }
+                result = &mut task => result.map_err(|e| e.to_string())?,
+                _ = sleep(duration) => {
+                    interrupt_handle.interrupt();
+                    drain_interrupted_duckdb_task(&mut task).await;
+                    Err(timeout_error())
+                }
+            }
+        }
+        (Some(token), None) => {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    interrupt_handle.interrupt();
+                    drain_interrupted_duckdb_task(&mut task).await;
+                    Err(canceled_error())
+                }
+                result = &mut task => result.map_err(|e| e.to_string())?,
+            }
+        }
+        (None, Some(duration)) => {
+            tokio::select! {
+                result = &mut task => result.map_err(|e| e.to_string())?,
+                _ = sleep(duration) => {
+                    interrupt_handle.interrupt();
+                    drain_interrupted_duckdb_task(&mut task).await;
+                    Err(timeout_error())
+                }
+            }
+        }
+        (None, None) => task.await.map_err(|e| e.to_string())?,
+    }
+}
+
+#[cfg(feature = "duckdb-bundled")]
+async fn drain_interrupted_duckdb_task(task: &mut JoinHandle<Result<db::QueryResult, String>>) {
+    let _ = timeout(DUCKDB_INTERRUPT_DRAIN_TIMEOUT, task).await;
+}
+
+#[cfg(feature = "duckdb-bundled")]
 fn duckdb_execute_for_database(
     con: &duckdb::Connection,
     attached_names: &[String],
@@ -641,10 +701,11 @@ pub async fn do_execute(
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let con = con.clone();
+            let interrupt_handle = con.lock().map_err(|e| e.to_string())?.interrupt_handle();
             if let Some(ref execution_id) = options.execution_id {
-                let interrupt_handle = con.lock().map_err(|e| e.to_string())?.interrupt_handle();
+                let cancel_interrupt_handle = interrupt_handle.clone();
                 state.running_queries.register_interrupt(execution_id, move || {
-                    interrupt_handle.interrupt();
+                    cancel_interrupt_handle.interrupt();
                 });
             }
             let sql = sql.to_string();
@@ -652,14 +713,11 @@ pub async fn do_execute(
             let attached_names = _duckdb_attached_names;
             let max_rows = options.max_rows;
             drop(connections);
-            wait_for_query_opt(cancel_token, query_timeout, async move {
-                let task = tokio::task::spawn_blocking(move || {
-                    let con = con.lock().map_err(|e| e.to_string())?;
-                    duckdb_execute_for_database(&con, &attached_names, database.as_deref(), &sql, max_rows)
-                });
-                task.await.map_err(|e| e.to_string())?
-            })
-            .await
+            let task = tokio::task::spawn_blocking(move || {
+                let con = con.lock().map_err(|e| e.to_string())?;
+                duckdb_execute_for_database(&con, &attached_names, database.as_deref(), &sql, max_rows)
+            });
+            wait_for_duckdb_task_with_interrupt(cancel_token, query_timeout, interrupt_handle, task).await
         }
         #[cfg(not(feature = "duckdb-bundled"))]
         PoolKind::DuckDb(_) => {
@@ -811,23 +869,21 @@ pub async fn do_execute(
                 return Err("External data sources are read-only. Only SELECT queries are supported.".to_string());
             }
             let con = ext_pool.cache.clone();
+            let interrupt_handle = con.lock().map_err(|e| e.to_string())?.interrupt_handle();
             if let Some(ref execution_id) = options.execution_id {
-                let interrupt_handle = con.lock().map_err(|e| e.to_string())?.interrupt_handle();
+                let cancel_interrupt_handle = interrupt_handle.clone();
                 state.running_queries.register_interrupt(execution_id, move || {
-                    interrupt_handle.interrupt();
+                    cancel_interrupt_handle.interrupt();
                 });
             }
             let sql = sql.to_string();
             let max_rows = options.max_rows;
             drop(connections);
-            wait_for_query_opt(cancel_token, query_timeout, async move {
-                let task = tokio::task::spawn_blocking(move || {
-                    let con = con.lock().map_err(|e| e.to_string())?;
-                    duckdb_execute_with_max_rows(&con, &sql, max_rows)
-                });
-                task.await.map_err(|e| e.to_string())?
-            })
-            .await
+            let task = tokio::task::spawn_blocking(move || {
+                let con = con.lock().map_err(|e| e.to_string())?;
+                duckdb_execute_with_max_rows(&con, &sql, max_rows)
+            });
+            wait_for_duckdb_task_with_interrupt(cancel_token, query_timeout, interrupt_handle, task).await
         }
         #[cfg(not(feature = "duckdb-bundled"))]
         PoolKind::ExternalTabular(_) => {
@@ -1668,6 +1724,38 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err(), timeout_error());
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duckdb_timeout_interrupts_running_task_and_releases_connection() {
+        let con = std::sync::Arc::new(std::sync::Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
+        let interrupt_handle = con.lock().unwrap().interrupt_handle();
+        let running_con = con.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let con = running_con.lock().map_err(|e| e.to_string())?;
+            duckdb_execute_with_max_rows(&con, "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) tbl(i)", None)
+        });
+
+        let result =
+            wait_for_duckdb_task_with_interrupt(None, Some(Duration::from_millis(10)), interrupt_handle, task).await;
+
+        assert_eq!(result.unwrap_err(), timeout_error());
+
+        let follow_con = con.clone();
+        let follow_up = timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                let con = follow_con.lock().map_err(|e| e.to_string())?;
+                duckdb_execute_with_max_rows(&con, "SELECT 1", None)
+            }),
+        )
+        .await
+        .expect("DuckDB connection should be released after timeout")
+        .expect("follow-up task should not panic")
+        .expect("follow-up query should succeed");
+
+        assert_eq!(follow_up.rows, vec![vec![serde_json::json!(1)]]);
     }
 
     #[test]

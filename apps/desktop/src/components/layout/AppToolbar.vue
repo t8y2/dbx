@@ -66,12 +66,13 @@ function onToolbarDblClick(e: MouseEvent) {
 
 const toolbarEl = ref<HTMLElement>();
 const toolbarCollapsed = ref(false);
-const COLLAPSE_THRESHOLD = 1000;
 
 function checkToolbarWidth() {
   const el = toolbarEl.value;
   if (!el) return;
-  toolbarCollapsed.value = el.clientWidth < COLLAPSE_THRESHOLD;
+  const screenWidth = window.visualViewport?.width ?? window.innerWidth;
+  const threshold = screenWidth / 2;
+  toolbarCollapsed.value = el.clientWidth < threshold;
 }
 
 let resizeObserver: ResizeObserver | null = null;
@@ -79,10 +80,12 @@ let resizeObserver: ResizeObserver | null = null;
 onMounted(() => {
   resizeObserver = new ResizeObserver(checkToolbarWidth);
   if (toolbarEl.value) resizeObserver.observe(toolbarEl.value);
+  window.addEventListener("resize", checkToolbarWidth);
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
+  window.removeEventListener("resize", checkToolbarWidth);
 });
 
 const moreItems = computed(() => {

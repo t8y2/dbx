@@ -3414,6 +3414,16 @@ const canvasDevicePixelRatio = ref(typeof window === "undefined" ? 1 : window.de
 const canvasBackingPixelRatio = computed(() => Math.min(4, Math.max(1, canvasDevicePixelRatio.value * settingsStore.editorSettings.uiScale)));
 const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
 const canvasContentHeight = computed(() => Math.max(1, displayRowCount.value * CANVAS_DATA_GRID_ROW_HEIGHT));
+// Clamp the sticky canvas/overlay to the content width. A viewport-wide sticky surface inflates the
+// scroller's scrollWidth up to clientWidth, so with few columns it sits right on the overflow threshold
+// and the custom horizontal scrollbar flickers while the pane shrinks (canvas width lags clientWidth).
+const canvasSurfaceWidth = computed(() => {
+  const total = totalWidth.value;
+  const vw = canvasViewportWidth.value;
+  if (total <= 0) return Math.max(0, vw);
+  if (vw <= 0) return total;
+  return Math.min(vw, total);
+});
 const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}`);
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
@@ -3774,10 +3784,9 @@ function canvasEffectiveViewportHeight(): number {
 }
 
 const canvasOverlayStyle = computed(() => {
-  const vw = canvasEffectiveViewportWidth();
   const vh = canvasEffectiveViewportHeight();
   return {
-    width: `${vw}px`,
+    width: `${canvasSurfaceWidth.value}px`,
     height: `${vh}px`,
     marginTop: `-${vh}px`,
   };
@@ -3833,7 +3842,7 @@ function drawCanvasGrid() {
   drawCanvasDataGrid({
     canvas,
     scroller,
-    width: Math.max(1, canvasViewportWidth.value || scroller.clientWidth),
+    width: Math.max(1, canvasSurfaceWidth.value || scroller.clientWidth),
     height: Math.max(1, canvasViewportHeight.value || scroller.clientHeight),
     pixelRatio: canvasBackingPixelRatio.value,
     isDark: isDark.value,
@@ -4408,7 +4417,7 @@ function scrollCanvasRowIntoView(rowIndex: number, block: "nearest" | "start") {
   syncCanvasViewport();
 }
 
-function scrollGridRowIntoView(rowIndex: number) {
+function f(rowIndex: number) {
   const target = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
   nextTick(() => {
     if (useCanvasGridRows.value) {
@@ -6716,7 +6725,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <canvas
                     ref="canvasRef"
                     class="canvas-grid-surface sticky left-0 top-0 z-0 block text-xs font-sans font-normal"
-                    :style="{ width: `${canvasViewportWidth}px`, height: `${canvasViewportHeight}px` }"
+                    :style="{ width: `${canvasSurfaceWidth}px`, height: `${canvasViewportHeight}px` }"
                     @mousemove="onCanvasMouseMove"
                     @mouseleave="onCanvasMouseLeave"
                     @mousedown="onCanvasMouseDown"

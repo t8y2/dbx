@@ -67,7 +67,7 @@ function toggleAll() {
   refreshSelectedSyncSql().catch((e) => toast(e?.message || String(e), 5000));
 }
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "etcd"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "etcd", "kafka"].includes(c.db_type)));
 
 const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && targetConnectionId.value && targetDatabase.value && targetSchema.value);
 

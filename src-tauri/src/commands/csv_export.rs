@@ -25,9 +25,6 @@ pub async fn export_query_result_csv(request: QueryResultCsvExportRequest) -> Re
 }
 
 #[tauri::command]
-pub async fn export_table_data_csv(
-    state: State<'_, Arc<AppState>>,
-    request: TableCsvExportOptions,
-) -> Result<u64, String> {
-    export_table_data_csv_core(&state, request).await
+pub fn export_table_data_csv(state: State<'_, Arc<AppState>>, request: TableCsvExportOptions) -> Result<u64, String> {
+    tauri::async_runtime::block_on(async move { export_table_data_csv_core(&state, request).await })
 }

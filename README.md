@@ -262,8 +262,10 @@ pnpm dev:backend   # backend
 ### Build
 
 ```bash
-pnpm tauri build
+pnpm build:tauri
 ```
+
+On Windows, use `build:tauri` (not bare `pnpm tauri build`) so MSVC/OpenSSL env is loaded for Kafka (`sasl2-sys`). Same requirement as `pnpm dev:tauri`.
 
 The installer will be in `src-tauri/target/release/bundle/`.
 

@@ -20,6 +20,26 @@ import type {
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
+  KafkaTopicSummary,
+  KafkaTopicDetail,
+  KafkaBrokerInfo,
+  KafkaAclEntry,
+  KafkaMessageRecord,
+  KafkaFetchRequest,
+  KafkaProduceRequest,
+  KafkaProduceResult,
+  KafkaConsumerGroupSummary,
+  KafkaConsumerGroupDetail,
+  KafkaCreateTopicRequest,
+  KafkaCreateTopicResult,
+  KafkaDeleteTopicResult,
+  KafkaPayload,
+  SchemaRegistrySchemaDetail,
+  KafkaDecodedPayload,
+  KafkaTailStartRequest,
+  KafkaTailEvent,
+  KafkaTopicCountStartRequest,
+  KafkaTopicCountEvent,
 } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/databaseObjectCapabilities";
 import type { AiConfig } from "@/stores/settingsStore";
@@ -1134,6 +1154,152 @@ export async function etcdPut(connectionId: string, key: string, value: KvValue,
 
 export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
   return invoke("etcd_delete", { connectionId, key });
+}
+
+// --- Kafka ---
+export type {
+  KafkaTopicSummary,
+  KafkaTopicDetail,
+  KafkaBrokerInfo,
+  KafkaAclEntry,
+  KafkaPartitionInfo,
+  KafkaPayloadEncoding,
+  KafkaPayload,
+  KafkaMessageRecord,
+  KafkaStartOffset,
+  KafkaFetchRequest,
+  KafkaProduceRequest,
+  KafkaProduceResult,
+  KafkaConsumerGroupSummary,
+  KafkaConsumerGroupDetail,
+  KafkaConsumerGroupPartitionLag,
+  KafkaCreateTopicRequest,
+  KafkaCreateTopicResult,
+  KafkaDeleteTopicResult,
+  SchemaRegistrySchemaDetail,
+  KafkaDecodedPayload,
+  KafkaTailStartRequest,
+  KafkaTailEvent,
+  KafkaTopicCountStartRequest,
+  KafkaTopicCountEvent,
+} from "@/types/database";
+
+export async function kafkaListTopics(connectionId: string, prefix: string, limit: number): Promise<KafkaTopicSummary[]> {
+  return invoke("kafka_list_topics", { connectionId, prefix, limit });
+}
+
+export async function kafkaDescribeTopic(connectionId: string, topic: string): Promise<KafkaTopicDetail> {
+  return invoke("kafka_describe_topic", { connectionId, topic });
+}
+
+export async function kafkaFetchMessages(connectionId: string, req: KafkaFetchRequest): Promise<KafkaMessageRecord[]> {
+  return invoke("kafka_fetch_messages", {
+    connectionId,
+    topic: req.topic,
+    partition: req.partition,
+    startOffset: req.startOffset,
+    limit: req.limit,
+  });
+}
+
+export async function kafkaProduceMessage(connectionId: string, req: KafkaProduceRequest): Promise<KafkaProduceResult> {
+  return invoke("kafka_produce_message", { connectionId, req });
+}
+
+export async function kafkaGetTopicMessageCount(connectionId: string, topic: string): Promise<number | null> {
+  return invoke("kafka_get_topic_message_count", { connectionId, topic });
+}
+
+export async function kafkaTopicCountStart(request: KafkaTopicCountStartRequest, onEvent: (event: KafkaTopicCountEvent) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let unlisten: UnlistenFn | null = null;
+    void (async () => {
+      try {
+        unlisten = await listen<KafkaTopicCountEvent>("kafka-topic-count-progress", (event) => {
+          if (event.payload.sessionId !== request.sessionId) return;
+          onEvent(event.payload);
+          if (["done", "stopped", "error"].includes(event.payload.status)) {
+            unlisten?.();
+            resolve();
+          }
+        });
+        await invoke("kafka_topic_count_start", { request });
+      } catch (error) {
+        unlisten?.();
+        reject(error);
+      }
+    })();
+  });
+}
+
+export async function kafkaTopicCountStop(sessionId: string): Promise<void> {
+  return invoke("kafka_topic_count_stop", { sessionId });
+}
+
+export async function kafkaListBrokers(connectionId: string): Promise<KafkaBrokerInfo[]> {
+  return invoke("kafka_list_brokers", { connectionId });
+}
+
+export async function kafkaListAcls(connectionId: string): Promise<KafkaAclEntry[]> {
+  return invoke("kafka_list_acls", { connectionId });
+}
+
+export async function kafkaListConsumerGroups(connectionId: string): Promise<KafkaConsumerGroupSummary[]> {
+  return invoke("kafka_list_consumer_groups", { connectionId });
+}
+
+export async function kafkaDescribeConsumerGroup(connectionId: string, groupId: string): Promise<KafkaConsumerGroupDetail> {
+  return invoke("kafka_describe_consumer_group", { connectionId, groupId });
+}
+
+export async function kafkaCreateTopic(connectionId: string, req: KafkaCreateTopicRequest): Promise<KafkaCreateTopicResult> {
+  return invoke("kafka_create_topic", { connectionId, req });
+}
+
+export async function kafkaDeleteTopic(connectionId: string, topic: string): Promise<KafkaDeleteTopicResult> {
+  return invoke("kafka_delete_topic", { connectionId, topic });
+}
+
+export async function kafkaSchemaRegistryListSubjects(connectionId: string, prefix: string): Promise<string[]> {
+  return invoke("kafka_schema_registry_list_subjects", { connectionId, prefix });
+}
+
+export async function kafkaSchemaRegistryListVersions(connectionId: string, subject: string): Promise<number[]> {
+  return invoke("kafka_schema_registry_list_versions", { connectionId, subject });
+}
+
+export async function kafkaSchemaRegistryGetSchema(connectionId: string, subject: string, version: string): Promise<SchemaRegistrySchemaDetail> {
+  return invoke("kafka_schema_registry_get_schema", { connectionId, subject, version });
+}
+
+export async function kafkaDecodePayload(connectionId: string, payload: KafkaPayload, subjectHint?: string): Promise<KafkaDecodedPayload> {
+  return invoke("kafka_decode_payload", { connectionId, payload, subjectHint });
+}
+
+export async function kafkaTailStart(request: KafkaTailStartRequest, onEvent: (event: KafkaTailEvent) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let unlisten: UnlistenFn | null = null;
+    void (async () => {
+      try {
+        unlisten = await listen<KafkaTailEvent>("kafka-tail-progress", (event) => {
+          if (event.payload.tailId !== request.tailId) return;
+          onEvent(event.payload);
+          if (event.payload.status === "stopped") {
+            unlisten?.();
+            resolve();
+          }
+        });
+        await invoke("kafka_tail_start", { request });
+      } catch (error) {
+        unlisten?.();
+        reject(error);
+      }
+    })();
+  });
+}
+
+export async function kafkaTailStop(tailId: string): Promise<void> {
+  return invoke("kafka_tail_stop", { tailId });
 }
 
 // --- MongoDB ---

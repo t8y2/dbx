@@ -391,8 +391,8 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
 mod tests {
     use super::*;
     use crate::models::connection::{
-        default_connect_timeout_secs, default_idle_timeout_secs, default_query_timeout_secs,
-        default_redis_key_separator,
+        default_connect_timeout_secs, default_idle_timeout_secs, default_kafka_consumer_group,
+        default_query_timeout_secs, default_redis_key_separator,
     };
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
@@ -431,6 +431,11 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            kafka_bootstrap_servers: String::new(),
+            kafka_security_protocol: None,
+            kafka_sasl_mechanism: None,
+            kafka_consumer_group: default_kafka_consumer_group(),
+            kafka_schema_registry_url: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

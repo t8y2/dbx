@@ -770,6 +770,7 @@ pub async fn do_execute(
                 .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
+        PoolKind::Kafka(_) => Err("Use Kafka-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
         PoolKind::InfluxDb(client) => {
             let client = client.clone();
@@ -1332,6 +1333,7 @@ pub async fn execute_statements_in_transaction(
             #[cfg(feature = "duckdb-bundled")]
             PoolKind::DuckDb(_)
             | PoolKind::Redis(_)
+            | PoolKind::Kafka(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
             | PoolKind::InfluxDb(_)
@@ -1340,6 +1342,7 @@ pub async fn execute_statements_in_transaction(
             #[cfg(not(feature = "duckdb-bundled"))]
             PoolKind::DuckDb(_)
             | PoolKind::Redis(_)
+            | PoolKind::Kafka(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
             | PoolKind::InfluxDb(_)
@@ -1895,6 +1898,11 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            kafka_bootstrap_servers: String::new(),
+            kafka_security_protocol: None,
+            kafka_sasl_mechanism: None,
+            kafka_consumer_group: crate::models::connection::default_kafka_consumer_group(),
+            kafka_schema_registry_url: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

@@ -5,6 +5,7 @@ export * from "./database.js";
 export * from "./diagnostics.js";
 export * from "./entrypoint.js";
 export * from "./format.js";
+export * from "./kafka-bridge.js";
 export * from "./paths.js";
 export * from "./schema-context.js";
 export * from "./sql-safety.js";

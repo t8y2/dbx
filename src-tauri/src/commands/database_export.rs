@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
+use crate::commands::spawn_local_async;
 
 pub use dbx_core::database_export::{DatabaseExportRequest, ExportProgress, ExportStatus};
 
@@ -18,7 +19,7 @@ pub async fn export_database_sql(
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
 
-    tokio::spawn(async move {
+    spawn_local_async("database export", move || async move {
         let result = dbx_core::database_export::export_database_sql_core(&state, &request, |progress| {
             emit_progress(&app, progress)
         })

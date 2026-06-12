@@ -9,8 +9,14 @@ import {
   evaluateMongoAggregateSafety,
   evaluateSqlSafety,
   formatCell,
+  formatKafkaPayload,
   formatSchemaContext,
   isMainModule,
+  kafkaDecodePayload,
+  kafkaFetchMessages,
+  kafkaListSchemaSubjects,
+  kafkaListTopics,
+  kafkaProduceMessage,
   mdTable,
   notifyReload,
   parseMongoAggregateCommand,
@@ -46,7 +52,7 @@ function formatQueryToolResult(result: QueryResult, title?: string) {
 }
 
 export const DBX_CONNECTION_TYPE_DESCRIPTION =
-  "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, etcd, doris, starrocks, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, gbase, h2, snowflake, trino, hive, db2, informix, influxdb, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access";
+  "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, etcd, kafka, doris, starrocks, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, gbase, h2, snowflake, trino, hive, db2, informix, influxdb, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access";
 const FILE_CAPABLE_CONNECTION_TYPES = new Set(["sqlite", "duckdb", "access", "h2"]);
 
 export function createDbxMcpServer(backend: Backend, options: { isWebMode?: boolean } = {}): McpServer {
@@ -263,6 +269,148 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
           },
           "Query sent to DBX",
         );
+      },
+    );
+
+    server.tool(
+      "dbx_kafka_list_topics",
+      "List Kafka topics for a connection. Requires DBX desktop app to be running.",
+      {
+        connection_name: z.string().describe("Name of the DBX Kafka connection"),
+        prefix: z.string().optional().describe("Topic name prefix filter"),
+        limit: z.number().int().min(1).max(500).default(100).describe("Maximum number of topics to return"),
+      },
+      async ({ connection_name, prefix, limit }) => {
+        const config = await backend.findConnection(connection_name);
+        if (!config) return toolError("CONNECTION_NOT_FOUND", `Connection "${connection_name}" not found.`);
+        if (config.db_type !== "kafka") return toolError("INVALID_CONNECTION_TYPE", `Connection "${connection_name}" is not a Kafka connection.`);
+        try {
+          const topics = await kafkaListTopics(connection_name, prefix ?? "", limit);
+          if (topics.length === 0) return text("No topics found.");
+          const rows = topics.map((t) => [t.name, String(t.partitionCount), t.internal ? "yes" : "no"]);
+          return text(mdTable(["Topic", "Partitions", "Internal"], rows));
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/not running/i.test(msg)) return toolError("DBX_NOT_RUNNING", msg);
+          return toolError("KAFKA_ERROR", msg);
+        }
+      },
+    );
+
+    server.tool(
+      "dbx_kafka_fetch_messages",
+      "Fetch Kafka messages from a topic partition. Requires DBX desktop app to be running.",
+      {
+        connection_name: z.string().describe("Name of the DBX Kafka connection"),
+        topic: z.string().describe("Topic name"),
+        partition: z.number().int().min(0).describe("Partition number"),
+        start_offset: z
+          .union([z.enum(["earliest", "latest"]), z.object({ offset: z.number().int() })])
+          .default("latest")
+          .describe('Start offset: "earliest", "latest", or { offset: number }'),
+        limit: z.number().int().min(1).max(100).default(20).describe("Maximum number of messages to fetch"),
+      },
+      async ({ connection_name, topic, partition, start_offset, limit }) => {
+        const config = await backend.findConnection(connection_name);
+        if (!config) return toolError("CONNECTION_NOT_FOUND", `Connection "${connection_name}" not found.`);
+        if (config.db_type !== "kafka") return toolError("INVALID_CONNECTION_TYPE", `Connection "${connection_name}" is not a Kafka connection.`);
+        try {
+          const messages = await kafkaFetchMessages(connection_name, topic, partition, start_offset, limit);
+          if (messages.length === 0) return text("No messages found.");
+          const rows = messages.map((m) => [
+            String(m.partition),
+            String(m.offset),
+            String(m.timestamp),
+            formatKafkaPayload(m.key),
+            formatKafkaPayload(m.value),
+          ]);
+          return text(`${mdTable(["Partition", "Offset", "Timestamp", "Key", "Value"], rows)}\n\n${messages.length} message(s)`);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/not running/i.test(msg)) return toolError("DBX_NOT_RUNNING", msg);
+          return toolError("KAFKA_ERROR", msg);
+        }
+      },
+    );
+
+    server.tool(
+      "dbx_kafka_list_schema_subjects",
+      "List Confluent Schema Registry subjects for a Kafka connection. Requires DBX desktop app to be running and Schema Registry URL configured.",
+      {
+        connection_name: z.string().describe("Name of the DBX Kafka connection"),
+        prefix: z.string().optional().describe("Subject name prefix filter"),
+      },
+      async ({ connection_name, prefix }) => {
+        const config = await backend.findConnection(connection_name);
+        if (!config) return toolError("CONNECTION_NOT_FOUND", `Connection "${connection_name}" not found.`);
+        if (config.db_type !== "kafka") return toolError("INVALID_CONNECTION_TYPE", `Connection "${connection_name}" is not a Kafka connection.`);
+        try {
+          const subjects = await kafkaListSchemaSubjects(connection_name, prefix ?? "");
+          if (subjects.length === 0) return text("No schema subjects found.");
+          return text(mdTable(["Subject"], subjects.map((subject) => [subject])));
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/not running/i.test(msg)) return toolError("DBX_NOT_RUNNING", msg);
+          return toolError("KAFKA_ERROR", msg);
+        }
+      },
+    );
+
+    server.tool(
+      "dbx_kafka_decode_payload",
+      "Decode a Kafka message payload using Schema Registry (Avro/JSON). Requires DBX desktop app to be running.",
+      {
+        connection_name: z.string().describe("Name of the DBX Kafka connection"),
+        encoding: z.enum(["utf8", "base64"]).describe("Payload encoding"),
+        data: z.string().describe("Raw payload data"),
+        subject_hint: z.string().optional().describe("Optional schema subject hint, e.g. orders-value"),
+      },
+      async ({ connection_name, encoding, data, subject_hint }) => {
+        const config = await backend.findConnection(connection_name);
+        if (!config) return toolError("CONNECTION_NOT_FOUND", `Connection "${connection_name}" not found.`);
+        if (config.db_type !== "kafka") return toolError("INVALID_CONNECTION_TYPE", `Connection "${connection_name}" is not a Kafka connection.`);
+        try {
+          const decoded = await kafkaDecodePayload(connection_name, { encoding, data }, subject_hint);
+          if (decoded.error) return toolError("KAFKA_DECODE_ERROR", decoded.error);
+          return text(decoded.presentation || JSON.stringify(decoded.decoded ?? null, null, 2));
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/not running/i.test(msg)) return toolError("DBX_NOT_RUNNING", msg);
+          return toolError("KAFKA_ERROR", msg);
+        }
+      },
+    );
+
+    server.tool(
+      "dbx_kafka_produce_message",
+      "Produce a Kafka message. Requires DBX desktop app to be running.",
+      {
+        connection_name: z.string().describe("Name of the DBX Kafka connection"),
+        topic: z.string().describe("Topic name"),
+        value: z.string().describe("Message value"),
+        key: z.string().optional().describe("Message key"),
+        partition: z.number().int().min(0).optional().describe("Target partition"),
+        headers: z.array(z.tuple([z.string(), z.string()])).optional().describe("Message headers as [key, value] pairs"),
+      },
+      async ({ connection_name, topic, value, key, partition, headers }) => {
+        const config = await backend.findConnection(connection_name);
+        if (!config) return toolError("CONNECTION_NOT_FOUND", `Connection "${connection_name}" not found.`);
+        if (config.db_type !== "kafka") return toolError("INVALID_CONNECTION_TYPE", `Connection "${connection_name}" is not a Kafka connection.`);
+        const safety = sqlSafetyFromEnv();
+        if (!safety.allowWrites) {
+          return toolError(
+            "WRITE_BLOCKED",
+            "MCP Kafka produce is read-only by default. Set DBX_MCP_ALLOW_WRITES=1 to allow produce operations.",
+          );
+        }
+        try {
+          const result = await kafkaProduceMessage(connection_name, { topic, value, key, partition, headers });
+          return text(`Produced message to ${result.topic} partition ${result.partition} at offset ${result.offset}.`);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/not running/i.test(msg)) return toolError("DBX_NOT_RUNNING", msg);
+          return toolError("KAFKA_ERROR", msg);
+        }
       },
     );
   }

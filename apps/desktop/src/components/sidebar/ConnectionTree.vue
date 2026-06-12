@@ -50,6 +50,16 @@ watch(
   { flush: "sync" },
 );
 
+watch(deferredSearchQuery, (query) => {
+  store.setKafkaTopicSearchFilter(query);
+  for (const node of store.treeNodes) {
+    if (node.type !== "connection" || !node.connectionId || !node.isExpanded) continue;
+    const config = store.getConfig(node.connectionId);
+    if (config?.db_type !== "kafka") continue;
+    void store.loadKafkaTopics(node.connectionId, query);
+  }
+});
+
 const isSearching = computed(() => !!deferredSearchQuery.value);
 const isFiltering = computed(() => !!searchQuery.value.trim() || hasSearchScopeFilter.value);
 
@@ -57,7 +67,7 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
   database: ["database", "redis-db", "mongo-db"],
   schema: ["schema"],
-  table: ["table", "mongo-collection", "elasticsearch-index"],
+  table: ["table", "mongo-collection", "elasticsearch-index", "kafka-topic", "kafka-consumer-group", "kafka-schema-subject"],
   view: ["view"],
 };
 

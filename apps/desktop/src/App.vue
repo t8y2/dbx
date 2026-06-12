@@ -127,7 +127,8 @@ const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore
 
 const activeConnection = computed(() => {
   const tab = activeTab.value;
-  return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
+  const connectionId = tab?.connectionId || connectionStore.activeConnectionId;
+  return connectionId ? connectionStore.getConfig(connectionId) : undefined;
 });
 
 function updateAgentDriverUpdateCount(count: number) {

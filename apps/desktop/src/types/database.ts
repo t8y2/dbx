@@ -48,6 +48,7 @@ export type DatabaseType =
   | "xugu"
   | "iotdb"
   | "etcd"
+  | "kafka"
   | "iris"
   | "influxdb"
   | "jdbc";
@@ -96,6 +97,11 @@ export interface ConnectionConfig {
   redis_cluster_nodes?: string;
   redis_key_separator?: string;
   etcd_endpoints?: string;
+  kafka_bootstrap_servers?: string;
+  kafka_security_protocol?: string;
+  kafka_sasl_mechanism?: string;
+  kafka_consumer_group?: string;
+  kafka_schema_registry_url?: string;
   one_time?: boolean;
   read_only?: boolean;
 }
@@ -324,6 +330,14 @@ export type TreeNodeType =
   | "trigger"
   | "redis-db"
   | "etcd-root"
+  | "kafka-topic"
+  | "kafka-brokers-root"
+  | "kafka-topics-root"
+  | "kafka-groups-root"
+  | "kafka-consumer-group"
+  | "kafka-schemas-root"
+  | "kafka-schema-subject"
+  | "kafka-acls-root"
   | "mongo-db"
   | "mongo-collection"
   | "elasticsearch-index";
@@ -411,7 +425,8 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  mode: "data" | "query" | "redis" | "mongo" | "etcd" | "objects" | "structure" | "users";
+  mode: "data" | "query" | "redis" | "mongo" | "etcd" | "kafka" | "kafka-brokers" | "kafka-acls" | "kafka-group" | "kafka-schema" | "objects" | "structure" | "users";
+  topic?: string;
   structureTableName?: string;
   objectBrowser?: {
     schema?: string;
@@ -476,4 +491,168 @@ export interface SavedSqlFile {
 export interface SavedSqlLibrary {
   folders: SavedSqlFolder[];
   files: SavedSqlFile[];
+}
+
+export interface KafkaTopicSummary {
+  name: string;
+  partitionCount: number;
+  internal: boolean;
+  messageCount?: number | null;
+}
+
+export interface KafkaBrokerInfo {
+  id: number;
+  host: string;
+  port: number;
+  address: string;
+}
+
+export interface KafkaAclEntry {
+  resourceType: string;
+  resourceName: string;
+  patternType: string;
+  principal: string;
+  host: string;
+  operation: string;
+  permission: string;
+}
+
+export interface KafkaPartitionInfo {
+  partition: number;
+  leader?: number | null;
+  replicas?: number[];
+  isr?: number[];
+  offsetBegin?: number | null;
+  offsetEnd?: number | null;
+}
+
+export interface KafkaTopicDetail {
+  name: string;
+  partitionCount: number;
+  replicationFactor: number;
+  partitions: KafkaPartitionInfo[];
+  config?: Record<string, string>;
+}
+
+export type KafkaPayloadEncoding = "utf8" | "base64";
+
+export interface KafkaPayload {
+  encoding: KafkaPayloadEncoding;
+  data: string;
+}
+
+export interface KafkaMessageRecord {
+  partition: number;
+  offset: number;
+  timestamp: number;
+  key?: KafkaPayload | null;
+  value?: KafkaPayload | null;
+  headers: [string, string][];
+}
+
+export type KafkaStartOffset = "earliest" | "latest" | { offset: number };
+
+export interface KafkaFetchRequest {
+  topic: string;
+  partition: number;
+  startOffset: KafkaStartOffset;
+  limit: number;
+}
+
+export interface KafkaProduceRequest {
+  topic: string;
+  key?: string | null;
+  value: string;
+  headers?: [string, string][];
+  partition?: number | null;
+}
+
+export interface KafkaProduceResult {
+  topic: string;
+  partition: number;
+  offset: number;
+}
+
+export interface KafkaConsumerGroupSummary {
+  groupId: string;
+  state: string;
+  protocolType?: string;
+  memberCount?: number;
+}
+
+export interface KafkaConsumerGroupPartitionLag {
+  topic: string;
+  partition: number;
+  committedOffset?: number | null;
+  endOffset?: number | null;
+  lag?: number | null;
+}
+
+export interface KafkaConsumerGroupDetail {
+  groupId: string;
+  state: string;
+  protocolType?: string;
+  memberCount?: number;
+  partitions: KafkaConsumerGroupPartitionLag[];
+}
+
+export interface KafkaCreateTopicRequest {
+  name: string;
+  partitions: number;
+  replicationFactor: number;
+}
+
+export interface KafkaCreateTopicResult {
+  name: string;
+}
+
+export interface KafkaDeleteTopicResult {
+  name: string;
+  deleted: boolean;
+}
+
+export interface SchemaRegistrySchemaDetail {
+  subject?: string | null;
+  version?: number | null;
+  schemaType: string;
+  schema: string;
+  schemaId: number;
+}
+
+export interface KafkaDecodedPayload {
+  schemaId?: number | null;
+  schemaType?: string | null;
+  subject?: string | null;
+  decoded?: unknown;
+  presentation: string;
+  error?: string | null;
+}
+
+export interface KafkaTailStartRequest {
+  tailId: string;
+  connectionId: string;
+  topic: string;
+  partition: number;
+  pollIntervalMs?: number;
+}
+
+export interface KafkaTailEvent {
+  tailId: string;
+  status: "message" | "error" | "stopped";
+  message?: KafkaMessageRecord | null;
+  error?: string | null;
+}
+
+export interface KafkaTopicCountStartRequest {
+  sessionId: string;
+  connectionId: string;
+  topics: string[];
+}
+
+export interface KafkaTopicCountEvent {
+  sessionId: string;
+  status: "count" | "done" | "stopped" | "error";
+  topic?: string | null;
+  messageCount?: number | null;
+  error?: string | null;
 }

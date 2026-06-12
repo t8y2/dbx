@@ -46,6 +46,26 @@ import type {
   KvGetResponse,
   KvPutResponse,
   KvDeleteResponse,
+  KafkaTopicSummary,
+  KafkaTopicDetail,
+  KafkaBrokerInfo,
+  KafkaAclEntry,
+  KafkaMessageRecord,
+  KafkaFetchRequest,
+  KafkaProduceRequest,
+  KafkaProduceResult,
+  KafkaConsumerGroupSummary,
+  KafkaConsumerGroupDetail,
+  KafkaCreateTopicRequest,
+  KafkaCreateTopicResult,
+  KafkaDeleteTopicResult,
+  KafkaPayload,
+  SchemaRegistrySchemaDetail,
+  KafkaDecodedPayload,
+  KafkaTailStartRequest,
+  KafkaTailEvent,
+  KafkaTopicCountStartRequest,
+  KafkaTopicCountEvent,
   MongoDocumentResult,
   HistoryEntry,
   SqlFileRequest,
@@ -1237,6 +1257,133 @@ export async function etcdPut(connectionId: string, key: string, value: KvValue,
 
 export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
   return post("/api/etcd/delete", { connectionId, key });
+}
+
+// ---------------------------------------------------------------------------
+// Kafka
+// ---------------------------------------------------------------------------
+
+export async function kafkaListTopics(connectionId: string, prefix: string, limit: number): Promise<KafkaTopicSummary[]> {
+  return post("/api/kafka/list-topics", { connectionId, prefix, limit });
+}
+
+export async function kafkaDescribeTopic(connectionId: string, topic: string): Promise<KafkaTopicDetail> {
+  return post("/api/kafka/describe-topic", { connectionId, topic });
+}
+
+export async function kafkaFetchMessages(connectionId: string, req: KafkaFetchRequest): Promise<KafkaMessageRecord[]> {
+  return post("/api/kafka/fetch-messages", {
+    connectionId,
+    topic: req.topic,
+    partition: req.partition,
+    startOffset: req.startOffset,
+    limit: req.limit,
+  });
+}
+
+export async function kafkaProduceMessage(connectionId: string, req: KafkaProduceRequest): Promise<KafkaProduceResult> {
+  return post("/api/kafka/produce-message", { connectionId, ...req });
+}
+
+export async function kafkaGetTopicMessageCount(connectionId: string, topic: string): Promise<number | null> {
+  const result = await post<{ messageCount: number | null }>("/api/kafka/get-topic-message-count", { connectionId, topic });
+  return result.messageCount ?? null;
+}
+
+export async function kafkaTopicCountStart(request: KafkaTopicCountStartRequest, onEvent: (event: KafkaTopicCountEvent) => void): Promise<void> {
+  await post("/api/kafka/topic-count/start", request);
+  const es = new EventSource(`/api/kafka/topic-count/progress/${encodeURIComponent(request.sessionId)}`);
+  return new Promise((resolve, reject) => {
+    es.onmessage = (message) => {
+      try {
+        const event = JSON.parse(message.data) as KafkaTopicCountEvent;
+        onEvent(event);
+        if (["done", "stopped", "error"].includes(event.status)) {
+          es.close();
+          resolve();
+        }
+      } catch (error) {
+        es.close();
+        reject(error);
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      reject(new Error("Kafka topic count stream disconnected"));
+    };
+  });
+}
+
+export async function kafkaTopicCountStop(sessionId: string): Promise<void> {
+  await post("/api/kafka/topic-count/stop", { sessionId });
+}
+
+export async function kafkaListBrokers(connectionId: string): Promise<KafkaBrokerInfo[]> {
+  return post("/api/kafka/list-brokers", { connectionId });
+}
+
+export async function kafkaListAcls(connectionId: string): Promise<KafkaAclEntry[]> {
+  return post("/api/kafka/list-acls", { connectionId });
+}
+
+export async function kafkaListConsumerGroups(connectionId: string): Promise<KafkaConsumerGroupSummary[]> {
+  return post("/api/kafka/list-consumer-groups", { connectionId });
+}
+
+export async function kafkaDescribeConsumerGroup(connectionId: string, groupId: string): Promise<KafkaConsumerGroupDetail> {
+  return post("/api/kafka/describe-consumer-group", { connectionId, groupId });
+}
+
+export async function kafkaCreateTopic(connectionId: string, req: KafkaCreateTopicRequest): Promise<KafkaCreateTopicResult> {
+  return post("/api/kafka/create-topic", { connectionId, ...req });
+}
+
+export async function kafkaDeleteTopic(connectionId: string, topic: string): Promise<KafkaDeleteTopicResult> {
+  return post("/api/kafka/delete-topic", { connectionId, topic });
+}
+
+export async function kafkaSchemaRegistryListSubjects(connectionId: string, prefix: string): Promise<string[]> {
+  return post("/api/kafka/schema-registry/list-subjects", { connectionId, prefix });
+}
+
+export async function kafkaSchemaRegistryListVersions(connectionId: string, subject: string): Promise<number[]> {
+  return post("/api/kafka/schema-registry/list-versions", { connectionId, subject });
+}
+
+export async function kafkaSchemaRegistryGetSchema(connectionId: string, subject: string, version: string): Promise<SchemaRegistrySchemaDetail> {
+  return post("/api/kafka/schema-registry/get-schema", { connectionId, subject, version });
+}
+
+export async function kafkaDecodePayload(connectionId: string, payload: KafkaPayload, subjectHint?: string): Promise<KafkaDecodedPayload> {
+  return post("/api/kafka/decode-payload", { connectionId, payload, subjectHint });
+}
+
+export async function kafkaTailStart(request: KafkaTailStartRequest, onEvent: (event: KafkaTailEvent) => void): Promise<void> {
+  await post("/api/kafka/tail/start", request);
+  const es = new EventSource(`/api/kafka/tail/progress/${encodeURIComponent(request.tailId)}`);
+  return new Promise((resolve, reject) => {
+    es.onmessage = (message) => {
+      try {
+        const event = JSON.parse(message.data) as KafkaTailEvent;
+        onEvent(event);
+        if (event.status === "stopped") {
+          es.close();
+          resolve();
+        }
+      } catch (error) {
+        es.close();
+        reject(error);
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      reject(new Error("Kafka tail stream disconnected"));
+    };
+  });
+}
+
+export async function kafkaTailStop(tailId: string): Promise<void> {
+  await post("/api/kafka/tail/stop", { tailId });
 }
 
 // ---------------------------------------------------------------------------

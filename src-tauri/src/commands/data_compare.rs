@@ -11,19 +11,23 @@ pub fn prepare_data_compare(
 }
 
 #[tauri::command]
-pub async fn prepare_data_compare_from_tables(
+pub fn prepare_data_compare_from_tables(
     state: State<'_, Arc<AppState>>,
     options: dbx_core::data_compare::DataCompareFromTablesOptions,
 ) -> Result<dbx_core::data_compare::DataCompareFromTablesPreparation, String> {
-    dbx_core::data_compare::prepare_data_compare_from_tables(&state, options).await
+    tauri::async_runtime::block_on(async move {
+        dbx_core::data_compare::prepare_data_compare_from_tables(&state, options).await
+    })
 }
 
 #[tauri::command]
-pub async fn prepare_data_compare_missing_target(
+pub fn prepare_data_compare_missing_target(
     state: State<'_, Arc<AppState>>,
     options: dbx_core::data_compare::DataCompareMissingTargetOptions,
 ) -> Result<dbx_core::data_compare::DataCompareFromTablesPreparation, String> {
-    dbx_core::data_compare::prepare_data_compare_missing_target(&state, options).await
+    tauri::async_runtime::block_on(async move {
+        dbx_core::data_compare::prepare_data_compare_missing_target(&state, options).await
+    })
 }
 
 #[tauri::command]

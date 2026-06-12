@@ -22,6 +22,7 @@ import {
   Link,
   Zap,
   ListTree,
+  Layers,
   Pencil,
   Play,
   Plug,
@@ -48,6 +49,9 @@ import {
   Clipboard,
   UsersRound,
   Lock,
+  Server,
+  Shield,
+  MessagesSquare,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -60,7 +64,7 @@ import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/d
 import * as api from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
-import { canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebarTreeItemLayout";
+import { canTreeNodeShowExpander, isKafkaSectionRoot, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebarTreeItemLayout";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/queryEditorTableDrop";
 import { editablePrimaryKeys } from "@/lib/tableEditing";
@@ -98,6 +102,7 @@ import { selectedConnectionDeleteTargets } from "@/lib/sidebarConnectionSelectio
 import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import KafkaCreateTopicDialog from "@/components/kafka/KafkaCreateTopicDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -215,6 +220,22 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-red-400" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
+    case "kafka-topic":
+      return { icon: Layers, colorClass: "text-slate-600 dark:text-slate-300" };
+    case "kafka-brokers-root":
+      return { icon: Server, colorClass: "text-sky-500" };
+    case "kafka-topics-root":
+      return { icon: MessagesSquare, colorClass: "text-slate-500 dark:text-slate-300" };
+    case "kafka-groups-root":
+      return { icon: UsersRound, colorClass: "text-violet-500" };
+    case "kafka-schemas-root":
+      return { icon: Braces, colorClass: "text-amber-500" };
+    case "kafka-schema-subject":
+      return { icon: Braces, colorClass: "text-amber-400" };
+    case "kafka-consumer-group":
+      return { icon: UsersRound, colorClass: "text-violet-400" };
+    case "kafka-acls-root":
+      return { icon: Shield, colorClass: "text-emerald-500" };
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
     case "mongo-collection":
@@ -259,9 +280,22 @@ function isGroupLabel(node: TreeNode): boolean {
 
 function displayLabel(node: TreeNode): string {
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
-  if (node.type === "user-admin") return t(node.label);
+  if (node.type === "user-admin" || node.type === "kafka-brokers-root" || node.type === "kafka-topics-root" || node.type === "kafka-groups-root" || node.type === "kafka-schemas-root" || node.type === "kafka-acls-root") return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
+}
+
+function formatKafkaTopicMessageCount(count: number): string {
+  if (count >= 1_000_000_000) {
+    return `${(count / 1_000_000_000).toFixed(1).replace(/\.0$/, "")}B`;
+  }
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  if (count >= 10_000) {
+    return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  }
+  return count.toLocaleString();
 }
 
 function visibleLabel(node: TreeNode): string {
@@ -294,6 +328,12 @@ async function toggle() {
     return;
   }
 
+  if (node.type === "kafka-topics-root" && (node.children?.length ?? 0) > 0) {
+    node.isExpanded = !node.isExpanded;
+    emit("node-toggled", node, wasExpanded);
+    return;
+  }
+
   const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
@@ -314,6 +354,8 @@ async function toggle() {
         await connectionStore.loadRedisDatabases(node.connectionId);
       } else if (config?.db_type === "etcd") {
         await connectionStore.loadEtcdRoot(node.connectionId);
+      } else if (config?.db_type === "kafka") {
+        await connectionStore.loadKafkaTopics(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
@@ -327,6 +369,30 @@ async function toggle() {
     } else if (node.type === "etcd-root" && node.connectionId) {
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd");
+    } else if (node.type === "kafka-topic" && node.connectionId) {
+      const tabTitle = node.label;
+      const tab = queryStore.createTab(node.connectionId, "", tabTitle, "kafka");
+      queryStore.updateSql(tab, node.label);
+    } else if (node.type === "kafka-topics-root" && node.connectionId) {
+      await connectionStore.loadKafkaTopics(node.connectionId);
+    } else if (node.type === "kafka-brokers-root" && node.connectionId) {
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Kafka"}:${t("kafka.brokers")}`;
+      queryStore.createTab(node.connectionId, "", tabTitle, "kafka-brokers");
+    } else if (node.type === "kafka-acls-root" && node.connectionId) {
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Kafka"}:${t("kafka.acls")}`;
+      queryStore.createTab(node.connectionId, "", tabTitle, "kafka-acls");
+    } else if (node.type === "kafka-groups-root" && node.connectionId) {
+      await connectionStore.loadKafkaConsumerGroups(node.connectionId, node.id);
+    } else if (node.type === "kafka-schemas-root" && node.connectionId) {
+      await connectionStore.loadKafkaSchemaSubjects(node.connectionId, node.id);
+    } else if (node.type === "kafka-schema-subject" && node.connectionId) {
+      const tabTitle = node.label;
+      const tab = queryStore.createTab(node.connectionId, "", tabTitle, "kafka-schema");
+      queryStore.updateSql(tab, node.label);
+    } else if (node.type === "kafka-consumer-group" && node.connectionId) {
+      const tabTitle = node.label;
+      const tab = queryStore.createTab(node.connectionId, "", tabTitle, "kafka-group");
+      queryStore.updateSql(tab, node.label);
     } else if (node.type === "user-admin" && node.connectionId) {
       queryStore.openUserAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
@@ -541,6 +607,9 @@ function requestRefreshSelectedNode(): boolean {
 function canRefreshTreeNodeShortcut(): boolean {
   const type = props.node.type;
   if (type === "connection" || type === "database" || type === "schema" || type === "table" || type === "view") {
+    return true;
+  }
+  if (type === "kafka-topics-root" || type === "kafka-groups-root" || type === "kafka-schemas-root") {
     return true;
   }
   return isGroupLabel(props.node) && type !== "group-partitions";
@@ -928,6 +997,8 @@ const createDatabaseCharset = ref("utf8mb4");
 const createDatabaseCollation = ref("utf8mb4_unicode_ci");
 const showDropDatabaseConfirm = ref(false);
 const showFlushRedisDbConfirm = ref(false);
+const showKafkaCreateTopicDialog = ref(false);
+const showKafkaDeleteTopicConfirm = ref(false);
 const showCreateSchemaDialog = ref(false);
 const createSchemaName = ref("");
 const showDropSchemaConfirm = ref(false);
@@ -1625,6 +1696,35 @@ async function confirmFlushRedisDb() {
   }
 }
 
+function openKafkaCreateTopic() {
+  if (!props.node.connectionId) return;
+  showKafkaCreateTopicDialog.value = true;
+}
+
+async function onKafkaTopicCreated() {
+  const connectionId = props.node.connectionId;
+  if (!connectionId) return;
+  await connectionStore.loadKafkaTopics(connectionId);
+}
+
+function requestDeleteKafkaTopic() {
+  showKafkaDeleteTopicConfirm.value = true;
+}
+
+async function confirmDeleteKafkaTopic() {
+  const node = props.node;
+  if (node.type !== "kafka-topic" || !node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    await api.kafkaDeleteTopic(node.connectionId, node.label);
+    showKafkaDeleteTopicConfirm.value = false;
+    toast(t("kafka.topicDeleted"), 3000);
+    await connectionStore.loadKafkaTopics(node.connectionId);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function confirmDropDatabase() {
   const node = props.node;
   if (!node.connectionId) return;
@@ -2209,6 +2309,8 @@ function openFieldLineage() {
   };
 }
 
+const isKafkaSectionRootNode = computed(() => isKafkaSectionRoot(props.node.type));
+
 const canExpand = computed(() =>
   canTreeNodeShowExpander({
     type: props.node.type,
@@ -2636,6 +2738,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: Plus,
       });
     }
+    if (currentDatabaseType() === "kafka" && isConnected.value) {
+      items.push({ label: t("kafka.createTopic"), action: openKafkaCreateTopic, icon: Plus });
+    }
     items.push({ label: "", separator: true });
     if (availableGroups.value.length > 0 || currentGroupId.value) {
       const groupChildren: ContextMenuItem[] = availableGroups.value.map((group: { id: string; name: string }) => ({
@@ -2792,6 +2897,38 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: "", separator: true });
       items.push({ label: t("redis.flushDb"), action: flushRedisDb, icon: Eraser, variant: "destructive" as const });
     }
+    return items;
+  }
+
+  if (node.type === "kafka-topics-root") {
+    if (!isConnectionReadonly.value) {
+      items.push({ label: t("kafka.createTopic"), action: openKafkaCreateTopic, icon: Plus });
+      items.push({ label: "", separator: true });
+    }
+    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+    return items;
+  }
+
+  if (node.type === "kafka-brokers-root" || node.type === "kafka-acls-root") {
+    items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
+    return items;
+  }
+
+  if (node.type === "kafka-topic") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
+    if (!isConnectionReadonly.value) {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("kafka.deleteTopic"), action: requestDeleteKafkaTopic, icon: Trash2, variant: "destructive" as const });
+    }
+    return items;
+  }
+
+  if (node.type === "kafka-consumer-group") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("kafka.viewConsumerGroup"), action: toggle, icon: UsersRound });
     return items;
   }
 
@@ -3011,6 +3148,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
               'tree-item-active rounded-none': connectionColor && (isSelected || isMultiSelected),
               'tree-item-active rounded-md': !connectionColor && (isSelected || isMultiSelected),
               'tree-item-highlight': highlighted,
+              'mt-1 first:mt-0 rounded-md border border-border/40 bg-muted/25 py-1.5 font-medium tracking-wide text-muted-foreground': isKafkaSectionRootNode,
             },
           ]"
           :tabindex="isSelected || isMultiSelected ? 0 : -1"
@@ -3046,9 +3184,21 @@ function treeItemMenuItems(): ContextMenuItem[] {
           />
           <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
           <span
-            v-if="(node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') && node.objectCount != null"
-            class="text-muted-foreground text-[10px] shrink-0"
-            >{{ node.objectCount }}</span
+            v-if="
+              (node.type === 'group-tables' ||
+                node.type === 'group-views' ||
+                node.type === 'group-procedures' ||
+                node.type === 'group-functions' ||
+                node.type === 'group-sequences' ||
+                node.type === 'group-packages' ||
+                node.type === 'group-partitions' ||
+                node.type === 'kafka-topics-root' ||
+                node.type === 'kafka-topic') &&
+              node.objectCount != null
+            "
+            class="text-muted-foreground text-[10px] shrink-0 tabular-nums"
+            :title="node.type === 'kafka-topic' ? t('kafka.topicMessageCount', { count: node.objectCount }) : undefined"
+            >{{ node.type === "kafka-topic" ? formatKafkaTopicMessageCount(node.objectCount) : node.objectCount }}</span
           >
           <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
             {{ t("editor.defaultDatabase") }}
@@ -3258,6 +3408,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
   <DangerConfirmDialog v-model:open="showDropDatabaseConfirm" :title="t('contextMenu.confirmDropDatabaseTitle')" :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })" :sql="dropDatabasePreviewSql" :confirm-label="t('contextMenu.dropDatabase')" @confirm="confirmDropDatabase" />
 
   <DangerConfirmDialog v-model:open="showFlushRedisDbConfirm" :title="t('redis.flushDb')" :message="t('redis.flushDbMessage')" :details="t('redis.flushDbDetails', { db: node.database })" :confirm-label="t('redis.flushDbConfirm')" @confirm="confirmFlushRedisDb" />
+
+  <KafkaCreateTopicDialog v-if="node.type === 'connection' && node.connectionId" :open="showKafkaCreateTopicDialog" :connection-id="node.connectionId" @update:open="showKafkaCreateTopicDialog = $event" @created="onKafkaTopicCreated" />
+
+  <DangerConfirmDialog v-model:open="showKafkaDeleteTopicConfirm" :title="t('kafka.deleteTopicTitle')" :message="t('kafka.deleteTopicMessage', { name: node.label })" :confirm-label="t('kafka.deleteTopic')" @confirm="confirmDeleteKafkaTopic" />
 
   <Dialog v-model:open="showCreateSchemaDialog">
     <DialogContent class="sm:max-w-[400px]">

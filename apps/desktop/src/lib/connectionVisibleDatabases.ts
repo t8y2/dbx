@@ -3,11 +3,29 @@ import { filterDatabaseNamesForConnection, normalizeVisibleDatabaseSelection } f
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
-const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["elasticsearch", "etcd"]);
+const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["elasticsearch", "etcd", "kafka"]);
 
 type VisibleDatabaseConnectionFields = Pick<
   ConnectionConfig,
-  "db_type" | "driver_profile" | "host" | "port" | "username" | "database" | "connection_string" | "url_params" | "redis_connection_mode" | "redis_sentinel_master" | "redis_sentinel_nodes" | "redis_cluster_nodes" | "etcd_endpoints" | "jdbc_driver_class"
+  | "db_type"
+  | "driver_profile"
+  | "host"
+  | "port"
+  | "username"
+  | "database"
+  | "connection_string"
+  | "url_params"
+  | "redis_connection_mode"
+  | "redis_sentinel_master"
+  | "redis_sentinel_nodes"
+  | "redis_cluster_nodes"
+  | "etcd_endpoints"
+  | "kafka_bootstrap_servers"
+  | "kafka_security_protocol"
+  | "kafka_sasl_mechanism"
+  | "kafka_consumer_group"
+  | "kafka_schema_registry_url"
+  | "jdbc_driver_class"
 >;
 
 export function buildDraftVisibleDatabasesConnectionId(seed: string): string {
@@ -44,6 +62,11 @@ function visibleDatabaseFingerprint(connection: VisibleDatabaseConnectionFields)
     redis_sentinel_nodes: connection.redis_sentinel_nodes || "",
     redis_cluster_nodes: connection.redis_cluster_nodes || "",
     etcd_endpoints: connection.etcd_endpoints || "",
+    kafka_bootstrap_servers: connection.kafka_bootstrap_servers || "",
+    kafka_security_protocol: connection.kafka_security_protocol || "",
+    kafka_sasl_mechanism: connection.kafka_sasl_mechanism || "",
+    kafka_consumer_group: connection.kafka_consumer_group || "",
+    kafka_schema_registry_url: connection.kafka_schema_registry_url || "",
     jdbc_driver_class: connection.jdbc_driver_class || "",
   });
 }

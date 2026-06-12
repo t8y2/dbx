@@ -56,6 +56,7 @@ pub enum PoolKind {
     Rqlite(db::rqlite_driver::RqliteClient),
     Turso(db::turso_driver::TursoClient),
     Redis(db::redis_driver::RedisConnection),
+    Kafka(Arc<db::kafka_driver::KafkaConnectionHandle>),
     DuckDb(DuckDbHandle),
     MongoDb(mongodb::Client),
     ClickHouse(db::clickhouse_driver::ChClient),
@@ -416,6 +417,11 @@ impl AppState {
                     ))
                 };
                 PoolKind::Redis(con)
+            }
+            DatabaseType::Kafka => {
+                let handle = db::kafka_driver::connect(&db_config).await?;
+                db::kafka_driver::test_connection(&handle).await?;
+                PoolKind::Kafka(Arc::new(handle))
             }
             #[cfg(feature = "duckdb-bundled")]
             DatabaseType::DuckDb => {
@@ -986,6 +992,7 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::Rqlite(_) => {}
         PoolKind::Turso(_) => {}
         PoolKind::Redis(_) => {}
+        PoolKind::Kafka(_) => {}
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             crate::db::duckdb_driver::close_connection(con);
@@ -1271,6 +1278,11 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            kafka_bootstrap_servers: String::new(),
+            kafka_security_protocol: None,
+            kafka_sasl_mechanism: None,
+            kafka_consumer_group: crate::models::connection::default_kafka_consumer_group(),
+            kafka_schema_registry_url: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -1892,6 +1904,7 @@ mod tests {
             DatabaseType::Postgres,
             DatabaseType::Redshift,
             DatabaseType::Redis,
+            DatabaseType::Kafka,
             DatabaseType::ClickHouse,
             DatabaseType::SqlServer,
             DatabaseType::Elasticsearch,

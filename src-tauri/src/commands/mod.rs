@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::thread;
+
 pub mod agents;
 pub mod ai;
 pub mod app_settings;
@@ -13,6 +16,7 @@ pub mod etcd_cmd;
 pub mod external_db;
 pub mod external_sql;
 pub mod history;
+pub mod kafka_cmd;
 pub mod keychain;
 pub mod mcp;
 pub mod mcp_bridge;
@@ -34,3 +38,21 @@ pub mod text_export;
 pub mod transfer;
 pub mod update;
 pub mod xlsx_export;
+
+pub(crate) fn spawn_local_async<F, Fut>(name: &'static str, future_factory: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                log::error!("Failed to start {name} runtime: {e}");
+                return;
+            }
+        };
+
+        runtime.block_on(future_factory());
+    });
+}

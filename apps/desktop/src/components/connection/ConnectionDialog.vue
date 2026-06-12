@@ -121,6 +121,11 @@ const defaultForm = (): ConnectionForm => ({
   redis_cluster_nodes: "",
   redis_key_separator: ":",
   etcd_endpoints: "",
+  kafka_bootstrap_servers: "",
+  kafka_security_protocol: "PLAINTEXT",
+  kafka_sasl_mechanism: "PLAIN",
+  kafka_consumer_group: "",
+  kafka_schema_registry_url: "",
   read_only: false,
   visible_databases: undefined,
 });
@@ -419,6 +424,7 @@ const driverProfiles: Record<
   xugu: { type: "xugu", port: 5138, user: "", label: "虚谷 XuguDB", icon: "xugu" },
   iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb" },
   etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
+  kafka: { type: "kafka", port: 9092, user: "", label: "Kafka", icon: "kafka" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
   influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
   custom_mysql: {
@@ -551,6 +557,11 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         redis_key_separator: config.redis_key_separator ?? ":",
         etcd_endpoints: config.etcd_endpoints || "",
+        kafka_bootstrap_servers: config.kafka_bootstrap_servers || "",
+        kafka_security_protocol: config.kafka_security_protocol || "PLAINTEXT",
+        kafka_sasl_mechanism: config.kafka_sasl_mechanism || "PLAIN",
+        kafka_consumer_group: config.kafka_consumer_group || "",
+        kafka_schema_registry_url: config.kafka_schema_registry_url || "",
         read_only: config.read_only || false,
         visible_databases: config.visible_databases,
       };
@@ -708,6 +719,7 @@ const iconTypeMap: Record<string, string> = {
   xugu: "xugu",
   iotdb: "iotdb",
   etcd: "etcd",
+  kafka: "kafka",
   dm: "dm",
   h2: "h2",
   snowflake: "snowflake",
@@ -784,6 +796,7 @@ const dbOptions = [
   { value: "xugu", label: "虚谷 XuguDB" },
   { value: "iotdb", label: "Apache IoTDB" },
   { value: "etcd", label: "etcd" },
+  { value: "kafka", label: "Kafka" },
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
   { value: "jdbc", label: "JDBC" },
@@ -832,7 +845,7 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "redis", "etcd", "clickhouse", "elasticsearch", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "redis", "etcd", "kafka", "clickhouse", "elasticsearch", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
 const bareMysqlProfiles = new Set(["doris", "starrocks", "selectdb", "oceanbase"]);
@@ -899,6 +912,13 @@ const etcdEndpointsLines = computed({
   get: () => form.value.etcd_endpoints || "",
   set: (value: string) => {
     form.value.etcd_endpoints = normalizeEndpointLines(value);
+  },
+});
+
+const kafkaBootstrapServersLines = computed({
+  get: () => form.value.kafka_bootstrap_servers || "",
+  set: (value: string) => {
+    form.value.kafka_bootstrap_servers = normalizeEndpointLines(value);
   },
 });
 const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isH2FileMode.value);
@@ -1112,10 +1132,36 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     }
   } else {
     config.etcd_endpoints = undefined;
-    config.client_cert_path = undefined;
-    config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd") {
+  if (config.db_type === "kafka") {
+    config.kafka_bootstrap_servers = normalizeEndpointLines(config.kafka_bootstrap_servers || "");
+    const firstBootstrap = firstKafkaBootstrapEndpoint(config.kafka_bootstrap_servers);
+    if (firstBootstrap) {
+      config.host = firstBootstrap.host;
+      config.port = firstBootstrap.port;
+      config.ssl = firstBootstrap.scheme === "ssl" || config.kafka_security_protocol === "SSL" || config.kafka_security_protocol === "SASL_SSL" || !!config.ssl;
+    }
+    config.kafka_security_protocol = config.kafka_security_protocol?.trim() || "PLAINTEXT";
+    config.kafka_sasl_mechanism = config.kafka_sasl_mechanism?.trim() || "PLAIN";
+    config.kafka_consumer_group = config.kafka_consumer_group?.trim() || "";
+    config.kafka_schema_registry_url = config.kafka_schema_registry_url?.trim() || "";
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.etcdClientCertPairRequired"));
+    }
+  } else {
+    config.kafka_bootstrap_servers = undefined;
+    config.kafka_security_protocol = undefined;
+    config.kafka_sasl_mechanism = undefined;
+    config.kafka_consumer_group = undefined;
+    config.kafka_schema_registry_url = undefined;
+    if (config.db_type !== "etcd") {
+      config.client_cert_path = undefined;
+      config.client_key_path = undefined;
+    }
+  }
+  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "kafka") {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -1342,6 +1388,26 @@ function parseRedisEndpoint(value: string, defaultPort: number): { host: string;
     return { host: parts[0], port: Number.isFinite(port) && port > 0 ? port : defaultPort };
   }
   return { host: endpoint, port: defaultPort };
+}
+
+function firstKafkaBootstrapEndpoint(value?: string): { scheme?: string; host: string; port: number } | null {
+  const first = normalizeEndpointLines(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!first) return null;
+  return parseKafkaBootstrapEndpoint(first);
+}
+
+function parseKafkaBootstrapEndpoint(value: string): { scheme?: string; host: string; port: number } {
+  const trimmed = value.trim();
+  const schemeMatch = trimmed.match(/^(ssl|plaintext):\/\//i);
+  const scheme = schemeMatch?.[1]?.toLowerCase();
+  const withoutScheme = trimmed.replace(/^(ssl|plaintext|kafka|kafkas):\/\//i, "");
+  const [hostPart, portPart] = withoutScheme.split(":");
+  const host = hostPart?.trim() || "localhost";
+  const port = Number(portPart) || 9092;
+  return { scheme, host, port };
 }
 
 function firstEtcdEndpoint(value?: string): { scheme?: string; host: string; port: number } | null {
@@ -2391,6 +2457,76 @@ function openExternalUrl(url: string) {
                   </div>
                 </template>
 
+                <!-- Kafka: bootstrap servers, security, SASL, consumer group -->
+                <template v-else-if="form.db_type === 'kafka'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label class="text-right mt-2">{{ t("connection.kafkaBootstrapServers") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <textarea
+                        v-model="kafkaBootstrapServersLines"
+                        class="flex min-h-[76px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        placeholder="localhost:9092&#10;broker-2:9092"
+                        spellcheck="false"
+                      />
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("connection.kafkaBootstrapServersHint") }}
+                      </p>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.kafkaSecurityProtocol") }}</Label>
+                    <Select v-model="form.kafka_security_protocol">
+                      <SelectTrigger class="col-span-3">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="PLAINTEXT">PLAINTEXT</SelectItem>
+                        <SelectItem value="SSL">SSL</SelectItem>
+                        <SelectItem value="SASL_PLAINTEXT">SASL_PLAINTEXT</SelectItem>
+                        <SelectItem value="SASL_SSL">SASL_SSL</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.kafkaSaslMechanism") }}</Label>
+                    <Select v-model="form.kafka_sasl_mechanism">
+                      <SelectTrigger class="col-span-3">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="PLAIN">PLAIN</SelectItem>
+                        <SelectItem value="SCRAM-SHA-256">SCRAM-SHA-256</SelectItem>
+                        <SelectItem value="SCRAM-SHA-512">SCRAM-SHA-512</SelectItem>
+                        <SelectItem value="GSSAPI">GSSAPI</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.user") }}</Label>
+                    <Input v-model="form.username" class="col-span-3" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.password") }}</Label>
+                    <Input v-model="form.password" type="password" class="col-span-3" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.kafkaConsumerGroup") }}</Label>
+                    <Input v-model="form.kafka_consumer_group" class="col-span-3" :placeholder="t('connection.kafkaConsumerGroupPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label class="text-right mt-2">{{ t("connection.kafkaSchemaRegistryUrl") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="form.kafka_schema_registry_url" :placeholder="t('connection.kafkaSchemaRegistryUrlPlaceholder')" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.kafkaSchemaRegistryUrlHint") }}</p>
+                    </div>
+                  </div>
+                </template>
+
                 <!-- etcd: endpoints, user, password, TLS -->
                 <template v-else-if="form.db_type === 'etcd'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -2617,7 +2753,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'kafka'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label class="pt-2 text-right text-xs">
                       <span class="inline-flex items-center justify-end gap-1">

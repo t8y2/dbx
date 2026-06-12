@@ -51,3 +51,8 @@ bytes = "1"
 font-kit = "0.14.3"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 sysinfo = { version = "0.32", features = ["system"] }
+apache-avro = { version = "0.17", default-features = false }
+# System OpenSSL (see .cargo/config.toml on Windows). Avoid ssl-vendored — no Perl / long source builds.
+rdkafka = { version = "0.37", features = ["cmake-build", "ssl", "sasl"] }
+# `scram` wires openssl-sys into vendored SASL so nmake links the same system OpenSSL as rdkafka.
+sasl2-sys = { version = "0.1.22", features = ["vendored", "scram"] }

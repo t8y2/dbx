@@ -64,6 +64,16 @@ pub struct ConnectionConfig {
     pub redis_key_separator: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kafka_bootstrap_servers: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_security_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_sasl_mechanism: Option<String>,
+    #[serde(default = "default_kafka_consumer_group", skip_serializing_if = "is_default_kafka_consumer_group")]
+    pub kafka_consumer_group: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kafka_schema_registry_url: String,
     /// Typed configuration for external tabular sources.
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
@@ -208,6 +218,14 @@ fn is_default_redis_separator(value: &str) -> bool {
     value == ":"
 }
 
+pub fn default_kafka_consumer_group() -> String {
+    "dbx-consumer".to_string()
+}
+
+fn is_default_kafka_consumer_group(value: &str) -> bool {
+    value == "dbx-consumer"
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -282,6 +300,8 @@ pub enum DatabaseType {
     Xugu,
     Iotdb,
     Etcd,
+    #[serde(rename = "kafka")]
+    Kafka,
     #[serde(rename = "iris")]
     Iris,
     #[serde(rename = "turso")]
@@ -354,6 +374,16 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
+    pub kafka_bootstrap_servers: String,
+    #[serde(default)]
+    pub kafka_security_protocol: Option<String>,
+    #[serde(default)]
+    pub kafka_sasl_mechanism: Option<String>,
+    #[serde(default = "default_kafka_consumer_group")]
+    pub kafka_consumer_group: String,
+    #[serde(default)]
+    pub kafka_schema_registry_url: String,
+    #[serde(default)]
     pub external_config: Option<serde_json::Value>,
     #[serde(default)]
     pub jdbc_driver_class: Option<String>,
@@ -402,6 +432,11 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_cluster_nodes: data.redis_cluster_nodes,
             redis_key_separator: data.redis_key_separator,
             etcd_endpoints: data.etcd_endpoints,
+            kafka_bootstrap_servers: data.kafka_bootstrap_servers,
+            kafka_security_protocol: data.kafka_security_protocol,
+            kafka_sasl_mechanism: data.kafka_sasl_mechanism,
+            kafka_consumer_group: data.kafka_consumer_group,
+            kafka_schema_registry_url: data.kafka_schema_registry_url,
             external_config: data.external_config,
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
@@ -628,6 +663,16 @@ impl ConnectionConfig {
             && self.redis_connection_mode.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("cluster"))
     }
 
+    pub fn kafka_bootstrap_servers(&self) -> String {
+        let servers = self.kafka_bootstrap_servers.trim();
+        if !servers.is_empty() {
+            return servers.to_string();
+        }
+        let host = self.host.trim();
+        let port = if self.port == 0 { 9092 } else { self.port };
+        format!("{host}:{port}")
+    }
+
     pub fn redis_tls_insecure(&self) -> bool {
         self.db_type == DatabaseType::Redis && redis_url_params_enable_insecure(self.url_params.as_deref())
     }
@@ -744,6 +789,7 @@ impl ConnectionConfig {
             DatabaseType::Etcd => {
                 format!("etcd://{host}:{port}")
             }
+            DatabaseType::Kafka => kafka_connection_url(self, raw_host, port, false),
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
             DatabaseType::InfluxDb => {
                 let scheme = if self.ssl { "https" } else { "http" };
@@ -936,6 +982,7 @@ impl ConnectionConfig {
                     format!("etcd://{}:{}@{host}:{port}", username, password)
                 }
             }
+            DatabaseType::Kafka => kafka_connection_url(self, raw_host, port, true),
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -1349,6 +1396,31 @@ fn bracket_ipv6(host: &str) -> String {
     }
 }
 
+fn kafka_connection_url(config: &ConnectionConfig, host: &str, port: u16, include_credentials: bool) -> String {
+    let bootstrap = config.kafka_bootstrap_servers();
+    let authority = if bootstrap.contains(',') {
+        bootstrap
+    } else if bootstrap.contains(':') {
+        bootstrap
+    } else {
+        let host = bracket_ipv6(host.trim());
+        let effective_port = if port == 0 { 9092 } else { port };
+        format!("{host}:{effective_port}")
+    };
+
+    if include_credentials && (!config.username.is_empty() || !config.password.is_empty()) {
+        let username = encode_url_part(&config.username);
+        let password = encode_url_part(&config.password);
+        if config.username.is_empty() {
+            format!("kafka://:{password}@{authority}")
+        } else {
+            format!("kafka://{username}:{password}@{authority}")
+        }
+    } else {
+        format!("kafka://{authority}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1393,6 +1465,11 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            kafka_bootstrap_servers: String::new(),
+            kafka_security_protocol: None,
+            kafka_sasl_mechanism: None,
+            kafka_consumer_group: super::default_kafka_consumer_group(),
+            kafka_schema_registry_url: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -2164,6 +2241,17 @@ mod tests {
         let url = "jdbc:sqlserver://mshost:1433;databaseName=master";
         let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
         assert_eq!(rewritten, "jdbc:sqlserver://127.0.0.1:54321;databaseName=master");
+    }
+
+    #[test]
+    fn kafka_url_uses_bootstrap_servers_and_redacts_credentials() {
+        let mut config = mysql_config("kafka-user", "kafka-secret", None);
+        config.db_type = DatabaseType::Kafka;
+        config.port = 9092;
+        config.kafka_bootstrap_servers = "broker1:9092,broker2:9092".to_string();
+
+        assert_eq!(config.connection_url(), "kafka://kafka-user:kafka-secret@broker1:9092,broker2:9092");
+        assert_eq!(config.redacted_connection_url(), "kafka://broker1:9092,broker2:9092");
     }
 
     #[test]

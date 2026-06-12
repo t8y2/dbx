@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::connection::AppState;
+use super::spawn_local_async;
 
 use super::connection::ensure_connection_writable;
 
@@ -90,6 +91,50 @@ struct MongoDeleteDocumentsRequest {
     many: bool,
 }
 
+#[derive(Deserialize)]
+struct KafkaListTopicsRequest {
+    connection_name: String,
+    prefix: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct KafkaFetchMessagesRequest {
+    connection_name: String,
+    topic: String,
+    partition: i32,
+    start_offset: dbx_core::db::kafka_driver::KafkaStartOffset,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct KafkaProduceMessageRequest {
+    connection_name: String,
+    topic: String,
+    #[serde(default)]
+    key: Option<String>,
+    value: String,
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+    #[serde(default)]
+    partition: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct KafkaSchemaRegistryListSubjectsRequest {
+    connection_name: String,
+    #[serde(default)]
+    prefix: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KafkaDecodePayloadRequest {
+    connection_name: String,
+    payload: dbx_core::db::kafka_driver::KafkaPayload,
+    #[serde(default)]
+    subject_hint: Option<String>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct McpOpenTableEvent {
     pub connection_id: String,
@@ -129,7 +174,7 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
             };
             let app = app_handle.clone();
             let st = state.clone();
-            tokio::spawn(async move {
+            spawn_local_async("mcp bridge request", move || async move {
                 let mut buf = vec![0u8; 65536];
                 let n = match stream.read(&mut buf).await {
                     Ok(n) if n > 0 => n,
@@ -157,6 +202,16 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
                     handle_mongo_update_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/delete-documents") {
                     handle_mongo_delete_documents_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/kafka/list-topics") {
+                    handle_kafka_list_topics_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/kafka/fetch-messages") {
+                    handle_kafka_fetch_messages_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/kafka/produce-message") {
+                    handle_kafka_produce_message_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/kafka/list-schema-subjects") {
+                    handle_kafka_list_schema_subjects_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/kafka/decode-payload") {
+                    handle_kafka_decode_payload_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/execute-query") {
                     handle_execute_query_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /execute-query") {
@@ -245,6 +300,30 @@ async fn resolve_mongo_pool_key(
         }
     };
     Some((pool_key, database, connection_id))
+}
+
+async fn resolve_kafka_connection(
+    state: &Arc<AppState>,
+    connection_name: &str,
+    stream: &mut tokio::net::TcpStream,
+) -> Option<String> {
+    let config = match resolve_connection(state, connection_name).await {
+        Ok(c) => c,
+        Err(e) => {
+            respond_error(stream, "404 Not Found", &e).await;
+            return None;
+        }
+    };
+    if config.db_type != dbx_core::models::connection::DatabaseType::Kafka {
+        respond_error(stream, "400 Bad Request", "Not a Kafka connection").await;
+        return None;
+    }
+    let connection_id = config.id.clone();
+    if let Err(e) = state.get_or_create_pool(&connection_id, None).await {
+        respond_error(stream, "500 Internal Server Error", &e).await;
+        return None;
+    }
+    Some(connection_id)
 }
 
 async fn handle_open_table(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
@@ -523,6 +602,131 @@ async fn handle_mongo_delete_documents_data(state: &Arc<AppState>, body: &str, s
     .await
     {
         Ok(deleted) => respond_json(stream, &serde_json::json!({ "affected_rows": deleted })).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_kafka_list_topics_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: KafkaListTopicsRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some(connection_id) = resolve_kafka_connection(state, &req.connection_name, stream).await else {
+        return;
+    };
+    match dbx_core::kafka_ops::kafka_list_topics_core(
+        state,
+        &connection_id,
+        req.prefix.as_deref().unwrap_or(""),
+        req.limit.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(topics) => respond_json(stream, &topics).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_kafka_fetch_messages_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: KafkaFetchMessagesRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some(connection_id) = resolve_kafka_connection(state, &req.connection_name, stream).await else {
+        return;
+    };
+    match dbx_core::kafka_ops::kafka_fetch_messages_core(
+        state,
+        &connection_id,
+        &req.topic,
+        req.partition,
+        req.start_offset,
+        req.limit.unwrap_or(20),
+    )
+    .await
+    {
+        Ok(messages) => respond_json(stream, &messages).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_kafka_list_schema_subjects_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: KafkaSchemaRegistryListSubjectsRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some(connection_id) = resolve_kafka_connection(state, &req.connection_name, stream).await else {
+        return;
+    };
+    match dbx_core::kafka_ops::kafka_schema_registry_list_subjects_core(
+        state,
+        &connection_id,
+        req.prefix.as_deref().unwrap_or(""),
+    )
+    .await
+    {
+        Ok(subjects) => respond_json(stream, &subjects).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_kafka_decode_payload_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: KafkaDecodePayloadRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some(connection_id) = resolve_kafka_connection(state, &req.connection_name, stream).await else {
+        return;
+    };
+    match dbx_core::kafka_ops::kafka_decode_payload_core(
+        state,
+        &connection_id,
+        &req.payload,
+        req.subject_hint.as_deref(),
+    )
+    .await
+    {
+        Ok(decoded) => respond_json(stream, &decoded).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_kafka_produce_message_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: KafkaProduceMessageRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some(connection_id) = resolve_kafka_connection(state, &req.connection_name, stream).await else {
+        return;
+    };
+    if let Err(e) = ensure_connection_writable(state, &connection_id, "Produce message").await {
+        respond_error(stream, "403 Forbidden", &e).await;
+        return;
+    }
+    let produce_req = dbx_core::db::kafka_driver::KafkaProduceRequest {
+        topic: req.topic,
+        key: req.key,
+        value: req.value,
+        headers: req.headers,
+        partition: req.partition,
+    };
+    match dbx_core::kafka_ops::kafka_produce_message_core(state, &connection_id, produce_req).await {
+        Ok(result) => respond_json(stream, &result).await,
         Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
     }
 }

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
+use std::net::TcpListener as StdTcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -10,8 +13,7 @@ use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::ChannelMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::{Duration, MissedTickBehavior};
 
 use crate::models::connection::SshTunnelConfig;
@@ -43,12 +45,12 @@ impl client::Handler for SshClient {
 }
 
 async fn connect_and_authenticate(
-    ssh_host: &str,
+    ssh_host: String,
     ssh_port: u16,
-    ssh_user: &str,
-    ssh_password: &str,
-    ssh_key_path: &str,
-    ssh_key_passphrase: &str,
+    ssh_user: String,
+    ssh_password: String,
+    ssh_key_path: String,
+    ssh_key_passphrase: String,
     use_ssh_agent: bool,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
@@ -57,22 +59,22 @@ async fn connect_and_authenticate(
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
     let mut session =
-        tokio::time::timeout(connect_timeout, client::connect(config, (ssh_host, ssh_port), SshClient {}))
+        tokio::time::timeout(connect_timeout, client::connect(config, (ssh_host.as_str(), ssh_port), SshClient {}))
             .await
             .map_err(|_| format!("SSH connection timed out ({connect_timeout_secs}s)"))?
             .map_err(|e| format!("SSH connection failed: {e}"))?;
 
     if !ssh_key_path.is_empty() {
         // Validate SSH key file path
-        validate_file_path(ssh_key_path, |_| false)?;
+        validate_file_path(&ssh_key_path, |_| false)?;
 
-        let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
+        let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase.as_str()) };
         let key_pair =
-            load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+            load_ssh_private_key(&ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
         let auth_res = tokio::time::timeout(
             connect_timeout,
             session.authenticate_publickey(
-                ssh_user,
+                ssh_user.as_str(),
                 PrivateKeyWithHashAlg::new(
                     Arc::new(key_pair),
                     session.best_supported_rsa_hash().await.ok().flatten().flatten(),
@@ -86,15 +88,18 @@ async fn connect_and_authenticate(
             return Err("SSH public key authentication failed".to_string());
         }
     } else if !ssh_password.is_empty() {
-        let auth_res = tokio::time::timeout(connect_timeout, session.authenticate_password(ssh_user, ssh_password))
-            .await
-            .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
-            .map_err(|e| format!("SSH password auth failed: {e}"))?;
+        let auth_res = tokio::time::timeout(
+            connect_timeout,
+            session.authenticate_password(ssh_user.as_str(), ssh_password.as_str()),
+        )
+        .await
+        .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
+        .map_err(|e| format!("SSH password auth failed: {e}"))?;
         if !auth_res.success() {
             return Err("SSH password authentication failed".to_string());
         }
     } else if use_ssh_agent {
-        match try_authenticate_with_agent(&mut session, ssh_user, &connect_timeout).await {
+        match try_authenticate_with_agent(&mut session, ssh_user.clone(), connect_timeout).await {
             Ok(()) => {}
             Err(agent_err) => return Err(agent_err),
         }
@@ -105,14 +110,27 @@ async fn connect_and_authenticate(
     Ok(session)
 }
 
+type DynamicAgentClient = AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin + 'static>>;
+
+async fn connect_ssh_agent() -> Result<DynamicAgentClient, russh::keys::Error> {
+    #[cfg(unix)]
+    {
+        AgentClient::connect_env().await.map(|agent| agent.dynamic())
+    }
+    #[cfg(windows)]
+    {
+        AgentClient::connect_pageant().await.map(|agent| agent.dynamic())
+    }
+}
+
 /// Try to authenticate using ssh-agent identities. Returns `Ok(())` on success,
 /// or an error describing why agent auth failed (unavailable, no identities, all rejected).
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
-    ssh_user: &str,
-    connect_timeout: &Duration,
+    ssh_user: String,
+    connect_timeout: Duration,
 ) -> Result<(), String> {
-    let mut agent = match AgentClient::connect_env().await {
+    let mut agent = match connect_ssh_agent().await {
         Ok(a) => a,
         Err(e) => {
             return Err(format!("No SSH password or key provided, and ssh-agent is unavailable: {e}"));
@@ -130,36 +148,33 @@ async fn try_authenticate_with_agent(
     };
 
     let hash_alg = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+    let deadline = tokio::time::Instant::now() + connect_timeout;
 
-    let auth_result = tokio::time::timeout(*connect_timeout, async {
-        for identity in identities {
-            let result = match &identity {
-                AgentIdentity::PublicKey { key, .. } => {
-                    session.authenticate_publickey_with(ssh_user, key.clone(), hash_alg, &mut agent).await
-                }
-                AgentIdentity::Certificate { certificate, .. } => {
-                    session.authenticate_certificate_with(ssh_user, certificate.clone(), hash_alg, &mut agent).await
-                }
-            };
+    for identity in identities {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("No SSH password or key provided, and ssh-agent auth timed out".to_string());
+        }
 
-            match result {
-                Ok(auth_res) if auth_res.success() => return Ok(()),
-                Ok(_) => continue,
-                Err(e) => {
-                    log::debug!("SSH agent identity ({}) auth failed: {e}", identity.comment());
-                    continue;
-                }
+        let comment = identity.comment().to_string();
+        let result = match identity {
+            AgentIdentity::PublicKey { key, .. } => {
+                session.authenticate_publickey_with(ssh_user.as_str(), key, hash_alg, &mut agent).await
+            }
+            AgentIdentity::Certificate { certificate, .. } => {
+                session.authenticate_certificate_with(ssh_user.as_str(), certificate, hash_alg, &mut agent).await
+            }
+        };
+
+        match result {
+            Ok(auth_res) if auth_res.success() => return Ok(()),
+            Ok(_) => continue,
+            Err(e) => {
+                log::debug!("SSH agent identity ({comment}) auth failed: {e}");
             }
         }
-        Err("No SSH password or key provided, and no ssh-agent identity was accepted".to_string())
-    })
-    .await;
-
-    match auth_result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("No SSH password or key provided, and ssh-agent auth timed out".to_string()),
     }
+
+    Err("No SSH password or key provided, and no ssh-agent identity was accepted".to_string())
 }
 
 fn load_ssh_private_key(path: &str, passphrase: Option<&str>) -> Result<PrivateKey, String> {
@@ -299,13 +314,22 @@ fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, String> {
 
 /// Accept connections on the local listener and forward them through the SSH session.
 /// Returns when the SSH session dies (listener error or session.is_closed()).
-async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remote_host: &str, remote_port: u16) {
+async fn forward_loop(
+    session: Handle<SshClient>,
+    listener: Arc<Mutex<TcpListener>>,
+    remote_host: String,
+    remote_port: u16,
+) -> Handle<SshClient> {
     let mut idle_check = tokio::time::interval(IDLE_SESSION_CHECK_INTERVAL);
     idle_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
+        let accept_fut = {
+            let listener = listener.clone();
+            async move { listener.lock().await.accept().await }
+        };
         let accepted = tokio::select! {
-            result = listener.accept() => result,
+            result = accept_fut => result,
             _ = idle_check.tick() => {
                 if session.is_closed() {
                     log::warn!("SSH session closed while tunnel was idle");
@@ -341,7 +365,7 @@ async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remot
 
         let mut channel = match session
             .channel_open_direct_tcpip(
-                remote_host,
+                remote_host.as_str(),
                 remote_port.into(),
                 peer_addr.ip().to_string(),
                 peer_addr.port().into(),
@@ -390,6 +414,8 @@ async fn forward_loop(session: &Handle<SshClient>, listener: &TcpListener, remot
             }
         });
     }
+
+    session
 }
 
 /// Main tunnel task: runs the forward loop and automatically reconnects
@@ -412,10 +438,11 @@ async fn tunnel_reconnect_loop(
     remote_host: String,
     remote_port: u16,
 ) {
+    let listener = Arc::new(Mutex::new(listener));
     loop {
         log::info!("SSH tunnel active: {}:{} -> {}:{}", connect_host, connect_port, remote_host, remote_port);
 
-        forward_loop(&session, &listener, &remote_host, remote_port).await;
+        let _closed_session = forward_loop(session, listener.clone(), remote_host.clone(), remote_port).await;
 
         log::warn!("SSH tunnel connection lost ({}:{}), reconnecting...", connect_host, connect_port);
 
@@ -434,12 +461,12 @@ async fn tunnel_reconnect_loop(
             tokio::time::sleep(delay).await;
 
             match connect_and_authenticate(
-                &connect_host,
+                connect_host.clone(),
                 connect_port,
-                &ssh_user,
-                &ssh_password,
-                &ssh_key_path,
-                &ssh_key_passphrase,
+                ssh_user.clone(),
+                ssh_password.clone(),
+                ssh_key_path.clone(),
+                ssh_key_passphrase.clone(),
                 use_ssh_agent,
                 connect_timeout_secs,
             )
@@ -471,8 +498,25 @@ async fn tunnel_reconnect_loop(
 }
 
 struct TunnelEntry {
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<TunnelTaskHandle>,
     local_port: u16,
+}
+
+struct TunnelTaskHandle {
+    abort_tx: Option<oneshot::Sender<()>>,
+    finished: Arc<AtomicBool>,
+}
+
+impl TunnelTaskHandle {
+    fn abort(mut self) {
+        if let Some(abort_tx) = self.abort_tx.take() {
+            let _ = abort_tx.send(());
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]
@@ -652,27 +696,28 @@ async fn spawn_tunnel(
     remote_host: &str,
     remote_port: u16,
     expose_to_lan: bool,
-) -> Result<(JoinHandle<()>, u16), String> {
+) -> Result<(TunnelTaskHandle, u16), String> {
     let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
 
     let bind_addr = if expose_to_lan { "0.0.0.0" } else { "127.0.0.1" };
     let listener =
-        TcpListener::bind((bind_addr, local_port)).await.map_err(|e| format!("Failed to bind local port: {e}"))?;
+        StdTcpListener::bind((bind_addr, local_port)).map_err(|e| format!("Failed to bind local port: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| format!("Failed to configure local tunnel listener: {e}"))?;
 
     // Initial connection: fail fast on bad credentials
     let session = connect_and_authenticate(
-        connect_host,
+        connect_host.to_string(),
         connect_port,
-        ssh_user,
-        ssh_password,
-        ssh_key_path,
-        ssh_key_passphrase,
+        ssh_user.to_string(),
+        ssh_password.to_string(),
+        ssh_key_path.to_string(),
+        ssh_key_passphrase.to_string(),
         use_ssh_agent,
         connect_timeout_secs,
     )
     .await?;
 
-    let handle = tokio::spawn(tunnel_reconnect_loop(
+    let handle = spawn_tunnel_task(
         session,
         connect_host.to_string(),
         connect_port,
@@ -685,9 +730,83 @@ async fn spawn_tunnel(
         listener,
         remote_host.to_string(),
         remote_port,
-    ));
+    );
 
     Ok((handle, local_port))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_tunnel_task(
+    session: Handle<SshClient>,
+    connect_host: String,
+    connect_port: u16,
+    ssh_user: String,
+    ssh_password: String,
+    ssh_key_path: String,
+    ssh_key_passphrase: String,
+    use_ssh_agent: bool,
+    connect_timeout_secs: u64,
+    listener: StdTcpListener,
+    remote_host: String,
+    remote_port: u16,
+) -> TunnelTaskHandle {
+    let (abort_tx, mut abort_rx) = oneshot::channel();
+    let finished = Arc::new(AtomicBool::new(false));
+    let thread_finished = finished.clone();
+
+    thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                log::error!("Failed to start SSH tunnel runtime: {e}");
+                thread_finished.store(true, Ordering::SeqCst);
+                return;
+            }
+        };
+        let local = tokio::task::LocalSet::new();
+
+        runtime.block_on(local.run_until(async move {
+            let listener = match TcpListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    log::error!("Failed to create SSH tunnel listener: {e}");
+                    return;
+                }
+            };
+            let task = tokio::task::spawn_local(tunnel_reconnect_loop(
+                session,
+                connect_host,
+                connect_port,
+                ssh_user,
+                ssh_password,
+                ssh_key_path,
+                ssh_key_passphrase,
+                use_ssh_agent,
+                connect_timeout_secs,
+                listener,
+                remote_host,
+                remote_port,
+            ));
+            let abort_handle = task.abort_handle();
+
+            tokio::select! {
+                _ = &mut abort_rx => {
+                    abort_handle.abort();
+                }
+                result = task => {
+                    if let Err(e) = result {
+                        if !e.is_cancelled() {
+                            log::error!("SSH tunnel task failed: {e}");
+                        }
+                    }
+                }
+            }
+        }));
+
+        thread_finished.store(true, Ordering::SeqCst);
+    });
+
+    TunnelTaskHandle { abort_tx: Some(abort_tx), finished }
 }
 
 fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {

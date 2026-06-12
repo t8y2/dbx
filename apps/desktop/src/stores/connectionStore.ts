@@ -106,6 +106,9 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionDatabasesCache = ref<Record<string, string[]>>({});
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
+  const kafkaTopicSearchFilter = ref("");
+  const kafkaTopicCountGeneration = new Map<string, number>();
+  const kafkaTopicCountSessions = new Map<string, string>();
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
   const completionObjectIndex = new Map<string, { touched: number; objects: SqlCompletionObject[] }>();
   const completionColumnIndex = new Map<string, { touched: number; columns: SqlCompletionColumn[] }>();
@@ -229,6 +232,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sqlite: "SQLite",
       redis: "Redis",
       etcd: "etcd",
+      kafka: "Kafka",
       duckdb: "DuckDB",
       clickhouse: "ClickHouse",
       sqlserver: "SQL Server",
@@ -643,6 +647,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadRedisDatabases(connectionId);
     } else if (config.db_type === "etcd") {
       await loadEtcdRoot(connectionId);
+    } else if (config.db_type === "kafka") {
+      await loadKafkaTopics(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
@@ -692,6 +698,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function disconnect(connectionId: string) {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
+    kafkaTopicCountGeneration.set(connectionId, (kafkaTopicCountGeneration.get(connectionId) ?? 0) + 1);
+    await stopKafkaTopicCountHydration(connectionId);
     await api.disconnectDb(connectionId);
     clearConnectionError(connectionId);
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -923,6 +931,201 @@ export const useConnectionStore = defineStore("connection", () => {
         ),
       );
       node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadKafkaSchemaSubjects(connectionId: string, schemasRootId?: string) {
+    const node = findNode(treeNodes.value, schemasRootId || `${connectionId}:kafka-schemas`);
+    if (!node || node.type !== "kafka-schemas-root" || !node.connectionId) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const subjects = await api.kafkaSchemaRegistryListSubjects(connectionId, "");
+      setChildren(
+        node,
+        subjects.map((subject) => ({
+          id: `${connectionId}:schema:${subject}`,
+          label: subject,
+          type: "kafka-schema-subject" as const,
+          connectionId,
+          database: "",
+          isExpanded: false,
+          children: [],
+        })),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadKafkaConsumerGroups(connectionId: string, groupsRootId?: string) {
+    const node = findNode(treeNodes.value, groupsRootId || `${connectionId}:kafka-groups`);
+    if (!node || node.type !== "kafka-groups-root" || !node.connectionId) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const groups = await api.kafkaListConsumerGroups(connectionId);
+      setChildren(
+        node,
+        groups.map((group) => ({
+          id: `${connectionId}:group:${group.groupId}`,
+          label: group.groupId,
+          type: "kafka-consumer-group" as const,
+          connectionId,
+          database: "",
+          isExpanded: false,
+          children: [],
+        })),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  function setKafkaTopicSearchFilter(filter: string) {
+    kafkaTopicSearchFilter.value = filter.trim().toLowerCase();
+  }
+
+  function updateKafkaTopicMessageCount(connectionId: string, topicName: string, messageCount: number) {
+    const topicsRoot = findNode(treeNodes.value, `${connectionId}:kafka-topics`);
+    const node = topicsRoot?.children?.find((child) => child.type === "kafka-topic" && child.id === `${connectionId}:topic:${topicName}`);
+    if (!node) return;
+    node.objectCount = messageCount;
+  }
+
+  async function stopKafkaTopicCountHydration(connectionId: string) {
+    const sessionId = kafkaTopicCountSessions.get(connectionId);
+    if (!sessionId) return;
+    kafkaTopicCountSessions.delete(connectionId);
+    try {
+      await api.kafkaTopicCountStop(sessionId);
+    } catch {
+      // Best-effort cancellation.
+    }
+  }
+
+  function startKafkaTopicCountHydration(connectionId: string, topicNames: string[], generation: number) {
+    if (topicNames.length === 0) return;
+    void (async () => {
+      await stopKafkaTopicCountHydration(connectionId);
+      if (kafkaTopicCountGeneration.get(connectionId) !== generation) return;
+
+      const sessionId = `${connectionId}:topic-count:${generation}`;
+      kafkaTopicCountSessions.set(connectionId, sessionId);
+
+      try {
+        await api.kafkaTopicCountStart({ sessionId, connectionId, topics: topicNames }, (event) => {
+          if (kafkaTopicCountGeneration.get(connectionId) !== generation) return;
+          if (event.status === "count" && event.topic && event.messageCount != null) {
+            updateKafkaTopicMessageCount(connectionId, event.topic, event.messageCount);
+          }
+        });
+      } catch {
+        // Best-effort background enrichment.
+      } finally {
+        if (kafkaTopicCountSessions.get(connectionId) === sessionId) {
+          kafkaTopicCountSessions.delete(connectionId);
+        }
+      }
+    })();
+  }
+
+  async function loadKafkaTopics(connectionId: string, filter?: string) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const normalizedFilter = (filter ?? kafkaTopicSearchFilter.value).trim();
+      const topics = await api.kafkaListTopics(connectionId, normalizedFilter, normalizedFilter ? 500 : 0);
+      const visibleTopics = topics.filter((topic) => !topic.internal);
+      const topicNodes = visibleTopics.map((topic) => ({
+        id: `${connectionId}:topic:${topic.name}`,
+        label: topic.name,
+        type: "kafka-topic" as const,
+        connectionId,
+        database: "",
+        isExpanded: false,
+        children: [],
+      }));
+      const existingTopicsRoot = findNode(treeNodes.value, `${connectionId}:kafka-topics`);
+      const topicsRootNode = {
+        id: `${connectionId}:kafka-topics`,
+        label: "kafka.topics",
+        type: "kafka-topics-root" as const,
+        connectionId,
+        database: "",
+        isExpanded: !!normalizedFilter || !!existingTopicsRoot?.isExpanded,
+        objectCount: topicNodes.length,
+        children: topicNodes,
+      };
+      const brokersRootNode = {
+        id: `${connectionId}:kafka-brokers`,
+        label: "kafka.brokers",
+        type: "kafka-brokers-root" as const,
+        connectionId,
+        database: "",
+        isExpanded: false,
+        children: [],
+      };
+      const groupsRootNode = {
+        id: `${connectionId}:kafka-groups`,
+        label: "kafka.consumerGroups",
+        type: "kafka-groups-root" as const,
+        connectionId,
+        database: "",
+        isExpanded: false,
+        children: [],
+      };
+      const aclsRootNode = {
+        id: `${connectionId}:kafka-acls`,
+        label: "kafka.acls",
+        type: "kafka-acls-root" as const,
+        connectionId,
+        database: "",
+        isExpanded: false,
+        children: [],
+      };
+      const config = getConfig(connectionId);
+      const sectionNodes: TreeNode[] = [brokersRootNode, topicsRootNode, groupsRootNode];
+      if (config?.kafka_schema_registry_url?.trim()) {
+        sectionNodes.push({
+          id: `${connectionId}:kafka-schemas`,
+          label: "kafka.schemas",
+          type: "kafka-schemas-root",
+          connectionId,
+          database: "",
+          isExpanded: false,
+          children: [],
+        });
+      }
+      sectionNodes.push(aclsRootNode);
+      setChildren(node, withSavedSqlRoot(connectionId, sectionNodes, node));
+      node.isExpanded = true;
+
+      const countGeneration = (kafkaTopicCountGeneration.get(connectionId) ?? 0) + 1;
+      kafkaTopicCountGeneration.set(connectionId, countGeneration);
+      startKafkaTopicCountHydration(
+        connectionId,
+        visibleTopics.map((topic) => topic.name),
+        countGeneration,
+      );
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
@@ -1442,6 +1645,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadRedisDatabases(node.connectionId);
       } else if (config?.db_type === "etcd") {
         await loadEtcdRoot(node.connectionId);
+      } else if (config?.db_type === "kafka") {
+        await loadKafkaTopics(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
@@ -1449,6 +1654,12 @@ export const useConnectionStore = defineStore("connection", () => {
       } else {
         await loadDatabases(node.connectionId, options);
       }
+    } else if (node.type === "kafka-topics-root" && node.connectionId) {
+      await loadKafkaTopics(node.connectionId);
+    } else if (node.type === "kafka-groups-root" && node.connectionId) {
+      await loadKafkaConsumerGroups(node.connectionId, node.id);
+    } else if (node.type === "kafka-schemas-root" && node.connectionId) {
+      await loadKafkaSchemaSubjects(node.connectionId, node.id);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
@@ -2469,6 +2680,10 @@ export const useConnectionStore = defineStore("connection", () => {
     loadDatabases,
     loadRedisDatabases,
     loadEtcdRoot,
+    loadKafkaTopics,
+    setKafkaTopicSearchFilter,
+    loadKafkaConsumerGroups,
+    loadKafkaSchemaSubjects,
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadElasticsearchIndices,

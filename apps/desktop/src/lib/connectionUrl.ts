@@ -32,6 +32,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   redis: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   rediss: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   etcd: { type: "etcd", profile: "etcd", label: "etcd", defaultPort: 2379 },
+  kafka: { type: "kafka", profile: "kafka", label: "Kafka", defaultPort: 9092 },
   mongodb: { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },

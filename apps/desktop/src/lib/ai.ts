@@ -271,7 +271,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     tables.push(entry);
   }
 
-  if (!tab.tableMeta && !["redis", "mongodb"].includes(connection.db_type)) {
+  if (!tab.tableMeta && !["redis", "mongodb", "kafka"].includes(connection.db_type)) {
     try {
       const schemas = await loadCandidateSchemas(tab, connection);
       for (const schema of schemas) {

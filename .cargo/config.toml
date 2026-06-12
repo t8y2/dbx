@@ -4,3 +4,9 @@ LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+
+# Kafka (rdkafka + sasl2-sys) on Windows needs system OpenSSL + MSVC (nmake/cl).
+# Stable Cargo ignores [target.*.env]; use one of:
+#   pnpm dev:tauri                         (auto-loads scripts/windows-build-env.ps1)
+#   .\scripts\setup-windows-cargo-env.ps1  (one-time OpenSSL vars in ~/.cargo/config.toml)
+#   . .\scripts\windows-build-env.ps1      (manual, current shell only)

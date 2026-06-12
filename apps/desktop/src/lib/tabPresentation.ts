@@ -65,6 +65,26 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@keys`;
   }
+  if (tab.mode === "kafka") {
+    if (compact) return tab.sql || tab.title;
+    return `${tab.sql || tab.title}@${connectionDisplayName(tab.connectionId)}`;
+  }
+  if (tab.mode === "kafka-group") {
+    if (compact) return tab.sql || tab.title;
+    return `${tab.sql || tab.title}@${connectionDisplayName(tab.connectionId)}`;
+  }
+  if (tab.mode === "kafka-schema") {
+    if (compact) return tab.sql || tab.title;
+    return `${tab.sql || tab.title}@${connectionDisplayName(tab.connectionId)}`;
+  }
+  if (tab.mode === "kafka-brokers") {
+    if (compact) return t("tabs.kafkaBrokers");
+    return `${t("tabs.kafkaBrokers")}@${connectionDisplayName(tab.connectionId)}`;
+  }
+  if (tab.mode === "kafka-acls") {
+    if (compact) return t("tabs.kafkaAcls");
+    return `${t("tabs.kafkaAcls")}@${connectionDisplayName(tab.connectionId)}`;
+  }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
     if (compact) return schema || tab.title;
@@ -92,6 +112,15 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "mongo" && tab.sql) {
     lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });
+  }
+  if (tab.mode === "kafka" && tab.sql) {
+    lines.push({ label: t("tabs.tooltipTopic"), value: tab.sql });
+  }
+  if (tab.mode === "kafka-group" && tab.sql) {
+    lines.push({ label: t("tabs.tooltipConsumerGroup"), value: tab.sql });
+  }
+  if (tab.mode === "kafka-schema" && tab.sql) {
+    lines.push({ label: t("tabs.tooltipSchemaSubject"), value: tab.sql });
   }
   if (tab.mode === "objects" && tab.objectBrowser?.schema) {
     lines.push({ label: t("tabs.tooltipSchema"), value: tab.objectBrowser.schema });
@@ -138,6 +167,11 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "mongo") return t("tabs.mongo");
   if (tab.mode === "redis") return t("tabs.redis");
   if (tab.mode === "etcd") return t("tabs.etcd");
+  if (tab.mode === "kafka") return t("tabs.kafka");
+  if (tab.mode === "kafka-group") return t("tabs.kafkaGroup");
+  if (tab.mode === "kafka-schema") return t("tabs.kafkaSchema");
+  if (tab.mode === "kafka-brokers") return t("tabs.kafkaBrokers");
+  if (tab.mode === "kafka-acls") return t("tabs.kafkaAcls");
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   return tab.mode;

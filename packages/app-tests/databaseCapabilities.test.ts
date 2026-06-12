@@ -251,6 +251,9 @@ test("loads product support levels and capabilities from the driver manifest", (
   assert.equal(databaseSupportLevel("mysql"), "operate");
   assert.equal(databaseSupportLevel("jdbc"), "browse");
   assert.equal(databaseSupportLevel("redis"), "connect");
+  assert.equal(databaseSupportLevel("kafka"), "connect");
+  assert.equal(supportsSqlFileExecution("kafka"), false);
+  assert.equal(supportsDatabaseSearch("kafka"), false);
 
   assert.deepEqual(
     {

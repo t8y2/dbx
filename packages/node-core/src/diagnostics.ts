@@ -21,6 +21,7 @@ export const BRIDGE_REQUIRED_TYPES = [
   "oracle",
   "elasticsearch",
   "etcd",
+  "kafka",
   "dameng",
   "kingbase",
   "highgo",

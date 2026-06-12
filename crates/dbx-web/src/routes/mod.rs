@@ -7,6 +7,7 @@ pub mod database_export;
 pub mod etcd;
 pub mod history;
 pub mod jdbc;
+pub mod kafka;
 pub mod layout;
 pub mod mongo;
 pub mod plugins;

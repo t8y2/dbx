@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Check, Lock, Copy } from "@lucide/vue";
+import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Layers, UsersRound, Braces, Pencil, Package, Check, Lock, Copy, Server, Shield } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -204,6 +204,11 @@ const openTabMenuItems = computed(() =>
 function tabMenuIcon(tab: QueryTab) {
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis") return Table2;
   if (tab.mode === "etcd") return KeyRound;
+  if (tab.mode === "kafka") return Layers;
+  if (tab.mode === "kafka-brokers") return Server;
+  if (tab.mode === "kafka-acls") return Shield;
+  if (tab.mode === "kafka-group") return UsersRound;
+  if (tab.mode === "kafka-schema") return Braces;
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
   return Code2;
@@ -296,6 +301,11 @@ function activateTab(tabId: string) {
                   <span class="shrink-0" :class="tabIconClass(tab)">
                     <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
                     <KeyRound v-else-if="tab.mode === 'etcd'" class="h-3.5 w-3.5" />
+                    <Layers v-else-if="tab.mode === 'kafka'" class="h-3.5 w-3.5" />
+                    <Server v-else-if="tab.mode === 'kafka-brokers'" class="h-3.5 w-3.5" />
+                    <Shield v-else-if="tab.mode === 'kafka-acls'" class="h-3.5 w-3.5" />
+                    <UsersRound v-else-if="tab.mode === 'kafka-group'" class="h-3.5 w-3.5" />
+                    <Braces v-else-if="tab.mode === 'kafka-schema'" class="h-3.5 w-3.5" />
                     <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                     <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                     <Code2 v-else class="h-3.5 w-3.5" />

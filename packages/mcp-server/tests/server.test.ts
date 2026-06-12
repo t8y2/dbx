@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import type { Backend, ConnectionConfig } from "@dbx-app/node-core";
-import { createDbxMcpServer, DBX_MCP_PACKAGE_VERSION } from "../src/index.js";
+import { createDbxMcpServer, DBX_CONNECTION_TYPE_DESCRIPTION, DBX_MCP_PACKAGE_VERSION } from "../src/index.js";
 
 const connection: ConnectionConfig = {
   id: "1",
@@ -28,6 +28,10 @@ const backend: Backend = {
   describeTable: async () => [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, comment: null }],
   executeQuery: async () => ({ columns: ["total"], rows: [{ total: 1 }], row_count: 1 }),
 };
+
+test("connection type description includes kafka", () => {
+  assert.match(DBX_CONNECTION_TYPE_DESCRIPTION, /\bkafka\b/);
+});
 
 test("creates an MCP server without starting stdio transport", () => {
   const server = createDbxMcpServer(backend, { isWebMode: true });

@@ -33,6 +33,11 @@ function preloadDataGridComponent() {
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
+const KafkaTopicBrowser = defineAsyncComponent(() => import("@/components/kafka/KafkaTopicBrowser.vue"));
+const KafkaBrokerBrowser = defineAsyncComponent(() => import("@/components/kafka/KafkaBrokerBrowser.vue"));
+const KafkaAclBrowser = defineAsyncComponent(() => import("@/components/kafka/KafkaAclBrowser.vue"));
+const KafkaConsumerGroupBrowser = defineAsyncComponent(() => import("@/components/kafka/KafkaConsumerGroupBrowser.vue"));
+const KafkaSchemaBrowser = defineAsyncComponent(() => import("@/components/kafka/KafkaSchemaBrowser.vue"));
 const MongoDocBrowser = defineAsyncComponent(() => import("@/components/mongo/MongoDocBrowser.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
@@ -142,6 +147,7 @@ const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
+const kafkaTopicBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
@@ -395,6 +401,7 @@ function onHandleCloseColumnPanel() {
 function focusSearch(): boolean {
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "kafka") return kafkaTopicBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
@@ -817,6 +824,41 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
     <template v-else-if="activeTab.mode === 'etcd'">
       <div class="flex-1 min-h-0">
         <EtcdKeyBrowser ref="etcdKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- Kafka mode: topic message browser -->
+    <template v-else-if="activeTab.mode === 'kafka'">
+      <div class="flex-1 min-h-0">
+        <KafkaTopicBrowser ref="kafkaTopicBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :topic="activeTab.sql" />
+      </div>
+    </template>
+
+    <!-- Kafka brokers mode -->
+    <template v-else-if="activeTab.mode === 'kafka-brokers'">
+      <div class="flex-1 min-h-0">
+        <KafkaBrokerBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- Kafka ACLs mode -->
+    <template v-else-if="activeTab.mode === 'kafka-acls'">
+      <div class="flex-1 min-h-0">
+        <KafkaAclBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- Kafka consumer group mode -->
+    <template v-else-if="activeTab.mode === 'kafka-group'">
+      <div class="flex-1 min-h-0">
+        <KafkaConsumerGroupBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :group-id="activeTab.sql" />
+      </div>
+    </template>
+
+    <!-- Kafka Schema Registry mode -->
+    <template v-else-if="activeTab.mode === 'kafka-schema'">
+      <div class="flex-1 min-h-0">
+        <KafkaSchemaBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :subject="activeTab.sql" />
       </div>
     </template>
 

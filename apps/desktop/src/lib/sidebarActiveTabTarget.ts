@@ -20,6 +20,21 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "kafka-topic";
+      connectionId: string;
+      topicName: string;
+    }
+  | {
+      type: "kafka-consumer-group";
+      connectionId: string;
+      groupId: string;
+    }
+  | {
+      type: "kafka-schema-subject";
+      connectionId: string;
+      subject: string;
+    }
+  | {
       type: "query-context";
       connectionId: string;
       database: string;
@@ -58,6 +73,24 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
 
   if (tab.mode === "etcd") {
     return { type: "etcd-root", connectionId: tab.connectionId };
+  }
+
+  if (tab.mode === "kafka") {
+    const topicName = tab.sql || tab.title;
+    if (!topicName) return null;
+    return { type: "kafka-topic", connectionId: tab.connectionId, topicName };
+  }
+
+  if (tab.mode === "kafka-group") {
+    const groupId = tab.sql || tab.title;
+    if (!groupId) return null;
+    return { type: "kafka-consumer-group", connectionId: tab.connectionId, groupId };
+  }
+
+  if (tab.mode === "kafka-schema") {
+    const subject = tab.sql || tab.title;
+    if (!subject) return null;
+    return { type: "kafka-schema-subject", connectionId: tab.connectionId, subject };
   }
 
   if (tab.savedSqlId) {
@@ -99,6 +132,18 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "etcd-root") {
     return node.type === "etcd-root" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "kafka-topic") {
+    return node.type === "kafka-topic" && node.connectionId === target.connectionId && node.label === target.topicName;
+  }
+
+  if (target.type === "kafka-consumer-group") {
+    return node.type === "kafka-consumer-group" && node.connectionId === target.connectionId && node.label === target.groupId;
+  }
+
+  if (target.type === "kafka-schema-subject") {
+    return node.type === "kafka-schema-subject" && node.connectionId === target.connectionId && node.label === target.subject;
   }
 
   if (target.type === "saved-sql-file") {

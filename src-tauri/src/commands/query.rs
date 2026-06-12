@@ -9,7 +9,7 @@ use dbx_core::sql::split_sql_statements;
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_query(
+pub fn execute_query(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -23,33 +23,37 @@ pub async fn execute_query(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, String> {
-    let registered_query =
-        execution_id.as_ref().filter(|id| !id.trim().is_empty()).map(|id| state.running_queries.register(id.clone()));
-    let cancel_token = registered_query.as_ref().map(|query| query.token());
+    tauri::async_runtime::block_on(async move {
+        let registered_query = execution_id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| state.running_queries.register(id.clone()));
+        let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    dbx_core::query::execute_sql_statement_with_options(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            execution_id: execution_id.filter(|id| !id.trim().is_empty()),
-        },
-    )
-    .await
+        dbx_core::query::execute_sql_statement_with_options(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                execution_id: execution_id.filter(|id| !id.trim().is_empty()),
+            },
+        )
+        .await
+    })
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_multi(
+pub fn execute_multi(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -63,87 +67,101 @@ pub async fn execute_multi(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
 ) -> Result<Vec<db::QueryResult>, String> {
-    let registered_query =
-        execution_id.as_ref().filter(|id| !id.trim().is_empty()).map(|id| state.running_queries.register(id.clone()));
-    let cancel_token = registered_query.as_ref().map(|query| query.token());
-    let trace_id = execution_id.clone().as_deref().unwrap_or("no-execution-id").to_string();
-    let started_at = Instant::now();
-    log::info!(
-        "[query][execute_multi:start] trace_id={} connection_id={} database={} schema={:?} sql={}",
-        trace_id,
-        connection_id,
-        database,
-        schema,
-        sql
-    );
+    tauri::async_runtime::block_on(async move {
+        let registered_query = execution_id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| state.running_queries.register(id.clone()));
+        let cancel_token = registered_query.as_ref().map(|query| query.token());
+        let trace_id = execution_id.clone().as_deref().unwrap_or("no-execution-id").to_string();
+        let started_at = Instant::now();
+        log::info!(
+            "[query][execute_multi:start] trace_id={} connection_id={} database={} schema={:?} sql={}",
+            trace_id,
+            connection_id,
+            database,
+            schema,
+            sql
+        );
 
-    let result = dbx_core::query::execute_multi_core_with_options(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            execution_id: execution_id.filter(|id| !id.trim().is_empty()),
-        },
-    )
-    .await;
-    match &result {
-        Ok(results) => log::info!(
-            "[query][execute_multi:done] trace_id={} elapsed_ms={} result_count={} row_counts={:?} backend_execution_times_ms={:?}",
-            trace_id,
-            started_at.elapsed().as_millis(),
-            results.len(),
-            results.iter().map(|result| result.rows.len()).collect::<Vec<_>>(),
-            results.iter().map(|result| result.execution_time_ms).collect::<Vec<_>>()
-        ),
-        Err(error) => log::error!(
-            "[query][execute_multi:error] trace_id={} elapsed_ms={} error={}",
-            trace_id,
-            started_at.elapsed().as_millis(),
-            error
-        ),
-    }
-    result
+        let result = dbx_core::query::execute_multi_core_with_options(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                execution_id: execution_id.filter(|id| !id.trim().is_empty()),
+            },
+        )
+        .await;
+        match &result {
+            Ok(results) => log::info!(
+                "[query][execute_multi:done] trace_id={} elapsed_ms={} result_count={} row_counts={:?} backend_execution_times_ms={:?}",
+                trace_id,
+                started_at.elapsed().as_millis(),
+                results.len(),
+                results.iter().map(|result| result.rows.len()).collect::<Vec<_>>(),
+                results.iter().map(|result| result.execution_time_ms).collect::<Vec<_>>()
+            ),
+            Err(error) => log::error!(
+                "[query][execute_multi:error] trace_id={} elapsed_ms={} error={}",
+                trace_id,
+                started_at.elapsed().as_millis(),
+                error
+            ),
+        }
+        result
+    })
 }
 
 #[tauri::command]
-pub async fn cancel_query(state: State<'_, Arc<AppState>>, execution_id: String) -> Result<bool, String> {
+pub fn cancel_query(state: State<'_, Arc<AppState>>, execution_id: String) -> Result<bool, String> {
     Ok(state.running_queries.cancel(&execution_id))
 }
 
 #[tauri::command]
-pub async fn close_query_session(
+pub fn close_query_session(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
     session_id: String,
     client_session_id: Option<String>,
 ) -> Result<bool, String> {
-    dbx_core::query::close_query_session(&state, &connection_id, &database, &session_id, client_session_id.as_deref())
+    tauri::async_runtime::block_on(async move {
+        dbx_core::query::close_query_session(
+            &state,
+            &connection_id,
+            &database,
+            &session_id,
+            client_session_id.as_deref(),
+        )
         .await
+    })
 }
 
 #[tauri::command]
-pub async fn close_client_connection_session(
+pub fn close_client_connection_session(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
     client_session_id: String,
 ) -> Result<bool, String> {
-    let database = if database.trim().is_empty() { None } else { Some(database.as_str()) };
-    state.close_client_session_pool(&connection_id, database, &client_session_id).await
+    tauri::async_runtime::block_on(async move {
+        let database = if database.trim().is_empty() { None } else { Some(database.as_str()) };
+        state.close_client_session_pool(&connection_id, database, &client_session_id).await
+    })
 }
 
 #[tauri::command]
-pub async fn execute_batch(
+pub fn execute_batch(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -151,53 +169,66 @@ pub async fn execute_batch(
     schema: Option<String>,
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, String> {
-    dbx_core::query::execute_statements(&state, &connection_id, &database, &statements, schema.as_deref(), timeout_secs)
+    tauri::async_runtime::block_on(async move {
+        dbx_core::query::execute_statements(
+            &state,
+            &connection_id,
+            &database,
+            &statements,
+            schema.as_deref(),
+            timeout_secs,
+        )
         .await
+    })
 }
 
 #[tauri::command]
-pub async fn execute_script(
+pub fn execute_script(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
     sql: String,
     schema: Option<String>,
 ) -> Result<db::QueryResult, String> {
-    let db_type = {
-        let configs = state.configs.read().await;
-        configs.get(&connection_id).map(|config| config.db_type)
-    };
+    tauri::async_runtime::block_on(async move {
+        let db_type = {
+            let configs = state.configs.read().await;
+            configs.get(&connection_id).map(|config| config.db_type)
+        };
 
-    dbx_core::query::execute_statements(
-        &state,
-        &connection_id,
-        &database,
-        &db_type.map_or_else(
-            || split_sql_statements(&sql),
-            |db_type| dbx_core::sql::split_sql_statements_for_database(&sql, db_type),
-        ),
-        schema.as_deref(),
-        None,
-    )
-    .await
+        dbx_core::query::execute_statements(
+            &state,
+            &connection_id,
+            &database,
+            &db_type.map_or_else(
+                || split_sql_statements(&sql),
+                |db_type| dbx_core::sql::split_sql_statements_for_database(&sql, db_type),
+            ),
+            schema.as_deref(),
+            None,
+        )
+        .await
+    })
 }
 
 #[tauri::command]
-pub async fn execute_in_transaction(
+pub fn execute_in_transaction(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
 ) -> Result<db::QueryResult, String> {
-    dbx_core::query::execute_statements_in_transaction(
-        &state,
-        &connection_id,
-        &database,
-        &statements,
-        schema.as_deref(),
-    )
-    .await
+    tauri::async_runtime::block_on(async move {
+        dbx_core::query::execute_statements_in_transaction(
+            &state,
+            &connection_id,
+            &database,
+            &statements,
+            schema.as_deref(),
+        )
+        .await
+    })
 }
 
 #[tauri::command]
@@ -453,7 +484,7 @@ pub fn build_database_sql_export(
 }
 
 #[tauri::command]
-pub async fn get_explain_info(
+pub fn get_explain_info(
     state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
     connection_id: String,
     database: Option<String>,
@@ -461,56 +492,59 @@ pub async fn get_explain_info(
     sql: String,
     mode: Option<String>,
 ) -> Result<String, String> {
-    let client = {
-        let connections = state.connections.read().await;
-        let pool = connections.get(&connection_id).ok_or_else(|| "Connection not found".to_string())?;
-        match pool {
-            dbx_core::connection::PoolKind::Agent(client) => client.clone(),
-            _ => return Err("Connection is not an agent-based connection".to_string()),
-        }
-    };
+    tauri::async_runtime::block_on(async move {
+        let client = {
+            let connections = state.connections.read().await;
+            let pool = connections.get(&connection_id).ok_or_else(|| "Connection not found".to_string())?;
+            match pool {
+                dbx_core::connection::PoolKind::Agent(client) => client.clone(),
+                _ => return Err("Connection is not an agent-based connection".to_string()),
+            }
+        };
 
-    let config = {
-        let configs = state.configs.read().await;
-        configs.get(&connection_id).cloned()
-    };
-    let config = config.ok_or_else(|| "Connection config not found".to_string())?;
-    let timeout_secs = config.query_timeout_secs;
+        let config = {
+            let configs = state.configs.read().await;
+            configs.get(&connection_id).cloned()
+        };
+        let config = config.ok_or_else(|| "Connection config not found".to_string())?;
+        let timeout_secs = config.query_timeout_secs;
 
-    let mut client = client.lock().await;
-    let mode = mode.unwrap_or_else(|| "explain".to_string());
-    if mode.eq_ignore_ascii_case("autotrace") && !dbx_core::query_execution_sql::is_safe_dameng_autotrace_sql(&sql) {
-        return Err("unsafe".to_string());
-    }
-    let params = serde_json::json!({
-        "sql": sql,
-        "database": database.unwrap_or_default(),
-        "schema": schema.unwrap_or_default(),
-        "timeoutSecs": timeout_secs as i64,
-        "mode": mode,
-    });
+        let mut client = client.lock().await;
+        let mode = mode.unwrap_or_else(|| "explain".to_string());
+        if mode.eq_ignore_ascii_case("autotrace") && !dbx_core::query_execution_sql::is_safe_dameng_autotrace_sql(&sql)
+        {
+            return Err("unsafe".to_string());
+        }
+        let params = serde_json::json!({
+            "sql": sql,
+            "database": database.unwrap_or_default(),
+            "schema": schema.unwrap_or_default(),
+            "timeoutSecs": timeout_secs as i64,
+            "mode": mode,
+        });
 
-    let result: Result<serde_json::Value, String> = client.get_explain_info::<serde_json::Value>(params).await;
-    match result {
-        Ok(serde_json::Value::String(s)) => {
-            eprintln!("[get_explain_info] OK string, len={}", s.len());
-            Ok(s)
+        let result: Result<serde_json::Value, String> = client.get_explain_info::<serde_json::Value>(params).await;
+        match result {
+            Ok(serde_json::Value::String(s)) => {
+                eprintln!("[get_explain_info] OK string, len={}", s.len());
+                Ok(s)
+            }
+            Ok(serde_json::Value::Object(obj)) => {
+                let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let has_stats = obj.get("has_actual_stats").and_then(|v| v.as_bool()).unwrap_or(false);
+                eprintln!("[get_explain_info] OK object, plan_len={}, has_actual_stats={}", plan.len(), has_stats);
+                Ok(plan)
+            }
+            Ok(val) => {
+                eprintln!("[get_explain_info] OK unexpected type: {:?}", val);
+                Err(format!("Unexpected result type from getExplainInfo: {:?}", val))
+            }
+            Err(e) => {
+                eprintln!("[get_explain_info] error: {e}");
+                Err(e)
+            }
         }
-        Ok(serde_json::Value::Object(obj)) => {
-            let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let has_stats = obj.get("has_actual_stats").and_then(|v| v.as_bool()).unwrap_or(false);
-            eprintln!("[get_explain_info] OK object, plan_len={}, has_actual_stats={}", plan.len(), has_stats);
-            Ok(plan)
-        }
-        Ok(val) => {
-            eprintln!("[get_explain_info] OK unexpected type: {:?}", val);
-            Err(format!("Unexpected result type from getExplainInfo: {:?}", val))
-        }
-        Err(e) => {
-            eprintln!("[get_explain_info] error: {e}");
-            Err(e)
-        }
-    }
+    })
 }
 
 #[tauri::command]

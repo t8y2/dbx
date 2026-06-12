@@ -97,6 +97,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "etcd":
       return "etcd://host:2379";
 
+    case "kafka":
+      return "kafka://host:9092";
+
     case "sqlite":
       return "sqlite:///absolute/path/to/database.db";
 

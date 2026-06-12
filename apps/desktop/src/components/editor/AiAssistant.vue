@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { ArrowUp, ArrowRightLeft, AlertTriangle, Bot, Check, ChevronRight, CircleSlash, Copy, Database, HelpCircle, History, Loader2, MessageSquarePlus, Replace, Server, ShieldCheck, Table2, Play, Square, Trash2, Terminal, Wand2, Wrench, X, Zap, TestTube } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -26,7 +26,8 @@ import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConver
 import type { AiMessage } from "@/lib/api";
 import type { ConnectionConfig, QueryTab, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/defaultDatabase";
+import { formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/defaultDatabase";
+import { connectionDisplayName } from "@/lib/tabPresentation";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
@@ -147,36 +148,32 @@ const actionMenuItems = computed(() =>
 );
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
-const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
+const { databaseOptions: allDbOptions, loadingDatabaseOptions, loadDatabaseOptions } = useDatabaseOptions();
+
+const connectionOptionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
 
 const dbOptions = computed(() => {
   if (!props.connection) return [];
   return allDbOptions.value[props.connection.id] || [];
 });
 
-const dbSelectOptions = computed(() => {
-  const connection = props.connection;
-  if (!connection) return [];
-  return dbOptions.value.map((database) => ({
-    database,
-    value: encodeSelectableDatabaseValue(connection.db_type, database),
-    label: formatDatabaseLabel(connection, database, {
-      defaultDatabase: t("editor.defaultDatabase"),
-      noDatabase: t("editor.noDatabase"),
-    }),
-  }));
+const aiDatabaseValue = computed(() => props.tab?.database || "");
+
+const aiDatabaseOptions = computed(() => {
+  if (!props.connection) return [];
+  return dbOptions.value.length ? dbOptions.value : aiDatabaseValue.value ? [aiDatabaseValue.value] : [];
 });
 
-const selectedDatabaseSelectValue = computed(() => (props.connection ? encodeSelectableDatabaseValue(props.connection.db_type, props.tab?.database || "") : ""));
-
-const selectedDatabaseLabel = computed(() => {
-  if (!props.connection) return t("editor.selectDatabase");
-  if (!props.tab) return t("editor.selectDatabase");
-  return formatDatabaseLabel(props.connection, props.tab.database || "", {
+function databaseDisplayName(database: string): string {
+  return formatDatabaseLabel(props.connection, database, {
     defaultDatabase: t("editor.defaultDatabase"),
     noDatabase: t("editor.noDatabase"),
   });
-});
+}
+
+function connectionById(connectionId: string): ConnectionConfig | undefined {
+  return connectionStore.getConfig(connectionId);
+}
 
 async function loadDatabases() {
   if (!props.connection) return;
@@ -187,28 +184,33 @@ async function changeConnection(connectionId: string) {
   const conn = connectionStore.getConfig(connectionId);
   if (!conn) return;
   connectionStore.activeConnectionId = connectionId;
-  const tab = props.tab;
-  if (tab) {
-    queryStore.updateConnection(tab.id, connectionId, resolveDefaultDatabase(conn, []));
+  let tabId = props.tab?.id;
+  if (props.tab) {
+    queryStore.updateConnection(props.tab.id, connectionId, resolveDefaultDatabase(conn, []));
+    tabId = props.tab.id;
   } else {
-    queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
+    tabId = queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
   }
   try {
     await loadDatabaseOptions(connectionId);
     const database = resolveDefaultDatabase(conn, allDbOptions.value[connectionId] || []);
-    if (tab) {
-      queryStore.updateDatabase(tab.id, database);
+    if (tabId) {
+      queryStore.updateDatabase(tabId, database);
     }
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
 }
 
-function changeDatabase(value: string) {
-  const tab = props.tab;
+function changeDatabase(database: string) {
   const connection = props.connection;
-  if (!tab || !connection) return;
-  queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
+  if (!connection) return;
+  const tab = props.tab ?? queryStore.tabs.find((candidate) => candidate.id === queryStore.activeTabId);
+  if (!tab) {
+    queryStore.createTab(connection.id, database);
+    return;
+  }
+  queryStore.updateDatabase(tab.id, database);
 }
 
 function appendAssistantDelta(assistantIdx: number, delta: string) {
@@ -779,40 +781,55 @@ const messageRenderer = computed(() => {
     <div class="p-2">
       <div class="relative rounded-lg border bg-background px-2 pb-2 pt-1">
         <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
-          <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
-          <Server v-else class="h-3 w-3 shrink-0" />
-          <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
-            <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
-              <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
-            </SelectTrigger>
-            <SelectContent class="min-w-48">
-              <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
-                <div class="flex min-w-0 items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
-                  <span class="truncate">{{ conn.name }}</span>
-                </div>
-              </SelectItem>
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            :model-value="connection?.id || ''"
+            :options="connectionOptionIds"
+            :placeholder="t('editor.selectConnection')"
+            :search-placeholder="t('editor.searchConnection')"
+            :empty-text="t('grid.noSearchResults')"
+            :loading-text="t('common.loading')"
+            trigger-class="h-5 rounded-md px-1 text-xs text-foreground/80 shadow-none hover:bg-muted/50"
+            content-class="w-56"
+            :display-name="connectionDisplayName"
+            @update:model-value="(connectionId) => changeConnection(connectionId)"
+          >
+            <template #trigger-label="{ label }">
+              <div v-if="connection" class="flex min-w-0 items-center gap-1.5">
+                <DatabaseIcon :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+                <span class="truncate">{{ label }}</span>
+              </div>
+              <div v-else class="flex min-w-0 items-center gap-1.5">
+                <Server class="h-3 w-3 shrink-0" />
+                <span class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
+              </div>
+            </template>
+            <template #option-label="{ option, label }">
+              <div class="flex min-w-0 items-center gap-2">
+                <DatabaseIcon :db-type="connectionIconType(connectionById(option))" class="h-3.5 w-3.5 shrink-0" />
+                <span class="truncate">{{ label }}</span>
+              </div>
+            </template>
+          </SearchableSelect>
           <template v-if="connection">
             <Database class="h-3 w-3 shrink-0 text-foreground/40" />
-            <Select
-              :model-value="selectedDatabaseSelectValue"
-              @update:model-value="(v: any) => changeDatabase(v)"
+            <SearchableSelect
+              :model-value="aiDatabaseValue"
+              :options="aiDatabaseOptions"
+              :placeholder="t('editor.selectDatabase')"
+              :search-placeholder="t('editor.searchDatabase')"
+              :empty-text="t('grid.noSearchResults')"
+              :loading-text="t('common.loading')"
+              :loading="loadingDatabaseOptions[connection.id]"
+              trigger-class="h-5 rounded-md px-1 text-xs text-foreground/80 shadow-none hover:bg-muted/50"
+              content-class="w-56"
+              :display-name="databaseDisplayName"
+              @update:model-value="(database) => changeDatabase(database)"
               @update:open="
                 (open: boolean) => {
                   if (open) loadDatabases();
                 }
               "
-            >
-              <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
-                <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
-              </SelectContent>
-            </Select>
+            />
           </template>
         </div>
         <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">

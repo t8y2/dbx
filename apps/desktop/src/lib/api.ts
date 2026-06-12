@@ -254,6 +254,27 @@ export const etcdGet = forward("etcdGet");
 export const etcdPut = forward("etcdPut");
 export const etcdDelete = forward("etcdDelete");
 
+// Kafka
+export const kafkaListTopics = forward("kafkaListTopics");
+export const kafkaDescribeTopic = forward("kafkaDescribeTopic");
+export const kafkaFetchMessages = forward("kafkaFetchMessages");
+export const kafkaProduceMessage = forward("kafkaProduceMessage");
+export const kafkaGetTopicMessageCount = forward("kafkaGetTopicMessageCount");
+export const kafkaTopicCountStart = forward("kafkaTopicCountStart");
+export const kafkaTopicCountStop = forward("kafkaTopicCountStop");
+export const kafkaListBrokers = forward("kafkaListBrokers");
+export const kafkaListAcls = forward("kafkaListAcls");
+export const kafkaListConsumerGroups = forward("kafkaListConsumerGroups");
+export const kafkaDescribeConsumerGroup = forward("kafkaDescribeConsumerGroup");
+export const kafkaCreateTopic = forward("kafkaCreateTopic");
+export const kafkaDeleteTopic = forward("kafkaDeleteTopic");
+export const kafkaSchemaRegistryListSubjects = forward("kafkaSchemaRegistryListSubjects");
+export const kafkaSchemaRegistryListVersions = forward("kafkaSchemaRegistryListVersions");
+export const kafkaSchemaRegistryGetSchema = forward("kafkaSchemaRegistryGetSchema");
+export const kafkaDecodePayload = forward("kafkaDecodePayload");
+export const kafkaTailStart = forward("kafkaTailStart");
+export const kafkaTailStop = forward("kafkaTailStop");
+
 // MongoDB
 export const mongoListDatabases = forward("mongoListDatabases");
 export const mongoListCollections = forward("mongoListCollections");
@@ -328,6 +349,24 @@ export type {
   KvGetResponse,
   KvPutResponse,
   KvDeleteResponse,
+  KafkaTopicSummary,
+  KafkaTopicDetail,
+  KafkaPartitionInfo,
+  KafkaPayloadEncoding,
+  KafkaPayload,
+  KafkaMessageRecord,
+  KafkaStartOffset,
+  KafkaFetchRequest,
+  KafkaProduceRequest,
+  KafkaProduceResult,
+  KafkaBrokerInfo,
+  KafkaAclEntry,
+  KafkaConsumerGroupSummary,
+  KafkaConsumerGroupDetail,
+  KafkaConsumerGroupPartitionLag,
+  KafkaCreateTopicRequest,
+  KafkaCreateTopicResult,
+  KafkaDeleteTopicResult,
   MongoDocumentResult,
   HistoryEntry,
   SqlFileStatus,

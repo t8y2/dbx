@@ -28,54 +28,60 @@ struct SqlFileSummary {
 }
 
 #[tauri::command]
-pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
-    let path = PathBuf::from(&file_path);
-    let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let preview = decode_sql_file_bytes(&bytes)?.chars().take(20_000).collect();
+pub fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
+    tauri::async_runtime::block_on(async move {
+        let path = PathBuf::from(&file_path);
+        let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
+        let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+        let preview = decode_sql_file_bytes(&bytes)?.chars().take(20_000).collect();
 
-    Ok(SqlFilePreview {
-        file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("script.sql").to_string(),
-        file_path,
-        size_bytes: metadata.len(),
-        preview,
+        Ok(SqlFilePreview {
+            file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("script.sql").to_string(),
+            file_path,
+            size_bytes: metadata.len(),
+            preview,
+        })
     })
 }
 
 #[tauri::command]
-pub async fn execute_sql_file(
+pub fn execute_sql_file(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     request: SqlFileRequest,
 ) -> Result<(), String> {
-    // Fast-fail: reject early if the connection is read-only (individual statements are also checked in do_execute)
-    ensure_connection_writable(&state, &request.connection_id, "SQL file execution").await?;
-    let token = CancellationToken::new();
-    {
-        let mut executions = sql_file_executions().write().await;
-        register_sql_file_execution(&mut executions, request.execution_id.clone(), token.clone())?;
-    }
+    tauri::async_runtime::block_on(async move {
+        // Fast-fail: reject early if the connection is read-only (individual statements are also checked in do_execute)
+        ensure_connection_writable(&state, &request.connection_id, "SQL file execution").await?;
+        let token = CancellationToken::new();
+        {
+            let mut executions = sql_file_executions().write().await;
+            register_sql_file_execution(&mut executions, request.execution_id.clone(), token.clone())?;
+        }
 
-    let started_at = Instant::now();
-    emit_progress(&app, &request.execution_id, SqlFileStatus::Started, 0, 0, 0, 0, started_at, "", None);
+        let started_at = Instant::now();
+        emit_progress(&app, &request.execution_id, SqlFileStatus::Started, 0, 0, 0, 0, started_at, "", None);
 
-    let result = execute_sql_file_inner(&app, &state, &request, token, started_at).await;
-    {
-        let mut executions = sql_file_executions().write().await;
-        remove_sql_file_execution(&mut executions, &request.execution_id);
-    }
-    result
+        let result = execute_sql_file_inner(&app, &state, &request, token, started_at).await;
+        {
+            let mut executions = sql_file_executions().write().await;
+            remove_sql_file_execution(&mut executions, &request.execution_id);
+        }
+        result
+    })
 }
 
 #[tauri::command]
-pub async fn cancel_sql_file_execution(execution_id: String) -> Result<bool, String> {
-    let executions = sql_file_executions().read().await;
-    if let Some(token) = executions.get(&execution_id) {
-        token.cancel();
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+pub fn cancel_sql_file_execution(execution_id: String) -> Result<bool, String> {
+    tauri::async_runtime::block_on(async move {
+        let executions = sql_file_executions().read().await;
+        if let Some(token) = executions.get(&execution_id) {
+            token.cancel();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
 }
 
 async fn execute_sql_file_inner(

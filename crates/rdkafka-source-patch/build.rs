@@ -37,10 +37,7 @@ fn main() {
     }
 
     if patched == 0 {
-        println!(
-            "cargo:warning=rdkafka-source-patch: no rdkafka-sys sources found under {}",
-            registry_root.display()
-        );
+        println!("cargo:warning=rdkafka-source-patch: no rdkafka-sys sources found under {}", registry_root.display());
     }
 }
 
@@ -72,10 +69,7 @@ fn patch_rdkafka_conf_c(path: &Path) -> bool {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) => {
-            println!(
-                "cargo:warning=rdkafka-source-patch: failed to read {}: {err}",
-                path.display()
-            );
+            println!("cargo:warning=rdkafka-source-patch: failed to read {}: {err}", path.display());
             return false;
         }
     };
@@ -84,22 +78,13 @@ fn patch_rdkafka_conf_c(path: &Path) -> bool {
         return false;
     }
 
-    let patched = content.replace(
-        "#ifdef WITH_OAUTHBEARER_OIDC",
-        "#if WITH_OAUTHBEARER_OIDC",
-    );
+    let patched = content.replace("#ifdef WITH_OAUTHBEARER_OIDC", "#if WITH_OAUTHBEARER_OIDC");
 
     if let Err(err) = fs::write(path, patched) {
-        println!(
-            "cargo:warning=rdkafka-source-patch: failed to write {}: {err}",
-            path.display()
-        );
+        println!("cargo:warning=rdkafka-source-patch: failed to write {}: {err}", path.display());
         return false;
     }
 
-    println!(
-        "cargo:warning=rdkafka-source-patch: patched {} for librdkafka#5204",
-        path.display()
-    );
+    println!("cargo:warning=rdkafka-source-patch: patched {} for librdkafka#5204", path.display());
     true
 }

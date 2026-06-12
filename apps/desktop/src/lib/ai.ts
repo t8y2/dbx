@@ -7,6 +7,8 @@ import { aiTableMentionKey, type AiTableMention } from "@/lib/aiTableMentions";
 import { aiSkillForAction } from "@/lib/aiSkills";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 
+import type { AgentEvent } from "@/lib/tauri";
+
 export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData";
 export type AiAssistantMode = "ask" | "agent";
 
@@ -25,6 +27,7 @@ export interface AiSchemaTable {
 }
 
 export interface AiContext {
+  connectionId: string;
   connectionName: string;
   databaseType: DatabaseType;
   database: string;
@@ -44,7 +47,7 @@ export interface AiRequestInput {
   context: AiContext;
 }
 
-export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
+function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { messages: api.AiMessage[]; systemPrompt: string; maxTokens: number; temperature: number } {
   const isZh = isChineseLocale(currentLocale());
   const skill = aiSkillForAction(input.action);
   const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
@@ -54,27 +57,24 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
   const messages: api.AiMessage[] = [...(history || []), { role: "user", content: userPrompt }];
 
   const params = actionParams(input.action);
+  const maxTokens = input.config.enableThinking ? Math.max(params.maxTokens, 8192) : params.maxTokens;
+  return { messages, systemPrompt, maxTokens, temperature: params.temperature };
+}
+
+export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
+  const { messages, systemPrompt, maxTokens, temperature } = buildAgentRequest(input, history);
   return api.aiComplete({
     config: input.config,
     systemPrompt,
     messages,
-    maxTokens: params.maxTokens,
-    temperature: params.temperature,
+    maxTokens,
+    temperature,
   });
 }
 
 export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void): Promise<void> {
-  const isZh = isChineseLocale(currentLocale());
-  const skill = aiSkillForAction(input.action);
-  const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
-  const instruction = isZh ? skill.userInstruction.zh : skill.userInstruction.en;
-  const userPrompt = [`Action: ${input.action}`, instruction, "", "User request:", input.instruction.trim() || "(No extra instruction provided.)"].join("\n");
-
-  const messages: api.AiMessage[] = [...(history || []), { role: "user", content: userPrompt }];
-
+  const { messages, systemPrompt, maxTokens, temperature } = buildAgentRequest(input, history);
   const sid = sessionId || uuid();
-  const params = actionParams(input.action);
-  const maxTokens = input.config.enableThinking ? Math.max(params.maxTokens, 8192) : params.maxTokens;
 
   await api.aiStream(
     sid,
@@ -83,7 +83,7 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
       systemPrompt,
       messages,
       maxTokens,
-      temperature: params.temperature,
+      temperature,
     },
     (chunk) => {
       if (!chunk.done) {
@@ -91,6 +91,26 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
         if (chunk.delta) onDelta(chunk.delta);
       }
     },
+  );
+}
+
+export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string): Promise<string> {
+  const { messages, systemPrompt, maxTokens, temperature } = buildAgentRequest(input, history);
+  const sid = sessionId || uuid();
+
+  return api.aiAgentStream(
+    sid,
+    {
+      config: input.config,
+      systemPrompt,
+      messages,
+      maxTokens,
+      temperature,
+    },
+    input.context.connectionId,
+    input.context.database,
+    input.context.databaseType,
+    onEvent,
   );
 }
 
@@ -158,8 +178,8 @@ function buildBasePromptLines(isZh: boolean): string[] {
     isZh ? "精确、保守，根据当前数据库方言生成 SQL。" : "Be precise, conservative, and adapt SQL to the active database dialect.",
     isZh ? "严格使用当前数据库方言；标识符引用、分页、日期函数、字符串拼接、LIMIT/TOP/OFFSET 语法必须匹配数据库类型。" : "Strictly use the active database dialect; identifier quoting, pagination, date functions, string concatenation, and LIMIT/TOP/OFFSET syntax must match the database type.",
     isZh
-      ? "对于普通数据查询，优先使用下面已加载的 Schema 上下文，不要为了重复确认已给出的结构而查询 information_schema 或系统表。"
-      : "For ordinary data queries, prefer the loaded schema context below. Do not query information_schema or system tables merely to rediscover structure already provided.",
+      ? "对于普通数据查询，优先使用下面已加载的 Schema 上下文，不要为了重复确认已给出的结构而查询 information_schema 或系统表。但当用户询问某表的字段详情、列信息时，应使用 get_columns 工具获取最权威完整的定义。"
+      : "For ordinary data queries, prefer the loaded schema context below. Do not query information_schema or system tables merely to rediscover structure already provided. However, when the user asks for detailed column/field information of a specific table, use the get_columns tool for the authoritative and complete definition.",
     isZh
       ? "例外：当用户明确询问当前有哪些表/Schema、某张表是否存在、或需要盘点数据库对象时，应生成符合当前方言的只读元数据查询（例如 SHOW TABLES、information_schema、sqlite_master 等）。"
       : "Exception: when the user explicitly asks what tables/schemas exist, whether a table exists, or asks for database object inventory, generate a read-only metadata query appropriate for the active dialect (for example SHOW TABLES, information_schema, sqlite_master).",
@@ -314,6 +334,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   }
 
   return {
+    connectionId: tab.connectionId,
     connectionName: connection.name,
     databaseType: connection.db_type,
     database: tab.database,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, type Component } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -16,7 +16,8 @@ import { connectionIconType } from "@/lib/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
-import { buildAiContext, runAiStream, type AiAction } from "@/lib/ai";
+import { buildAiContext, runAgentStream, type AiAction } from "@/lib/ai";
+import type { AgentEvent } from "@/lib/tauri";
 import { buildAiAgentPlan } from "@/lib/aiAgentPlan";
 import { buildAiAgentStepItems, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/aiCodeHighlighter";
@@ -90,7 +91,7 @@ const selectedMentions = ref<AiTableMention[]>([]);
 let mentionTimer: ReturnType<typeof setTimeout> | undefined;
 let mentionRequestId = 0;
 
-const actionButtons: { action: AiAction; icon: any; key: string }[] = [
+const actionButtons: { action: AiAction; icon: Component; key: string }[] = [
   { action: "generate", icon: Wand2, key: "ai.actions.generate" },
   { action: "explain", icon: HelpCircle, key: "ai.actions.explain" },
   { action: "optimize", icon: Zap, key: "ai.actions.optimize" },
@@ -199,8 +200,9 @@ async function changeConnection(connectionId: string) {
     if (tab) {
       queryStore.updateDatabase(tab.id, database);
     }
-  } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, message) }), 5000);
   }
 }
 
@@ -251,8 +253,10 @@ function agentStepClass(tone: AiAgentStepTone): string {
 }
 
 function agentStepTitle(step: AiAgentStepItem): string {
-  if (!step.titleKey) return t(step.labelKey);
-  return t(step.titleKey, step.titleParams || {});
+  if (step.titleKey) return t(step.titleKey, step.titleParams || {});
+  const tool = step.titleParams?.tool;
+  if (tool) return `${t(step.labelKey)}: ${tool}`;
+  return t(step.labelKey);
 }
 
 function toggleReasoning(index: number) {
@@ -355,9 +359,10 @@ async function loadMentionCandidates(query: string) {
     mentionCache.value[key] = candidates.slice(0, 40);
     mentionCandidates.value = mentionCache.value[key];
     mentionSelectedIndex.value = 0;
-  } catch (e: any) {
+  } catch (e: unknown) {
     if (requestId !== mentionRequestId) return;
-    mentionError.value = translateBackendError(t, e?.message || String(e));
+    const message = e instanceof Error ? e.message : String(e);
+    mentionError.value = translateBackendError(t, message);
     mentionCandidates.value = [];
   } finally {
     if (requestId === mentionRequestId) mentionLoading.value = false;
@@ -484,6 +489,7 @@ async function send() {
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
   currentSessionId.value = sessionId;
+  const agentEvents: AgentEvent[] = [];
   try {
     const context = await buildAiContext(props.tab, props.connection, {
       mentionedTables,
@@ -492,7 +498,7 @@ async function send() {
       role: m.role,
       content: m.content,
     }));
-    await runAiStream(
+    await runAgentStream(
       {
         config: settings.aiConfig,
         action: activeAction.value,
@@ -501,29 +507,65 @@ async function send() {
         context,
       },
       history,
-      (delta) => {
-        appendAssistantDelta(assistantIdx, delta);
+      (event: AgentEvent) => {
+        agentEvents.push(event);
+        if (event.type === "text_delta" && event.delta) {
+          appendAssistantDelta(assistantIdx, event.delta);
+        }
+        if (event.type === "reasoning_delta" && event.delta) {
+          appendAssistantReasoning(assistantIdx, event.delta);
+        }
+        // Real-time agent step rendering
+        if (event.type === "tool_call_start" || event.type === "tool_call_end") {
+          const msg = messages.value[assistantIdx];
+          if (msg) {
+            const steps = agentEvents
+              .filter((e) => e.type === "tool_call_start" || e.type === "tool_call_end")
+              .map((e) => ({
+                key: `${e.tool_call_id || ""}-${e.type}`,
+                labelKey: e.type === "tool_call_start" ? "ai.agentSteps.callingTool" : e.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone",
+                tone: (e.type === "tool_call_start" ? "active" : e.is_error ? "danger" : "success") as AiAgentStepTone,
+                titleKey: undefined,
+                titleParams: { tool: e.tool_name || "" },
+              }));
+            msg.agentSteps = steps;
+          }
+        }
+        scrollToBottom();
       },
       sessionId,
-      (reasoningDelta) => {
-        appendAssistantReasoning(assistantIdx, reasoningDelta);
-      },
     );
-  } catch (e: any) {
-    messages.value[assistantIdx].content = `Error: ${e.message || e}`;
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    messages.value[assistantIdx].content = `Error: ${message}`;
   } finally {
     const msg = messages.value[assistantIdx];
     if (msg) msg.isThinking = false;
     isGenerating.value = false;
-    const agentPlan = buildAiAgentPlan({
-      mode: requestedMode,
-      action: requestedAction,
-      instruction: displayText,
-      assistantContent: msg?.content || "",
-      connection: props.connection,
-    });
-    if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
-    if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+    // Render agent tool call steps from agent events
+    if (msg && agentEvents.length > 0) {
+      msg.agentSteps = agentEvents
+        .filter((e) => e.type === "tool_call_start" || e.type === "tool_call_end")
+        .map((e) => ({
+          key: `${e.tool_call_id || ""}-${e.type}`,
+          labelKey: e.type === "tool_call_start" ? "ai.agentSteps.callingTool" : e.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone",
+          tone: e.type === "tool_call_start" ? "active" : e.is_error ? "danger" : "success",
+          titleKey: undefined,
+          titleParams: { tool: e.tool_name || "" },
+        }));
+    }
+    // Fallback: use aiAgentPlan for backward compatibility
+    if (msg && !msg.agentSteps?.length) {
+      const agentPlan = buildAiAgentPlan({
+        mode: requestedMode,
+        action: requestedAction,
+        instruction: displayText,
+        assistantContent: msg?.content || "",
+        connection: props.connection,
+      });
+      if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
+      if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+    }
     activeAction.value = "generate";
     currentSessionId.value = "";
     persistConversation();
@@ -555,8 +597,9 @@ async function copyCode(code: string, key: string) {
     setTimeout(() => {
       if (copiedIndex.value === key) copiedIndex.value = "";
     }, 2000);
-  } catch (e: any) {
-    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("grid.copyFailed", { message }), 5000);
   }
 }
 
@@ -620,6 +663,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   clearTimeout(mentionTimer);
+  cancelStream();
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
@@ -781,7 +825,7 @@ const messageRenderer = computed(() => {
         <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
           <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
           <Server v-else class="h-3 w-3 shrink-0" />
-          <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
+          <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(String(v ?? ''))">
             <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
               <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
             </SelectTrigger>
@@ -798,7 +842,7 @@ const messageRenderer = computed(() => {
             <Database class="h-3 w-3 shrink-0 text-foreground/40" />
             <Select
               :model-value="selectedDatabaseSelectValue"
-              @update:model-value="(v: any) => changeDatabase(v)"
+              @update:model-value="(v: any) => changeDatabase(String(v ?? ''))"
               @update:open="
                 (open: boolean) => {
                   if (open) loadDatabases();

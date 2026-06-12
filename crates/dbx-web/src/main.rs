@@ -290,6 +290,7 @@ async fn main() {
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
         .route("/ai/complete", post(routes::ai::ai_complete))
         .route("/ai/stream", post(routes::ai::ai_stream))
+        .route("/ai/agent-stream", post(routes::ai::ai_agent_stream))
         .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
         .route("/ai/test-connection", post(routes::ai::ai_test_connection))
         .route("/ai/models", post(routes::ai::ai_list_models))

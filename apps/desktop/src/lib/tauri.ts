@@ -274,6 +274,31 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
   }
 }
 
+export type AgentEvent =
+  | { type: "turn_start"; turn: number }
+  | { type: "text_delta"; delta: string }
+  | { type: "reasoning_delta"; delta: string }
+  | { type: "tool_call_start"; tool_call_id: string; tool_name: string; args: Record<string, unknown> }
+  | { type: "tool_call_end"; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
+  | { type: "turn_end"; turn: number }
+  | { type: "agent_end"; total_tokens?: number }
+  | { type: "error"; message: string };
+
+export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void): Promise<string> {
+  const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
+    onEvent(event.payload);
+    if (event.payload.type === "agent_end" || event.payload.type === "error") {
+      unlisten();
+    }
+  });
+  try {
+    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType });
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
+}
+
 export async function saveAiConfig(config: AiConfig): Promise<void> {
   return invoke("save_ai_config", { config });
 }

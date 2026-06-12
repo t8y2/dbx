@@ -961,6 +961,9 @@
       autoExecute: "准备执行",
       notRequested: "未请求执行",
       skipped: "未执行",
+      callingTool: "正在调用工具...",
+      toolDone: "工具调用完成",
+      toolError: "工具调用出错",
     },
     agentStepTitles: {
       riskCheck: "风险检查：{action} · {category} · {environment} · {reasons}",

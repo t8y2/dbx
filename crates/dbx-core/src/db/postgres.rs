@@ -1114,6 +1114,7 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let stmt = client.prepare_cached(postgres_tables_sql()).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
@@ -1492,6 +1493,7 @@ async fn get_columns_with_sql(
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
     match get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, schema, table).await {
         Ok(columns) => Ok(columns),

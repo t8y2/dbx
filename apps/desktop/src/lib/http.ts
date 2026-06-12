@@ -757,6 +757,58 @@ export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return post("/api/ai/models", { config });
 }
 
+export type { AgentEvent } from "./tauri";
+
+function isAgentEvent(v: unknown): v is import("./tauri").AgentEvent {
+  return typeof v === "object" && v !== null && "type" in v && typeof (v as Record<string, unknown>).type === "string";
+}
+
+export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: import("./tauri").AgentEvent) => void, signal?: AbortSignal): Promise<string> {
+  const res = await fetch("/api/ai/agent-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, request, connection_id: connectionId, database, db_type: dbType }),
+    signal,
+  });
+  if (!res.ok) throw new Error(await res.text());
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        const data = line.slice(5).trim();
+        if (data && data !== "[DONE]") {
+          try {
+            const parsed = JSON.parse(data);
+            if (!isAgentEvent(parsed)) {
+              console.warn("[aiAgentStream] Skipping invalid agent event:", data);
+              continue;
+            }
+            onEvent(parsed);
+            if (parsed.type === "agent_end" || parsed.type === "error") {
+              result = data;
+            }
+          } catch {
+            // skip malformed JSON
+          }
+        }
+      }
+    }
+  }
+  return result;
+}
+
 export async function saveAiConfig(config: AiConfig): Promise<void> {
   return post("/api/ai/config", { config });
 }

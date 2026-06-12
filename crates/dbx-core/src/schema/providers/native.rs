@@ -35,8 +35,14 @@ pub(in crate::schema) async fn list_tables(
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
             db::mysql::list_tables_show(p, database).await
         }
-        PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_tables(p, schema).await,
-        PoolKind::Mysql(p, _) => db::mysql::list_tables(p, schema).await,
+        PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
+            let s = if schema.is_empty() { database } else { schema };
+            db::ob_oracle::list_tables(p, s).await
+        }
+        PoolKind::Mysql(p, _) => {
+            let db = if schema.is_empty() { database } else { schema };
+            db::mysql::list_tables(p, db).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_tables(p, schema).await,
         PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema).await,

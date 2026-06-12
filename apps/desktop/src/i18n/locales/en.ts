@@ -962,6 +962,9 @@
       autoExecute: "Ready to run",
       notRequested: "Run not requested",
       skipped: "Not run",
+      callingTool: "Calling tool...",
+      toolDone: "Tool completed",
+      toolError: "Tool error",
     },
     agentStepTitles: {
       riskCheck: "Risk check: {action} · {category} · {environment} · {reasons}",

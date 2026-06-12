@@ -147,16 +147,49 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
-const iconThemeDescTruncated = ref({ default: false, black: false });
+const iconThemeDescTruncated = { default: ref<Boolean>(false), black: ref<Boolean>(false) };
 const iconThemeDescRef = {
   default: ref<HTMLElement | null>(null),
   black: ref<HTMLElement | null>(null),
 };
-const layoutDescTruncated = ref({ separated: false, classic: false });
+const layoutDescTruncated = { separated: ref<Boolean>(false), classic: ref<Boolean>(false) };
 const layoutDescRefs = {
   separated: ref<HTMLElement | null>(null),
   classic: ref<HTMLElement | null>(null),
 };
+let layoutDescObservers: Record<InterfaceLayout, ResizeObserver | undefined> = {
+  separated: undefined,
+  classic: undefined,
+};
+let iconThemeDescObservers: Record<DesktopIconTheme, ResizeObserver | undefined> = {
+  default: undefined,
+  black: undefined,
+};
+
+function observeElementTruncation(el: Ref<HTMLElement | null>, truncated: Ref<boolean>) {
+  if (!el.value) return;
+
+  const observer = new ResizeObserver(() => {
+    truncated.value = el.value!.scrollWidth > el.value!.clientWidth;
+  });
+
+  observer.observe(el.value);
+  return observer;
+}
+
+function initTruncationObservers() {
+  layoutDescObservers.separated = observeElementTruncation(layoutDescRefs.separated, layoutDescTruncated.separated);
+  layoutDescObservers.classic = observeElementTruncation(layoutDescRefs.classic, layoutDescTruncated.classic);
+  iconThemeDescObservers.default = observeElementTruncation(iconThemeDescRef.default, iconThemeDescTruncated.default);
+  iconThemeDescObservers.black = observeElementTruncation(iconThemeDescRef.black, iconThemeDescTruncated.black);
+}
+
+function cleanupTruncationObservers() {
+  layoutDescObservers.separated?.disconnect();
+  layoutDescObservers.classic?.disconnect();
+  iconThemeDescObservers.default?.disconnect();
+  iconThemeDescObservers.black?.disconnect();
+}
 
 function setLayoutDescRef(layout: InterfaceLayout, el: unknown) {
   layoutDescRefs[layout].value = el instanceof HTMLElement ? el : null;
@@ -166,31 +199,32 @@ function setIconThemeDescRef(theme: DesktopIconTheme, el: unknown) {
   iconThemeDescRef[theme].value = el instanceof HTMLElement ? el : null;
 }
 
-function checkIconThemeDescTruncation() {
-  nextTick(() => {
-    if (iconThemeDescRef.default.value) {
-      iconThemeDescTruncated.value.default = iconThemeDescRef.default.value.scrollWidth > iconThemeDescRef.default.value.clientWidth;
-    }
-    if (iconThemeDescRef.black.value) {
-      iconThemeDescTruncated.value.black = iconThemeDescRef.black.value.scrollWidth > iconThemeDescRef.black.value.clientWidth;
-    }
-  });
-}
-
 function checkLayoutDescTruncation() {
+  checkTruncationForRefs([
+    { el: layoutDescRefs.separated, truncated: layoutDescTruncated.separated },
+    { el: layoutDescRefs.classic, truncated: layoutDescTruncated.classic },
+  ]);
+}
+
+function checkIconThemeDescTruncation() {
+  checkTruncationForRefs([
+    { el: iconThemeDescRef.default, truncated: iconThemeDescTruncated.default },
+    { el: iconThemeDescRef.black, truncated: iconThemeDescTruncated.black },
+  ]);
+}
+
+function checkTruncationForRefs(items: Array<{ el: Ref<HTMLElement | null>; truncated: Ref<boolean> }>) {
   nextTick(() => {
-    if (layoutDescRefs.separated.value) {
-      layoutDescTruncated.value.separated = layoutDescRefs.separated.value.scrollWidth > layoutDescRefs.separated.value.clientWidth;
-    }
-    if (layoutDescRefs.classic.value) {
-      layoutDescTruncated.value.classic = layoutDescRefs.classic.value.scrollWidth > layoutDescRefs.classic.value.clientWidth;
+    for (const item of items) {
+      if (item.el.value) {
+        item.truncated.value = checkElementTruncation(item.el.value);
+      }
     }
   });
 }
 
-function handleResize() {
-  checkIconThemeDescTruncation();
-  checkLayoutDescTruncation();
+function checkElementTruncation(el: HTMLElement | null) {
+  return el ? el.scrollWidth > el.clientWidth : false;
 }
 
 function openAddSnippetDialog() {
@@ -965,7 +999,7 @@ watch(webdavRememberPassword, (val) => {
 
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
-  if (activeSettingsTab.value === "appearance") {
+  if (tab === "appearance") {
     checkLayoutDescTruncation();
     checkIconThemeDescTruncation();
   }
@@ -973,11 +1007,13 @@ watch(activeSettingsTab, (tab) => {
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
-  window.addEventListener("resize", handleResize);
+  checkLayoutDescTruncation();
+  checkIconThemeDescTruncation();
+  initTruncationObservers();
 });
 
 onUnmounted(() => {
-  window.removeEventListener("resize", handleResize);
+  cleanupTruncationObservers();
 });
 
 async function changePassword() {
@@ -1615,7 +1651,7 @@ watch(
                             <div :ref="(el) => setLayoutDescRef('separated', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutSeparatedDescription") }}</div>
                           </div>
                         </TooltipTrigger>
-                        <TooltipContent v-if="layoutDescTruncated.separated" class="max-w-[320px] text-xs leading-relaxed">
+                        <TooltipContent v-if="layoutDescTruncated.separated.value" class="max-w-[320px] text-xs leading-relaxed">
                           {{ t("settings.appLayoutSeparatedDescription") }}
                         </TooltipContent>
                       </Tooltip>
@@ -1630,7 +1666,7 @@ watch(
                             <div :ref="(el) => setLayoutDescRef('classic', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutClassicDescription") }}</div>
                           </div>
                         </TooltipTrigger>
-                        <TooltipContent v-if="layoutDescTruncated.classic" class="max-w-[320px] text-xs leading-relaxed">
+                        <TooltipContent v-if="layoutDescTruncated.classic.value" class="max-w-[320px] text-xs leading-relaxed">
                           {{ t("settings.appLayoutClassicDescription") }}
                         </TooltipContent>
                       </Tooltip>
@@ -1654,7 +1690,7 @@ watch(
                               <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeDefaultDescription") }}</div>
                             </div>
                           </TooltipTrigger>
-                          <TooltipContent v-if="iconThemeDescTruncated.default" class="max-w-[320px] text-xs leading-relaxed">
+                          <TooltipContent v-if="iconThemeDescTruncated.default.value" class="max-w-[320px] text-xs leading-relaxed">
                             {{ t("settings.iconThemeDefaultDescription") }}
                           </TooltipContent>
                         </Tooltip>
@@ -1672,7 +1708,7 @@ watch(
                               <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeBlackDescription") }}</div>
                             </div>
                           </TooltipTrigger>
-                          <TooltipContent v-if="iconThemeDescTruncated.black" class="max-w-[320px] text-xs leading-relaxed">
+                          <TooltipContent v-if="iconThemeDescTruncated.black.value" class="max-w-[320px] text-xs leading-relaxed">
                             {{ t("settings.iconThemeBlackDescription") }}
                           </TooltipContent>
                         </Tooltip>

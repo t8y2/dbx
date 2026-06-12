@@ -8,9 +8,6 @@ license = "Apache-2.0"
 default = ["duckdb-bundled"]
 duckdb-bundled = ["duckdb/bundled"]
 
-[build-dependencies]
-rdkafka-source-patch = { path = "../rdkafka-source-patch" }
-
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -57,7 +54,7 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 sysinfo = { version = "0.32", features = ["system"] }
 apache-avro = { version = "0.17", default-features = false }
 # System OpenSSL (see .cargo/config.toml on Windows). Avoid ssl-vendored — no Perl / long source builds.
-# rdkafka-source-patch fixes librdkafka#5204 so WITH_CURL=0 builds do not require libcurl-dev.
-rdkafka = { version = "0.37", features = ["cmake-build", "ssl", "sasl"] }
+# curl-static vendors libcurl so librdkafka#5204 builds do not require system libcurl-dev.
+rdkafka = { version = "0.37", features = ["cmake-build", "ssl", "sasl", "curl-static"] }
 # `scram` wires openssl-sys into vendored SASL so nmake links the same system OpenSSL as rdkafka.
 sasl2-sys = { version = "0.1.22", features = ["vendored", "scram"] }

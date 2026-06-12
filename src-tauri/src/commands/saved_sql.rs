@@ -103,7 +103,12 @@ fn sync_saved_sql_directory_blocking(target_dir: &Path, entries: &[SavedSqlSyncE
     for entry in entries {
         let mut file_dir = sync_root.to_path_buf();
         if let Some(folder_name) = entry.folder_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
-            file_dir.push(sanitize_file_segment(folder_name));
+            for segment in folder_name.split('/') {
+                let segment = segment.trim();
+                if !segment.is_empty() {
+                    file_dir.push(sanitize_file_segment(segment));
+                }
+            }
         }
         std::fs::create_dir_all(&file_dir).map_err(|e| e.to_string())?;
 

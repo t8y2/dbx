@@ -1,14 +1,20 @@
-import type { ColumnInfo, DatabaseType, IndexInfo } from "../types/database.ts";
-import type { ColumnExtra, EditableStructureColumn, EditableStructureIndex } from "./tableStructureEditorSql.ts";
+import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "../types/database.ts";
+import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "./tableStructureEditorSql.ts";
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
   mysql: [
     "tinyint",
+    "tinyint unsigned",
     "smallint",
+    "smallint unsigned",
     "mediumint",
+    "mediumint unsigned",
     "int",
+    "int unsigned",
     "integer",
+    "integer unsigned",
     "bigint",
+    "bigint unsigned",
     "float",
     "double",
     "double precision",
@@ -256,12 +262,18 @@ export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
 
 export const DEFAULT_TYPE_LENGTHS: Record<string, string> = {
   tinyint: "4",
+  "tinyint unsigned": "4",
   smallint: "6",
+  "smallint unsigned": "6",
   mediumint: "9",
+  "mediumint unsigned": "9",
   int: "11",
+  "int unsigned": "11",
   integer: "11",
+  "integer unsigned": "11",
   int4: "11",
   bigint: "20",
+  "bigint unsigned": "20",
   int8: "20",
   float: "10,2",
   real: "10,2",
@@ -346,6 +358,7 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     id: `existing:${index.name}`,
     name: index.name,
     columns: [...index.columns],
+    nameEdited: true,
     isUnique: index.is_unique,
     isPrimary: index.is_primary,
     filter: index.filter ?? "",
@@ -357,8 +370,91 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
   }));
 }
 
+export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableStructureForeignKey[] {
+  const groups = new Map<string, ForeignKeyInfo[]>();
+  for (const foreignKey of foreignKeys) {
+    const key = [foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""].join("\u0000");
+    groups.set(key, [...(groups.get(key) ?? []), foreignKey]);
+  }
+
+  return [...groups.values()].map((group, index) => {
+    const first = group[0]!;
+    const original = {
+      ...first,
+      column: group.map((foreignKey) => foreignKey.column).join(", "),
+      ref_column: group.map((foreignKey) => foreignKey.ref_column).join(", "),
+    };
+    return {
+      id: `existing:${first.name}:${index}`,
+      name: first.name,
+      column: original.column,
+      refSchema: first.ref_schema ?? "",
+      refTable: first.ref_table,
+      refColumn: original.ref_column,
+      onUpdate: first.on_update ?? "",
+      onDelete: first.on_delete ?? "",
+      original,
+      markedForDrop: false,
+    };
+  });
+}
+
+export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureTrigger[] {
+  return triggers.map((trigger) => ({
+    id: `existing:${trigger.name}`,
+    name: trigger.name,
+    timing: trigger.timing,
+    event: trigger.event,
+    statement: trigger.statement ?? "",
+    original: trigger,
+    markedForDrop: false,
+  }));
+}
+
 export function toColumnNames(columns: string[]): string {
   return columns.join(", ");
+}
+
+const AUTO_INDEX_NAME_MAX_LENGTH = 63;
+
+function normalizeIndexNamePart(value: string): string {
+  const trimmed = value.trim();
+  const unquoted = (trimmed.startsWith("[") && trimmed.endsWith("]")) || (trimmed.startsWith("`") && trimmed.endsWith("`")) || (trimmed.startsWith('"') && trimmed.endsWith('"')) ? trimmed.slice(1, -1) : trimmed;
+  return unquoted
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function truncateIndexName(value: string, maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  if (value.length <= maxLength) return value;
+  const suffix = "_IDX";
+  if (!value.endsWith(suffix)) return value.slice(0, maxLength).replace(/_+$/g, "");
+  return `${value.slice(0, maxLength - suffix.length).replace(/_+$/g, "")}${suffix}`;
+}
+
+export function generateIndexName(tableName: string, columns: string[], maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  const parts = [tableName, ...columns].map(normalizeIndexNamePart).filter(Boolean);
+  if (parts.length === 0) return "";
+  return truncateIndexName(`${parts.join("_")}_IDX`, maxLength);
+}
+
+export function generateUniqueIndexName(tableName: string, columns: string[], existingNames: Iterable<string>, maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  const base = generateIndexName(tableName, columns, maxLength);
+  if (!base) return "";
+
+  const taken = new Set([...existingNames].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  if (!taken.has(base.toLowerCase())) return base;
+
+  for (let counter = 2; counter < 10_000; counter++) {
+    const suffix = `_${counter}`;
+    const stem = base.length + suffix.length <= maxLength ? base : base.slice(0, maxLength - suffix.length).replace(/_+$/g, "");
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return base;
 }
 
 export function splitDataType(raw: string): { baseType: string; params: string } {

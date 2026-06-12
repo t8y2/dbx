@@ -45,13 +45,13 @@ function metrics(starLabel: string) {
   return {
     en: [
       { value: "~15 MB", label: "desktop installer" },
-      { value: "40+", label: "database engines" },
+      { value: "50+", label: "database engines" },
       { value: "2 modes", label: "desktop and Docker" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
       { value: "~15 MB", label: "桌面安装包" },
-      { value: "40+", label: "数据库引擎" },
+      { value: "50+", label: "数据库引擎" },
       { value: "2 种模式", label: "桌面与 Docker" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
@@ -74,16 +74,47 @@ const databaseSupport = [
   { name: "Redshift", icon: "/icons/database/redshift.svg", tone: "#8c4fff" },
   { name: "Dameng", icon: "/icons/database/dm.svg", tone: "#3857ff" },
   { name: "GaussDB", icon: "/icons/database/gaussdb.svg", tone: "#ff5a3d" },
-  { name: "JDBC", initials: "JDBC", tone: "#6ea8ff" },
+  { name: "openGauss", icon: "/icons/database/opengauss.svg", tone: "#1488c9" },
+  { name: "KingBase", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
+  { name: "HighGo", icon: "/icons/database/highgo.png", tone: "#005bac" },
   { name: "TiDB", icon: "/icons/database/tidb.svg", tone: "#e60012" },
   { name: "OceanBase", icon: "/icons/database/oceanbase.svg", tone: "#2285ff" },
   { name: "SelectDB", icon: "/icons/database/selectdb.svg", tone: "#22c1c3" },
   { name: "TDengine", icon: "/icons/database/tdengine.svg", tone: "#2f6fff" },
-  { name: "openGauss", icon: "/icons/database/opengauss.svg", tone: "#1488c9" },
-  { name: "KingBase", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
-  { name: "HighGo", initials: "HG", tone: "#005bac" },
   { name: "CockroachDB", icon: "/icons/database/cockroachdb.svg", tone: "#6933ff" },
-  { name: "More", initials: "···", tone: "#6ea8ff" },
+  { name: "RQLite", icon: "/icons/database/rqlite.png", tone: "#5a67d8" },
+  { name: "Turso", icon: "/icons/database/turso.png", tone: "#10b981" },
+  { name: "Databend", icon: "/icons/database/databend.svg", tone: "#f59e0b" },
+  { name: "Databricks", icon: "/icons/database/databricks.webp", tone: "#ff5a1f" },
+  { name: "Snowflake", icon: "/icons/database/snowflake.svg", tone: "#29b5e8" },
+  { name: "BigQuery", icon: "/icons/database/bigquery.svg", tone: "#4285f4" },
+  { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
+  { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
+  { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
+  { name: "SAP HANA", icon: "/icons/database/saphana.webp", tone: "#008fd3" },
+  { name: "Teradata", icon: "/icons/database/teradata.webp", tone: "#f37440" },
+  { name: "Vertica", icon: "/icons/database/vertica.webp", tone: "#007dc5" },
+  { name: "Exasol", icon: "/icons/database/exasol.webp", tone: "#002b45" },
+  { name: "Firebird", icon: "/icons/database/firebird.webp", tone: "#e17000" },
+  { name: "Informix", icon: "/icons/database/informix.svg", tone: "#0178c8" },
+  { name: "Neo4j", icon: "/icons/database/neo4j.svg", tone: "#018bff" },
+  { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
+  { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
+  { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
+  { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
+  { name: "KWDB", icon: "/icons/database/kwdb.svg", tone: "#6366f1" },
+  { name: "Vastbase", icon: "/icons/database/vastbase.png", tone: "#2563eb" },
+  { name: "GoldenDB", icon: "/icons/database/goldendb.png", tone: "#eab308" },
+  { name: "YashanDB", icon: "/icons/database/yashandb.png", tone: "#dc2626" },
+  { name: "SunDB", icon: "/icons/database/sundb.svg", tone: "#f97316" },
+  { name: "XuguDB", icon: "/icons/database/xugu.png", tone: "#84cc16" },
+  { name: "GBase", icon: "/icons/database/gbase.webp", tone: "#06b6d4" },
+  { name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
+  { name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
+  { name: "etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
+  { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
+  { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
+  { name: "Your DB?", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
 ];
 
 const workflows = {
@@ -313,7 +344,7 @@ const testimonials = {
 
 const i18nText = {
   en: {
-    heroTitle: "15 MB to manage 40+ databases!",
+    heroTitle: "15 MB to manage 50+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -335,7 +366,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "15MB，管理40+种数据库！",
+    heroTitle: "15MB，管理50+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -362,11 +393,11 @@ import { buildMetadata } from "@/lib/metadata";
 
 const landingMeta = {
   en: {
-    title: "DBX - 15 MB to manage 40+ databases!",
+    title: "DBX - 15 MB to manage 50+ databases!",
     description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
   },
   cn: {
-    title: "DBX - 15MB，管理40+种数据库！",
+    title: "DBX - 15MB，管理50+种数据库！",
     description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
   },
 };
@@ -474,15 +505,31 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.supportTitle}</h2>
           <p className="mt-2 max-w-[760px] text-landing-muted text-sm leading-[1.65] justify-self-end text-right max-[760px]:max-w-none max-[760px]:text-left">{t.supportDesc}</p>
         </div>
-        <div className="grid grid-cols-8 gap-3 max-[760px]:grid-cols-2 max-[760px]:gap-2.5 max-[760px]:mt-[18px]">
-          {databaseSupport.map((db) => (
-            <div className="landing-db-card grid place-items-center min-h-[126px] rounded-[10px] px-2.5 py-[18px] max-[760px]:min-h-[122px] max-[760px]:py-4" key={db.name} style={{ "--db-tone": db.tone } as CSSProperties} data-stagger>
+        <div className="grid grid-cols-9 gap-3 max-[1240px]:grid-cols-7 max-[960px]:grid-cols-5 max-[640px]:grid-cols-3 max-[440px]:grid-cols-2 max-[760px]:gap-2.5">
+          {databaseSupport.map((db) => {
+            const isCta = "href" in db && db.href;
+            const CardTag = isCta ? "a" : "div";
+            return (
+            <CardTag
+              className={`landing-db-card grid place-items-center aspect-square rounded-[10px] px-2.5 py-[18px] max-[760px]:py-4 ${isCta ? "border-2 border-dashed border-[color-mix(in_srgb,var(--color-landing-blue)_40%,transparent)] hover:border-[color-mix(in_srgb,var(--color-landing-blue)_70%,transparent)] transition-colors cursor-pointer" : ""}`}
+              key={db.name}
+              {...(isCta ? { href: db.href, target: "_blank", rel: "noopener noreferrer" } : {})}
+              style={{ "--db-tone": db.tone } as CSSProperties}
+              data-stagger
+            >
               <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px]">
-                {db.icon ? <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" /> : <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-white text-xs font-[780]">{db.initials}</span>}
+                {isCta ? (
+                  <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
+                ) : db.icon ? (
+                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
+                ) : (
+                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-white text-xs font-[780]">{db.name.slice(0, 2).toUpperCase()}</span>
+                )}
               </div>
-              <strong className="text-sm font-[650] leading-[1.2] text-center text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]">{db.name}</strong>
-            </div>
-          ))}
+              <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+            </CardTag>
+            );
+          })}
         </div>
       </RevealSection>
 

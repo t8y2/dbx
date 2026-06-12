@@ -15,8 +15,11 @@ mkdir -p "$PACKAGE_DIR/bin" "$PACKAGE_DIR/lib"
 cp "$ROOT/manifest.json" "$PACKAGE_DIR/manifest.json"
 cp "$ROOT/bin/dbx-jdbc-plugin" "$PACKAGE_DIR/bin/dbx-jdbc-plugin"
 cp "$ROOT/bin/dbx-jdbc-plugin.bat" "$PACKAGE_DIR/bin/dbx-jdbc-plugin.bat"
+cp "$ROOT/bin/dbx-maven-resolver" "$PACKAGE_DIR/bin/dbx-maven-resolver"
+cp "$ROOT/bin/dbx-maven-resolver.bat" "$PACKAGE_DIR/bin/dbx-maven-resolver.bat"
 cp "$ROOT/target/dbx-jdbc-plugin-$VERSION-all.jar" "$PACKAGE_DIR/lib/dbx-jdbc-plugin.jar"
 chmod +x "$PACKAGE_DIR/bin/dbx-jdbc-plugin"
+chmod +x "$PACKAGE_DIR/bin/dbx-maven-resolver"
 
 (cd "$ROOT/dist" && zip -qr "dbx-jdbc-plugin-$VERSION.zip" "dbx-jdbc-plugin-$VERSION")
 cp "$ZIP_PATH" "$LATEST_ZIP_PATH"

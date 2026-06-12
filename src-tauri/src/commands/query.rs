@@ -307,6 +307,7 @@ pub fn build_create_database_sql(options: dbx_core::db_admin_sql::CreateDatabase
     Ok(dbx_core::db_admin_sql::build_create_database_sql(options))
 }
 
+#[cfg(feature = "duckdb-bundled")]
 #[tauri::command]
 pub fn build_duckdb_attach_database_sql(
     options: dbx_core::db_admin_sql::DuckDbAttachDatabaseSqlOptions,

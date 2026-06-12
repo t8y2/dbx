@@ -9,7 +9,7 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import * as api from "@/lib/api";
 import type { QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
-import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 
 export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>) {
   const { t } = useI18n();
@@ -46,6 +46,24 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
+  async function refreshDataTabTableMeta(tab: QueryTab): Promise<void> {
+    if (tab.mode !== "data" || !tab.connectionId || !tab.database) return;
+    const tableMeta = tableMetaForDataTab(tab);
+    if (!tableMeta?.tableName) return;
+
+    await connectionStore.ensureConnected(tab.connectionId);
+    const config = connectionStore.getConfig(tab.connectionId);
+    const querySchema = connectionObjectTreeQuerySchema(config, tab.database, tableMeta.schema);
+    const columns = await api.getColumns(tab.connectionId, tab.database, querySchema, tableMeta.tableName);
+    const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns);
+    queryStore.setTableMeta(tab.id, {
+      schema: tableMeta.schema,
+      tableName: tableMeta.tableName,
+      columns,
+      primaryKeys,
+    });
+  }
+
   async function onExecuteSql(sql: string) {
     const tab = activeTab.value;
     if (!tab) return;
@@ -60,6 +78,11 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.whereInput = whereInput ?? "";
       const pageLimit = limit ?? settingsStore.editorSettings.pageSize;
       const pageOffset = offset ?? 0;
+      try {
+        await refreshDataTabTableMeta(tab);
+      } catch (e: any) {
+        toast(e?.message || String(e), 5000);
+      }
       const nextSql = await buildTableSql(tab, { whereInput, orderBy, limit: pageLimit, offset: pageOffset });
       queryStore.updateSql(tab.id, nextSql);
       await queryStore.executeTabSql(tab.id, nextSql, {

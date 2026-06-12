@@ -1,7 +1,9 @@
 use super::column_format::{column_data_type, column_extra_clause};
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
+use super::foreign_keys::build_foreign_key_sql;
 use super::indexes::build_create_index_statements;
+use super::triggers::build_trigger_sql;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
 use super::validation::validate_columns;
@@ -135,6 +137,9 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
             &options.table_name,
         ));
     }
+
+    statements.extend(build_foreign_key_sql(&options, &mut warnings));
+    statements.extend(build_trigger_sql(&options, &mut warnings));
 
     TableStructureSqlResult { statements, warnings }
 }

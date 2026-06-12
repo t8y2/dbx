@@ -357,7 +357,7 @@ fn has_top_level_select_into(sql: &str) -> bool {
 }
 
 fn add_sql_server_top(sql: &str, limit: usize) -> String {
-    if has_top_level_select_top(sql) {
+    if has_top_level_select_top(sql) || has_top_level_offset_fetch_next(sql) {
         return sql.to_string();
     }
     if sql.len() >= 6 && sql[..6].eq_ignore_ascii_case("SELECT") {
@@ -413,6 +413,13 @@ fn has_top_level_limit(sql: &str) -> bool {
 fn has_top_level_fetch_first(sql: &str) -> bool {
     let tokens = top_level_sql_tokens(sql);
     tokens.windows(2).any(|w| w[0].text == "FETCH" && w[1].text == "FIRST")
+}
+
+fn has_top_level_offset_fetch_next(sql: &str) -> bool {
+    let tokens = top_level_sql_tokens(sql);
+    let has_offset = tokens.iter().any(|token| token.text == "OFFSET");
+    let has_fetch_next = tokens.windows(2).any(|w| w[0].text == "FETCH" && w[1].text == "NEXT");
+    has_offset && has_fetch_next
 }
 
 fn add_fetch_first_limit(statement: &str, limit: usize, offset: usize) -> String {
@@ -785,6 +792,19 @@ mod tests {
         });
 
         assert_eq!(result, err("unsupported"));
+    }
+
+    #[test]
+    fn keeps_sqlserver_offset_fetch_next_when_offset_is_zero() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM TABLE_NAME ORDER BY id OFFSET 1 ROWS FETCH NEXT 10 ROWS ONLY".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM TABLE_NAME ORDER BY id OFFSET 1 ROWS FETCH NEXT 10 ROWS ONLY");
     }
 
     #[test]

@@ -1957,6 +1957,7 @@ dependencies = [
  "log",
  "mongodb",
  "mysql_async",
+ "pageant",
  "percent-encoding",
  "portpicker",
  "rayon",

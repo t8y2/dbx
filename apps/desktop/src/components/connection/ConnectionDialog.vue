@@ -4,13 +4,15 @@ import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { ConnectionConfig, DatabaseType, JdbcDriverInfo, ProxyTunnelConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import { Switch } from "@/components/ui/switch";
+import type { ConnectionConfig, DatabaseType, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -33,6 +35,11 @@ type DbCategory = { key: string; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 type DbPickerView = "icon" | "list";
 type ConfigTab = "connection" | "advanced" | "tls" | "transport";
+type JdbcDriverSelectItem = {
+  id: string;
+  label: string;
+  paths: string[];
+};
 
 type LegacyTransportFields = {
   ssh_enabled?: boolean;
@@ -251,8 +258,10 @@ const customDriverName = ref("");
 const mongoUseUrl = ref(false);
 const jdbcDriverPathsInput = ref("");
 const jdbcDrivers = ref<JdbcDriverInfo[]>([]);
+const jdbcMavenBundles = ref<JdbcMavenBundleInfo[]>([]);
 const agentDrivers = ref<AgentDriverInstallState[]>([]);
 const selectedJdbcDriverPath = ref("");
+const jdbcManualClasspathOpen = ref(false);
 const connectionUrlInput = ref("");
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
@@ -274,6 +283,31 @@ const colorOptions = [
 const isPresetColor = (color: string | undefined) => colorOptions.some((c) => c.value === (color || ""));
 const customColorInput = ref("");
 const customColorOpen = ref(false);
+
+const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
+  const bundles = jdbcMavenBundles.value.map((bundle) => ({
+    id: `maven:${bundle.id}`,
+    label: bundle.coordinate,
+    paths: bundle.artifacts.map((artifact) => artifact.path),
+  }));
+  const manual = jdbcDrivers.value
+    .filter((driver) => !driver.bundle_id)
+    .map((driver) => ({
+      id: `manual:${driver.path}`,
+      label: driver.name,
+      paths: [driver.path],
+    }));
+  return [...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
+});
+
+const jdbcDriverSelectItemById = computed(() => new Map(jdbcDriverSelectItems.value.map((item) => [item.id, item])));
+const jdbcManualClasspathCount = computed(
+  () =>
+    jdbcDriverPathsInput.value
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean).length,
+);
 
 function applyCustomColor(value: string) {
   form.value.color = value;
@@ -739,7 +773,7 @@ const iconTypeMap: Record<string, string> = {
   custom_postgres: "postgres",
 };
 
-const dbOptions = [
+const dbOptions: DbOption[] = [
   { value: "postgres", label: "PostgreSQL" },
   { value: "mysql", label: "MySQL" },
   { value: "mongodb", label: "MongoDB" },
@@ -800,11 +834,18 @@ const dbOptions = [
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
   { value: "jdbc", label: "JDBC" },
-  { value: "custom_mysql", label: "Custom (MySQL)" },
-  { value: "custom_postgres", label: "Custom (PostgreSQL)" },
 ];
 
 const dbCategories = computed<DbCategory[]>(() => [{ key: "all", title: "", options: dbOptions }]);
+
+function matchesDbOption(option: DbOption, keyword: string, categoryTitle = "") {
+  const profile = driverProfiles[option.value];
+  return [option.label, option.value, profile?.label, profile?.type, categoryTitle].some((value) =>
+    String(value || "")
+      .toLowerCase()
+      .includes(keyword),
+  );
+}
 
 const filteredDbCategories = computed<DbCategory[]>(() => {
   const keyword = dbSearchQuery.value.trim().toLowerCase();
@@ -813,14 +854,7 @@ const filteredDbCategories = computed<DbCategory[]>(() => {
   return dbCategories.value
     .map((category) => ({
       ...category,
-      options: category.options.filter((option) => {
-        const profile = driverProfiles[option.value];
-        return [option.label, option.value, profile?.label, profile?.type, category.title].some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(keyword),
-        );
-      }),
+      options: category.options.filter((option) => matchesDbOption(option, keyword, category.title)),
     }))
     .filter((category) => category.options.length > 0);
 });
@@ -2005,9 +2039,12 @@ async function browseJdbcDriverPaths() {
 async function loadJdbcDrivers() {
   if (!isDesktop) return;
   try {
-    jdbcDrivers.value = await api.listJdbcDrivers();
+    const [drivers, bundles] = await Promise.all([api.listJdbcDrivers(), api.listJdbcMavenBundles()]);
+    jdbcDrivers.value = drivers;
+    jdbcMavenBundles.value = bundles;
   } catch {
     jdbcDrivers.value = [];
+    jdbcMavenBundles.value = [];
   }
 }
 
@@ -2028,18 +2065,21 @@ async function loadAgentDrivers() {
   }
 }
 
-function addJdbcDriverPath(path: string) {
+function addJdbcDriverPaths(paths: string[]) {
   const existing = jdbcDriverPathsInput.value
     .split(/\r?\n/)
     .map((value) => value.trim())
     .filter(Boolean);
-  jdbcDriverPathsInput.value = Array.from(new Set([...existing, path])).join("\n");
+  jdbcDriverPathsInput.value = Array.from(new Set([...existing, ...paths])).join("\n");
 }
 
-function onJdbcDriverSelect(path: any) {
-  if (typeof path !== "string" || !path) return;
-  selectedJdbcDriverPath.value = path;
-  addJdbcDriverPath(path);
+function onJdbcDriverSelect(id: any) {
+  if (typeof id !== "string" || !id) return;
+  const item = jdbcDriverSelectItemById.value.get(id);
+  if (!item) return;
+  selectedJdbcDriverPath.value = id;
+  addJdbcDriverPaths(item.paths);
+  jdbcManualClasspathOpen.value = false;
 }
 
 function openExternalUrl(url: string) {
@@ -2080,7 +2120,7 @@ function openExternalUrl(url: string) {
           <div class="max-h-[58vh] space-y-5 overflow-y-auto pr-2">
             <section v-for="category in filteredDbCategories" :key="category.key" class="space-y-2">
               <div class="flex items-center">
-                <h3 class="text-sm font-medium">{{ category.title }}</h3>
+                <h3 v-if="category.title" class="text-sm font-medium">{{ category.title }}</h3>
               </div>
 
               <div v-if="dbPickerView === 'icon'" class="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
@@ -2266,24 +2306,29 @@ function openExternalUrl(url: string) {
                     <Label class="text-right">{{ t("connection.password") }}</Label>
                     <Input v-model="form.password" type="password" class="col-span-3" />
                   </div>
-                  <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.jdbcDriverClass") }}</Label>
-                    <Input v-model="form.jdbc_driver_class" class="col-span-3" :placeholder="t('connection.jdbcDriverClassPlaceholder')" />
-                  </div>
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label class="text-right mt-2">{{ t("connection.jdbcDriverPaths") }}</Label>
                     <div class="col-span-3 space-y-2">
-                      <Select v-if="jdbcDrivers.length > 0" :model-value="selectedJdbcDriverPath" @update:model-value="onJdbcDriverSelect">
+                      <Select v-if="jdbcDriverSelectItems.length > 0" :model-value="selectedJdbcDriverPath" @update:model-value="onJdbcDriverSelect">
                         <SelectTrigger>
                           <SelectValue :placeholder="t('connection.jdbcDriverSelectPlaceholder')" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem v-for="driver in jdbcDrivers" :key="driver.path" :value="driver.path">
-                            {{ driver.name }}
+                          <SelectItem v-for="driver in jdbcDriverSelectItems" :key="driver.id" :value="driver.id">
+                            {{ driver.label }}
                           </SelectItem>
                         </SelectContent>
                       </Select>
-                      <div class="flex items-start gap-1">
+                      <div class="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2">
+                        <div class="flex min-w-0 items-center gap-2">
+                          <div class="truncate text-xs font-medium">{{ t("connection.jdbcManualClasspath") }}</div>
+                          <Badge variant="outline" class="h-5 shrink-0 rounded-full px-2 text-[10px] font-medium">
+                            {{ t("connection.jdbcManualClasspathCount", { count: jdbcManualClasspathCount }) }}
+                          </Badge>
+                        </div>
+                        <Switch v-model="jdbcManualClasspathOpen" />
+                      </div>
+                      <div v-if="jdbcManualClasspathOpen" class="flex items-start gap-1">
                         <textarea
                           v-model="jdbcDriverPathsInput"
                           class="flex min-h-12 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -2299,6 +2344,10 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.jdbcDriverClass") }}</Label>
+                    <Input v-model="form.jdbc_driver_class" class="col-span-3" :placeholder="t('connection.jdbcDriverClassPlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />

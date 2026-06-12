@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: Build frontend (native, no emulation)
-FROM --platform=$BUILDPLATFORM node:20-slim AS frontend
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend
 WORKDIR /app
 RUN npm i -g pnpm
 COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY apps/desktop/ apps/desktop/
+COPY crates/dbx-core/assets/database-drivers.manifest.json crates/dbx-core/assets/database-drivers.manifest.json
 RUN pnpm build
 
 # Stage 2: Cross-compile Rust backend for the requested platform (native, no emulation)

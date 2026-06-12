@@ -6,7 +6,10 @@ use axum::Json;
 use futures::stream::Stream;
 use serde::Deserialize;
 
+use dbx_core::agent_events::AgentEvent;
+use dbx_core::agent_loop::{run_agent_loop, AgentLoopContext};
 use dbx_core::ai::{AiCompletionRequest, AiConfig, AiConversation, AiModelInfo, AiStreamChunk};
+use dbx_core::models::connection::DatabaseType;
 
 use crate::error::AppError;
 use crate::state::WebState;
@@ -56,6 +59,16 @@ pub struct AiListModelsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AiCancelStreamRequest {
     pub session_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentStreamRequest {
+    pub session_id: String,
+    pub request: AiCompletionRequest,
+    pub connection_id: String,
+    pub database: String,
+    pub db_type: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +173,75 @@ pub async fn ai_stream(
         }
 
         dbx_core::ai::unregister_stream(&sid).await;
+    });
+
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Ok(data) = rx.recv().await {
+            yield Ok(Event::default().data(data));
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+// ---------------------------------------------------------------------------
+// AI agent stream (POST returns SSE with AgentEvent)
+// ---------------------------------------------------------------------------
+
+pub async fn ai_agent_stream(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AiAgentStreamRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    let session_id = body.session_id;
+    let request = body.request;
+
+    let cancelled = dbx_core::ai::register_stream(&session_id).await;
+    let (tx, rx) = tokio::sync::broadcast::channel::<String>(256);
+
+    let parsed_db_type: DatabaseType = serde_json::from_str(&format!("\"{}\"", body.db_type))
+        .map_err(|_| AppError(format!("Unknown database type: {}", body.db_type)))?;
+
+    let agent_ctx = AgentLoopContext {
+        state: state.app.clone(),
+        connection_id: body.connection_id,
+        database: body.database,
+        db_type: parsed_db_type,
+    };
+
+    let sid = session_id.clone();
+    let req_config = request.config;
+    let req_system_prompt = request.system_prompt;
+    let req_messages = request.messages;
+    let req_max_tokens = request.max_tokens;
+    let req_temperature = request.temperature;
+    let tx2 = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let rt =
+            tokio::runtime::Builder::new_current_thread().enable_all().build().expect("failed to create agent runtime");
+        rt.block_on(async move {
+            let result = run_agent_loop(
+                &req_config,
+                &req_system_prompt,
+                &req_messages,
+                &agent_ctx,
+                move |event: AgentEvent| {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    let _ = tx2.send(json);
+                },
+                &cancelled,
+                req_max_tokens,
+                req_temperature,
+            )
+            .await;
+
+            if let Err(e) = result {
+                let error_event = AgentEvent::Error { message: e };
+                let _ = tx.send(serde_json::to_string(&error_event).unwrap_or_default());
+            }
+
+            dbx_core::ai::unregister_stream(&sid).await;
+        });
     });
 
     let stream = async_stream::stream! {

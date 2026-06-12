@@ -7,19 +7,21 @@ const i18n = {
   en: {
     home: "Home",
     docs: "Docs",
+    databases: "Databases",
     changelog: "Changelog",
     community: "Community",
     drivers: "Offline Drivers",
     lang: "中文",
   },
-  cn: { home: "首页", docs: "文档", changelog: "更新日志", community: "交流群", drivers: "离线驱动", lang: "English" },
+  cn: { home: "首页", docs: "文档", databases: "数据库", changelog: "更新日志", community: "交流群", drivers: "离线驱动", lang: "English" },
 };
 
-export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "changelog" | "community" | "drivers" }) {
+export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "drivers" }) {
   const ref = useRef<HTMLElement>(null);
   const t = i18n[lang];
   const otherLang = lang === "cn" ? "en" : "cn";
   const langHrefMap: Record<string, string> = {
+    databases: `/${otherLang}/databases`,
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
     drivers: `/${otherLang}/drivers`,
@@ -52,6 +54,9 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
           </Link>
           <Link href={`/${lang}/docs/what-is-dbx`} className="landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden text-landing-muted">
             {t.docs}
+          </Link>
+          <Link href={`/${lang}/databases`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "databases" ? "text-landing-ink" : "text-landing-muted"}`}>
+            {t.databases}
           </Link>
           <Link href={`/${lang}/changelog`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "changelog" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.changelog}

@@ -50,6 +50,18 @@ cargo fmt --check
 cargo check --workspace --locked
 ```
 
+> [!TIP]
+> DuckDB compiles from source and takes a while. Skip it during routine
+> development when you're not touching DuckDB features:
+>
+> ```bash
+> cargo check --workspace --no-default-features
+> cargo test  --workspace --no-default-features
+> pnpm tauri dev -- --no-default-features
+> ```
+>
+> Release builds and CI should always include DuckDB (omit the flag).
+
 For package changes, also run:
 
 ```bash

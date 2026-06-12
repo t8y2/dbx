@@ -101,8 +101,14 @@ function toggleDatabase(database: string) {
   selectedNames.value = next;
 }
 
+const isSearching = computed(() => searchText.value.trim().length > 0);
+
 function selectAll() {
   selectedNames.value = new Set(listedDatabaseNames.value);
+}
+
+function selectFiltered() {
+  selectedNames.value = new Set(filteredDatabaseNames.value);
 }
 
 function clearSelection() {
@@ -141,6 +147,9 @@ async function saveSelection() {
         <div class="flex items-center gap-2">
           <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading" @click="selectAll">
             {{ t("visibleDatabases.selectAll") }}
+          </button>
+          <button v-if="isSearching" class="hover:text-foreground disabled:opacity-50" :disabled="isLoading" @click="selectFiltered">
+            {{ t("visibleDatabases.selectFiltered") }}
           </button>
           <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading" @click="clearSelection">
             {{ t("visibleDatabases.clear") }}

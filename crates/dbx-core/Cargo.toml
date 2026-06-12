@@ -10,7 +10,7 @@ duckdb-bundled = ["duckdb/bundled"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 regex = "1"
 rayon = "1"
 percent-encoding = "2"
@@ -39,6 +39,7 @@ futures = "0.3"
 iana-time-zone = "0.1"
 mongodb = "3.2.5"
 russh = "0.60"
+pageant = "0.2"
 portpicker = "0.1.1"
 csv = "1"
 calamine = "0.30.1"

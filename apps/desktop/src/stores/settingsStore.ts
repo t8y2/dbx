@@ -260,7 +260,36 @@ export interface EditorSettings {
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
   snippets: SqlSnippet[];
   exportBatchSize: number;
+  toolbarItems: ToolbarItems;
 }
+
+export interface ToolbarItems {
+  dataTransfer: boolean;
+  driverManager: boolean;
+  sqlFile: boolean;
+  schemaDiff: boolean;
+  dataCompare: boolean;
+  checkUpdates: boolean;
+  sqlLibrary: boolean;
+  history: boolean;
+  ai: boolean;
+  theme: boolean;
+  github: boolean;
+}
+
+export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
+  dataTransfer: true,
+  driverManager: true,
+  sqlFile: true,
+  schemaDiff: true,
+  dataCompare: true,
+  checkUpdates: true,
+  sqlLibrary: true,
+  history: true,
+  ai: true,
+  theme: true,
+  github: true,
+};
 
 export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }[] = [
   { value: "app", label: "Follow app theme", dark: false },
@@ -327,6 +356,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   customColumnFormatters: {},
   snippets: DEFAULT_SQL_SNIPPETS,
   exportBatchSize: 10000,
+  toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -390,6 +420,7 @@ function normalizeCustomColumnFormatters(value: unknown): Record<string, CustomC
 
 function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnippet[] {
   if (!Array.isArray(value)) return existing ?? DEFAULT_SQL_SNIPPETS;
+  if (value.length === 0) return [];
   const valid: SqlSnippet[] = [];
   const seenPrefixes = new Set<string>();
   for (const item of value) {
@@ -402,6 +433,24 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
   }
   if (valid.length === 0) return existing ?? DEFAULT_SQL_SNIPPETS;
   return valid;
+}
+
+function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): ToolbarItems {
+  const defaults = DEFAULT_TOOLBAR_ITEMS;
+  if (!items || typeof items !== "object") return { ...defaults };
+  return {
+    dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
+    driverManager: items.driverManager ?? defaults.driverManager,
+    sqlFile: items.sqlFile ?? defaults.sqlFile,
+    schemaDiff: items.schemaDiff ?? defaults.schemaDiff,
+    dataCompare: items.dataCompare ?? defaults.dataCompare,
+    checkUpdates: items.checkUpdates ?? defaults.checkUpdates,
+    sqlLibrary: items.sqlLibrary ?? defaults.sqlLibrary,
+    history: items.history ?? defaults.history,
+    ai: items.ai ?? defaults.ai,
+    theme: items.theme ?? defaults.theme,
+    github: items.github ?? defaults.github,
+  };
 }
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
@@ -463,6 +512,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
     snippets: normalizeSqlSnippets(settings.snippets, existing?.snippets),
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
+    toolbarItems: normalizeToolbarItems(settings.toolbarItems),
   };
 }
 
@@ -617,6 +667,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
     if (partial.snippets !== undefined) editorSettings.value.snippets = normalizeSqlSnippets(partial.snippets);
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
+    if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
     saveEditorSettings(editorSettings.value);
   }
 

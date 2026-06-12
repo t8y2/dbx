@@ -30,6 +30,7 @@ const emit = defineEmits<{
 const open = ref(true);
 const triggerRef = ref<HTMLButtonElement | null>(null);
 let closeHandled = false;
+let isCommitting = false;
 
 const hasDate = computed(() => props.kind !== "time");
 const hasTime = computed(() => props.kind !== "date");
@@ -136,12 +137,16 @@ function setNow() {
 }
 
 function finishCommit() {
+  if (isCommitting) return;
   closeHandled = true;
+  isCommitting = true;
   emit("commit");
 }
 
 function finishCancel() {
+  if (isCommitting) return;
   closeHandled = true;
+  isCommitting = true;
   emit("cancel");
 }
 
@@ -200,7 +205,7 @@ function twoDigit(value: string | number): string {
     <PopoverContent align="start" side="bottom" class="w-auto gap-1.5 rounded-md p-1.5" @click.stop @keydown.stop="onKeydown" @interact-outside="onPopoverInteractOutside">
       <div v-if="hasDate" class="grid grid-cols-[4.5rem_4.5rem_4.5rem] gap-1.5">
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <input :value="dateParts.year" data-temporal-part="year" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateDateFromInput('year', $event)" />
+          <input :value="dateParts.year" data-temporal-part="year" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateDateFromInput('year', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('year', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -212,7 +217,7 @@ function twoDigit(value: string | number): string {
         </div>
 
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <input :value="twoDigit(dateParts.month)" data-temporal-part="month" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateDateFromInput('month', $event)" />
+          <input :value="twoDigit(dateParts.month)" data-temporal-part="month" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateDateFromInput('month', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('month', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -224,7 +229,7 @@ function twoDigit(value: string | number): string {
         </div>
 
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <input :value="twoDigit(dateParts.day)" data-temporal-part="day" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateDateFromInput('day', $event)" />
+          <input :value="twoDigit(dateParts.day)" data-temporal-part="day" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateDateFromInput('day', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepDate('day', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -238,7 +243,7 @@ function twoDigit(value: string | number): string {
 
       <div v-if="hasTime" class="grid grid-cols-[3.5rem_0.5rem_3.5rem_0.5rem_3.5rem] items-center gap-1.5">
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <input :value="twoDigit(timeParts.hour)" data-temporal-part="hour" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateTimeFromInput('hour', $event)" />
+          <input :value="twoDigit(timeParts.hour)" data-temporal-part="hour" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateTimeFromInput('hour', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('hour', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -250,7 +255,7 @@ function twoDigit(value: string | number): string {
         </div>
         <span class="text-center text-xs text-muted-foreground">:</span>
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <input :value="twoDigit(timeParts.minute)" data-temporal-part="minute" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateTimeFromInput('minute', $event)" />
+          <input :value="twoDigit(timeParts.minute)" data-temporal-part="minute" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateTimeFromInput('minute', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('minute', 1)">
               <ChevronUp class="h-3 w-3" />
@@ -262,7 +267,7 @@ function twoDigit(value: string | number): string {
         </div>
         <span class="text-center text-xs text-muted-foreground">:</span>
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
-          <input :value="twoDigit(timeParts.second)" data-temporal-part="second" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @change="updateTimeFromInput('second', $event)" />
+          <input :value="twoDigit(timeParts.second)" data-temporal-part="second" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateTimeFromInput('second', $event)" />
           <div class="grid border-l">
             <button type="button" class="flex items-center justify-center hover:bg-muted" @click="stepTime('second', 1)">
               <ChevronUp class="h-3 w-3" />

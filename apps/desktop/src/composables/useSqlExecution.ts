@@ -7,6 +7,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { classifySqlActivityKind } from "@/lib/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
+import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -32,7 +33,14 @@ function primarySqlOperation(sql: string): string {
   return statement?.match(/^([a-z]+)/i)?.[1]?.toUpperCase() || "SQL";
 }
 
-export function useSqlExecution(deps: { activeTab: ComputedRef<QueryTab | undefined>; activeConnection: ComputedRef<ConnectionConfig | undefined>; executableSql: ComputedRef<string>; resolveExecutableSql?: () => Promise<string>; activeOutputView: Ref<"result" | "summary" | "explain" | "chart"> }) {
+export function useSqlExecution(deps: {
+  activeTab: ComputedRef<QueryTab | undefined>;
+  activeConnection: ComputedRef<ConnectionConfig | undefined>;
+  executableSql: ComputedRef<string>;
+  resolveExecutableSql?: () => Promise<string>;
+  activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
+  blockDangerousRedisCommands?: Ref<boolean>;
+}) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
   const historyStore = useHistoryStore();
@@ -54,6 +62,14 @@ export function useSqlExecution(deps: { activeTab: ComputedRef<QueryTab | undefi
     const tab = deps.activeTab.value;
     const sql = sqlOverride ?? (await resolvedExecutableSql());
     if (!tab || !sql.trim()) return;
+    // Redis: block dangerous commands when toggle is on
+    if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
+      const safety = classifyRedisCommandSafety(sql);
+      if (safety === "blocked") {
+        toast(t("redis.blockedCommand", { command: firstRedisCommandToken(sql) }), 5000);
+        return;
+      }
+    }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
@@ -71,7 +87,8 @@ export function useSqlExecution(deps: { activeTab: ComputedRef<QueryTab | undefi
     deps.activeOutputView.value = "result";
     const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
     const start = Date.now();
-    await queryStore.executeCurrentSql(sql);
+    const isRedis = deps.activeConnection.value?.db_type === "redis";
+    await queryStore.executeCurrentSql(sql, isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : undefined);
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }

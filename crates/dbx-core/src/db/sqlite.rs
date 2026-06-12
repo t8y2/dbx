@@ -455,6 +455,8 @@ pub async fn list_foreign_keys(pool: &SqliteHandle, _schema: &str, table: &str) 
                         ref_schema: None,
                         ref_table: row.get("table")?,
                         ref_column: row.get("to")?,
+                        on_update: None,
+                        on_delete: None,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -476,7 +478,7 @@ pub async fn list_triggers(pool: &SqliteHandle, _schema: &str, table: &str) -> R
             let rows = stmt
                 .query_map([table], |row| {
                     let sql_text: Option<String> = row.get("sql")?;
-                    let upper = sql_text.unwrap_or_default().to_uppercase();
+                    let upper = sql_text.clone().unwrap_or_default().to_uppercase();
                     let timing = if upper.contains("BEFORE") {
                         "BEFORE"
                     } else if upper.contains("AFTER") {
@@ -491,7 +493,12 @@ pub async fn list_triggers(pool: &SqliteHandle, _schema: &str, table: &str) -> R
                     } else {
                         "DELETE"
                     };
-                    Ok(TriggerInfo { name: row.get("name")?, event: event.to_string(), timing: timing.to_string() })
+                    Ok(TriggerInfo {
+                        name: row.get("name")?,
+                        event: event.to_string(),
+                        timing: timing.to_string(),
+                        statement: sql_text,
+                    })
                 })
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())

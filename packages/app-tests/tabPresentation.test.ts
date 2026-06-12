@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { executionSummaryItems, tabDisplayTitle, tabularResultItems } from "../../apps/desktop/src/lib/tabPresentation.ts";
+import { databaseDisplayNameForTab, executionSummaryItems, tabDisplayTitle, tabularResultItems } from "../../apps/desktop/src/lib/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
@@ -66,6 +66,39 @@ test("query tab display title uses custom title when present", () => {
   try {
     assert.equal(tabDisplayTitle(queryTab(), t), "Prod@app");
     assert.equal(tabDisplayTitle(queryTab({ title: "Revenue checks", customTitle: true }), t), "Revenue checks");
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("jdbc tabs use the connection target when database is empty", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    db_type: "jdbc",
+    connection_string: "jdbc:oracle:thin:@172.20.66.143:20001:XE",
+  });
+  const t = (key: string) => (key === "editor.noDatabase" ? "No database selected" : key);
+
+  try {
+    assert.equal(databaseDisplayNameForTab("conn-1", "", t), "XE");
+    assert.equal(
+      tabDisplayTitle(
+        queryTab({
+          database: "",
+          mode: "data",
+          tableMeta: {
+            schema: "SYSTEM",
+            tableName: "DBX_JDBC_TEST",
+            columns: [],
+            primaryKeys: ["ID"],
+          },
+        }),
+        t,
+      ),
+      "DBX_JDBC_TEST@XE.SYSTEM",
+    );
   } finally {
     restoreStorage();
   }

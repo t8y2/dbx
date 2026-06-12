@@ -884,6 +884,8 @@ mod tests {
             ref_schema: overrides.ref_schema,
             ref_table: if overrides.ref_table.is_empty() { "users".to_string() } else { overrides.ref_table },
             ref_column: if overrides.ref_column.is_empty() { "id".to_string() } else { overrides.ref_column },
+            on_update: None,
+            on_delete: None,
         }
     }
 
@@ -942,6 +944,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: String::new(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
                 foreign_key(ForeignKeyInfo {
                     name: "orders_account_id_fk".to_string(),
@@ -949,6 +953,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "accounts".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
             ],
             &[
@@ -958,6 +964,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "members".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
                 foreign_key(ForeignKeyInfo {
                     name: "orders_region_id_fk".to_string(),
@@ -965,6 +973,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "regions".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
             ],
         );
@@ -1012,6 +1022,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "users".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 })),
                 target: None,
                 changes: Vec::new(),

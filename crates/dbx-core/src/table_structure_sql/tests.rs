@@ -33,6 +33,33 @@ fn index(name: &str, columns: &[&str]) -> EditableStructureIndex {
     }
 }
 
+fn foreign_key(name: &str, column: &str, ref_table: &str, ref_column: &str) -> EditableStructureForeignKey {
+    EditableStructureForeignKey {
+        id: name.to_string(),
+        name: name.to_string(),
+        column: column.to_string(),
+        ref_schema: String::new(),
+        ref_table: ref_table.to_string(),
+        ref_column: ref_column.to_string(),
+        on_update: String::new(),
+        on_delete: String::new(),
+        original: None,
+        marked_for_drop: false,
+    }
+}
+
+fn trigger(name: &str, timing: &str, event: &str, statement: &str) -> EditableStructureTrigger {
+    EditableStructureTrigger {
+        id: name.to_string(),
+        name: name.to_string(),
+        timing: timing.to_string(),
+        event: event.to_string(),
+        statement: statement.to_string(),
+        original: None,
+        marked_for_drop: false,
+    }
+}
+
 #[test]
 fn builds_mysql_column_and_index_changes() {
     let mut renamed = column("display_name");
@@ -72,6 +99,8 @@ fn builds_mysql_column_and_index_changes() {
         table_name: "users".to_string(),
         columns: vec![renamed, email],
         indexes: vec![old_index, email_index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -100,6 +129,8 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         table_name: "users".to_string(),
         columns: vec![created_at],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -123,6 +154,8 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         table_name: "users".to_string(),
         columns: vec![created_at],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -153,6 +186,8 @@ fn builds_postgres_create_table_with_comments_and_index() {
         table_name: "users".to_string(),
         columns: vec![id, name],
         indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -189,6 +224,8 @@ fn warns_for_sqlite_unsafe_column_changes() {
         table_name: "users".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -214,6 +251,8 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         table_name: "users".to_string(),
         columns: vec![email],
         indexes: vec![email_index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -277,6 +316,8 @@ fn builds_mysql_column_reorder_statements() {
         table_name: "users".to_string(),
         columns: vec![id, email, name],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -303,6 +344,8 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         table_name: "users".to_string(),
         columns: vec![email],
         indexes: vec![index("idx_users_email", &["email"])],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -333,6 +376,8 @@ fn builds_duckdb_create_table_statements() {
         table_name: "events".to_string(),
         columns: vec![name, created_at],
         indexes: vec![index("idx_events_name", &["name"])],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -373,6 +418,8 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         table_name: "events".to_string(),
         columns: vec![source, status],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -414,6 +461,8 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         table_name: "USERS".to_string(),
         columns: vec![name],
         indexes: vec![index("IDX_USERS_DISPLAY_NAME", &["DISPLAY_NAME"])],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -454,6 +503,8 @@ fn builds_postgres_alter_table_add_primary_key() {
         table_name: "users".to_string(),
         columns: vec![id],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -484,6 +535,8 @@ fn builds_postgres_alter_table_drop_primary_key() {
         table_name: "users".to_string(),
         columns: vec![id],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -530,6 +583,8 @@ fn builds_mysql_alter_table_change_primary_key() {
         table_name: "users".to_string(),
         columns: vec![old_pk, new_pk],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -563,6 +618,8 @@ fn builds_no_statements_when_primary_key_unchanged() {
         table_name: "users".to_string(),
         columns: vec![id],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -593,6 +650,8 @@ fn warns_sqlite_cannot_alter_primary_key() {
         table_name: "users".to_string(),
         columns: vec![id],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -616,6 +675,8 @@ fn mysql_create_table_with_auto_increment() {
         table_name: "users".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -639,6 +700,8 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         table_name: "users".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -664,6 +727,8 @@ fn postgres_create_table_with_identity() {
         table_name: "users".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -689,6 +754,8 @@ fn sqlserver_create_table_with_identity() {
         table_name: "users".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -709,6 +776,8 @@ fn mysql_quotes_datetime_literal_default() {
         table_name: "events".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -729,6 +798,8 @@ fn mysql_does_not_quote_current_timestamp() {
         table_name: "events".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -750,6 +821,8 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         table_name: "events".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -770,6 +843,8 @@ fn mysql_date_literal_default_is_quoted() {
         table_name: "users".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -790,6 +865,8 @@ fn mysql_time_literal_default_is_quoted() {
         table_name: "shifts".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -810,6 +887,8 @@ fn non_temporal_types_are_not_quoted() {
         table_name: "games".to_string(),
         columns: vec![col],
         indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
     });
@@ -867,4 +946,110 @@ fn mysql_single_column_alter_quotes_datetime_literal() {
     });
 
     assert!(result.statements.iter().any(|s| s.contains("DEFAULT '2024-01-01 00:00:00'")));
+}
+
+#[test]
+fn builds_mysql_foreign_key_changes() {
+    let mut existing = foreign_key("fk_orders_users", "user_id", "users", "id");
+    existing.on_delete = "CASCADE".to_string();
+    existing.original = Some(ForeignKeyInfo {
+        name: "fk_orders_users_old".to_string(),
+        column: "customer_id".to_string(),
+        ref_schema: None,
+        ref_table: "customers".to_string(),
+        ref_column: "id".to_string(),
+        on_update: None,
+        on_delete: Some("RESTRICT".to_string()),
+    });
+
+    let mut dropped = foreign_key("fk_orders_accounts", "account_id", "accounts", "id");
+    dropped.marked_for_drop = true;
+    dropped.original = Some(ForeignKeyInfo {
+        name: "fk_orders_accounts".to_string(),
+        column: "account_id".to_string(),
+        ref_schema: None,
+        ref_table: "accounts".to_string(),
+        ref_column: "id".to_string(),
+        on_update: None,
+        on_delete: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: vec![existing, dropped],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_users_old`;",
+            "ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_users` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;",
+            "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_accounts`;",
+        ]
+    );
+}
+
+#[test]
+fn builds_mysql_composite_foreign_key() {
+    let composite = foreign_key("fk_order_items_product", "tenant_id, product_id", "products", "tenant_id, id");
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "order_items".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: vec![composite],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `order_items` ADD CONSTRAINT `fk_order_items_product` FOREIGN KEY (`tenant_id`, `product_id`) REFERENCES `products` (`tenant_id`, `id`);",
+        ]
+    );
+}
+
+#[test]
+fn builds_mysql_trigger_changes() {
+    let mut existing = trigger("orders_bu", "BEFORE", "UPDATE", "BEGIN\n  SET NEW.updated_at = NOW();\nEND");
+    existing.original = Some(TriggerInfo {
+        name: "orders_bu".to_string(),
+        event: "UPDATE".to_string(),
+        timing: "BEFORE".to_string(),
+        statement: Some("SET NEW.updated_at = CURRENT_TIMESTAMP".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP TRIGGER `orders_bu`;",
+            "CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders` FOR EACH ROW\nBEGIN\n  SET NEW.updated_at = NOW();\nEND;",
+        ]
+    );
 }

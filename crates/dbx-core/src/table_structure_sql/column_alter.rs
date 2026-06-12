@@ -6,6 +6,7 @@ use super::util::{
     clean, format_default_for_sql, normalize_default, original_comment, original_default, qualified_table, quote_ident,
     quote_string,
 };
+use crate::table_structure_sql::ColumnExtra;
 
 pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> TableStructureSqlResult {
     let capabilities = capabilities_for(options.database_type);
@@ -88,12 +89,20 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     TableStructureSqlResult { statements, warnings }
 }
 
+fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
+    !extra.auto_increment.unwrap_or(false)
+        && !extra.on_update_current_timestamp.unwrap_or(false)
+        && extra.identity.is_none()
+}
+
 pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool {
     let Some(original) = &column.original else { return false };
     let current_extra = column.extra.as_ref();
     match (current_extra, original.extra.as_deref()) {
         // Neither has extra → no change
         (None, None | Some("")) => false,
+        // Current extra is empty (all None) → no effective extra
+        (Some(curr), _) if is_column_extra_empty(curr) => false,
         // Extra added or removed
         (Some(_), None | Some("")) => true,
         (None, Some(_)) => true,

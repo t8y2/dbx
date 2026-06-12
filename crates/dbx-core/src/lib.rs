@@ -1,9 +1,12 @@
 pub mod agent_catalog;
 pub mod agent_connection;
+pub mod agent_events;
 pub mod agent_kv;
+pub mod agent_loop;
 pub mod agent_manager;
 pub mod agent_runtime;
 pub mod agent_service;
+pub mod agent_tools;
 pub mod ai;
 pub mod cloud_sync;
 pub mod connection;

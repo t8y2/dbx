@@ -1,7 +1,7 @@
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_h2_existing_column_sql, build_mysql_existing_column_sql,
     build_oracle_like_existing_column_sql, build_postgres_existing_column_sql, build_sqlite_existing_column_sql,
-    build_sqlserver_existing_column_sql, has_existing_column_attribute_change,
+    build_sqlserver_existing_column_sql, has_column_extra_change, has_existing_column_attribute_change,
 };
 use super::column_format::column_definition;
 use super::comments::build_sqlserver_column_comment_sql;
@@ -64,7 +64,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             continue;
         }
 
-        if !has_existing_column_attribute_change(column) && !has_position_change {
+        if !has_existing_column_attribute_change(column) && !has_column_extra_change(column) && !has_position_change {
             continue;
         }
         let original = column.original.as_ref().unwrap();
@@ -72,7 +72,8 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         let has_attribute_change = column.data_type.trim() != original.data_type.trim()
             || column.is_nullable != original.is_nullable
             || normalize_default(Some(&column.default_value)) != original_default(column)
-            || clean(&column.comment) != original_comment(column);
+            || clean(&column.comment) != original_comment(column)
+            || has_column_extra_change(column);
         if has_position_change && !capabilities.reorder_column {
             warnings.push(format!("Reordering columns is not supported for {database_label} from this editor."));
         }

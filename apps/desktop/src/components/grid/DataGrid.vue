@@ -45,7 +45,6 @@ import {
   WrapText,
   Info,
   Rows3,
-  TriangleAlert,
   RefreshCcw,
   RotateCcw,
   Pencil,
@@ -72,6 +71,7 @@ import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/compon
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ImagePreviewDialog from "@/components/grid/ImagePreviewDialog.vue";
@@ -181,7 +181,7 @@ const props = defineProps<{
   cacheKey?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: () => Promise<QueryResult | undefined>;
-  customSave?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
+  customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
 }>();
 
 const dataGridTraceId = uuid().slice(0, 8);
@@ -1902,7 +1902,7 @@ const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsCont
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
 type DataGridTableMeta = NonNullable<typeof props.tableMeta>;
 const hiveTableTransactional = ref<boolean | undefined>(undefined);
-const canEditExistingRows = computed(() => !!props.customSave || canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []));
+const canEditExistingRows = computed(() => !!props.customSaveHandler || canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []));
 watch(
   () => [props.databaseType, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
   async () => {
@@ -2118,7 +2118,7 @@ const editor = useDataGridEditor({
   sourceColumns: computed(() => props.sourceColumns),
   canEditExistingRows,
   onExecuteSql: computed(() => props.onExecuteSql),
-  customSave: computed(() => props.customSave),
+  customSaveHandler: computed(() => props.customSaveHandler),
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,
@@ -2234,7 +2234,7 @@ const saveActionMode = computed(() =>
 const saveToolbarState = computed(() =>
   dataGridSaveToolbarState({
     editable: props.editable,
-    hasSaveTarget: !!props.tableMeta || !!props.customSave,
+    hasSaveTarget: !!props.tableMeta || !!props.customSaveHandler,
     hasPendingChanges: hasPendingChanges.value,
     isSaving: isSaving.value,
   }),
@@ -2242,13 +2242,13 @@ const saveToolbarState = computed(() =>
 const hasSearchBarSlot = computed(() => !!slots["search-bar"]);
 const showDataGridTopbar = computed(
   () =>
-    (useTransaction.value && !!props.editable && (!!props.tableMeta || !!props.customSave)) ||
+    (useTransaction.value && !!props.editable && (!!props.tableMeta || !!props.customSaveHandler)) ||
     hasLocalColumnFilters.value ||
     canShowWhereSearch.value ||
     hasSearchBarSlot.value ||
     showQueryEditReadyBadge.value ||
     props.context !== "results" ||
-    (!!props.editable && (!!props.tableMeta || !!props.customSave)) ||
+    (!!props.editable && (!!props.tableMeta || !!props.customSaveHandler)) ||
     transactionActive.value ||
     saveToolbarState.value.showActions,
 );
@@ -2615,11 +2615,6 @@ const {
   handleDataCellMousedown,
   isRowSelected,
 } = selection;
-
-const selectionSummary = computed(() => {
-  if (hasRowSelection.value) return t("grid.selectedRows", { count: selectedRowCount.value });
-  return t("grid.selectedCells", { count: selectedCellCount.value });
-});
 
 const multiRowCount = computed(() => {
   if (hasRowSelection.value) return selectedRowCount.value;
@@ -3419,6 +3414,16 @@ const canvasDevicePixelRatio = ref(typeof window === "undefined" ? 1 : window.de
 const canvasBackingPixelRatio = computed(() => Math.min(4, Math.max(1, canvasDevicePixelRatio.value * settingsStore.editorSettings.uiScale)));
 const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
 const canvasContentHeight = computed(() => Math.max(1, displayRowCount.value * CANVAS_DATA_GRID_ROW_HEIGHT));
+// Clamp the sticky canvas/overlay to the content width. A viewport-wide sticky surface inflates the
+// scroller's scrollWidth up to clientWidth, so with few columns it sits right on the overflow threshold
+// and the custom horizontal scrollbar flickers while the pane shrinks (canvas width lags clientWidth).
+const canvasSurfaceWidth = computed(() => {
+  const total = totalWidth.value;
+  const vw = canvasViewportWidth.value;
+  if (total <= 0) return Math.max(0, vw);
+  if (vw <= 0) return total;
+  return Math.min(vw, total);
+});
 const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}`);
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
@@ -3734,9 +3739,11 @@ function canvasEditingCellViewportRect() {
 function canvasEditingCellIsVisible() {
   const rect = canvasEditingCellViewportRect();
   if (!rect) return false;
+  const viewportWidth = canvasEffectiveViewportWidth();
+  const viewportHeight = canvasEffectiveViewportHeight();
   const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
-  const clippedRight = Math.min(canvasViewportWidth.value, rect.left + rect.width);
-  return rect.top + rect.height > 0 && rect.top < canvasViewportHeight.value && clippedRight - clippedLeft > 0;
+  const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
+  return rect.top + rect.height > 0 && rect.top < viewportHeight && clippedRight - clippedLeft > 0;
 }
 
 function commitHiddenCanvasEditBeforeCellInteraction() {
@@ -3768,11 +3775,29 @@ const canvasSingleSelectedCell = computed(() => {
   return { rowIndex: range.startRow, visibleColIdx: range.startCol };
 });
 
+function canvasEffectiveViewportWidth(): number {
+  return canvasViewportWidth.value || canvasScrollerElement()?.clientWidth || 0;
+}
+
+function canvasEffectiveViewportHeight(): number {
+  return canvasViewportHeight.value || canvasScrollerElement()?.clientHeight || 0;
+}
+
+const canvasOverlayStyle = computed(() => {
+  const vh = canvasEffectiveViewportHeight();
+  return {
+    width: `${canvasSurfaceWidth.value}px`,
+    height: `${vh}px`,
+    marginTop: `-${vh}px`,
+  };
+});
+
 const canvasEditingCellStyle = computed(() => {
   const cell = canvasEditingCell.value;
   if (!cell) return {};
+  const viewportWidth = canvasEffectiveViewportWidth();
   const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left);
-  const clippedRight = Math.min(canvasViewportWidth.value, cell.rect.left + cell.rect.width);
+  const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, cell.rect.left + cell.rect.width) : cell.rect.left + cell.rect.width;
   return {
     left: `${clippedLeft}px`,
     top: `${cell.rect.top}px`,
@@ -3789,11 +3814,13 @@ const canvasDetailButtonCell = computed(() => {
   if (visibleColIdx < 0) return null;
   const rect = canvasCellViewportRect(target.rowIndex, visibleColIdx);
   if (!rect) return null;
+  const viewportWidth = canvasEffectiveViewportWidth();
+  const viewportHeight = canvasEffectiveViewportHeight();
   const visibleLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
-  const visibleRight = Math.min(canvasViewportWidth.value, rect.left + rect.width);
+  const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
   const minWidth = canQuickDownload ? 46 : 24;
-  if (rect.top < 0 || rect.top > canvasViewportHeight.value - 1 || visibleRight - visibleLeft < minWidth) return null;
+  if (rect.top < 0 || rect.top > viewportHeight - 1 || visibleRight - visibleLeft < minWidth) return null;
   return { rowIndex: target.rowIndex, visibleColIdx, actualColIdx: target.col, rect, canQuickDownload };
 });
 
@@ -3815,7 +3842,7 @@ function drawCanvasGrid() {
   drawCanvasDataGrid({
     canvas,
     scroller,
-    width: Math.max(1, canvasViewportWidth.value || scroller.clientWidth),
+    width: Math.max(1, canvasSurfaceWidth.value || scroller.clientWidth),
     height: Math.max(1, canvasViewportHeight.value || scroller.clientHeight),
     pixelRatio: canvasBackingPixelRatio.value,
     isDark: isDark.value,
@@ -5858,7 +5885,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           "
         >
           <div class="data-grid-topbar flex items-stretch relative">
-            <div v-if="useTransaction && editable && (tableMeta || customSave)" class="flex items-center px-2 py-0.5 border-r shrink-0">
+            <div v-if="useTransaction && editable && (tableMeta || customSaveHandler)" class="flex items-center px-2 py-0.5 border-r shrink-0">
               <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
                 <SelectTrigger class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground [&_svg]:size-3">
                   <SelectValue :placeholder="t('grid.filterRows')" />
@@ -5883,7 +5910,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </template>
             <template v-if="canShowWhereSearch">
               <div ref="searchSplitContainerRef" class="flex flex-1 min-w-0">
-                <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': useTransaction && editable && (tableMeta || customSave) }" :style="whereSearchPaneStyle">
+                <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': useTransaction && editable && (tableMeta || customSaveHandler) }" :style="whereSearchPaneStyle">
                   <Popover v-model:open="filterBuilderOpen">
                     <PopoverTrigger as-child>
                       <button
@@ -6147,7 +6174,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   {{ t("grid.renderModeHint") }}
                 </TooltipContent>
               </Tooltip>
-              <Button v-if="editable && (tableMeta || customSave)" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" @click="addRow"> <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }} </Button>
+              <Button v-if="editable && (tableMeta || customSaveHandler)" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" @click="addRow"> <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }} </Button>
               <template v-if="saveToolbarState.showActions">
                 <Tooltip v-if="pendingChangeCount > 0">
                   <TooltipTrigger as-child>
@@ -6230,14 +6257,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </button>
               </div>
             </Transition>
-            <div v-if="isErrorResult" class="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-destructive">
-              <TriangleAlert class="h-8 w-8 text-destructive/50" aria-hidden="true" />
-              <div class="space-y-1">
-                <div class="text-sm font-medium">{{ t("grid.queryError") }}</div>
-                <div class="text-xs max-w-lg break-all text-destructive/80">{{ errorMessage }}</div>
-              </div>
-              <slot name="error-actions" :error-message="errorMessage" />
-            </div>
+            <ErrorBanner v-if="isErrorResult" variant="centered" :message="errorMessage">
+              <template #actions>
+                <slot name="error-actions" :error-message="errorMessage" />
+              </template>
+            </ErrorBanner>
             <div v-else-if="isTransposeMode" class="flex-1 flex flex-col min-h-0 overflow-hidden">
               <div class="h-8 flex items-center gap-2 px-3 border-y shrink-0 bg-muted/20">
                 <Rows3 class="w-3.5 h-3.5 text-muted-foreground" />
@@ -6701,22 +6725,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <canvas
                     ref="canvasRef"
                     class="canvas-grid-surface sticky left-0 top-0 z-0 block text-xs font-sans font-normal"
-                    :style="{ width: `${canvasViewportWidth}px`, height: `${canvasViewportHeight}px` }"
+                    :style="{ width: `${canvasSurfaceWidth}px`, height: `${canvasViewportHeight}px` }"
                     @mousemove="onCanvasMouseMove"
                     @mouseleave="onCanvasMouseLeave"
                     @mousedown="onCanvasMouseDown"
                     @contextmenu="onCanvasContext"
                     @dblclick="onCanvasDblClick"
                   />
-                  <div
-                    ref="canvasOverlayRef"
-                    class="canvas-grid-overlay sticky left-0 top-0 z-10 overflow-hidden"
-                    :style="{
-                      width: `${canvasViewportWidth}px`,
-                      height: `${canvasViewportHeight}px`,
-                      marginTop: `-${canvasViewportHeight}px`,
-                    }"
-                  >
+                  <div ref="canvasOverlayRef" class="canvas-grid-overlay sticky left-0 top-0 z-10 overflow-hidden" :style="canvasOverlayStyle">
                     <div v-if="canvasEditingCell" class="absolute pointer-events-auto z-20" :class="{ 'tabular-nums': canvasEditingCellIsNumeric }" :style="canvasEditingCellStyle" @mousedown.stop @click.stop>
                       <TemporalCellEditor v-if="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)" v-model="editValue" :kind="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)!" @cancel="cancelEdit" @commit="commitGridEdit" />
                       <EnumCellEditor
@@ -7264,11 +7280,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         <span v-if="showTruncationWarning" class="shrink-0 text-amber-500 text-xs">(truncated)</span>
         <span v-if="!hasData" class="shrink-0">{{ t("grid.rowsAffected", { count: result.affected_rows }) }}</span>
         <span class="shrink-0">{{ result.execution_time_ms }}ms</span>
-        <span v-if="selectedRowCount > 0 || hasCellSelection" class="min-w-0 truncate text-foreground">
-          {{ selectionSummary }}
-        </span>
 
-        <template v-if="editable && (tableMeta || customSave)">
+        <template v-if="editable && (tableMeta || customSaveHandler)">
           <span v-if="hasPendingChanges" class="shrink-0 text-foreground">
             {{ t("grid.pendingChanges", { count: pendingChangeCount }) }}
           </span>
@@ -7753,7 +7766,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .data-grid-horizontal-scrollbar {
   position: absolute;
   inset-inline: calc(var(--row-num-w) + 8px) 10px;
-  bottom: 8px;
+  bottom: 2px;
   z-index: 30;
   height: 10px;
   cursor: pointer;
@@ -7767,7 +7780,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   top: 4px;
   height: 2px;
   border-radius: 999px;
-  background: color-mix(in oklch, var(--foreground) 12%, transparent);
+  background: color-mix(in oklch, var(--foreground) 7%, transparent);
 }
 
 .data-grid-horizontal-scrollbar__thumb {
@@ -7776,7 +7789,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   height: 4px;
   min-width: 24px;
   border-radius: 999px;
-  background: color-mix(in oklch, var(--foreground) 42%, transparent);
+  background: color-mix(in oklch, var(--foreground) 24%, transparent);
   transition:
     height 120ms ease,
     background-color 120ms ease,
@@ -7787,7 +7800,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .data-grid-horizontal-scrollbar--dragging .data-grid-horizontal-scrollbar__thumb {
   top: 2px;
   height: 6px;
-  background: color-mix(in oklch, var(--foreground) 62%, transparent);
+  background: color-mix(in oklch, var(--foreground) 42%, transparent);
 }
 
 .canvas-grid-surface {

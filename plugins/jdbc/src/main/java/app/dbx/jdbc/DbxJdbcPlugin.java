@@ -45,6 +45,14 @@ import java.util.logging.Logger;
 public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_ROWS = 10_000;
+    private static final String[] DEFAULT_TABLE_TYPES = new String[] {
+        "TABLE",
+        "VIEW",
+        "BASE TABLE",
+        "MATERIALIZED VIEW",
+        "SYSTEM TABLE",
+        "SYSTEM VIEW"
+    };
     private static final JdbcDriverQuirks DEFAULT_QUIRKS = new JdbcDriverQuirks(
         false,
         false,
@@ -793,8 +801,8 @@ public final class DbxJdbcPlugin {
         if (quirks.useOracleMetadata()) {
             return oracleListTables(conn, oracleEffectiveSchema(conn, schema));
         }
-        String[] types = new String[] {"TABLE", "VIEW", "MATERIALIZED VIEW", "SYSTEM TABLE", "SYSTEM VIEW"};
         DatabaseMetaData meta = conn.getMetaData();
+        String[] types = jdbcTableTypes(meta);
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
         appendTables(result, meta, catalog, schemaPattern, types);
@@ -815,7 +823,7 @@ public final class DbxJdbcPlugin {
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
 
-        String[] tableTypes = new String[] {"TABLE", "VIEW", "MATERIALIZED VIEW", "SYSTEM TABLE", "SYSTEM VIEW"};
+        String[] tableTypes = jdbcTableTypes(meta);
         appendTableObjects(result, meta, catalog, schemaPattern, schema, tableTypes);
         if (result.isEmpty() && catalog != null) {
             appendTableObjects(result, meta, null, schemaPattern, schema, tableTypes);
@@ -981,6 +989,27 @@ public final class DbxJdbcPlugin {
                 result.add(item);
             }
         }
+    }
+
+    static String[] jdbcTableTypes(DatabaseMetaData meta) throws SQLException {
+        Set<String> allowed = new HashSet<>();
+        for (String type : DEFAULT_TABLE_TYPES) {
+            allowed.add(type.toUpperCase(Locale.ROOT));
+        }
+        try (ResultSet rs = meta.getTableTypes()) {
+            List<String> types = new ArrayList<>();
+            while (rs.next()) {
+                String type = rs.getString("TABLE_TYPE");
+                if (type != null && allowed.contains(type.toUpperCase(Locale.ROOT))) {
+                    types.add(type);
+                }
+            }
+            if (!types.isEmpty()) {
+                return types.toArray(new String[0]);
+            }
+        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+        }
+        return DEFAULT_TABLE_TYPES;
     }
 
     private static void appendTableObjects(
@@ -1475,6 +1504,10 @@ public final class DbxJdbcPlugin {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
         }
+        Object temporalValue = readTemporalValue(rs, meta, index);
+        if (temporalValue != null) {
+            return temporalValue;
+        }
         if (value instanceof Date || value instanceof Time || value instanceof Timestamp || value instanceof TemporalAccessor) {
             return value.toString();
         }
@@ -1485,6 +1518,24 @@ public final class DbxJdbcPlugin {
             return value;
         }
         return value.toString();
+    }
+
+    private static Object readTemporalValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
+        return switch (meta.getColumnType(index)) {
+            case Types.DATE -> {
+                Date date = rs.getDate(index);
+                yield date == null ? null : date.toString();
+            }
+            case Types.TIME -> {
+                Time time = rs.getTime(index);
+                yield time == null ? null : time.toString();
+            }
+            case Types.TIMESTAMP -> {
+                Timestamp timestamp = rs.getTimestamp(index);
+                yield timestamp == null ? null : timestamp.toString();
+            }
+            default -> null;
+        };
     }
 
     private static boolean isBinaryColumn(ResultSetMetaData meta, int index) throws SQLException {

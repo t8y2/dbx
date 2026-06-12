@@ -153,6 +153,25 @@ pub async fn find_documents(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 
+pub async fn document_find_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoFindRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::mongo_ops::document_find_documents_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        req.skip.unwrap_or(0),
+        req.limit.unwrap_or(50),
+        req.filter.as_deref(),
+        req.sort.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
 pub async fn aggregate_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoAggregateRequest>,

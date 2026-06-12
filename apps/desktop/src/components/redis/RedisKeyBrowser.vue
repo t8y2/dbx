@@ -35,7 +35,7 @@ const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 
-type RedisSearchMode = "key" | "value";
+type RedisSearchMode = "key" | "value" | "all";
 type RedisCreateKeyType = "string" | "hash" | "list" | "set" | "zset" | "stream" | "json";
 
 interface CreateKeyEntry {
@@ -100,10 +100,14 @@ let redisBrowserIsActive = true;
 let redisDbFlushedListenerRegistered = false;
 
 const valueQuery = computed(() => searchPattern.value.trim());
+const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
 const effectivePattern = computed(() => (searchMode.value === "key" ? redisKeySearchPattern(searchPattern.value, fuzzyKeySearch.value) : "*"));
 const isSearchMode = computed(() => (searchMode.value === "key" ? effectivePattern.value !== "*" : valueQuery.value !== ""));
-const searchPlaceholder = computed(() => (searchMode.value === "key" ? (fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern")) : t("redis.valueSearchPlaceholder")));
-const loadingEmptyText = computed(() => (searchMode.value === "value" && valueQuery.value ? t("redis.searchingValues") : t("redis.loadingKeys")));
+const searchPlaceholder = computed(() => {
+  if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
+  return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
+});
+const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 watch(redisKeySeparator, () => {
   if (flatKeys.value.length > 0) rebuildTree(false);
@@ -192,7 +196,7 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
 
 async function fetchScanPage(): Promise<RedisScanResult> {
   const pageSize = settingsStore.editorSettings.redisScanPageSize;
-  return searchMode.value === "value" ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize) : await api.redisScanKeys(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize);
+  return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeys(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize);
 }
 
 function appendScanResult(result: RedisScanResult) {
@@ -223,7 +227,7 @@ async function scanNextPage(requestId = searchRequestId): Promise<boolean> {
 }
 
 async function streamValueSearch(requestId: number) {
-  while (requestId === searchRequestId && searchMode.value === "value" && valueQuery.value && hasMore.value) {
+  while (requestId === searchRequestId && isValueSearchMode.value && valueQuery.value && hasMore.value) {
     const applied = await scanNextPage(requestId);
     if (!applied) return;
   }
@@ -255,13 +259,13 @@ async function loadKeys() {
   expandedGroupIds.value = new Set();
   scanCursor.value = 0;
   try {
-    if (searchMode.value === "value" && !valueQuery.value) {
+    if (isValueSearchMode.value && !valueQuery.value) {
       hasMore.value = false;
       return;
     }
     const applied = await scanNextPage(requestId);
     if (applied) {
-      if (searchMode.value === "value") {
+      if (isValueSearchMode.value) {
         await streamValueSearch(requestId);
       } else {
         await fillInitialKeyBatch(requestId);
@@ -848,6 +852,9 @@ defineExpose({ focusSearch });
               </button>
               <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'value' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('value')">
                 {{ t("redis.searchByValue") }}
+              </button>
+              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('all')">
+                {{ t("redis.searchByAll") }}
               </button>
             </div>
             <Input v-model="searchPattern" data-redis-search-input class="h-6 text-xs border-0 shadow-none focus-visible:ring-0" :placeholder="searchPlaceholder" @input="onSearchInput" @keydown="onSearchKeydown" />

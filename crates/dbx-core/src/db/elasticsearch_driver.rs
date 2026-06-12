@@ -304,9 +304,33 @@ struct SearchHits {
     hits: Vec<SearchHit>,
 }
 
-#[derive(Deserialize)]
-struct HitsTotal {
-    value: u64,
+enum HitsTotal {
+    Count(u64),
+    Value { value: u64 },
+}
+
+impl HitsTotal {
+    fn value(&self) -> u64 {
+        match self {
+            Self::Count(value) | Self::Value { value } => *value,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HitsTotal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(count) = value.as_u64() {
+            return Ok(Self::Count(count));
+        }
+        if let Some(count) = value.get("value").and_then(serde_json::Value::as_u64) {
+            return Ok(Self::Value { value: count });
+        }
+        Err(serde::de::Error::custom("expected hits.total as a number or an object with value"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -322,12 +346,10 @@ pub async fn find_documents(
     index: &str,
     skip: u64,
     limit: i64,
+    filter: Option<&str>,
+    sort: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
-    let body = serde_json::json!({
-        "from": skip,
-        "size": limit,
-        "sort": ["_doc"],
-    });
+    let body = build_find_documents_body(skip, limit, filter, sort)?;
 
     let path = format!("/{}/_search", index);
     let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
@@ -353,11 +375,228 @@ pub async fn find_documents(
         })
         .collect();
 
-    Ok(MongoDocumentResult { documents, total: result.hits.total.value })
+    Ok(MongoDocumentResult { documents, total: result.hits.total.value() })
+}
+
+fn build_find_documents_body(
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::Map::new();
+    body.insert("from".to_string(), serde_json::json!(skip));
+    body.insert("size".to_string(), serde_json::json!(limit));
+
+    if let Some(query) = elasticsearch_query_from_document_filter(filter)? {
+        body.insert("query".to_string(), query);
+    }
+
+    body.insert("sort".to_string(), elasticsearch_sort_from_document_sort(sort)?);
+    Ok(serde_json::Value::Object(body))
+}
+
+fn elasticsearch_query_from_document_filter(filter: Option<&str>) -> Result<Option<serde_json::Value>, String> {
+    let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_str(filter).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let query = translate_document_filter_value(&value)?;
+    Ok(match query {
+        Some(query) => Some(query),
+        None => None,
+    })
+}
+
+fn translate_document_filter_value(value: &serde_json::Value) -> Result<Option<serde_json::Value>, String> {
+    let Some(object) = value.as_object() else {
+        return Err("Elasticsearch filter must be a JSON object".to_string());
+    };
+    if object.is_empty() {
+        return Ok(None);
+    }
+
+    let mut must = Vec::new();
+    for (key, value) in object {
+        match key.as_str() {
+            "$and" => must.extend(translate_logical_filter_array("$and", value)?),
+            "$or" => {
+                let should = translate_logical_filter_array("$or", value)?;
+                if !should.is_empty() {
+                    must.push(serde_json::json!({ "bool": { "should": should, "minimum_should_match": 1 } }));
+                }
+            }
+            key if key.starts_with('$') => {
+                return Err(format!("Unsupported Elasticsearch filter operator: {key}"));
+            }
+            field => must.push(translate_field_filter(field, value)?),
+        }
+    }
+
+    Ok(single_or_bool_filter(must))
+}
+
+fn translate_logical_filter_array(operator: &str, value: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    let items = value.as_array().ok_or_else(|| format!("{operator} must be an array"))?;
+    let mut queries = Vec::new();
+    for item in items {
+        if let Some(query) = translate_document_filter_value(item)? {
+            queries.push(query);
+        }
+    }
+    Ok(queries)
+}
+
+fn translate_field_filter(field: &str, value: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let Some(object) = value.as_object() else {
+        return Ok(term_or_null_query(field, value));
+    };
+    if object.keys().any(|key| key.starts_with('$')) {
+        return translate_field_operator_filter(field, object);
+    }
+    Ok(term_or_null_query(field, value))
+}
+
+fn translate_field_operator_filter(
+    field: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut must = Vec::new();
+    let mut must_not = Vec::new();
+    let mut range = serde_json::Map::new();
+
+    for (operator, value) in object {
+        match operator.as_str() {
+            "$options" => {}
+            "$ne" => {
+                if value.is_null() {
+                    must.push(serde_json::json!({ "exists": { "field": field } }));
+                } else {
+                    must_not.push(serde_json::json!({ "term": { field: value.clone() } }));
+                }
+            }
+            "$gt" => {
+                range.insert("gt".to_string(), value.clone());
+            }
+            "$gte" => {
+                range.insert("gte".to_string(), value.clone());
+            }
+            "$lt" => {
+                range.insert("lt".to_string(), value.clone());
+            }
+            "$lte" => {
+                range.insert("lte".to_string(), value.clone());
+            }
+            "$regex" => {
+                must.push(regex_like_query(field, value, object.get("$options"))?);
+            }
+            "$not" => {
+                let Some(inner) = value.as_object() else {
+                    return Err("$not must be a JSON object".to_string());
+                };
+                if let Some(regex) = inner.get("$regex") {
+                    must_not.push(regex_like_query(
+                        field,
+                        regex,
+                        inner.get("$options").or_else(|| object.get("$options")),
+                    )?);
+                } else {
+                    return Err("Unsupported Elasticsearch $not filter".to_string());
+                }
+            }
+            other => return Err(format!("Unsupported Elasticsearch field filter operator: {other}")),
+        }
+    }
+
+    if !range.is_empty() {
+        must.push(serde_json::json!({ "range": { field: serde_json::Value::Object(range) } }));
+    }
+
+    match (must.len(), must_not.is_empty()) {
+        (1, true) => Ok(must.remove(0)),
+        (0, false) => Ok(serde_json::json!({ "bool": { "must_not": must_not } })),
+        _ => {
+            let mut bool_query = serde_json::Map::new();
+            if !must.is_empty() {
+                bool_query.insert("must".to_string(), serde_json::Value::Array(must));
+            }
+            if !must_not.is_empty() {
+                bool_query.insert("must_not".to_string(), serde_json::Value::Array(must_not));
+            }
+            Ok(serde_json::json!({ "bool": bool_query }))
+        }
+    }
+}
+
+fn term_or_null_query(field: &str, value: &serde_json::Value) -> serde_json::Value {
+    if value.is_null() {
+        serde_json::json!({ "bool": { "must_not": [{ "exists": { "field": field } }] } })
+    } else {
+        serde_json::json!({ "term": { field: value.clone() } })
+    }
+}
+
+fn regex_like_query(
+    field: &str,
+    value: &serde_json::Value,
+    options: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let pattern = value.as_str().ok_or_else(|| "$regex must be a string for Elasticsearch filters".to_string())?;
+    let case_insensitive = options
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.chars().any(|ch| ch.eq_ignore_ascii_case(&'i')));
+    Ok(serde_json::json!({
+        "wildcard": {
+            field: {
+                "value": wildcard_contains_pattern(pattern),
+                "case_insensitive": case_insensitive
+            }
+        }
+    }))
+}
+
+fn wildcard_contains_pattern(pattern: &str) -> String {
+    if pattern.starts_with('*') || pattern.ends_with('*') {
+        pattern.to_string()
+    } else {
+        format!("*{}*", pattern)
+    }
+}
+
+fn single_or_bool_filter(mut queries: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+    match queries.len() {
+        0 => None,
+        1 => queries.pop(),
+        _ => Some(serde_json::json!({ "bool": { "filter": queries } })),
+    }
+}
+
+fn elasticsearch_sort_from_document_sort(sort: Option<&str>) -> Result<serde_json::Value, String> {
+    let Some(sort) = sort.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(serde_json::json!(["_doc"]));
+    };
+    let value: serde_json::Value = serde_json::from_str(sort).map_err(|e| format!("Invalid sort JSON: {e}"))?;
+    let object = value.as_object().ok_or_else(|| "Elasticsearch sort must be a JSON object".to_string())?;
+    if object.is_empty() {
+        return Ok(serde_json::json!(["_doc"]));
+    }
+
+    let items = object
+        .iter()
+        .map(|(field, direction)| {
+            let order = match direction {
+                serde_json::Value::Number(number) if number.as_i64().unwrap_or(1) < 0 => "desc",
+                serde_json::Value::String(value) if value.eq_ignore_ascii_case("desc") => "desc",
+                _ => "asc",
+            };
+            serde_json::json!({ field: { "order": order } })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::Value::Array(items))
 }
 
 pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> Result<String, String> {
-    let doc: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let doc = elasticsearch_document_body_from_json(doc_json)?;
 
     let path = format!("/{}/_doc?refresh=true", index);
     let resp = client.post(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
@@ -372,7 +611,7 @@ pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> 
 }
 
 pub async fn update_document(client: &EsClient, index: &str, id: &str, doc_json: &str) -> Result<u64, String> {
-    let doc: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let doc = elasticsearch_document_body_from_json(doc_json)?;
 
     let path = format!("/{}/_doc/{}?refresh=true", index, id);
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
@@ -383,6 +622,14 @@ pub async fn update_document(client: &EsClient, index: &str, id: &str, doc_json:
     }
 
     Ok(1)
+}
+
+fn elasticsearch_document_body_from_json(doc_json: &str) -> Result<serde_json::Value, String> {
+    let mut doc: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    if let serde_json::Value::Object(map) = &mut doc {
+        map.remove("_id");
+    }
+    Ok(doc)
 }
 
 pub async fn delete_document(client: &EsClient, index: &str, id: &str) -> Result<u64, String> {
@@ -1139,8 +1386,10 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        elasticsearch_accept_invalid_certs, elasticsearch_base_url_fallbacks, redact_elasticsearch_url, EsClient,
+        build_find_documents_body, elasticsearch_accept_invalid_certs, elasticsearch_base_url_fallbacks,
+        redact_elasticsearch_url, EsClient, SearchResponse,
     };
+    use serde_json::json;
     use std::time::Duration;
 
     #[test]
@@ -1188,5 +1437,129 @@ mod tests {
             redact_elasticsearch_url("https://elastic:secret@localhost:9200"),
             "https://user:password@localhost:9200"
         );
+    }
+
+    #[test]
+    fn builds_elasticsearch_find_body_with_filter_and_sort() {
+        let body = build_find_documents_body(20, 10, Some(r#"{"city":"长治"}"#), Some(r#"{"created_at":-1}"#)).unwrap();
+
+        assert_eq!(
+            body,
+            json!({
+                "from": 20,
+                "size": 10,
+                "query": { "term": { "city": "长治" } },
+                "sort": [{ "created_at": { "order": "desc" } }]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_elasticsearch_find_body_with_structured_filter_operators() {
+        let body = build_find_documents_body(
+            0,
+            100,
+            Some(
+                r#"{
+                    "$and": [
+                        {"city": {"$ne": "上海"}},
+                        {"age": {"$gt": 18, "$lte": 60}},
+                        {"name": {"$not": {"$regex": "test", "$options": "i"}}}
+                    ]
+                }"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            body,
+            json!({
+                "from": 0,
+                "size": 100,
+                "query": {
+                    "bool": {
+                        "filter": [
+                            { "bool": { "must_not": [{ "term": { "city": "上海" } }] } },
+                            { "range": { "age": { "gt": 18, "lte": 60 } } },
+                            {
+                                "bool": {
+                                    "must_not": [
+                                        {
+                                            "wildcard": {
+                                                "name": {
+                                                    "value": "*test*",
+                                                    "case_insensitive": true
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                },
+                "sort": ["_doc"]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_elasticsearch_find_body_with_or_filter() {
+        let body =
+            build_find_documents_body(0, 50, Some(r#"{"$or":[{"city":"长治"},{"city":"上海"}]}"#), None).unwrap();
+
+        assert_eq!(
+            body["query"],
+            json!({
+                "bool": {
+                    "should": [
+                        { "term": { "city": "长治" } },
+                        { "term": { "city": "上海" } }
+                    ],
+                    "minimum_should_match": 1
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parses_search_total_from_elasticsearch_6_number_shape() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "hits": {
+                "total": 5,
+                "hits": []
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.hits.total.value(), 5);
+    }
+
+    #[test]
+    fn parses_search_total_from_elasticsearch_7_object_shape() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "hits": {
+                "total": { "value": 5, "relation": "eq" },
+                "hits": []
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.hits.total.value(), 5);
+    }
+
+    #[test]
+    fn document_body_removes_elasticsearch_id_metadata() {
+        let doc = super::elasticsearch_document_body_from_json(r#"{"_id":"abc","name":"Alice"}"#).unwrap();
+
+        assert_eq!(doc, json!({ "name": "Alice" }));
+    }
+
+    #[test]
+    fn document_body_preserves_user_field_order() {
+        let doc = super::elasticsearch_document_body_from_json(r#"{"z":1,"_id":"abc","a":2}"#).unwrap();
+
+        assert_eq!(serde_json::to_string(&doc).unwrap(), r#"{"z":1,"a":2}"#);
     }
 }

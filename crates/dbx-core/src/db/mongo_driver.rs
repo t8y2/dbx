@@ -1,5 +1,5 @@
 use mongodb::{
-    bson::{doc, oid::ObjectId, Bson, Document},
+    bson::{doc, oid::ObjectId, Bson, DateTime, Document},
     options::ClientOptions,
     Client,
 };
@@ -181,7 +181,8 @@ pub async fn insert_document(
     collection: &str,
     doc_json: &str,
 ) -> Result<String, String> {
-    let doc: Document = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let doc = json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}"))?;
     let col = client.database(database).collection::<Document>(collection);
     let result = col.insert_one(doc).await.map_err(|e| e.to_string())?;
     Ok(format!("{}", result.inserted_id))
@@ -216,10 +217,13 @@ pub async fn update_document(
     id: &str,
     doc_json: &str,
 ) -> Result<u64, String> {
-    let mut new_doc: Document = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
-    new_doc.remove("_id");
+    let value: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
     let col = client.database(database).collection::<Document>(collection);
     for filter in document_id_filters(id) {
+        let current = col.find_one(filter.clone()).await.map_err(|e| e.to_string())?;
+        let mut new_doc = json_object_to_document_preserving_existing(&value, current.as_ref())
+            .map_err(|e| format!("Invalid document: {e}"))?;
+        new_doc.remove("_id");
         let result = col.replace_one(filter, new_doc.clone()).await.map_err(|e| e.to_string())?;
         if result.matched_count > 0 {
             return Ok(result.modified_count);
@@ -298,7 +302,10 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
         Bson::Int32(v) => serde_json::json!(v),
         Bson::Int64(v) => serde_json::json!(v),
         Bson::ObjectId(oid) => serde_json::Value::String(oid.to_hex()),
-        Bson::DateTime(dt) => serde_json::Value::String(dt.to_string()),
+        Bson::DateTime(dt) => serde_json::Value::String(format!(
+            "ISODate(\"{}\")",
+            dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string())
+        )),
         Bson::Array(arr) => serde_json::Value::Array(arr.iter().map(bson_to_json).collect()),
         Bson::Document(doc) => {
             let mut map = serde_json::Map::new();
@@ -320,10 +327,62 @@ pub fn json_object_to_document(value: &serde_json::Value) -> Result<Document, St
     }
 }
 
+fn json_object_to_document_preserving_existing(
+    value: &serde_json::Value,
+    existing: Option<&Document>,
+) -> Result<Document, String> {
+    match (value, existing) {
+        (serde_json::Value::Object(obj), Some(existing)) => Ok(obj
+            .iter()
+            .map(|(key, value)| {
+                let bson = existing
+                    .get(key)
+                    .map(|existing_bson| json_value_to_bson_preserving_existing(value, existing_bson))
+                    .unwrap_or_else(|| json_value_to_bson(value));
+                (key.clone(), bson)
+            })
+            .collect()),
+        _ => json_object_to_document(value),
+    }
+}
+
 pub fn json_filter_to_document(value: &serde_json::Value) -> Result<Document, String> {
     match json_filter_value_to_bson(value, None) {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
+    }
+}
+
+fn json_value_to_bson_preserving_existing(value: &serde_json::Value, existing: &Bson) -> Bson {
+    if &bson_to_json(existing) == value {
+        return existing.clone();
+    }
+
+    match (value, existing) {
+        (serde_json::Value::Array(values), Bson::Array(existing_values)) => Bson::Array(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    existing_values
+                        .get(index)
+                        .map(|existing_item| json_value_to_bson_preserving_existing(item, existing_item))
+                        .unwrap_or_else(|| json_value_to_bson(item))
+                })
+                .collect(),
+        ),
+        (serde_json::Value::Object(obj), Bson::Document(existing_doc)) => Bson::Document(
+            obj.iter()
+                .map(|(key, item)| {
+                    let bson = existing_doc
+                        .get(key)
+                        .map(|existing_item| json_value_to_bson_preserving_existing(item, existing_item))
+                        .unwrap_or_else(|| json_value_to_bson(item));
+                    (key.clone(), bson)
+                })
+                .collect(),
+        ),
+        _ => json_value_to_bson(value),
     }
 }
 
@@ -350,10 +409,26 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
                         return Bson::ObjectId(oid);
                     }
                 }
+                if let Some(date) = parse_extended_json_date(obj) {
+                    return Bson::DateTime(date);
+                }
             }
             let doc: Document = obj.iter().map(|(k, v)| (k.clone(), json_value_to_bson(v))).collect();
             Bson::Document(doc)
         }
+    }
+}
+
+fn parse_extended_json_date(obj: &serde_json::Map<String, serde_json::Value>) -> Option<DateTime> {
+    match obj.get("$date")? {
+        serde_json::Value::String(value) => DateTime::parse_rfc3339_str(value).ok(),
+        serde_json::Value::Number(value) => value.as_i64().map(DateTime::from_millis),
+        serde_json::Value::Object(inner) if inner.len() == 1 => match inner.get("$numberLong") {
+            Some(serde_json::Value::String(value)) => value.parse::<i64>().ok().map(DateTime::from_millis),
+            Some(serde_json::Value::Number(value)) => value.as_i64().map(DateTime::from_millis),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -509,5 +584,58 @@ mod tests {
         let doc = json_filter_to_document(&filter).unwrap();
 
         assert!(matches!(doc.get("owner_id"), Some(Bson::String(value)) if value == id));
+    }
+
+    #[test]
+    fn bson_to_json_displays_date_as_mongo_isodate() {
+        let date = DateTime::parse_rfc3339_str("2026-06-10T13:59:31.287Z").unwrap();
+        let value = bson_to_json(&Bson::DateTime(date));
+
+        assert_eq!(value, serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
+    }
+
+    #[test]
+    fn json_object_to_document_parses_extended_json_date() {
+        let value = serde_json::json!({
+            "created_at": { "$date": "2026-06-10T13:59:31.287Z" },
+            "updated_at": { "$date": { "$numberLong": "1781099971287" } }
+        });
+        let doc = json_object_to_document(&value).unwrap();
+
+        assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(_))));
+        assert!(matches!(
+            doc.get("updated_at"),
+            Some(Bson::DateTime(value)) if value.timestamp_millis() == 1_781_099_971_287
+        ));
+    }
+
+    #[test]
+    fn json_object_to_document_preserves_unchanged_bson_date_fields() {
+        let date = DateTime::parse_rfc3339_str("2026-06-10T13:59:31.287Z").unwrap();
+        let existing = doc! {
+            "_id": "doc-1",
+            "created_at": Bson::DateTime(date),
+            "name": "before",
+            "profile": {
+                "last_seen": Bson::DateTime(date),
+                "status": "old",
+            },
+        };
+        let displayed = bson_to_json(&Bson::Document(existing.clone()));
+        let mut edited = displayed.as_object().cloned().unwrap();
+        edited.insert("name".to_string(), serde_json::json!("after"));
+        if let Some(serde_json::Value::Object(profile)) = edited.get_mut("profile") {
+            profile.insert("status".to_string(), serde_json::json!("new"));
+        }
+
+        let doc =
+            json_object_to_document_preserving_existing(&serde_json::Value::Object(edited), Some(&existing)).unwrap();
+
+        assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(value)) if *value == date));
+        let Some(Bson::Document(profile)) = doc.get("profile") else {
+            panic!("expected profile document");
+        };
+        assert!(matches!(profile.get("last_seen"), Some(Bson::DateTime(value)) if *value == date));
+        assert!(matches!(profile.get("status"), Some(Bson::String(value)) if value == "new"));
     }
 }

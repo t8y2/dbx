@@ -433,6 +433,8 @@ fn spawn_plugin_child(plugin: &InstalledPlugin, env: &PluginRuntimeEnv) -> Resul
 
     #[cfg(windows)]
     {
+        #[allow(unused_imports)]
+        use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
 

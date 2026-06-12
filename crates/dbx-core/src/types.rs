@@ -102,6 +102,10 @@ pub struct ForeignKeyInfo {
     pub ref_schema: Option<String>,
     pub ref_table: String,
     pub ref_column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,4 +113,6 @@ pub struct TriggerInfo {
     pub name: String,
     pub event: String,
     pub timing: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
 }

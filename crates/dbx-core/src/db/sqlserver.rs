@@ -601,6 +601,12 @@ pub async fn list_databases(client: &mut SqlServerClient) -> Result<Vec<Database
     Ok(rows.iter().map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string() }).collect())
 }
 
+pub async fn test_connection(client: &mut SqlServerClient) -> Result<(), String> {
+    let stream = client.simple_query("SELECT 1").await.map_err(|e| e.to_string())?;
+    let _ = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn list_schemas(client: &mut SqlServerClient) -> Result<Vec<String>, String> {
     let stream = client
         .query(
@@ -891,6 +897,8 @@ pub async fn list_foreign_keys(
             ref_schema: Some(row.get::<&str, _>(2).unwrap_or("").to_string()),
             ref_table: row.get::<&str, _>(3).unwrap_or("").to_string(),
             ref_column: row.get::<&str, _>(4).unwrap_or("").to_string(),
+            on_update: None,
+            on_delete: None,
         })
         .collect())
 }
@@ -940,6 +948,7 @@ pub async fn list_triggers(
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             event: row.get::<&str, _>(1).unwrap_or("").to_string(),
             timing: row.get::<&str, _>(2).unwrap_or("AFTER").to_string(),
+            statement: None,
         })
         .collect())
 }

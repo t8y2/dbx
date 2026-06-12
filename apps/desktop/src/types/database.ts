@@ -165,6 +165,29 @@ export interface JdbcDriverInfo {
   name: string;
   path: string;
   size: number;
+  bundle_id?: string | null;
+}
+
+export interface JdbcMavenArtifactInfo {
+  group_id: string;
+  artifact_id: string;
+  version: string;
+  classifier: string;
+  extension: string;
+  file_name: string;
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+export interface JdbcMavenBundleInfo {
+  id: string;
+  coordinate: string;
+  scope: string;
+  repositories: string[];
+  installed_at: string;
+  path: string;
+  artifacts: JdbcMavenArtifactInfo[];
 }
 
 export interface JdbcPluginStatus {
@@ -242,12 +265,15 @@ export interface ForeignKeyInfo {
   ref_schema?: string | null;
   ref_table: string;
   ref_column: string;
+  on_update?: string | null;
+  on_delete?: string | null;
 }
 
 export interface TriggerInfo {
   name: string;
   event: string;
   timing: string;
+  statement?: string | null;
 }
 
 export interface QueryResult {
@@ -348,7 +374,7 @@ export interface ConnectionGroup {
   collapsed: boolean;
 }
 
-export type SidebarOrderEntry = { type: "group"; id: string; connectionIds: string[] } | { type: "connection"; id: string };
+export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
 
 export interface SidebarLayout {
   groups: ConnectionGroup[];
@@ -386,6 +412,7 @@ export interface QueryTab {
   schema?: string;
   sql: string;
   savedSqlId?: string;
+  originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
   resultSortedSql?: string;
@@ -467,6 +494,7 @@ export interface QueryTab {
 export interface SavedSqlFolder {
   id: string;
   connectionId: string;
+  parentFolderId?: string;
   name: string;
   orderIndex?: number;
   createdAt: string;

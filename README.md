@@ -1,5 +1,5 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>40+ databases in 15 MB. Desktop & Docker self-hosting, with built-in AI assistant.</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>50+ databases in 15 MB. Desktop & Docker self-hosting, with built-in AI assistant.</strong></p>
 
   <p>
     <img src="https://dl.dbxio.com/assets/readme-hero-20260517.png" alt="DBX screenshot" width="820" />
@@ -85,9 +85,9 @@
 
 ## Features
 
-### 40+ Databases, One Tool
+### 50+ Databases, One Tool
 
-MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend DBX to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, and custom JDBC connections. All in a single ~15 MB app. No bundled Chromium.
+MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend DBX to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase, Databend, RQLite, Turso, InfluxDB, IoTDB, etcd, IRIS, and more. All in a single ~15 MB app. No bundled Chromium.
 
 ### Query Editor
 
@@ -246,9 +246,16 @@ pnpm dev:tauri
 > skip it to speed up local builds:
 >
 > ```bash
+> # Fast checks (skip DuckDB)
 > cargo check --no-default-features
 > cargo test  --no-default-features
+>
+> # Tauri dev without DuckDB
+> pnpm tauri dev -- --no-default-features
 > ```
+>
+> The `--no-default-features` flag only affects local development.
+> Release builds (`pnpm tauri build`) always include DuckDB.
 
 Web version:
 
@@ -257,7 +264,16 @@ pnpm dev:web       # frontend
 pnpm dev:backend   # backend
 ```
 
-[dbx-agents](https://github.com/t8y2/dbx-agents) contains driver development projects.
+[dbx-agents](https://github.com/t8y2/dbx-agents) is a separate repository containing JDBC agent driver development projects. For local development, clone it alongside `dbx/` under the same workspace directory and open the parent folder in your IDE:
+
+```bash
+mkdir dbx-workspace && cd dbx-workspace
+git clone https://github.com/t8y2/dbx.git
+git clone https://github.com/t8y2/dbx-agents.git
+# Open dbx-workspace/ in your IDE to work on both projects together
+```
+
+This keeps the two repositories independent (separate git histories) while making it easy to navigate between them during development.
 
 ### Build
 
@@ -305,12 +321,12 @@ Yes. The desktop app works fully offline. For air-gapped driver installs, downlo
 
 <details>
 <summary><strong>How is DBX different from DBeaver / TablePlus / Beekeeper Studio?</strong></summary>
-DBX is 15 MB with no runtime dependencies (no Java, no Python). It includes AI and MCP natively — not as plugins. It supports 40+ databases across desktop, Docker, and web from a single codebase.
+DBX is 15 MB with no runtime dependencies (no Java, no Python). It includes AI and MCP natively — not as plugins. It supports 50+ databases across desktop, Docker, and web from a single codebase.
 </details>
 
 <details>
 <summary><strong>What databases are supported?</strong></summary>
-MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. JDBC-oriented profiles extend support to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, and custom JDBC connections.
+MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend support to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase, Databend, RQLite, Turso, InfluxDB, IoTDB, etcd, IRIS, and custom JDBC connections.
 </details>
 
 <details>

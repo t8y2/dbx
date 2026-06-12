@@ -295,14 +295,13 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         | ColumnType::MYSQL_TYPE_TIME
         | ColumnType::MYSQL_TYPE_TIME2
         | ColumnType::MYSQL_TYPE_NEWDATE => {
-            if let Some(v) = row_get::<NaiveDateTime, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
-            }
-            if let Some(v) = row_get::<NaiveDate, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
-            }
-            if let Some(v) = row_get::<NaiveTime, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
+            if let Some(value) = mysql_temporal_value_to_json(
+                column.column_type(),
+                row_get::<NaiveDateTime, _>(row, idx),
+                row_get::<NaiveDate, _>(row, idx),
+                row_get::<NaiveTime, _>(row, idx),
+            ) {
+                return value;
             }
         }
         _ => {}
@@ -322,6 +321,29 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         .or_else(|| row_get::<bool, _>(row, idx).map(serde_json::Value::Bool))
         .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(|bytes| mysql_bytes_to_json(bytes, column)))
         .unwrap_or(serde_json::Value::Null)
+}
+
+fn mysql_temporal_value_to_json(
+    column_type: ColumnType,
+    datetime: Option<NaiveDateTime>,
+    date: Option<NaiveDate>,
+    time: Option<NaiveTime>,
+) -> Option<serde_json::Value> {
+    let value = match column_type {
+        ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => {
+            date.map(|value| value.to_string()).or_else(|| datetime.map(|value| value.date().to_string()))?
+        }
+        ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => time.map(|value| value.to_string())?,
+        ColumnType::MYSQL_TYPE_TIMESTAMP
+        | ColumnType::MYSQL_TYPE_TIMESTAMP2
+        | ColumnType::MYSQL_TYPE_DATETIME
+        | ColumnType::MYSQL_TYPE_DATETIME2 => datetime
+            .map(|value| value.to_string())
+            .or_else(|| date.map(|value| value.to_string()))
+            .or_else(|| time.map(|value| value.to_string()))?,
+        _ => return None,
+    };
+    Some(serde_json::Value::String(value))
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
@@ -1303,7 +1325,7 @@ fn fix_potential_double_encoding(s: &str) -> String {
 
 pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = columns_sql(database, table);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut conn = get_conn_with_health_check(pool).await?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
         Err(err) => {
@@ -1353,7 +1375,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
 
 pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = show_columns_sql(database, table, true);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut conn = get_conn_with_health_check(pool).await?;
     let rows: Vec<mysql_async::Row> = match conn.query_iter(&sql).await {
         Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
         Err(_) => {
@@ -1695,8 +1717,13 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
         "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
-         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
+         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+         rc.UPDATE_RULE, rc.DELETE_RULE \
          FROM information_schema.KEY_COLUMN_USAGE kcu \
+         LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA \
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+          AND rc.TABLE_NAME = kcu.TABLE_NAME \
          WHERE kcu.TABLE_SCHEMA = {} AND kcu.TABLE_NAME = {} \
          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
          ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
@@ -1715,13 +1742,15 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
             ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
             ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
             ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+            on_update: Some(get_str_by_name(row, "UPDATE_RULE")).filter(|value| !value.is_empty()),
+            on_delete: Some(get_str_by_name(row, "DELETE_RULE")).filter(|value| !value.is_empty()),
         })
         .collect())
 }
 
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let sql = format!(
-        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING \
+        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
          FROM information_schema.TRIGGERS \
          WHERE TRIGGER_SCHEMA = {} AND EVENT_OBJECT_TABLE = {} \
          ORDER BY TRIGGER_NAME",
@@ -1738,6 +1767,7 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             name: get_str_by_name(row, "TRIGGER_NAME"),
             event: get_str_by_name(row, "EVENT_MANIPULATION"),
             timing: get_str_by_name(row, "ACTION_TIMING"),
+            statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())
 }
@@ -2102,6 +2132,27 @@ mod tests {
         );
 
         assert_eq!(mysql_datetime_to_string(value), "2026-05-12 00:00:00");
+    }
+
+    #[test]
+    fn mysql_date_values_display_without_midnight_time() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+
+        assert_eq!(
+            mysql_temporal_value_to_json(ColumnType::MYSQL_TYPE_DATE, Some(datetime), Some(date), None),
+            Some(serde_json::json!("2026-06-10"))
+        );
+    }
+
+    #[test]
+    fn mysql_datetime_values_keep_time_component() {
+        let datetime = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap().and_hms_opt(12, 34, 56).unwrap();
+
+        assert_eq!(
+            mysql_temporal_value_to_json(ColumnType::MYSQL_TYPE_DATETIME, Some(datetime), None, None),
+            Some(serde_json::json!("2026-06-10 12:34:56"))
+        );
     }
 
     #[tokio::test]

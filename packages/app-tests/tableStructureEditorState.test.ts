@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildStructureTargetLabel, combineDataTypeForDatabase, createColumnDrafts, createIndexDrafts, getDataTypeOptions, normalizeDataTypeParams, parseExtraToColumnExtra, toColumnNames } from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
+import { buildStructureTargetLabel, combineDataTypeForDatabase, createColumnDrafts, createIndexDrafts, generateIndexName, generateUniqueIndexName, getDataTypeOptions, normalizeDataTypeParams, parseExtraToColumnExtra, toColumnNames } from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
 import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
 
 const columns: ColumnInfo[] = [
@@ -151,6 +151,17 @@ test("creates editable index drafts and splits pasted column lists", () => {
     ],
   );
   assert.equal(toColumnNames(["id", "name"]), "id, name");
+});
+
+test("generates conventional index names from table and columns", () => {
+  assert.equal(generateIndexName("A", ["B"]), "A_B_IDX");
+  assert.equal(generateIndexName("order item", ["customer-id", "created_at"]), "ORDER_ITEM_CUSTOMER_ID_CREATED_AT_IDX");
+  assert.equal(generateIndexName("users", ["email"], 12), "USERS_EM_IDX");
+});
+
+test("generates unique index names when automatic name already exists", () => {
+  assert.equal(generateUniqueIndexName("users", ["email"], ["USERS_EMAIL_IDX"]), "USERS_EMAIL_IDX_2");
+  assert.equal(generateUniqueIndexName("users", ["email"], ["users_email_idx", "USERS_EMAIL_IDX_2"]), "USERS_EMAIL_IDX_3");
 });
 
 test("structure editor target label omits duplicate database and schema", () => {

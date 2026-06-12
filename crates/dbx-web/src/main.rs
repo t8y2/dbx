@@ -102,6 +102,11 @@ async fn main() {
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
         .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))
+        .route(
+            "/jdbc/drivers/maven",
+            get(routes::jdbc::list_jdbc_maven_bundles).post(routes::jdbc::install_jdbc_driver_from_maven),
+        )
+        .route("/jdbc/drivers/maven/{bundle_id}", delete(routes::jdbc::delete_jdbc_maven_bundle))
         .route("/jdbc/drivers/{name}", delete(routes::jdbc::delete_jdbc_driver))
         .route("/jdbc/plugin/status", get(routes::jdbc::get_jdbc_plugin_status))
         .route("/jdbc/plugin/install", post(routes::jdbc::install_jdbc_plugin))
@@ -279,6 +284,7 @@ async fn main() {
         // MongoDB
         .route("/mongo/list-databases", post(routes::mongo::list_databases))
         .route("/mongo/list-collections", post(routes::mongo::list_collections))
+        .route("/document-store/find-documents", post(routes::mongo::document_find_documents))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
@@ -306,6 +312,7 @@ async fn main() {
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
         .route("/ai/complete", post(routes::ai::ai_complete))
         .route("/ai/stream", post(routes::ai::ai_stream))
+        .route("/ai/agent-stream", post(routes::ai::ai_agent_stream))
         .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
         .route("/ai/test-connection", post(routes::ai::ai_test_connection))
         .route("/ai/models", post(routes::ai::ai_list_models))

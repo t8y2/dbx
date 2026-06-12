@@ -8,8 +8,8 @@ use mysql_async::Row as MysqlRow;
 
 use crate::agent_connection::{
     agent_connect_params, h2_file_path_from_jdbc_url, is_h2_file_connection, mongo_legacy_error_with_auth_hint,
-    oracle_alternate_connect_config, oracle_auth_fallback_profiles, oracle_error_with_driver_hint,
-    should_retry_oracle_with_10g_driver,
+    oracle_alternate_connect_config_labels, oracle_alternate_connect_configs, oracle_auth_fallback_profiles,
+    oracle_error_with_driver_hint, should_retry_oracle_with_10g_driver,
 };
 use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::database_capabilities;
@@ -325,7 +325,10 @@ impl AppState {
 
         let conns = self.connections.read().await;
         if conns.contains_key(&pool_key) {
-            return Ok(pool_key);
+            drop(conns);
+            if !self.remove_stale_connection_pool(&pool_key).await {
+                return Ok(pool_key);
+            }
         } else {
             drop(conns);
         }
@@ -413,7 +416,7 @@ impl AppState {
                     ))
                 } else {
                     db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                        db::redis_driver::connect(&url, connect_timeout).await?,
+                        db::redis_driver::connect_standalone(&db_config, &host, port, connect_timeout).await?,
                     ))
                 };
                 PoolKind::Redis(con)
@@ -559,27 +562,48 @@ impl AppState {
                 let connect_result =
                     client.call_method::<serde_json::Value>(AgentMethod::Connect, connect_params.clone()).await;
                 if let Err(err) = connect_result {
-                    if let Some(alternate_config) = oracle_alternate_connect_config(&db_config, &err) {
+                    let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
+                    if !alternate_configs.is_empty() {
                         log::warn!(
-                            "Oracle connect failed with {:?} descriptor: {}. Retrying with {:?} descriptor.",
+                            "Oracle connect failed with {:?} descriptor: {}. Retrying with Oracle JDBC URL variants: {:?}.",
                             db_config.oracle_connection_type,
                             err,
-                            alternate_config.oracle_connection_type
+                            oracle_alternate_connect_config_labels(&alternate_configs)
                         );
-                        client
-                            .call_method::<serde_json::Value>(
-                                AgentMethod::Connect,
-                                agent_connect_params(
-                                    &alternate_config,
-                                    &host,
-                                    port,
-                                    alternate_config.effective_database().unwrap_or(""),
-                                ),
-                            )
-                            .await
-                            .map_err(|alternate_err| {
-                                format!("{err}\n\nFallback with alternate Oracle descriptor failed: {alternate_err}")
-                            })?;
+                        let mut fallback_errors = Vec::new();
+                        let mut connected = false;
+                        for alternate_config in alternate_configs {
+                            let label = oracle_alternate_connect_config_labels(std::slice::from_ref(&alternate_config))
+                                .into_iter()
+                                .next()
+                                .unwrap_or_else(|| "alternate".to_string());
+                            match client
+                                .call_method::<serde_json::Value>(
+                                    AgentMethod::Connect,
+                                    agent_connect_params(
+                                        &alternate_config,
+                                        &host,
+                                        port,
+                                        alternate_config.effective_database().unwrap_or(""),
+                                    ),
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    connected = true;
+                                    break;
+                                }
+                                Err(alternate_err) => {
+                                    fallback_errors.push(format!("{label}: {alternate_err}"));
+                                }
+                            }
+                        }
+                        if !connected {
+                            return Err(format!(
+                                "{err}\n\nFallback with alternate Oracle JDBC URLs failed: {}",
+                                fallback_errors.join("\n")
+                            ));
+                        }
                     } else if should_retry_oracle_with_10g_driver(&db_config, &err) {
                         log::warn!(
                             "Oracle connect failed with profile {:?}: {}. Retrying with legacy Oracle profiles.",
@@ -658,6 +682,49 @@ impl AppState {
         .await?;
 
         Ok(("127.0.0.1".to_string(), local_port))
+    }
+
+    async fn remove_stale_connection_pool(&self, pool_key: &str) -> bool {
+        let stale = {
+            let connections = self.connections.read().await;
+            let Some(pool) = connections.get(pool_key) else {
+                return false;
+            };
+            match pool {
+                PoolKind::SqlServer(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let mut client = client.lock().await;
+                    match db::sqlserver::test_connection(&mut client).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("SQL Server connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
+                PoolKind::Redis(redis) => match db::redis_driver::test_connection(redis).await {
+                    Ok(()) => false,
+                    Err(err) => {
+                        log::warn!("Redis connection pool '{pool_key}' is stale: {err}");
+                        true
+                    }
+                },
+                _ => false,
+            }
+        };
+
+        if !stale {
+            return false;
+        }
+
+        let removed = self.connections.write().await.remove(pool_key);
+        if let Some(pool) = removed {
+            close_pool_kind(pool).await;
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn reconnect_pool(&self, connection_id: &str, database: Option<&str>) -> Result<String, String> {
@@ -1492,16 +1559,18 @@ mod tests {
         )
         .expect("listener errors should allow alternate descriptor retry");
         assert_eq!(retry.driver_profile.as_deref(), Some("oracle"));
-        assert_eq!(retry.oracle_connection_type.as_deref(), Some("sid"));
+        assert_eq!(retry.connection_string.as_deref(), Some("jdbc:oracle:thin:@127.0.0.1:3306:ORCL"));
 
+        let mut sid_config = config.clone();
+        sid_config.oracle_connection_type = Some("sid".to_string());
         let service_retry = oracle_alternate_connect_config(
-            &retry,
+            &sid_config,
             "Agent RPC error (-1): ORA-12505: listener does not currently know of SID given",
         )
         .expect("SID listener errors should allow service-name retry");
-        assert_eq!(service_retry.oracle_connection_type.as_deref(), Some("service_name"));
+        assert_eq!(service_retry.connection_string.as_deref(), Some("jdbc:oracle:thin:@//127.0.0.1:3306/ORCL"));
 
-        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_none());
+        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_some());
     }
 
     #[test]

@@ -181,6 +181,8 @@ let semanticDiagnosticTimer: ReturnType<typeof setTimeout> | null = null;
 let semanticDiagnosticRunId = 0;
 let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
+let imeCompositionActive = false;
+let pendingImeModelEmit = false;
 
 function editorThemeAppearance() {
   return isDark.value ? "dark" : "light";
@@ -682,7 +684,7 @@ async function refreshSemanticDiagnostics() {
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch") {
+  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "redis") {
     setSemanticDiagnostics([]);
     return;
   }
@@ -904,6 +906,7 @@ async function provideElasticsearchCompletions(currentState: import("@codemirror
 }
 
 async function provideSqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
+  if (imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
   if (!props.connectionId) return null;
   const fullDoc = currentState.doc.toString();
   if (props.databaseType === "elasticsearch") {
@@ -988,6 +991,23 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
   } catch {
     return null;
   }
+}
+
+function isEditorComposing(currentView: EditorViewType): boolean {
+  return imeCompositionActive || currentView.compositionStarted || currentView.composing;
+}
+
+function flushImeComposition() {
+  const currentView = view.value;
+  if (!currentView || !pendingImeModelEmit) return;
+  pendingImeModelEmit = false;
+  emit("update:modelValue", currentView.state.doc.toString());
+  scheduleSemanticDiagnostics();
+  syncContextMenuState(currentView);
+  emit("selectionChange", selectedSqlFromView(currentView));
+  emit("cursorChange", currentView.state.selection.main.head);
+  latestSelection = readEditorSelection(currentView);
+  if (editorIsActive) emitEditorSelection(latestSelection);
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
@@ -1547,14 +1567,19 @@ onMounted(async () => {
       rectangularSelection({ eventFilter: (e: MouseEvent) => e.altKey || e.button === 1 }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
-          emit("update:modelValue", update.state.doc.toString());
-          scheduleSemanticDiagnostics();
-          let insertedText = "";
-          update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
-            insertedText += inserted.toString();
-          });
-          if (insertedText.endsWith(".")) {
-            startCompletion(update.view);
+          if (isEditorComposing(update.view)) {
+            pendingImeModelEmit = true;
+            completionEpoch++;
+          } else {
+            emit("update:modelValue", update.state.doc.toString());
+            scheduleSemanticDiagnostics();
+            let insertedText = "";
+            update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+              insertedText += inserted.toString();
+            });
+            if (insertedText.endsWith(".")) {
+              startCompletion(update.view);
+            }
           }
         }
         if (update.selectionSet || update.docChanged) {
@@ -1584,6 +1609,16 @@ onMounted(async () => {
         blur(_event, currentView) {
           latestSelection = readEditorSelection(currentView);
           if (editorIsActive) emitEditorSelection(latestSelection);
+          return false;
+        },
+        compositionstart() {
+          imeCompositionActive = true;
+          completionEpoch++;
+          return false;
+        },
+        compositionend() {
+          imeCompositionActive = false;
+          window.setTimeout(flushImeComposition, 0);
           return false;
         },
         wheel(event) {
@@ -1736,6 +1771,7 @@ watch(
   () => props.modelValue,
   (val) => {
     if (view.value && val !== view.value.state.doc.toString()) {
+      if (isEditorComposing(view.value)) return;
       view.value.dispatch({
         changes: { from: 0, to: view.value.state.doc.length, insert: val },
       });

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X } from "@lucide/vue";
+import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -23,6 +23,7 @@ const props = defineProps<{
   activeConnection?: ConnectionConfig;
   executableSql: string;
   explainMode?: string;
+  blockDangerousRedisCommands?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +39,7 @@ const emit = defineEmits<{
   changeSchema: [schema: string | undefined];
   setDefaultDatabase: [];
   clearDefaultDatabase: [];
+  "update:blockDangerousRedisCommands": [value: boolean];
 }>();
 
 const { t } = useI18n();
@@ -54,6 +56,10 @@ const connectionOptionIds = computed(() => connectionStore.connections.map((conn
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
+const supportsExplain = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "etcd";
+});
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
@@ -119,7 +125,7 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : t("toolbar.executeShortcut") }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <Tooltip v-if="supportsExplain">
         <TooltipTrigger as-child>
           <Button
             :variant="activeTab.isExplaining ? 'destructive' : 'ghost'"
@@ -154,6 +160,20 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.formatSql") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="activeConnection?.db_type === 'redis'">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6"
+            :class="blockDangerousRedisCommands !== false ? 'text-orange-600 bg-orange-100 dark:text-orange-300 dark:bg-orange-900/30' : 'text-muted-foreground/50'"
+            @click="emit('update:blockDangerousRedisCommands', blockDangerousRedisCommands === false)"
+          >
+            <Shield class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.blockDangerousRedisCommands") }}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>

@@ -12,7 +12,7 @@ const props = defineProps<{
       <circle class="text-green-600 transition-[stroke-dashoffset] duration-200" cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" pathLength="100" stroke-dasharray="100" :stroke-dashoffset="100 - (props.percent ?? 0)" />
     </svg>
     <span class="relative z-10 font-mono text-[10px] font-semibold leading-none text-green-700 tabular-nums">
-      {{ props.percent ?? "..." }}
+      {{ props.percent ?? 0 }}
     </span>
   </span>
 </template>

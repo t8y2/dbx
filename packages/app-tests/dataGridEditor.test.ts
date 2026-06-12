@@ -18,9 +18,10 @@ function installBrowserTestGlobals() {
     length: 0,
   };
   globalThis.fetch = (async (input, init) => {
-    if (String(input) !== "/api/query/prepare-data-grid-save") {
-      return new Response("unexpected request", { status: 500 });
+    if (String(input) === "/api/history/save") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
     }
+    if (String(input) !== "/api/query/prepare-data-grid-save") return new Response("unexpected request", { status: 500 });
     const body = JSON.parse(String(init?.body ?? "{}"));
     const options = body.options as DataGridSaveStatementOptions;
     return new Response(
@@ -168,9 +169,11 @@ test("cloning a row copies non-generated primary key values without executing sa
       primaryKeys: ["code", "year"],
     })),
     onExecuteSql: computed(() => undefined),
-    customSave: computed(() => async () => {
-      saveCalls += 1;
-    }),
+    customSaveHandler: computed(() => ({
+      save: async () => {
+        saveCalls += 1;
+      },
+    })),
     sql: computed(() => undefined),
     searchText: ref(""),
     whereFilterInput: ref(""),
@@ -247,7 +250,7 @@ test("cloning a row clears auto-generated key columns", async () => {
       primaryKeys: ["id"],
     })),
     onExecuteSql: computed(() => undefined),
-    customSave: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
     sql: computed(() => undefined),
     searchText: ref(""),
     whereFilterInput: ref(""),
@@ -301,7 +304,7 @@ test("saving deleted rows reloads current table data", async () => {
       primaryKeys: ["id"],
     })),
     onExecuteSql: computed(() => undefined),
-    customSave: computed(() => async () => {}),
+    customSaveHandler: computed(() => ({ save: async () => {} })),
     sql: computed(() => "SELECT id, name FROM people"),
     searchText: ref("ada"),
     whereFilterInput: ref("name ILIKE '%a%'"),
@@ -360,7 +363,7 @@ test("saving inserted rows reloads current table data", async () => {
     onExecuteSql: computed(() => async (sql: string) => {
       executedSql.push(sql);
     }),
-    customSave: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
     sql: computed(() => "SELECT id, name FROM people"),
     searchText: ref("linus"),
     whereFilterInput: ref("name ILIKE '%l%'"),
@@ -406,7 +409,7 @@ test("saving edited rows without deletes does not reload table data", async () =
       primaryKeys: ["id"],
     })),
     onExecuteSql: computed(() => undefined),
-    customSave: computed(() => async () => {}),
+    customSaveHandler: computed(() => ({ save: async () => {} })),
     sql: computed(() => "SELECT id, name FROM people"),
     searchText: ref(""),
     whereFilterInput: ref(""),
@@ -463,7 +466,7 @@ test("saving manually typed JSON from a MySQL grid normalizes smart quotes", asy
     onExecuteSql: computed(() => async (sql: string) => {
       executedSql.push(sql);
     }),
-    customSave: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
     sql: computed(() => "SELECT id, payload FROM settings"),
     searchText: ref(""),
     whereFilterInput: ref(""),
@@ -518,7 +521,7 @@ test("saving manually typed JSON arrays from a Postgres array column uses array 
     onExecuteSql: computed(() => async (sql: string) => {
       executedSql.push(sql);
     }),
-    customSave: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
     sql: computed(() => "SELECT id, tags FROM articles"),
     searchText: ref(""),
     whereFilterInput: ref(""),
@@ -595,7 +598,7 @@ test("failed table data save records a failed history entry", async () => {
       primaryKeys: ["id"],
     })),
     onExecuteSql: computed(() => undefined),
-    customSave: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
     sql: computed(() => "SELECT id, title FROM pp_questions"),
     searchText: ref(""),
     whereFilterInput: ref(""),

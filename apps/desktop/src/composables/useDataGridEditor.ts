@@ -30,6 +30,11 @@ type GridScrollerRef =
       scrollToPosition?: (position: number) => void;
     };
 
+export interface CustomSaveHandler {
+  save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
+  preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
+}
+
 export interface UseDataGridEditorOptions {
   result: ComputedRef<{ columns: string[]; rows: CellValue[][] }>;
   editable: ComputedRef<boolean | undefined>;
@@ -48,7 +53,7 @@ export interface UseDataGridEditorOptions {
   sourceColumns?: ComputedRef<Array<string | undefined> | undefined>;
   canEditExistingRows?: ComputedRef<boolean>;
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
-  customSave?: ComputedRef<((changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>) | undefined>;
+  customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
   sql: ComputedRef<string | undefined>;
   searchText: Ref<string>;
   whereFilterInput: Ref<string>;
@@ -119,7 +124,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     sourceColumns = computed(() => undefined),
     canEditExistingRows = computed(() => true),
     onExecuteSql,
-    customSave,
+    customSaveHandler,
     sql,
     searchText,
     orderByInput,
@@ -174,7 +179,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const isSaving = ref(false);
   const saveError = ref("");
 
-  const useTransaction = computed(() => editable.value && supportsDataGridTransaction(databaseType.value) && (!!customSave?.value || (!!connectionId.value && !!database.value && !!tableMeta.value)));
+  const hasBackendSaveTarget = computed(() => !!connectionId.value && !!tableMeta.value);
+  const useTransaction = computed(() => editable.value && supportsDataGridTransaction(databaseType.value) && (!!customSaveHandler?.value || hasBackendSaveTarget.value));
 
   if (hasPendingChanges.value && useTransaction.value) {
     transactionActive.value = true;
@@ -218,6 +224,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   // --- Scroll helpers ---
   let isCancelling = false;
+  let isCommitting = false;
   let cancelScrollRestoreFrame = 0;
   let resetScrollFrame = 0;
   let resetScrollAfterResult = false;
@@ -391,12 +398,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function commitEdit() {
-    if (isCancelling) return;
+    if (isCancelling || isCommitting) return;
     if (!editingCell.value) return;
+    isCommitting = true;
     const { rowId, col } = editingCell.value;
     const item = getRowItem(rowId);
     if (!item || item.isDeleted) {
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
 
@@ -407,15 +416,18 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         newRows.value[item.newIndex][col] = newVal;
       }
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
 
     if (item.sourceIndex === undefined) {
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
     if (!canEditExistingRows.value) {
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
 
@@ -434,6 +446,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     dirtyRows.value = new Map(dirtyRows.value);
     editingCell.value = null;
+    isCommitting = false;
   }
 
   function commitEditFromBlur() {
@@ -643,7 +656,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   async function recordDataGridHistory(statements: string[], rollbackStatements: string[], elapsed: number, historyResult?: { affected_rows?: number; success?: boolean; error?: string }) {
-    if (!connectionId.value || !database.value || !tableMeta.value) return;
+    if (!connectionId.value || !tableMeta.value) return;
     const connName = connectionStore.getConfig(connectionId.value)?.name || "";
     const success = historyResult?.success ?? true;
     const details = {
@@ -659,7 +672,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     await historyStore.add({
       connection_id: connectionId.value,
       connection_name: connName,
-      database: database.value,
+      database: database.value ?? "",
       sql: statements.join("\n"),
       execution_time_ms: elapsed,
       success,
@@ -695,9 +708,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     isSaving.value = true;
     const shouldReloadAfterSave = newRows.value.length > 0 || deletedRows.value.size > 0;
 
-    if (customSave?.value) {
+    if (customSaveHandler?.value) {
       try {
-        await customSave.value({
+        await customSaveHandler.value.save({
           dirtyRows: dirtyRows.value,
           newRows: newRows.value,
           deletedRows: deletedRows.value,
@@ -752,17 +765,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       rollbackStatements: rollbackStmts,
     });
 
-    if (useTransaction.value && connectionId.value && database.value) {
+    if (useTransaction.value && hasBackendSaveTarget.value) {
       try {
-        apiResult = await api.executeInTransaction(connectionId.value, database.value, stmts, preparedSave?.executionSchema);
+        apiResult = await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, e);
         isSaving.value = false;
         return;
       }
-    } else if (connectionId.value && database.value) {
+    } else if (hasBackendSaveTarget.value) {
       try {
-        apiResult = await api.executeBatch(connectionId.value, database.value, stmts);
+        apiResult = await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, e);
         isSaving.value = false;
@@ -896,8 +909,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     isPreviewLoading.value = true;
     previewStatements.value = [];
     try {
-      if (customSave?.value) {
-        // customSave doesn't expose SQL — return empty
+      if (customSaveHandler?.value) {
+        const preview = customSaveHandler.value.preview;
+        if (preview) return await preview({ dirtyRows: dirtyRows.value, newRows: newRows.value, deletedRows: deletedRows.value, columns: result.value.columns, rows: result.value.rows });
         return [];
       }
       const stmtOptions = saveStatementOptions();

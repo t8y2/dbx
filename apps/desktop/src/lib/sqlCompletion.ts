@@ -1041,6 +1041,7 @@ export function buildSqlCompletionItemsFromContext(
 }
 
 export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolean {
+  if (isSqlCommentContext(sql, cursor)) return false;
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
   if (/\bon\s+$/i.test(sql.slice(0, cursor))) return true;
@@ -1051,6 +1052,82 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolea
     return true;
   }
   return /[\w$.@]/.test(previousChar);
+}
+
+export function isSqlCommentContext(sql: string, cursor: number): boolean {
+  const end = Math.max(0, Math.min(cursor, sql.length));
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let inBracket = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = 0; index < end; index += 1) {
+    const ch = sql[index] ?? "";
+    const next = sql[index + 1] ?? "";
+
+    if (inLineComment) {
+      if (ch === "\n" || ch === "\r") inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (inSingleQuote) {
+      if (ch === "\\" && next) {
+        index += 1;
+      } else if (ch === "'" && next === "'") {
+        index += 1;
+      } else if (ch === "'") {
+        inSingleQuote = false;
+      }
+      continue;
+    }
+    if (inDoubleQuote) {
+      if (ch === "\\" && next) {
+        index += 1;
+      } else if (ch === '"' && next === '"') {
+        index += 1;
+      } else if (ch === '"') {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+    if (inBacktick) {
+      if (ch === "`") inBacktick = false;
+      continue;
+    }
+    if (inBracket) {
+      if (ch === "]") inBracket = false;
+      continue;
+    }
+
+    if (ch === "-" && next === "-") {
+      inLineComment = true;
+      index += 1;
+    } else if (ch === "#") {
+      inLineComment = true;
+    } else if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      index += 1;
+    } else if (ch === "'") {
+      inSingleQuote = true;
+    } else if (ch === '"') {
+      inDoubleQuote = true;
+    } else if (ch === "`") {
+      inBacktick = true;
+    } else if (ch === "[") {
+      inBracket = true;
+    }
+  }
+
+  return inLineComment || inBlockComment;
 }
 
 export function isSqlLikeCompletionStatement(sql: string, cursor: number): boolean {

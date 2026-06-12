@@ -107,6 +107,69 @@ pub struct IndexInfo {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EditableStructureForeignKey {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub column: String,
+    #[serde(default)]
+    pub ref_schema: String,
+    #[serde(default)]
+    pub ref_table: String,
+    #[serde(default)]
+    pub ref_column: String,
+    #[serde(default)]
+    pub on_update: String,
+    #[serde(default)]
+    pub on_delete: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<ForeignKeyInfo>,
+    #[serde(default)]
+    pub marked_for_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub column: String,
+    #[serde(default)]
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_column: String,
+    #[serde(default)]
+    pub on_update: Option<String>,
+    #[serde(default)]
+    pub on_delete: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableStructureTrigger {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub timing: String,
+    #[serde(default)]
+    pub event: String,
+    #[serde(default)]
+    pub statement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<TriggerInfo>,
+    #[serde(default)]
+    pub marked_for_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    pub event: String,
+    pub timing: String,
+    #[serde(default)]
+    pub statement: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TableStructureSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
@@ -117,6 +180,10 @@ pub struct TableStructureSqlOptions {
     pub columns: Vec<EditableStructureColumn>,
     #[serde(default)]
     pub indexes: Vec<EditableStructureIndex>,
+    #[serde(default)]
+    pub foreign_keys: Vec<EditableStructureForeignKey>,
+    #[serde(default)]
+    pub triggers: Vec<EditableStructureTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -15,6 +15,11 @@ function conn(id: string, name?: string): ConnectionConfig {
   };
 }
 
+function groupConnectionIds(entry: SidebarLayout["order"][number]): string[] {
+  assert.equal(entry.type, "group");
+  return (entry.children ?? []).filter((child) => child.type === "connection").map((child) => child.id);
+}
+
 // --- reconcileLayout ---
 
 test("reconcileLayout returns all connections ungrouped when layout is null", () => {
@@ -48,7 +53,7 @@ test("reconcileLayout removes stale connections from layout", () => {
   const result = reconcileLayout(["a", "b"], layout);
   const groupEntry = result.order.find((e) => e.type === "group");
   assert.ok(groupEntry && groupEntry.type === "group");
-  assert.deepEqual(groupEntry.connectionIds, ["a"]);
+  assert.deepEqual(groupConnectionIds(groupEntry), ["a"]);
   assert.equal(result.order.length, 2);
 });
 
@@ -161,7 +166,7 @@ test("moveConnectionToGroup moves connection into a group", () => {
   const result = moveConnectionToGroup(layout, "a", "g1");
   const groupEntry = result.order.find((e) => e.type === "group" && e.id === "g1");
   assert.ok(groupEntry && groupEntry.type === "group");
-  assert.deepEqual(groupEntry.connectionIds, ["a"]);
+  assert.deepEqual(groupConnectionIds(groupEntry), ["a"]);
   assert.equal(result.order.length, 1);
 });
 
@@ -221,7 +226,7 @@ test("reorderEntry moves connection inside a group", () => {
   assert.equal(result.order.length, 1);
   const groupEntry = result.order[0];
   assert.ok(groupEntry.type === "group");
-  assert.deepEqual(groupEntry.connectionIds, ["a"]);
+  assert.deepEqual(groupConnectionIds(groupEntry), ["a"]);
 });
 
 test("reorderEntry is a no-op when dragging to same position", () => {
@@ -251,7 +256,7 @@ test("appendConnectionToLayout adds to target group and expands it", () => {
 
   assert.equal(result.groups[0].collapsed, false);
   assert.ok(groupEntry.type === "group");
-  assert.deepEqual(groupEntry.connectionIds, ["a", "b"]);
+  assert.deepEqual(groupConnectionIds(groupEntry), ["a", "b"]);
 });
 
 test("removeConnectionFromSidebarLayout removes from ungrouped", () => {
@@ -268,5 +273,5 @@ test("removeConnectionFromSidebarLayout removes from inside a group", () => {
   const result = removeConnectionFromSidebarLayout(layout, "a");
   const groupEntry = result.order[0];
   assert.ok(groupEntry.type === "group");
-  assert.deepEqual(groupEntry.connectionIds, ["b"]);
+  assert.deepEqual(groupConnectionIds(groupEntry), ["b"]);
 });

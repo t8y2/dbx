@@ -4,6 +4,7 @@ import {
   buildSqlCompletionItems,
   getSqlFunctionSignatureHelp,
   getSqlCompletionResultValidFor,
+  isSqlCommentContext,
   shouldAutoOpenSqlCompletion,
   extractCteDefinitions,
   getSqlCompletionContext,
@@ -518,6 +519,22 @@ test("does not auto-open completion after structural punctuation", () => {
   for (const sql of ["select count(*)", "select * from users;", "select * from users,"]) {
     assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), false, sql);
   }
+});
+
+test("does not auto-open completion inside SQL comments", () => {
+  for (const { sql, cursor } of [
+    { sql: "-- sougou", cursor: "-- sougou".length },
+    { sql: "select 1 -- sougou", cursor: "select 1 -- sougou".length },
+    { sql: "# sougou", cursor: "# sougou".length },
+    { sql: "select /* sougou */ 1", cursor: "select /* sougou".length },
+    { sql: "select /* sougou", cursor: "select /* sougou".length },
+  ]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), false, sql);
+  }
+  assert.equal(isSqlCommentContext("select '-- not comment' as value", "select '-- not comment'".length), false);
+  assert.equal(isSqlCommentContext("select /* comment */ val", "select /* comment */ val".length), false);
+  assert.equal(shouldAutoOpenSqlCompletion("select '-- not comment' as value", "select '-- not comment' as value".length), true);
+  assert.equal(shouldAutoOpenSqlCompletion("select /* comment */ val", "select /* comment */ val".length), true);
 });
 
 test("auto-opens completion after word characters and explicit dot qualifiers", () => {

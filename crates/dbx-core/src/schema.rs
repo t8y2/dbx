@@ -1065,6 +1065,19 @@ pub fn postgres_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSou
     }
 }
 
+pub fn postgres_routine_object_source_legacy_sql(schema: &str, name: &str) -> String {
+    format!(
+        "SELECT pg_get_functiondef(p.oid) \
+         FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {} AND p.proname = {} \
+         AND NOT p.proisagg AND NOT p.proiswindow \
+         ORDER BY p.oid LIMIT 1",
+        sql_string(schema),
+        sql_string(name)
+    )
+}
+
 pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     let object_type = match kind {
         db::ObjectSourceKind::View => "VIEW",
@@ -1318,6 +1331,13 @@ async fn postgres_object_source(
                 .and_then(first_string_cell)
                 .map_err(|fallback_err| format!("{primary_err}; fallback failed: {fallback_err}"))
         }
+        Err(primary_err) if matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) => {
+            let fallback_sql = postgres_routine_object_source_legacy_sql(schema, name);
+            db::postgres::execute_query(pool, &fallback_sql)
+                .await
+                .and_then(first_string_cell)
+                .map_err(|fallback_err| format!("{primary_err}; fallback failed: {fallback_err}"))
+        }
         Err(err) => Err(err),
     }
 }
@@ -1345,6 +1365,16 @@ mod object_source_tests {
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn builds_postgres_legacy_routine_source_sql_without_prokind() {
+        let sql = postgres_routine_object_source_legacy_sql("public", "recalc_score");
+
+        assert!(sql.contains("pg_get_functiondef(p.oid)"));
+        assert!(sql.contains("NOT p.proisagg"));
+        assert!(sql.contains("NOT p.proiswindow"));
+        assert!(!sql.contains("p.prokind"));
     }
 
     #[test]

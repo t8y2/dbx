@@ -9,14 +9,17 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import * as api from "@/lib/api";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
+import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, defaultDocumentFilterRule, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/documentStoreProvider";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { DatabaseType, QueryResult } from "@/types/database";
+import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
@@ -60,22 +63,16 @@ const tableFindPaneWidth = ref<number | null>(null);
 const isResizingTableSearchSplit = ref(false);
 let tableSearchSplitStartX = 0;
 let tableSearchSplitStartWidth = 0;
+const documentStoreProvider = computed(() => documentStoreProviderFor(props.databaseType));
 
 const tableFindPaneStyle = computed(() => {
   if (tableFindPaneWidth.value == null) return {};
   return { flex: `0 0 ${tableFindPaneWidth.value}px` };
 });
-const documentStoreLabels = computed(() =>
-  props.databaseType === "elasticsearch"
-    ? {
-        documentsLabel: "Documents",
-        queryPreview: `${props.collection}/_search`,
-      }
-    : {
-        documentsLabel: t("mongo.documents", { count: total.value }),
-        queryPreview: mongoQueryPreview.value,
-      },
-);
+const documentStoreLabels = computed(() => ({
+  documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value, t }),
+  queryPreview: documentQueryPreview.value,
+}));
 
 type PendingDelete = { kind: "document"; index: number } | { kind: "field"; index: number; name: string };
 type LocalFilterSummary = {
@@ -84,28 +81,9 @@ type LocalFilterSummary = {
   values: string[];
   hiddenValueCount: number;
 };
-type MongoFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "less-than" | "is-null" | "is-not-null";
-type MongoFilterRule = {
-  id: string;
-  fieldName: string;
-  mode: MongoFilterMode;
-  rawValue: string;
-  conjunction: "AND" | "OR";
-};
-
-const mongoFilterModeOptions: Array<{ value: MongoFilterMode; labelKey: string }> = [
-  { value: "equals", labelKey: "grid.filterBuilderEquals" },
-  { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
-  { value: "like", labelKey: "grid.filterBuilderContains" },
-  { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
-  { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
-  { value: "less-than", labelKey: "grid.filterBuilderLessThan" },
-  { value: "is-null", labelKey: "grid.filterBuilderIsNull" },
-  { value: "is-not-null", labelKey: "grid.filterBuilderIsNotNull" },
-];
-const mongoFilterBuilderOpen = ref(false);
-const mongoFilterRules = ref<MongoFilterRule[]>([]);
-const appliedMongoFilter = ref<Record<string, unknown> | null>(null);
+const documentFilterBuilderOpen = ref(false);
+const documentFilterRules = ref<DocumentFilterRule[]>([]);
+const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 
 const pendingDelete = ref<PendingDelete | null>(null);
 
@@ -165,139 +143,77 @@ const gridResult = computed<QueryResult>(() => {
 
   return { columns, rows, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
-const mongoFilterFieldOptions = computed(() => gridResult.value.columns);
-const mongoStructuredFilterCount = computed(() => (appliedMongoFilter.value ? 1 : 0));
+const documentFilterFieldOptions = computed(() => gridResult.value.columns);
+const documentStructuredFilterCount = computed(() => (appliedDocumentFilter.value ? 1 : 0));
 
-function defaultMongoFilterRule(): MongoFilterRule {
-  return {
-    id: uuid(),
-    fieldName: mongoFilterFieldOptions.value[0] ?? "",
-    mode: "equals",
-    rawValue: "",
-    conjunction: "AND",
-  };
+function createDocumentFilterRule(): DocumentFilterRule {
+  return defaultDocumentFilterRule(uuid(), documentFilterFieldOptions.value[0] ?? "");
 }
 
-function ensureMongoFilterRule() {
-  if (mongoFilterRules.value.length === 0 && mongoFilterFieldOptions.value.length > 0) {
-    mongoFilterRules.value = [defaultMongoFilterRule()];
+function ensureDocumentFilterRule() {
+  if (documentFilterRules.value.length === 0 && documentFilterFieldOptions.value.length > 0) {
+    documentFilterRules.value = [createDocumentFilterRule()];
   }
 }
 
-function addMongoFilterRule() {
-  ensureMongoFilterRule();
-  mongoFilterRules.value = [...mongoFilterRules.value, defaultMongoFilterRule()];
+function addDocumentFilterRule() {
+  ensureDocumentFilterRule();
+  documentFilterRules.value = [...documentFilterRules.value, createDocumentFilterRule()];
 }
 
-function removeMongoFilterRule(ruleId: string) {
-  mongoFilterRules.value = mongoFilterRules.value.filter((rule) => rule.id !== ruleId);
-  if (mongoFilterRules.value.length === 0) appliedMongoFilter.value = null;
+function removeDocumentFilterRule(ruleId: string) {
+  documentFilterRules.value = documentFilterRules.value.filter((rule) => rule.id !== ruleId);
+  if (documentFilterRules.value.length === 0) appliedDocumentFilter.value = null;
 }
 
-function updateMongoFilterRule(ruleId: string, patch: Partial<MongoFilterRule>) {
-  mongoFilterRules.value = mongoFilterRules.value.map((rule) => {
+function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterRule>) {
+  documentFilterRules.value = documentFilterRules.value.map((rule) => {
     if (rule.id !== ruleId) return rule;
     const next = { ...rule, ...patch };
-    if (!mongoFilterModeNeedsValue(next.mode)) next.rawValue = "";
+    if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
     return next;
   });
 }
 
-function resetMongoFilterBuilder() {
-  appliedMongoFilter.value = null;
-  mongoFilterRules.value = mongoFilterFieldOptions.value.length > 0 ? [defaultMongoFilterRule()] : [];
+function resetDocumentFilterBuilder() {
+  appliedDocumentFilter.value = null;
+  documentFilterRules.value = documentFilterFieldOptions.value.length > 0 ? [createDocumentFilterRule()] : [];
 }
 
-function mongoFilterModeNeedsValue(mode: MongoFilterMode): boolean {
-  return mode !== "is-null" && mode !== "is-not-null";
+function currentDocumentFilter(): string | undefined {
+  return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value);
 }
 
-function parseMongoFilterValue(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (!trimmed) return "";
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
-  }
-}
-
-function mongoConditionForRule(rule: MongoFilterRule): Record<string, unknown> | null {
-  if (!rule.fieldName) return null;
-  if (mongoFilterModeNeedsValue(rule.mode) && !rule.rawValue.trim()) return null;
-  const value = mongoFilterModeNeedsValue(rule.mode) ? parseMongoFilterValue(rule.rawValue) : null;
-  switch (rule.mode) {
-    case "equals":
-      return { [rule.fieldName]: value };
-    case "not-equals":
-      return { [rule.fieldName]: { $ne: value } };
-    case "like":
-      return { [rule.fieldName]: { $regex: String(value), $options: "i" } };
-    case "not-like":
-      return { [rule.fieldName]: { $not: { $regex: String(value), $options: "i" } } };
-    case "greater-than":
-      return { [rule.fieldName]: { $gt: value } };
-    case "less-than":
-      return { [rule.fieldName]: { $lt: value } };
-    case "is-null":
-      return { [rule.fieldName]: null };
-    case "is-not-null":
-      return { [rule.fieldName]: { $ne: null } };
-  }
-}
-
-function combineMongoConditions(conditions: Record<string, unknown>[], rules: MongoFilterRule[]): Record<string, unknown> | null {
-  if (conditions.length === 0) return null;
-  let result = conditions[0];
-  for (let i = 1; i < conditions.length; i++) {
-    const operator = rules[i]?.conjunction === "OR" ? "$or" : "$and";
-    result = { [operator]: [result, conditions[i]] };
-  }
-  return result;
-}
-
-function parseMongoFilterInput(): Record<string, unknown> {
-  const trimmed = filterInput.value.trim();
-  if (!trimmed) return {};
-  const parsed = JSON.parse(trimmed);
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-}
-
-function currentMongoFilter(): string | undefined {
-  const manual = parseMongoFilterInput();
-  const structured = appliedMongoFilter.value;
-  const filter = structured ? (Object.keys(manual).length ? { $and: [manual, structured] } : structured) : manual;
-  return Object.keys(filter).length ? JSON.stringify(filter) : undefined;
-}
-
-const mongoQueryPreview = computed(() => {
+const documentQueryPreview = computed(() => {
   let filter = "{}";
   try {
-    filter = currentMongoFilter() ?? "{}";
+    filter = currentDocumentFilter() ?? "{}";
   } catch {
     filter = filterInput.value.trim() || "{}";
   }
-  const sort = sortInput.value.trim();
-  const parts = [`db.${props.collection}.find(${filter})`];
-  if (sort) parts.push(`.sort(${sort})`);
-  parts.push(`.skip(${page.value * pageSize.value}).limit(${pageSize.value})`);
-  return parts.join("");
+  return documentStoreProvider.value.queryPreview({
+    collection: props.collection,
+    filterJson: filter,
+    sortJson: sortInput.value.trim(),
+    skip: page.value * pageSize.value,
+    limit: pageSize.value,
+  });
 });
 
-async function applyMongoStructuredFilters() {
-  const items = mongoFilterRules.value.map((rule) => ({ rule, condition: mongoConditionForRule(rule) })).filter((item): item is { rule: MongoFilterRule; condition: Record<string, unknown> } => !!item.condition);
-  const structured = combineMongoConditions(
+async function applyDocumentStructuredFilters() {
+  const items = documentFilterRules.value.map((rule) => ({ rule, condition: buildDocumentFilterCondition(rule) })).filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
+  const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
     items.map((item) => item.rule),
   );
-  appliedMongoFilter.value = structured;
-  mongoFilterBuilderOpen.value = false;
+  appliedDocumentFilter.value = structured;
+  documentFilterBuilderOpen.value = false;
   applyFilter();
 }
 
-function clearMongoFilters(clearLocalFilter?: (columnIndex?: number) => void) {
-  appliedMongoFilter.value = null;
-  resetMongoFilterBuilder();
+function clearDocumentFilters(clearLocalFilter?: (columnIndex?: number) => void) {
+  appliedDocumentFilter.value = null;
+  resetDocumentFilterBuilder();
   clearLocalFilter?.();
   applyFilter();
 }
@@ -342,13 +258,119 @@ async function gridSave(changes: { dirtyRows: Map<number, Map<number, string | n
   await load();
 }
 
+function formatMongoValue(val: unknown): string {
+  if (val === null || val === undefined) return "null";
+  if (typeof val === "number" || typeof val === "boolean") return String(val);
+  if (typeof val === "string") return JSON.stringify(val);
+  return JSON.stringify(val);
+}
+
+function mongoIdPreview(val: unknown): string {
+  if (val === null || val === undefined) return "null";
+  if (typeof val === "string" && /^[a-fA-F0-9]{24}$/.test(val)) return `ObjectId("${val}")`;
+  return formatMongoValue(val);
+}
+
+function buildUpdateDoc(changes: Map<number, string | number | boolean | null>, columns: string[]): Record<string, unknown> {
+  const setFields: Record<string, unknown> = {};
+  const unsetFields: Record<string, unknown> = {};
+  for (const [colIdx, newVal] of changes) {
+    const col = columns[colIdx];
+    if (!col || col === "_id") continue;
+    if (newVal === null) {
+      unsetFields[col] = "";
+    } else if (typeof newVal === "string") {
+      try {
+        setFields[col] = JSON.parse(newVal);
+      } catch {
+        setFields[col] = newVal;
+      }
+    } else {
+      setFields[col] = newVal;
+    }
+  }
+  const doc: Record<string, unknown> = {};
+  if (Object.keys(setFields).length > 0) doc.$set = setFields;
+  if (Object.keys(unsetFields).length > 0) doc.$unset = unsetFields;
+  return doc;
+}
+
+function buildNewDoc(newRow: (string | number | boolean | null)[], columns: string[]): Record<string, unknown> {
+  const doc: Record<string, unknown> = {};
+  for (let ci = 0; ci < columns.length; ci++) {
+    const col = columns[ci];
+    if (!col || col === "_id") continue;
+    const val = newRow[ci];
+    if (val === null) continue;
+    if (typeof val === "string") {
+      try {
+        doc[col] = JSON.parse(val);
+      } catch {
+        doc[col] = val;
+      }
+    } else {
+      doc[col] = val;
+    }
+  }
+  return doc;
+}
+
+async function previewDocumentChanges(changes: { dirtyRows: Map<number, Map<number, string | number | boolean | null>>; deletedRows: Set<number>; newRows: (string | number | boolean | null)[][]; columns: string[]; rows: (string | number | boolean | null)[][] }): Promise<string[]> {
+  const { dirtyRows, deletedRows, newRows, columns, rows } = changes;
+  const idColIdx = columns.indexOf("_id");
+  const stmts: string[] = [];
+  const coll = props.collection;
+  const isEs = documentStoreProvider.value.kind === "elasticsearch";
+
+  for (const [rowIdx, dirtyCols] of dirtyRows) {
+    const row = rows[rowIdx];
+    const id = row?.[idColIdx];
+    if (id == null) continue;
+    const updateDoc = buildUpdateDoc(dirtyCols, columns);
+    if (isEs) {
+      stmts.push(`POST /${coll}/_update/${JSON.stringify(String(id))}\n${JSON.stringify({ doc: updateDoc.$set ?? updateDoc }, null, 2)}`);
+    } else {
+      stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(id)}}, ${JSON.stringify(updateDoc)})`);
+    }
+  }
+
+  for (const rowIdx of deletedRows) {
+    const row = rows[rowIdx];
+    const id = row?.[idColIdx];
+    if (id == null) continue;
+    if (isEs) {
+      stmts.push(`DELETE /${coll}/_doc/${JSON.stringify(String(id))}`);
+    } else {
+      stmts.push(`db.${coll}.deleteOne({_id: ${mongoIdPreview(id)}})`);
+    }
+  }
+
+  for (const newRow of newRows) {
+    const doc = buildNewDoc(newRow, columns);
+    if (isEs) {
+      stmts.push(`POST /${coll}/_doc\n${JSON.stringify(doc, null, 2)}`);
+    } else {
+      stmts.push(`db.${coll}.insertOne(${JSON.stringify(doc)})`);
+    }
+  }
+
+  return stmts;
+}
+
+const customSaveHandler = computed<CustomSaveHandler>(() => ({
+  save: gridSave,
+  preview: previewDocumentChanges,
+}));
+
 async function load() {
   loading.value = true;
   error.value = "";
+  const previousSelectedIdx = selectedIdx.value;
+  const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
-    const filter = currentMongoFilter();
+    const filter = currentDocumentFilter();
     const sort = sortInput.value.trim() || undefined;
-    const result = await api.mongoFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, sort);
+    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, sort);
     const nextDocuments = result.documents.map(asRecord);
     documents.value = nextDocuments;
     if (nextDocuments.length > 0) {
@@ -362,6 +384,7 @@ async function load() {
       lastGridColumns.value = [...keySet];
     }
     total.value = result.total;
+    syncSelectedDocumentAfterLoad(previousSelectedIdx, previousSelectedId);
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -382,11 +405,7 @@ function paginate(offset: number, limit: number) {
 }
 
 function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null) {
-  if (direction) {
-    sortInput.value = JSON.stringify({ [column]: direction === "asc" ? 1 : -1 });
-  } else {
-    sortInput.value = "";
-  }
+  sortInput.value = documentStoreProvider.value.sortInputForColumn(column, direction);
   page.value = 0;
   load();
 }
@@ -396,6 +415,33 @@ function asRecord(value: unknown): JsonRecord {
     return value as JsonRecord;
   }
   return {};
+}
+
+function documentIdentity(doc: JsonRecord | undefined): string | null {
+  const id = doc?._id;
+  if (id === null || id === undefined) return null;
+  return typeof id === "object" ? JSON.stringify(id) : String(id);
+}
+
+function syncSelectedDocumentAfterLoad(previousSelectedIdx: number | null, previousSelectedId: string | null) {
+  if (isNew.value || previousSelectedIdx === null) return;
+  if (!documents.value.length) {
+    selectedIdx.value = null;
+    if (!isEditing.value) editJson.value = "";
+    return;
+  }
+
+  const nextIdx = previousSelectedId ? documents.value.findIndex((doc) => documentIdentity(doc) === previousSelectedId) : previousSelectedIdx < documents.value.length ? previousSelectedIdx : -1;
+  if (nextIdx < 0) {
+    selectedIdx.value = null;
+    if (!isEditing.value) editJson.value = "";
+    return;
+  }
+
+  selectedIdx.value = nextIdx;
+  if (!isEditing.value) {
+    editJson.value = JSON.stringify(documents.value[nextIdx], null, 2);
+  }
 }
 
 function selectDoc(idx: number) {
@@ -778,7 +824,7 @@ function resetTableSearchSplitWidth() {
       :result="gridResult"
       context="results"
       editable
-      :custom-save="gridSave"
+      :custom-save-handler="customSaveHandler"
       :loading="loading"
       :sql="documentStoreLabels.queryPreview"
       :page-offset="page * pageSize"
@@ -791,24 +837,24 @@ function resetTableSearchSplitWidth() {
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">
           <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
-            <Popover v-model:open="mongoFilterBuilderOpen">
+            <Popover v-model:open="documentFilterBuilderOpen">
               <PopoverTrigger as-child>
                 <button
                   type="button"
                   class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
-                  :class="hasLocalColumnFilters || appliedMongoFilter ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
-                  @click="ensureMongoFilterRule"
+                  :class="hasLocalColumnFilters || appliedDocumentFilter ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+                  @click="ensureDocumentFilterRule"
                 >
                   <Filter class="h-3 w-3" />
-                  <span v-if="localFilterCount + mongoStructuredFilterCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">
-                    {{ localFilterCount + mongoStructuredFilterCount }}
+                  <span v-if="localFilterCount + documentStructuredFilterCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">
+                    {{ localFilterCount + documentStructuredFilterCount }}
                   </span>
                 </button>
               </PopoverTrigger>
               <PopoverContent align="start" class="w-[360px] max-w-[calc(100vw-24px)] gap-3 p-3">
                 <div class="flex items-center justify-between gap-3">
                   <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addMongoFilterRule">
+                  <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
                     <Plus class="mr-1 h-3.5 w-3.5" />
                     {{ t("grid.filterBuilderAddRule") }}
                   </Button>
@@ -845,15 +891,15 @@ function resetTableSearchSplitWidth() {
                   </div>
                 </div>
 
-                <div v-if="mongoFilterRules.length" class="space-y-2">
-                  <template v-for="(rule, index) in mongoFilterRules" :key="rule.id">
+                <div v-if="documentFilterRules.length" class="space-y-2">
+                  <template v-for="(rule, index) in documentFilterRules" :key="rule.id">
                     <div v-if="index > 0" class="flex justify-center">
                       <Button
                         variant="ghost"
                         size="sm"
                         class="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
                         @click="
-                          updateMongoFilterRule(rule.id, {
+                          updateDocumentFilterRule(rule.id, {
                             conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND',
                           })
                         "
@@ -862,41 +908,41 @@ function resetTableSearchSplitWidth() {
                       </Button>
                     </div>
                     <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1fr)_auto] items-center gap-1.5">
-                      <Select :model-value="rule.fieldName" @update:model-value="(value: any) => updateMongoFilterRule(rule.id, { fieldName: String(value) })">
+                      <Select :model-value="rule.fieldName" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { fieldName: String(value) })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                           <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                         </SelectTrigger>
                         <SelectContent position="popper">
-                          <SelectItem v-for="fieldName in mongoFilterFieldOptions" :key="fieldName" :value="fieldName">
+                          <SelectItem v-for="fieldName in documentFilterFieldOptions" :key="fieldName" :value="fieldName">
                             {{ fieldName }}
                           </SelectItem>
                         </SelectContent>
                       </Select>
 
-                      <Select :model-value="rule.mode" @update:model-value="(value: any) => updateMongoFilterRule(rule.id, { mode: value as MongoFilterMode })">
+                      <Select :model-value="rule.mode" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { mode: value as DocumentFilterMode })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent position="popper">
-                          <SelectItem v-for="option in mongoFilterModeOptions" :key="option.value" :value="option.value">
+                          <SelectItem v-for="option in documentFilterModeOptions" :key="option.value" :value="option.value">
                             {{ t(option.labelKey) }}
                           </SelectItem>
                         </SelectContent>
                       </Select>
 
                       <Input
-                        v-if="mongoFilterModeNeedsValue(rule.mode)"
+                        v-if="documentFilterModeNeedsValue(rule.mode)"
                         :model-value="rule.rawValue"
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"
-                        @update:model-value="(value) => updateMongoFilterRule(rule.id, { rawValue: String(value ?? '') })"
-                        @keydown.enter.prevent="applyMongoStructuredFilters"
+                        @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawValue: String(value ?? '') })"
+                        @keydown.enter.prevent="applyDocumentStructuredFilters"
                       />
                       <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground">
                         <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
                       </div>
 
-                      <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="mongoFilterRules.length === 1" @click="removeMongoFilterRule(rule.id)">
+                      <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="documentFilterRules.length === 1" @click="removeDocumentFilterRule(rule.id)">
                         <Trash2 class="h-3.5 w-3.5" />
                       </Button>
                     </div>
@@ -907,21 +953,21 @@ function resetTableSearchSplitWidth() {
                 </div>
 
                 <div class="flex items-center justify-between gap-2 pt-1">
-                  <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="clearMongoFilters(clearLocalFilter)">
+                  <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="clearDocumentFilters(clearLocalFilter)">
                     {{ t("grid.clearFilter") }}
                   </Button>
                   <div class="flex items-center gap-2">
-                    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="resetMongoFilterBuilder">
+                    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="resetDocumentFilterBuilder">
                       {{ t("grid.resetFilterBuilder") }}
                     </Button>
-                    <Button size="sm" class="h-8 px-3 text-xs" @click="applyMongoStructuredFilters">
+                    <Button size="sm" class="h-8 px-3 text-xs" @click="applyDocumentStructuredFilters">
                       {{ t("grid.applyFilter") }}
                     </Button>
                   </div>
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">find</span>
+            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.filterInputLabel }}</span>
             <input v-model="filterInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
             <button
               v-if="filterInput.trim()"
@@ -937,14 +983,14 @@ function resetTableSearchSplitWidth() {
           <button
             type="button"
             class="group relative flex w-2 shrink-0 cursor-col-resize items-center justify-center border-l border-r border-border/80 bg-muted/15 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-            aria-label="Resize find and sort"
+            aria-label="Resize document filter and sort"
             @mousedown="startTableSearchSplitResize"
             @dblclick.stop="resetTableSearchSplitWidth"
           >
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
           <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">sort</span>
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.sortInputLabel }}</span>
             <input v-model="sortInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
             <button
               v-if="sortInput.trim()"
@@ -1022,9 +1068,7 @@ function resetTableSearchSplitWidth() {
             {{ t("mongo.selectDocument") }}
           </div>
 
-          <div v-if="error" class="px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0">
-            {{ error }}
-          </div>
+          <ErrorBanner v-if="error" :message="error" />
           <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
         </div>
       </Pane>

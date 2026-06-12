@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct SavedSqlFolder {
     pub id: String,
     pub connection_id: String,
+    pub parent_folder_id: Option<String>,
     pub name: String,
     #[serde(default)]
     pub order_index: i64,

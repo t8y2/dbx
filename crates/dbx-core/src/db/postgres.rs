@@ -1114,6 +1114,7 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let stmt = client.prepare_cached(postgres_tables_sql()).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
@@ -1225,15 +1226,112 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
      ORDER BY sort_order, object_name"
 }
 
+fn list_objects_legacy_routines_sql(include_timestamps: bool) -> &'static str {
+    if include_timestamps {
+        return "SELECT c.relname AS object_name, \
+       CASE c.relkind \
+         WHEN 'v' THEN 'VIEW' \
+         WHEN 'm' THEN 'VIEW' \
+         WHEN 'S' THEN 'SEQUENCE' \
+         ELSE 'TABLE' \
+       END AS object_type, \
+       obj_description(c.oid) AS object_comment, \
+       stat.creation::text AS created_at, \
+       COALESCE( \
+         CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+           THEN pg_xact_commit_timestamp(c.xmin)::text END, \
+         stat.modification::text \
+       ) AS updated_at, \
+       CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
+       CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
+     LEFT JOIN LATERAL pg_stat_file( \
+       CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
+     ) stat ON true \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
+     UNION ALL \
+     SELECT p.proname AS object_name, \
+       CASE WHEN EXISTS ( \
+         SELECT 1 FROM information_schema.routines r \
+         WHERE r.specific_schema = n.nspname \
+           AND r.routine_name = p.proname \
+           AND upper(r.routine_type) = 'PROCEDURE' \
+       ) THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       CASE WHEN EXISTS ( \
+         SELECT 1 FROM information_schema.routines r \
+         WHERE r.specific_schema = n.nspname \
+           AND r.routine_name = p.proname \
+           AND upper(r.routine_type) = 'PROCEDURE' \
+       ) THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow \
+     ORDER BY sort_order, object_name";
+    }
+
+    "SELECT c.relname AS object_name, \
+       CASE c.relkind \
+         WHEN 'v' THEN 'VIEW' \
+         WHEN 'm' THEN 'VIEW' \
+         WHEN 'S' THEN 'SEQUENCE' \
+         ELSE 'TABLE' \
+       END AS object_type, \
+       obj_description(c.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
+       CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
+     UNION ALL \
+     SELECT p.proname AS object_name, \
+       CASE WHEN EXISTS ( \
+         SELECT 1 FROM information_schema.routines r \
+         WHERE r.specific_schema = n.nspname \
+           AND r.routine_name = p.proname \
+           AND upper(r.routine_type) = 'PROCEDURE' \
+       ) THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       CASE WHEN EXISTS ( \
+         SELECT 1 FROM information_schema.routines r \
+         WHERE r.specific_schema = n.nspname \
+           AND r.routine_name = p.proname \
+           AND upper(r.routine_type) = 'PROCEDURE' \
+       ) THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow \
+     ORDER BY sort_order, object_name"
+}
+
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    let stmt = client.prepare_cached(list_objects_sql(true)).await.map_err(|e| e.to_string())?;
-    let rows = match client.query(&stmt, &[&schema]).await {
-        Ok(rows) => rows,
-        Err(_) => {
-            let stmt = client.prepare_cached(list_objects_sql(false)).await.map_err(|e| e.to_string())?;
-            client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?
-        }
+    let rows = match client.prepare_cached(list_objects_sql(true)).await {
+        Ok(stmt) => match client.query(&stmt, &[&schema]).await {
+            Ok(rows) => rows,
+            Err(_) => query_list_objects_fallbacks(&client, schema).await?,
+        },
+        Err(_) => query_list_objects_fallbacks(&client, schema).await?,
     };
 
     Ok(rows
@@ -1249,6 +1347,22 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
+}
+
+async fn query_list_objects_fallbacks(
+    client: &deadpool_postgres::Object,
+    schema: &str,
+) -> Result<Vec<tokio_postgres::Row>, String> {
+    for sql in
+        [list_objects_sql(false), list_objects_legacy_routines_sql(true), list_objects_legacy_routines_sql(false)]
+    {
+        if let Ok(stmt) = client.prepare_cached(sql).await {
+            if let Ok(rows) = client.query(&stmt, &[&schema]).await {
+                return Ok(rows);
+            }
+        }
+    }
+    Err("failed to list PostgreSQL objects with compatible metadata queries".to_string())
 }
 
 pub async fn list_schemas(pool: &Pool) -> Result<Vec<String>, String> {
@@ -1379,6 +1493,7 @@ async fn get_columns_with_sql(
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
     match get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, schema, table).await {
         Ok(columns) => Ok(columns),
@@ -1688,6 +1803,8 @@ pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result
             ref_schema: Some(row.get::<_, String>(2)),
             ref_table: row.get::<_, String>(3),
             ref_column: row.get::<_, String>(4),
+            on_update: None,
+            on_delete: None,
         })
         .collect())
 }
@@ -1711,6 +1828,7 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
             name: row.get::<_, String>(0),
             event: row.get::<_, String>(1),
             timing: row.get::<_, String>(2),
+            statement: None,
         })
         .collect())
 }
@@ -2151,6 +2269,20 @@ mod tests {
     fn both_list_objects_sql_variants_include_pg_proc() {
         assert!(list_objects_sql(true).contains("pg_catalog.pg_proc"));
         assert!(list_objects_sql(false).contains("pg_catalog.pg_proc"));
+    }
+
+    #[test]
+    fn legacy_list_objects_sql_avoids_pg11_prokind() {
+        let sql = list_objects_legacy_routines_sql(false);
+
+        assert!(sql.contains("pg_catalog.pg_proc"));
+        assert!(sql.contains("information_schema.routines"));
+        assert!(sql.contains("'PROCEDURE'"));
+        assert!(sql.contains("'FUNCTION'"));
+        assert!(sql.contains("NOT p.proisagg"));
+        assert!(sql.contains("NOT p.proiswindow"));
+        assert!(!sql.contains("p.prokind"));
+        assert!(sql.contains("'SEQUENCE'"));
     }
 
     #[test]

@@ -72,7 +72,7 @@ pub async fn mongo_list_collections_core(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn mongo_find_documents_core(
+pub async fn document_find_documents_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -90,7 +90,7 @@ pub async fn mongo_find_documents_core(
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
-            elasticsearch_driver::find_documents(&client, collection, skip, limit).await
+            elasticsearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -107,6 +107,19 @@ pub async fn mongo_find_documents_core(
         }
         _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
+}
+
+pub async fn mongo_find_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    document_find_documents_core(state, connection_id, database, collection, skip, limit, filter, sort).await
 }
 
 pub async fn mongo_aggregate_documents_core(

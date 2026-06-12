@@ -34,9 +34,20 @@ pub async fn redis_scan_values(
     cursor: u64,
     pattern: String,
     query: String,
+    include_key_matches: Option<bool>,
     count: usize,
 ) -> Result<RedisScanResult, String> {
-    dbx_core::redis_ops::redis_scan_values_core(&state, &connection_id, db, cursor, &pattern, &query, count).await
+    dbx_core::redis_ops::redis_scan_values_core(
+        &state,
+        &connection_id,
+        db,
+        cursor,
+        &pattern,
+        &query,
+        include_key_matches.unwrap_or(false),
+        count,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -257,6 +268,7 @@ pub async fn redis_execute_command(
     connection_id: String,
     db: u32,
     command: String,
+    skip_safety_check: Option<bool>,
 ) -> Result<RedisCommandResult, String> {
     // In read-only mode, only allow safe read commands through the raw command interface
     if let Some(name) = dbx_core::query::connection_readonly_name(&state, &connection_id).await {
@@ -268,7 +280,14 @@ pub async fn redis_execute_command(
             ));
         }
     }
-    dbx_core::redis_ops::redis_execute_command_core(&state, &connection_id, db, &command).await
+    dbx_core::redis_ops::redis_execute_command_core(
+        &state,
+        &connection_id,
+        db,
+        &command,
+        skip_safety_check.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]

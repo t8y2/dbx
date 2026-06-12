@@ -1,5 +1,5 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>15 MB 驾驭 40+ 种数据库。桌面端 & Docker 自托管，内置 AI 助手。</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>15 MB 驾驭 50+ 种数据库。桌面端 & Docker 自托管，内置 AI 助手。</strong></p>
 
   <p>
     <img src="https://dl.dbxio.com/assets/readme-hero-20260517.png" alt="DBX 截图" width="820" />
@@ -85,9 +85,9 @@
 
 ## 功能特性
 
-### 40+ 种数据库，一个工具搞定
+### 50+ 种数据库，一个工具搞定
 
-MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 和自定义 JDBC。全部装进约 15 MB 的应用里，不内嵌 Chromium。
+MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、IoTDB、etcd、IRIS 等。全部装进约 15 MB 的应用里，不内嵌 Chromium。
 
 ### 查询编辑器
 
@@ -241,6 +241,20 @@ pnpm install
 pnpm dev:tauri
 ```
 
+> [!TIP]
+> DuckDB 从源码编译较慢。如果不涉及 DuckDB 功能，可以跳过以加速本地构建：
+>
+> ```bash
+> # 快速检查（跳过 DuckDB）
+> cargo check --no-default-features
+> cargo test  --no-default-features
+>
+> # Tauri 开发模式跳过 DuckDB
+> pnpm tauri dev -- --no-default-features
+> ```
+>
+> `--no-default-features` 仅影响本地开发，发布构建（`pnpm tauri build`）始终包含 DuckDB。
+
 Web 版本：
 
 ```bash
@@ -248,7 +262,14 @@ pnpm dev:web       # 前端
 pnpm dev:backend   # 后端
 ```
 
-[dbx-agents](https://github.com/t8y2/dbx-agents) 存放了驱动开发的工程。
+[dbx-agents](https://github.com/t8y2/dbx-agents) 是独立仓库，存放 JDBC Agent 驱动开发工程。本地开发时建议克隆到 `dbx/` 同级目录下，用 IDE 打开父文件夹即可同时开发两个项目：
+
+```bash
+mkdir dbx-workspace && cd dbx-workspace
+git clone https://github.com/t8y2/dbx.git
+git clone https://github.com/t8y2/dbx-agents.git
+# 用 IDE 打开 dbx-workspace/ 即可同时开发两个项目
+```
 
 ### 构建
 
@@ -294,12 +315,12 @@ pnpm tauri build
 
 <details>
 <summary><strong>DBX 和 DBeaver / TablePlus / Beekeeper Studio 有什么区别？</strong></summary>
-DBX 仅 15 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 40+ 数据库、桌面端、Docker 和 Web。
+DBX 仅 15 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 50+ 数据库、桌面端、Docker 和 Web。
 </details>
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 及自定义 JDBC 连接。
+MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、IoTDB、etcd、IRIS 及自定义 JDBC 连接。
 </details>
 
 <details>

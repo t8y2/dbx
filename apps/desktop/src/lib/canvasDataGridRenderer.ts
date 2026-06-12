@@ -395,7 +395,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           const selectedLeftX = clippedX + 0.5;
           const selectedRightX = clippedX + cellPaintWidth - 1.5;
           const selectedTopY = Math.max(y + 0.5, 1);
-          const drawSelectedLeftBorder = selectedLeftX > rowNumberWidth + 0.5;
+          const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
           ctx.strokeStyle = theme.cellSelectedBorder;
           ctx.beginPath();
           ctx.moveTo(selectedLeftX, selectedTopY);

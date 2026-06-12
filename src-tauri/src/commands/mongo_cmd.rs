@@ -47,6 +47,31 @@ pub async fn mongo_find_documents(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn document_find_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    skip: u64,
+    limit: i64,
+    filter: Option<String>,
+    sort: Option<String>,
+) -> Result<MongoDocumentResult, String> {
+    dbx_core::mongo_ops::document_find_documents_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        skip,
+        limit,
+        filter.as_deref(),
+        sort.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_aggregate_documents(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

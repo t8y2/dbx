@@ -2,8 +2,7 @@
 import { computed, ref, watch, nextTick } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Layers, UsersRound, Braces, Pencil, Package, Check, Lock, Copy, Server, Shield } from "@lucide/vue";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Check, Lock, Copy, AlertTriangle } from "@lucide/vue";
+import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Layers, UsersRound, Braces, Pencil, Package, Check, Lock, Copy, Server, Shield, AlertTriangle } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";

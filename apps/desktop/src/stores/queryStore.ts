@@ -186,6 +186,85 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function projectResultRun(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
+    tab.activeResultRunId = run.id;
+    tab.result = run.result;
+    tab.results = run.results;
+    tab.activeResultIndex = run.activeResultIndex;
+    tab.resultBaseSql = run.resultBaseSql;
+    tab.resultSortedSql = run.resultSortedSql;
+    tab.resultSortColumn = run.resultSortColumn;
+    tab.resultSortColumnIndex = run.resultSortColumnIndex;
+    tab.resultSortDirection = run.resultSortDirection;
+    tab.orderByInput = run.orderByInput;
+    tab.resultPageSql = run.resultPageSql;
+    tab.resultPageLimit = run.resultPageLimit;
+    tab.resultPageOffset = run.resultPageOffset;
+    tab.resultCountSql = run.resultCountSql;
+    tab.resultTotalRowCount = run.resultTotalRowCount;
+    tab.resultTotalRowCountLoading = run.resultTotalRowCountLoading;
+    tab.resultSessionId = run.resultSessionId;
+    tab.resultAccessedAt = run.resultAccessedAt;
+    tab.resultCacheKey = run.resultCacheKey;
+    tab.resultCacheState = run.resultCacheState;
+    tab.resultEvicted = run.resultEvicted;
+    tab.queryAnalysis = run.queryAnalysis;
+    tab.querySourceColumns = run.querySourceColumns;
+    tab.queryEditabilityReason = run.queryEditabilityReason;
+    tab.tableMeta = run.tableMeta;
+    touchResult(tab);
+  }
+
+  function setActiveResultRun(id: string, runId: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    const run = tab?.resultRuns?.find((item) => item.id === runId);
+    if (!tab || !run) return false;
+    projectResultRun(tab, run);
+    return true;
+  }
+
+  function nextResultRunSequence(tab: QueryTab): number {
+    return (tab.resultRuns?.reduce((max, run) => Math.max(max, run.sequence), 0) ?? 0) + 1;
+  }
+
+  function captureDisplayedResultRun(tab: QueryTab, sql: string, createdAt = Date.now()) {
+    if (tab.mode !== "query" || !tab.result) return;
+    const sequence = nextResultRunSequence(tab);
+    const run: NonNullable<QueryTab["resultRuns"]>[number] = {
+      id: uuid(),
+      title: `Run ${sequence}`,
+      sequence,
+      sql,
+      createdAt,
+      result: tab.result,
+      results: tab.results,
+      activeResultIndex: tab.activeResultIndex,
+      resultBaseSql: tab.resultBaseSql,
+      resultSortedSql: tab.resultSortedSql,
+      resultSortColumn: tab.resultSortColumn,
+      resultSortColumnIndex: tab.resultSortColumnIndex,
+      resultSortDirection: tab.resultSortDirection,
+      orderByInput: tab.orderByInput,
+      resultPageSql: tab.resultPageSql,
+      resultPageLimit: tab.resultPageLimit,
+      resultPageOffset: tab.resultPageOffset,
+      resultCountSql: tab.resultCountSql,
+      resultTotalRowCount: tab.resultTotalRowCount,
+      resultTotalRowCountLoading: tab.resultTotalRowCountLoading,
+      resultSessionId: tab.resultSessionId,
+      resultAccessedAt: tab.resultAccessedAt,
+      resultCacheKey: tab.resultCacheKey,
+      resultCacheState: tab.resultCacheState,
+      resultEvicted: tab.resultEvicted,
+      queryAnalysis: tab.queryAnalysis,
+      querySourceColumns: tab.querySourceColumns,
+      queryEditabilityReason: tab.queryEditabilityReason,
+      tableMeta: tab.tableMeta,
+    };
+    tab.resultRuns = [...(tab.resultRuns ?? []), run];
+    tab.activeResultRunId = run.id;
+  }
+
   async function evictCachedResult(tab: QueryTab) {
     await closeResultSession(tab);
     const cacheKey = tabResultCacheKey(tab.id);
@@ -1008,6 +1087,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
+          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1054,6 +1134,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
+          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1079,6 +1160,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
+          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1110,6 +1192,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
+          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1136,6 +1219,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
+          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1176,6 +1260,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
+          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1240,6 +1325,7 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCountLoading = false;
         }
         touchResult(current);
+        captureDisplayedResultRun(current, queryBaseSql);
         if (current.mode === "query" && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
@@ -1293,6 +1379,7 @@ export const useQueryStore = defineStore("query", () => {
         current.resultTotalRowCount = undefined;
         current.resultTotalRowCountLoading = false;
         touchResult(current);
+        captureDisplayedResultRun(current, queryBaseSql);
       }
     } finally {
       const current = tabs.value.find((t) => t.id === id);
@@ -1699,6 +1786,7 @@ export const useQueryStore = defineStore("query", () => {
     setObjectSource,
     setExecuting,
     setErrorResult,
+    setActiveResultRun,
     setActiveResultIndex,
     executeCurrentTab,
     executeCurrentSql,

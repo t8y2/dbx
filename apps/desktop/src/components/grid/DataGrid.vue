@@ -6901,14 +6901,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <!-- Table Info Drawer -->
           <div v-if="showTableInfo" class="relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
             <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDdlResizeStart" />
-            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
               <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="sm" class="h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                 <Copy class="w-3 h-3" />
                 <span>{{ t("grid.copyDdl") }}</span>
               </Button>
-              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-5 w-5" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
+              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
                 <WrapText class="w-3 h-3" />
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">
@@ -6919,8 +6919,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <button
                 v-for="tab in tableInfoTabs"
                 :key="tab.id"
-                class="h-9 min-w-0 px-1.5 text-[11px] text-muted-foreground border-b-2 border-transparent hover:bg-muted/50 hover:text-foreground"
-                :class="{ 'border-primary text-foreground bg-muted/40': activeTableInfoTab === tab.id }"
+                class="pt-0.5 h-9 min-w-0 px-1.5 text-[11px] text-muted-foreground border-b-2 border-transparent hover:bg-muted/50 hover:text-foreground"
+                :class="{ 'border-primary! text-foreground! bg-muted/40': activeTableInfoTab === tab.id }"
                 :title="tab.label"
                 @click="selectTableInfoTab(tab.id)"
               >
@@ -6946,10 +6946,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <table v-else class="w-full text-xs">
                 <thead class="sticky top-0 bg-muted text-muted-foreground">
                   <tr class="border-b">
-                    <th class="text-left font-medium px-3 py-2 w-8">#</th>
-                    <th class="text-left font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
-                    <th class="text-left font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
-                    <th class="text-left font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
                   </tr>
                 </thead>
                 <tbody>

@@ -1477,6 +1477,10 @@ export async function checkMcpServerStatus(): Promise<import("./tauri").McpServe
   };
 }
 
+export async function installMcpServer(): Promise<string> {
+  throw new Error("MCP Server installation is only available in the desktop app.");
+}
+
 export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
 }

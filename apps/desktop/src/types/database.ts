@@ -13,6 +13,7 @@ export type DatabaseType =
   | "elasticsearch"
   | "doris"
   | "starrocks"
+  | "manticoresearch"
   | "databend"
   | "redshift"
   | "dameng"

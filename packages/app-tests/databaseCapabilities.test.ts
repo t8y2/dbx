@@ -225,7 +225,9 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableStructureEditing("clickhouse"), true);
   assert.equal(supportsTableStructureEditing("rqlite"), true);
   assert.equal(supportsTableStructureEditing("mongodb"), false);
+  assert.equal(supportsTableStructureEditing("manticoresearch"), false);
   assert.equal(supportsDatabaseCreation("clickhouse"), true);
+  assert.equal(supportsDatabaseCreation("manticoresearch"), false);
   assert.equal(supportsDatabaseCreation("sqlite"), false);
   assert.equal(supportsFieldLineage("gaussdb"), true);
   assert.equal(supportsFieldLineage("kwdb"), true);
@@ -233,15 +235,19 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTransfer("duckdb"), true);
   assert.equal(supportsTransfer("hive"), true);
   assert.equal(supportsTransfer("mongodb"), true);
+  assert.equal(supportsTransfer("manticoresearch"), false);
   assert.equal(supportsDriverManagement("oracle"), true);
   assert.equal(supportsDriverManagement("mysql"), false);
+  assert.equal(supportsDriverManagement("manticoresearch"), false);
   assert.equal(supportsDriverManagement("kwdb"), false);
   assert.equal(usesPostgresLikeStructureCopy("gaussdb"), true);
   assert.equal(usesPostgresLikeStructureCopy("kwdb"), true);
   assert.equal(usesPostgresLikeStructureCopy("mysql"), false);
   assert.equal(supportsObjectBrowser("mysql"), true);
+  assert.equal(supportsObjectBrowser("manticoresearch"), false);
   assert.equal(supportsObjectBrowser("mongodb"), false);
   assert.equal(supportsTableTruncate("mysql"), true);
+  assert.equal(supportsTableTruncate("manticoresearch"), false);
   assert.equal(supportsTableTruncate("duckdb"), false);
   assert.equal(supportsTableTruncate("rqlite"), false);
 });
@@ -249,6 +255,7 @@ test("describes feature support through capability helpers", () => {
 test("loads product support levels and capabilities from the driver manifest", () => {
   assert.equal(manifestDatabaseTypes().includes("mysql"), true);
   assert.equal(databaseSupportLevel("mysql"), "operate");
+  assert.equal(databaseSupportLevel("manticoresearch"), "browse");
   assert.equal(databaseSupportLevel("jdbc"), "browse");
   assert.equal(databaseSupportLevel("redis"), "connect");
 
@@ -263,6 +270,27 @@ test("loads product support levels and capabilities from the driver manifest", (
       metadataBrowse: true,
       objectBrowser: true,
       tableStructureEdit: false,
+      userAdmin: false,
+    },
+  );
+
+  assert.deepEqual(
+    {
+      queryExecution: databaseProductCapabilities("manticoresearch").queryExecution,
+      metadataBrowse: databaseProductCapabilities("manticoresearch").metadataBrowse,
+      objectBrowser: databaseProductCapabilities("manticoresearch").objectBrowser,
+      tableDataEdit: databaseProductCapabilities("manticoresearch").tableDataEdit,
+      tableStructureEdit: databaseProductCapabilities("manticoresearch").tableStructureEdit,
+      sqlFileExecution: databaseProductCapabilities("manticoresearch").sqlFileExecution,
+      userAdmin: databaseProductCapabilities("manticoresearch").userAdmin,
+    },
+    {
+      queryExecution: true,
+      metadataBrowse: true,
+      objectBrowser: false,
+      tableDataEdit: false,
+      tableStructureEdit: false,
+      sqlFileExecution: true,
       userAdmin: false,
     },
   );

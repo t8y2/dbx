@@ -358,7 +358,7 @@ impl AppState {
                 .await?;
                 PoolKind::Mysql(pool, mode)
             }
-            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Databend => {
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch | DatabaseType::Databend => {
                 let pool = if database.is_none() {
                     connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, mysql_pool_max_connections)
                         .await?

@@ -36,6 +36,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             DatabaseType::Mysql
             | DatabaseType::Goldendb
             | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
             | DatabaseType::Hive
             | DatabaseType::Databend
             | DatabaseType::Tdengine

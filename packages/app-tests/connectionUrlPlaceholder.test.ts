@@ -6,6 +6,7 @@ const expected: Record<string, string> = {
   mysql: "mysql://user:password@host:port/database",
   doris: "mysql://user:password@host:port/database",
   starrocks: "mysql://user:password@host:port/database",
+  manticoresearch: "mysql://user:password@host:port/database",
   postgres: "postgresql://user:password@host:port/database",
   gaussdb: "postgresql://user:password@host:port/database",
   kwdb: "postgresql://user:password@host:port/database",
@@ -42,6 +43,7 @@ test("mysql-family types share the same placeholder", () => {
   const mysql = connectionUrlPlaceholder("mysql");
   assert.equal(connectionUrlPlaceholder("doris"), mysql);
   assert.equal(connectionUrlPlaceholder("starrocks"), mysql);
+  assert.equal(connectionUrlPlaceholder("manticoresearch"), mysql);
 });
 
 test("postgres-family types share the same placeholder", () => {

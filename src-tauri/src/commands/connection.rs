@@ -273,7 +273,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     Err(e) => Err(e),
                 }
             }
-            DatabaseType::Doris | DatabaseType::StarRocks => {
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
                 match db::mysql::connect_bare(&url, connect_timeout).await {
                     Ok(pool) => {
                         let _ = pool.disconnect().await;
@@ -488,7 +488,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 connect_mysql_metadata_pool(&config, &db_config, &host, port, connect_timeout, 3).await?;
             PoolKind::Mysql(pool, mode)
         }
-        DatabaseType::Doris | DatabaseType::StarRocks => PoolKind::Mysql(
+        DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => PoolKind::Mysql(
             connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, 3).await?,
             MysqlMode::Bare,
         ),

@@ -4,6 +4,7 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
   mysql: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   doris: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   starrocks: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
+  manticoresearch: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   goldendb: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   gbase: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   postgres: new Set(["template0", "template1"]),

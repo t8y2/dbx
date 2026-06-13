@@ -29,8 +29,12 @@ impl MySqlQueryDialect {
     pub fn for_connection(db_type: DatabaseType, driver_profile: Option<&str>) -> Self {
         let profile = driver_profile.map(str::to_ascii_lowercase);
         Self {
-            supports_admin_show_results: matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-                || profile.as_deref().is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks")),
+            supports_admin_show_results: matches!(
+                db_type,
+                DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
+            ) || profile
+                .as_deref()
+                .is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch")),
         }
     }
 }

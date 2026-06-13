@@ -420,6 +420,14 @@ const driverProfiles: Record<
     icon: "starrocks",
     urlParams: "",
   },
+  manticoresearch: {
+    type: "manticoresearch",
+    port: 9306,
+    user: "root",
+    label: "Manticore Search",
+    icon: "manticoresearch",
+    urlParams: "",
+  },
   redshift: { type: "redshift", port: 5439, user: "awsuser", label: "Redshift", icon: "redshift" },
   cockroachdb: {
     type: "postgres",
@@ -734,6 +742,7 @@ const iconTypeMap: Record<string, string> = {
   doris: "doris",
   selectdb: "selectdb",
   starrocks: "starrocks",
+  manticoresearch: "manticoresearch",
   redshift: "redshift",
   cockroachdb: "cockroachdb",
   tdengine: "tdengine",
@@ -819,6 +828,9 @@ const dbOptions: DbOption[] = [
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
   { value: "jdbc", label: "JDBC" },
+  { value: "manticoresearch", label: "Manticore Search" },
+  { value: "custom_mysql", label: "Custom (MySQL)" },
+  { value: "custom_postgres", label: "Custom (PostgreSQL)" },
 ];
 
 const dbCategories = computed<DbCategory[]>(() => [{ key: "all", title: "", options: dbOptions }]);
@@ -867,6 +879,7 @@ const sqliteExtensionPaths = computed({
 const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "redis", "etcd", "clickhouse", "elasticsearch", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
 const bareMysqlProfiles = new Set(["doris", "starrocks", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
 const mysqlTlsMode = computed({
@@ -1072,6 +1085,9 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   config.query_timeout_secs = Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
   const idleTimeout = Number(config.idle_timeout_secs);
   config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
+  if (config.db_type === "manticoresearch") {
+    config.url_params = "";
+  }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
@@ -2606,7 +2622,7 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.urlParams") }}</Label>
                     <Input
                       v-model="form.url_params"

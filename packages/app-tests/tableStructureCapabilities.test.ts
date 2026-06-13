@@ -94,7 +94,7 @@ test("limited analytic engines can open the editor for supported operations only
 });
 
 test("unsupported non-relational databases do not open the structure editor", () => {
-  for (const dbType of ["redis", "mongodb", "elasticsearch", "neo4j", undefined] as const) {
+  for (const dbType of ["redis", "mongodb", "elasticsearch", "manticoresearch", "neo4j", undefined] as const) {
     const caps = getTableStructureCapabilities(dbType);
     assert.equal(caps.dialect, "unsupported");
     assert.equal(canEditTableStructure(dbType), false);

@@ -64,7 +64,11 @@ impl SqlParsingOptions {
         Self {
             supports_hash_line_comments: matches!(
                 db_type,
-                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb
+                DatabaseType::Mysql
+                    | DatabaseType::Doris
+                    | DatabaseType::StarRocks
+                    | DatabaseType::ManticoreSearch
+                    | DatabaseType::Goldendb
             ),
             supports_oracle_plsql_blocks: matches!(
                 db_type,
@@ -1203,13 +1207,27 @@ fn executable_sql_keyword_matches(token: &str, keyword: &str) -> bool {
 }
 
 fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
-    matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb)
-        || driver_profile.map(|profile| profile.to_ascii_lowercase()).is_some_and(|profile| {
-            matches!(
-                profile.as_str(),
-                "mariadb" | "tidb" | "oceanbase" | "custom_mysql" | "doris" | "starrocks" | "selectdb" | "goldendb"
-            )
-        })
+    matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Goldendb
+    ) || driver_profile.map(|profile| profile.to_ascii_lowercase()).is_some_and(|profile| {
+        matches!(
+            profile.as_str(),
+            "mariadb"
+                | "tidb"
+                | "oceanbase"
+                | "custom_mysql"
+                | "doris"
+                | "starrocks"
+                | "manticoresearch"
+                | "selectdb"
+                | "goldendb"
+        )
+    })
 }
 
 fn mysql_executable_comment_body(statement: &str) -> Option<&str> {

@@ -7,7 +7,9 @@ pub(in crate::schema) async fn list_databases(
     config: Option<&ConnectionConfig>,
 ) -> Result<Vec<db::DatabaseInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => db::mysql::list_databases_show(p).await,
+        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => db::mysql::list_databases_show(p)
+            .await
+            .map(|databases| filter_mysql_system_databases_for_config(databases, config)),
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
         PoolKind::Mysql(p, _) => db::mysql::list_databases(p).await,
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
@@ -262,6 +264,26 @@ fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
 }
 
 fn is_doris_family_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks"))
+    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
+}
+
+fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::ManticoreSearch)
+        || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
+}
+
+fn filter_mysql_system_databases_for_config(
+    databases: Vec<db::DatabaseInfo>,
+    config: Option<&ConnectionConfig>,
+) -> Vec<db::DatabaseInfo> {
+    if !config.is_some_and(is_manticoresearch_config) {
+        return databases;
+    }
+
+    databases.into_iter().filter(|database| !is_mysql_system_database(&database.name)).collect()
+}
+
+fn is_mysql_system_database(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "information_schema" | "mysql" | "performance_schema" | "sys")
 }

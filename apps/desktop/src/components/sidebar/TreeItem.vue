@@ -48,6 +48,7 @@ import {
   Clipboard,
   UsersRound,
   Lock,
+  HardDriveDownload,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -62,7 +63,7 @@ import { uuid } from "@/lib/utils";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebarTreeItemLayout";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import { connectionFilePath } from "@/lib/connectionFile";
+import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connectionFile";
 import { revealPathInFileManager } from "@/lib/tauri";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/queryEditorTableDrop";
 import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
@@ -2138,6 +2139,44 @@ async function revealDatabaseFile() {
   }
 }
 
+const sqliteBackupSource = computed<string | null>(() => {
+  if (props.node.type !== "connection" || !props.node.connectionId) return null;
+  const config = connectionStore.getConfig(props.node.connectionId);
+  if (!config) return null;
+  return sqliteBackupSourcePath(config);
+});
+
+const canBackupSqliteDatabase = computed(() => {
+  const source = sqliteBackupSource.value;
+  if (!source || !props.node.connectionId) return false;
+  return isTauriRuntime() && (!isMemorySqlitePath(source) || connectionStore.connectedIds.has(props.node.connectionId));
+});
+
+async function backupSqliteDatabase() {
+  const connId = props.node.connectionId;
+  const config = connId ? connectionStore.getConfig(connId) : undefined;
+  const sourcePath = sqliteBackupSource.value;
+  if (!connId || !config || !sourcePath) return;
+
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const destinationPath = await save({
+      defaultPath: defaultSqliteBackupFileName(config),
+      filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }],
+    });
+    if (!destinationPath) return;
+
+    toast(t("contextMenu.backupSqliteDatabaseInProgress"), 2000);
+    if (!isMemorySqlitePath(sourcePath)) {
+      await connectionStore.ensureConnected(connId);
+    }
+    await api.backupSqliteDatabase(connId, destinationPath);
+    toast(t("contextMenu.backupSqliteDatabaseSuccess"), 3000);
+  } catch (e: any) {
+    toast(t("contextMenu.backupSqliteDatabaseFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function disconnectConnection() {
   if (props.node.connectionId) {
     try {
@@ -2738,6 +2777,13 @@ function treeItemMenuItems(): ContextMenuItem[] {
         label: t("contextMenu.revealDatabaseFile"),
         action: revealDatabaseFile,
         icon: FolderOpen,
+      });
+    }
+    if (canBackupSqliteDatabase.value) {
+      items.push({
+        label: t("contextMenu.backupSqliteDatabase"),
+        action: backupSqliteDatabase,
+        icon: HardDriveDownload,
       });
     }
     items.push({ label: t("contextMenu.duplicateConnection"), action: duplicateConnection, icon: CopyPlus });

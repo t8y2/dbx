@@ -132,6 +132,74 @@ test("restores evicted result cache handles as disk-backed runtime state", () =>
   assert.equal(restored.tabs[0]?.resultCacheState, "disk");
 });
 
+test("serializes query result run metadata without row payloads", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      activeResultRunId: "run-2",
+      resultRuns: [
+        {
+          id: "run-1",
+          title: "Run 1",
+          sequence: 1,
+          sql: "select 1",
+          createdAt: 100,
+          result: {
+            columns: ["id"],
+            rows: [[1]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+          resultCacheKey: "tab:tab-1:run:run-1",
+          resultCacheState: "disk",
+          resultEvicted: true,
+        },
+      ],
+    }),
+  ]);
+
+  assert.deepEqual(saved[0]?.resultRuns, [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1",
+      createdAt: 100,
+      activeResultIndex: undefined,
+      resultCacheKey: "tab:tab-1:run:run-1",
+      resultEvicted: true,
+    },
+  ]);
+  assert.equal(JSON.stringify(saved).includes("[[1]]"), false);
+  assert.equal(saved[0]?.activeResultRunId, "run-2");
+});
+
+test("restores query result run metadata as disk-backed runtime state", () => {
+  const raw = JSON.stringify([
+    {
+      ...queryTab(),
+      activeResultRunId: "run-1",
+      resultRuns: [
+        {
+          id: "run-1",
+          title: "Run 1",
+          sequence: 1,
+          sql: "select 1",
+          createdAt: 100,
+          resultCacheKey: "tab:tab-1:run:run-1",
+          resultEvicted: true,
+        },
+      ],
+    },
+  ]);
+
+  const restored = restoreOpenTabsState(raw, "tab-1");
+
+  assert.equal(restored.tabs[0]?.activeResultRunId, "run-1");
+  assert.equal(restored.tabs[0]?.resultRuns?.[0]?.id, "run-1");
+  assert.equal(restored.tabs[0]?.resultRuns?.[0]?.resultCacheState, "disk");
+  assert.equal(restored.tabs[0]?.resultRuns?.[0]?.result, undefined);
+});
+
 test("ignores legacy table data result cache handles on restore", () => {
   const raw = JSON.stringify([queryTab({ mode: "data", resultEvicted: true, resultCacheKey: "tab:tab-1:result" })]);
 

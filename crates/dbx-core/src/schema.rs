@@ -292,6 +292,10 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             drop(connections);
             return db::clickhouse_driver::list_databases(&client).await;
         }
+        if let Some(client) = extract_pool!(&connections, connection_id, InfluxDb) {
+            drop(connections);
+            return db::influxdb_driver::list_databases(&client).await;
+        }
         try_sqlserver!(connections, connection_id, list_databases);
         if let Some(client) = extract_pool!(&connections, connection_id, Agent) {
             let is_mongo =
@@ -474,6 +478,12 @@ async fn list_tables_once(
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
             return db::clickhouse_driver::list_tables(&client, clickhouse_metadata_database(database, schema))
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset));
+        }
+        if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
+            drop(connections);
+            return db::influxdb_driver::list_tables(&client, database)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset));
         }
@@ -1109,6 +1119,10 @@ pub async fn get_columns_core(
             return db::clickhouse_driver::get_columns(&client, clickhouse_metadata_database(database, schema), table)
                 .await
                 .map(deduplicate_column_infos);
+        }
+        if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
+            drop(connections);
+            return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
         }
         try_sqlserver!(connections, &pool_key, get_columns, schema, table);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {

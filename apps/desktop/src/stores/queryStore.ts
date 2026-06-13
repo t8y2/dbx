@@ -187,8 +187,9 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function projectResultRun(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
+    const activeIndex = run.activeResultIndex ?? 0;
     tab.activeResultRunId = run.id;
-    tab.result = run.result;
+    tab.result = run.result ?? run.results?.[activeIndex];
     tab.results = run.results;
     tab.activeResultIndex = run.activeResultIndex;
     tab.resultBaseSql = run.resultBaseSql;
@@ -263,6 +264,39 @@ export const useQueryStore = defineStore("query", () => {
     };
     tab.resultRuns = [...(tab.resultRuns ?? []), run];
     tab.activeResultRunId = run.id;
+  }
+
+  function syncActiveResultRunFromDisplayed(tab: QueryTab) {
+    if (!tab.activeResultRunId || !tab.resultRuns?.length) return;
+    const index = tab.resultRuns.findIndex((run) => run.id === tab.activeResultRunId);
+    if (index < 0) return;
+    tab.resultRuns[index] = {
+      ...tab.resultRuns[index],
+      result: tab.result,
+      results: tab.results,
+      activeResultIndex: tab.activeResultIndex,
+      resultBaseSql: tab.resultBaseSql,
+      resultSortedSql: tab.resultSortedSql,
+      resultSortColumn: tab.resultSortColumn,
+      resultSortColumnIndex: tab.resultSortColumnIndex,
+      resultSortDirection: tab.resultSortDirection,
+      orderByInput: tab.orderByInput,
+      resultPageSql: tab.resultPageSql,
+      resultPageLimit: tab.resultPageLimit,
+      resultPageOffset: tab.resultPageOffset,
+      resultCountSql: tab.resultCountSql,
+      resultTotalRowCount: tab.resultTotalRowCount,
+      resultTotalRowCountLoading: tab.resultTotalRowCountLoading,
+      resultSessionId: tab.resultSessionId,
+      resultAccessedAt: tab.resultAccessedAt,
+      resultCacheKey: tab.resultCacheKey,
+      resultCacheState: tab.resultCacheState,
+      resultEvicted: tab.resultEvicted,
+      queryAnalysis: tab.queryAnalysis,
+      querySourceColumns: tab.querySourceColumns,
+      queryEditabilityReason: tab.queryEditabilityReason,
+      tableMeta: tab.tableMeta,
+    };
   }
 
   async function evictCachedResult(tab: QueryTab) {
@@ -955,6 +989,7 @@ export const useQueryStore = defineStore("query", () => {
       const current = tabs.value.find((t) => t.id === tabId);
       if (patch && current?.result === result) {
         applyQueryMetadataPatch(current, patch);
+        syncActiveResultRunFromDisplayed(current);
         console.info("[DBX][executeTabSql:metadata:done]", { traceId, elapsed: elapsed() });
       } else {
         console.warn("[DBX][executeTabSql:metadata:stale]", { traceId, elapsed: elapsed() });
@@ -968,6 +1003,7 @@ export const useQueryStore = defineStore("query", () => {
     if (current.executionId !== executionId && current.result !== result) return;
     current.resultTotalRowCount = totalRowCount;
     current.resultTotalRowCountLoading = false;
+    syncActiveResultRunFromDisplayed(current);
   }
 
   function countQueryTotalRowsInBackground(options: { tabId: string; connectionId: string; database: string; schema?: string; countSql?: string; result: QueryResult; pageLimit?: number; pageOffset?: number; executionId: string; traceId: string; elapsed: () => string; timeoutSecs: number }) {
@@ -1544,6 +1580,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
+    syncActiveResultRunFromDisplayed(tab);
   }
 
   function notifyConnectionMayBeLost() {

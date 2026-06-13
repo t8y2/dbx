@@ -264,6 +264,51 @@ test("failed query executions append switchable error result runs", async () => 
   }
 });
 
+test("statement result switching is scoped to the active result run", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.resultRuns = [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1; select 10",
+      createdAt: 1,
+      results: [
+        { columns: ["a"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+        { columns: ["b"], rows: [[10]], affected_rows: 0, execution_time_ms: 1 },
+      ],
+      activeResultIndex: 0,
+    },
+    {
+      id: "run-2",
+      title: "Run 2",
+      sequence: 2,
+      sql: "select 2; select 20",
+      createdAt: 2,
+      results: [
+        { columns: ["c"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+        { columns: ["d"], rows: [[20]], affected_rows: 0, execution_time_ms: 1 },
+      ],
+      activeResultIndex: 0,
+    },
+  ];
+  tab.activeResultRunId = "run-1";
+  store.setActiveResultRun(tabId, "run-1");
+
+  store.setActiveResultIndex(tabId, 1);
+  assert.deepEqual(tab.result?.columns, ["b"]);
+  assert.equal(tab.resultRuns[0]?.activeResultIndex, 1);
+
+  store.setActiveResultRun(tabId, "run-2");
+  assert.deepEqual(tab.result?.columns, ["c"]);
+  assert.equal(tab.activeResultIndex, 0);
+});
+
 test("normalizes unquoted Oracle query identifiers before loading editable metadata", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

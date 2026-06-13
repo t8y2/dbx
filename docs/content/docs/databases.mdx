@@ -13,7 +13,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Core SQL engines               | MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, Teradata, Vertica, Exasol, Firebird, SAP HANA, YashanDB, GBase   | Available directly in the DBX connection picker                                                |
 | Document and key-value engines | Redis, MongoDB, Elasticsearch, etcd                                                                                                                              | Use dedicated browsers or query flows instead of the generic relational grid where appropriate |
-| MySQL-compatible profiles      | MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, GoldenDB, TDSQL, PolarDB, GreatSQL, custom MySQL                                                           | Reuse MySQL-style connection handling where the engine speaks a compatible protocol            |
+| MySQL-compatible profiles      | MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, TDSQL, PolarDB, GreatSQL, custom MySQL                                          | Reuse MySQL-style connection handling where the engine speaks a compatible protocol            |
 | PostgreSQL-compatible profiles | openGauss, KingBase, HighGo, Vastbase, CockroachDB, custom PostgreSQL                                                                                            | Reuse PostgreSQL-style connection handling where the engine speaks a compatible protocol       |
 | File-based engines             | SQLite, DuckDB, Microsoft Access, RQLite, Turso                                                                                                                  | Choose a local database file or HTTP endpoint instead of host and port                         |
 | Time-series and edge           | InfluxDB, IoTDB, TDengine, Databend                                                                                                                              | Optimized for time-series, IoT, or edge workloads                                              |
@@ -34,6 +34,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | TiDB                                        |         4000 |
 | OceanBase                                   |         2881 |
 | Doris / SelectDB / StarRocks / Databend     |         9030 |
+| Manticore Search                            |         9306 |
 | Redshift                                    |         5439 |
 | CockroachDB                                 |        26257 |
 | DM                                          |         5236 |

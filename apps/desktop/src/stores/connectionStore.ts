@@ -241,6 +241,7 @@ export const useConnectionStore = defineStore("connection", () => {
       elasticsearch: "Elasticsearch",
       doris: "Doris",
       starrocks: "StarRocks",
+      manticoresearch: "Manticore Search",
       redshift: "Redshift",
       dameng: "DM (Dameng)",
       gaussdb: "GaussDB",

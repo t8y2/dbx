@@ -284,7 +284,7 @@ function portBytes(port: number): Buffer {
 }
 
 function isMysqlType(dbType: string): boolean {
-  return dbType === "mysql" || dbType === "doris" || dbType === "starrocks";
+  return dbType === "mysql" || dbType === "doris" || dbType === "starrocks" || dbType === "manticoresearch";
 }
 
 interface BridgeQueryResult {

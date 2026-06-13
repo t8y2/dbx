@@ -319,7 +319,9 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 
     match pool {
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
-            db::mysql::list_databases_show(p).await
+            db::mysql::list_databases_show(p)
+                .await
+                .map(|databases| filter_mysql_system_databases_for_config(databases, db_config.as_ref()))
         }
         PoolKind::Mysql(p, mode) => dispatch_mysql!(p, mode, db::mysql::list_databases, db::ob_oracle::list_databases),
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
@@ -599,8 +601,8 @@ fn filter_table_infos(
 #[cfg(test)]
 mod tests {
     use super::{
-        clickhouse_metadata_database, deduplicate_column_infos, filter_table_infos,
-        is_agent_postgres_metadata_fallback_config,
+        clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
+        filter_table_infos, is_agent_postgres_metadata_fallback_config,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{duckdb_attach_database, duckdb_list_databases, duckdb_query_tables_in_database};
@@ -673,6 +675,39 @@ mod tests {
             parent_schema: None,
             parent_name: None,
         }
+    }
+
+    fn test_database_info(name: &str) -> super::db::DatabaseInfo {
+        super::db::DatabaseInfo { name: name.to_string() }
+    }
+
+    #[test]
+    fn manticoresearch_database_list_filters_mysql_system_databases() {
+        let databases = vec![
+            test_database_info("Manticore"),
+            test_database_info("information_schema"),
+            test_database_info("mysql"),
+            test_database_info("performance_schema"),
+            test_database_info("sys"),
+        ];
+        let config = test_connection_config(DatabaseType::ManticoreSearch);
+
+        let filtered = filter_mysql_system_databases_for_config(databases, Some(&config));
+
+        assert_eq!(filtered.into_iter().map(|database| database.name).collect::<Vec<_>>(), vec!["Manticore"]);
+    }
+
+    #[test]
+    fn doris_database_list_keeps_system_databases() {
+        let databases = vec![test_database_info("information_schema"), test_database_info("analytics")];
+        let config = test_connection_config(DatabaseType::Doris);
+
+        let filtered = filter_mysql_system_databases_for_config(databases, Some(&config));
+
+        assert_eq!(
+            filtered.into_iter().map(|database| database.name).collect::<Vec<_>>(),
+            vec!["information_schema", "analytics"]
+        );
     }
 
     #[test]
@@ -1469,8 +1504,28 @@ fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
 }
 
 fn is_doris_family_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks"))
+    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
+}
+
+fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::ManticoreSearch)
+        || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
+}
+
+fn filter_mysql_system_databases_for_config(
+    databases: Vec<db::DatabaseInfo>,
+    config: Option<&ConnectionConfig>,
+) -> Vec<db::DatabaseInfo> {
+    if !config.is_some_and(is_manticoresearch_config) {
+        return databases;
+    }
+
+    databases.into_iter().filter(|database| !is_mysql_system_database(&database.name)).collect()
+}
+
+fn is_mysql_system_database(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "information_schema" | "mysql" | "performance_schema" | "sys")
 }
 
 fn sql_string(value: &str) -> String {

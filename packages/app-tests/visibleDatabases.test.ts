@@ -29,8 +29,10 @@ test("normalizes selected database names against fresh database names", () => {
 test("mysql system databases are hidden by default but can be explicitly selected", () => {
   const databases = ["app", "information_schema", "mysql", "performance_schema", "sys"];
   assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "mysql" }), ["app"]);
+  assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "manticoresearch" }), ["app"]);
   assert.deepEqual(filterDatabaseNamesForConnection(databases, { db_type: "mysql", visible_databases: ["app", "sys"] }), ["app", "sys"]);
   assert.equal(isSystemDatabaseName("mysql", "performance_schema"), true);
+  assert.equal(isSystemDatabaseName("manticoresearch", "information_schema"), true);
   assert.equal(isSystemDatabaseName("postgres", "information_schema"), false);
 });
 

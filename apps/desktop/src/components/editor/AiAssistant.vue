@@ -834,7 +834,7 @@ const messageRenderer = computed(() => {
       <div class="flex flex-col gap-3 p-3">
         <template v-for="(msg, i) in messages" :key="i">
           <div v-if="msg.role === 'user'" class="flex justify-end">
-            <div class="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+            <div class="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
               {{ msg.content }}
             </div>
           </div>

@@ -37,7 +37,22 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/debugLog";
-import { aiListModels, aiTestConnection, checkMcpServerStatus, forgetWebdavSavedPassword, listSystemFonts, saveWebdavSavedPassword, webdavPasswordStatus, webdavSyncDownload, webdavSyncTest, webdavSyncUpload, type AiModelInfo, type McpServerStatus, type WebDavConfig } from "@/lib/api";
+import {
+  aiListModels,
+  aiTestConnection,
+  checkMcpServerStatus,
+  installMcpServer,
+  forgetWebdavSavedPassword,
+  listSystemFonts,
+  saveWebdavSavedPassword,
+  webdavPasswordStatus,
+  webdavSyncDownload,
+  webdavSyncTest,
+  webdavSyncUpload,
+  type AiModelInfo,
+  type McpServerStatus,
+  type WebDavConfig,
+} from "@/lib/api";
 import { eventToShortcut } from "@/lib/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/shortcutRegistry";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
@@ -628,6 +643,9 @@ const mcpCopied = ref<"" | "install" | "claude-config" | "codex-config">("");
 const mcpConfigTab = ref<"claude" | "codex">("claude");
 const mcpReadonlyMode = ref(false);
 const mcpAllowDangerous = ref(false);
+const mcpInstalling = ref(false);
+const mcpInstallMessage = ref("");
+const mcpInstallError = ref(false);
 
 const mcpEnvEntries = computed(() => {
   const entries: Array<[string, string]> = [];
@@ -715,6 +733,30 @@ async function copyMcpText(kind: "install" | "claude-config" | "codex-config", v
   window.setTimeout(() => {
     if (mcpCopied.value === kind) mcpCopied.value = "";
   }, 1500);
+}
+
+async function installMcp() {
+  if (mcpInstalling.value) return;
+  mcpInstalling.value = true;
+  mcpInstallMessage.value = "";
+  mcpInstallError.value = false;
+  try {
+    const result = await installMcpServer();
+    mcpInstallMessage.value = result;
+    mcpInstallError.value = false;
+    // 安装成功后刷新状态
+    await refreshMcpStatus();
+  } catch (e: any) {
+    mcpInstallMessage.value = e?.message || String(e);
+    mcpInstallError.value = true;
+  } finally {
+    mcpInstalling.value = false;
+    // 3秒后清除消息
+    window.setTimeout(() => {
+      mcpInstallMessage.value = "";
+      mcpInstallError.value = false;
+    }, 3000);
+  }
 }
 
 // ---------- WebDAV Sync ----------
@@ -2276,6 +2318,17 @@ watch(
                     <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>
+                  <Button type="button" variant="default" :disabled="mcpInstalling || !mcpStatus?.npm_available || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
+                    <Loader2 v-if="mcpInstalling" class="mr-2 h-4 w-4 animate-spin" />
+                    <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available" class="mr-2 h-4 w-4" />
+                    {{ mcpInstalling ? t("settings.mcpInstalling") : !mcpStatus?.installed ? t("settings.mcpInstallButton") : mcpStatus?.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate") }}
+                  </Button>
+                </div>
+                <div
+                  v-if="mcpInstallMessage"
+                  :class="['text-xs px-3 py-2 rounded-md border', mcpInstallError ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800' : 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-800']"
+                >
+                  {{ mcpInstallMessage }}
                 </div>
               </div>
 

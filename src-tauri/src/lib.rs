@@ -514,6 +514,7 @@ pub fn run() {
             commands::history::clear_history,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
+            commands::mcp::install_mcp_server,
             commands::update::check_for_updates,
             commands::update::get_system_proxy_url,
             commands::transfer::start_transfer,

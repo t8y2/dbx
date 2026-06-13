@@ -62,6 +62,26 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     })
 }
 
+#[tauri::command]
+pub async fn install_mcp_server() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let output = command_output(
+            "npm",
+            &["install", "-g", "@dbx-app/mcp-server@latest", "--registry=https://registry.npmjs.org"],
+        )?;
+
+        if !output.success {
+            let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
+            return Err(format!("Installation failed: {}", error_msg));
+        }
+
+        let version = installed_mcp_version().unwrap_or_else(|| "unknown".to_string());
+        Ok(format!("Successfully installed @dbx-app/mcp-server@{}", version))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 async fn fetch_latest_mcp_version() -> Result<String, String> {
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent("dbx-mcp-status-checker");
     let proxy_url =

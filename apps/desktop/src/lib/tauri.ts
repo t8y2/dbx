@@ -1043,6 +1043,10 @@ export async function checkMcpServerStatus(): Promise<McpServerStatus> {
   return invoke("check_mcp_server_status");
 }
 
+export async function installMcpServer(): Promise<string> {
+  return invoke("install_mcp_server");
+}
+
 export async function checkForUpdates(): Promise<UpdateInfo> {
   return invoke("check_for_updates");
 }

@@ -146,6 +146,7 @@ test("result run items expose ordered labels and active state", () => {
     { id: "run-2", title: "Run 2", sequence: 2, active: true },
   ]);
   assert.equal(activeResultRun(tab)?.id, "run-2");
+  assert.deepEqual(resultRunItems(queryTab()).map((item) => item.title), []);
 });
 
 test("result grid cache key includes result run id and statement result index", () => {

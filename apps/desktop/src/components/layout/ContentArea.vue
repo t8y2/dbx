@@ -41,7 +41,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, tabularResultItems } from "@/lib/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
 import { isTableDataEditable } from "@/lib/tableEditing";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
@@ -214,6 +214,8 @@ const activeQueryError = computed(() => {
 });
 const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
+const resultRuns = computed(() => resultRunItems(props.activeTab));
+const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 watch(
   () => tabularResults.value.map((item) => item.index).join(","),
   () => {
@@ -469,6 +471,24 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   {{ t("tabs.tableData") }}
                 </Button>
               </div>
+              <template v-if="resultRuns.length > 1">
+                <span class="mx-1 h-4 w-px shrink-0 bg-border" />
+                <div class="flex min-w-0 max-w-[35%] items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :aria-label="t('tabs.resultRuns')">
+                  <Button
+                    v-for="run in resultRuns"
+                    :key="run.id"
+                    size="sm"
+                    :variant="run.active ? 'default' : 'ghost'"
+                    class="h-6 shrink-0 px-2 text-xs"
+                    @click="
+                      queryStore.setActiveResultRun(activeTab.id, run.id);
+                      emit('update:activeOutputView', 'result');
+                    "
+                  >
+                    {{ t("tabs.runN", { n: run.sequence }) }}
+                  </Button>
+                </div>
+              </template>
               <template v-if="tabularResults.length > 1">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div class="relative min-w-0 flex-1 self-stretch">
@@ -600,8 +620,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               <DataGrid
                 v-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
-                :key="`${activeTab.id}-${activeTab.activeResultIndex ?? 0}`"
-                :cache-key="`${activeTab.id}-${activeTab.activeResultIndex ?? 0}`"
+                :key="activeResultGridCacheKey"
+                :cache-key="activeResultGridCacheKey"
                 class="flex-1 min-h-0"
                 :result="activeTab.result"
                 :sort-column="activeTab.resultSortColumn"

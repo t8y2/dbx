@@ -15,6 +15,8 @@ export interface TabResultSnapshot {
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
+  resultRuns?: QueryTab["resultRuns"];
+  activeResultRunId?: string;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
@@ -38,9 +40,17 @@ interface ColumnarQueryResult {
   has_more?: boolean;
 }
 
-interface TabResultSnapshotPayload extends Omit<TabResultSnapshot, "result" | "results"> {
+type QueryResultRunSnapshot = NonNullable<QueryTab["resultRuns"]>[number];
+
+interface ColumnarQueryResultRun extends Omit<QueryResultRunSnapshot, "result" | "results"> {
   result?: ColumnarQueryResult;
   results?: ColumnarQueryResult[];
+}
+
+interface TabResultSnapshotPayload extends Omit<TabResultSnapshot, "result" | "results" | "resultRuns"> {
+  result?: ColumnarQueryResult;
+  results?: ColumnarQueryResult[];
+  resultRuns?: ColumnarQueryResultRun[];
 }
 
 interface TabResultCacheEnvelope {
@@ -126,6 +136,15 @@ function stripResultSessionIds(results: QueryResult[] | undefined): QueryResult[
   return results?.map((result) => stripSessionIds(result)!);
 }
 
+function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab["resultRuns"] {
+  return resultRuns?.map((run) => ({
+    ...run,
+    result: stripSessionIds(run.result),
+    results: stripResultSessionIds(run.results),
+    resultSessionId: undefined,
+  }));
+}
+
 function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult | undefined {
   if (!result) return undefined;
   const columnValues = result.columns.map((_, colIndex) => result.rows.map((row) => row[colIndex] ?? null));
@@ -161,6 +180,13 @@ function snapshotToPayload(snapshot: TabResultSnapshot): TabResultSnapshotPayloa
     ...snapshot,
     result: toColumnarResult(snapshot.result),
     results: snapshot.results?.map((result) => toColumnarResult(result)!),
+    resultRuns: snapshot.resultRuns?.map((run) =>
+      removeUndefinedFields({
+        ...run,
+        result: toColumnarResult(run.result),
+        results: run.results?.map((result) => toColumnarResult(result)!),
+      }),
+    ),
   });
 }
 
@@ -169,11 +195,17 @@ function payloadToSnapshot(payload: TabResultSnapshotPayload): TabResultSnapshot
     ...payload,
     result: fromColumnarResult(payload.result),
     results: payload.results?.map((result) => fromColumnarResult(result)!),
+    resultRuns: payload.resultRuns?.map((run) => ({
+      ...run,
+      result: fromColumnarResult(run.result),
+      results: run.results?.map((result) => fromColumnarResult(result)!),
+    })),
   };
 }
 
 function resultStats(snapshot: TabResultSnapshot): { rowCount: number; columnCount: number } {
-  const result = snapshot.result ?? snapshot.results?.[snapshot.activeResultIndex ?? 0] ?? snapshot.results?.[0];
+  const activeRun = snapshot.resultRuns?.find((run) => run.id === snapshot.activeResultRunId) ?? snapshot.resultRuns?.[0];
+  const result = snapshot.result ?? snapshot.results?.[snapshot.activeResultIndex ?? 0] ?? snapshot.results?.[0] ?? activeRun?.result ?? activeRun?.results?.[activeRun.activeResultIndex ?? 0] ?? activeRun?.results?.[0];
   return {
     rowCount: result?.rows.length ?? 0,
     columnCount: result?.columns.length ?? 0,
@@ -317,11 +349,13 @@ export function tabResultCacheKey(tabId: string): string {
 }
 
 export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undefined {
-  if (!tab.result && !tab.results) return undefined;
+  if (!tab.result && !tab.results && !tab.resultRuns?.length) return undefined;
   return {
     result: stripSessionIds(tab.result),
     results: stripResultSessionIds(tab.results),
     activeResultIndex: tab.activeResultIndex,
+    resultRuns: stripResultRunSessionIds(tab.resultRuns),
+    activeResultRunId: tab.activeResultRunId,
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,

@@ -51,6 +51,14 @@ function markQueryResultsRowsRaw(results: QueryResult[]): QueryResult[] {
   return results;
 }
 
+function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns"]>): NonNullable<QueryTab["resultRuns"]> {
+  for (const run of resultRuns) {
+    if (run.result) markQueryResultRowsRaw(run.result);
+    if (run.results) markQueryResultsRowsRaw(run.results);
+  }
+  return resultRuns;
+}
+
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
   if (timeoutSecs === 0) return promise;
 
@@ -1615,7 +1623,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.results = results;
     tab.activeResultIndex = snapshot.activeResultIndex;
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
-    if (!tab.result && !tab.results) return false;
+    tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns) : tab.resultRuns;
+    tab.activeResultRunId = snapshot.activeResultRunId ?? tab.activeResultRunId;
+    if (!tab.result && !tab.results && !tab.resultRuns) return false;
 
     tab.queryAnalysis = snapshot.queryAnalysis;
     tab.querySourceColumns = snapshot.querySourceColumns;

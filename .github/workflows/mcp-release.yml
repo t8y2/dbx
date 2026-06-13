@@ -234,7 +234,7 @@ jobs:
   publish-homebrew-formula:
     name: Publish Homebrew formula
     runs-on: ubuntu-latest
-    needs: publish-leaf-packages
+    needs: [prepare, publish-leaf-packages]
     steps:
       - name: Download CLI npm tarball and compute SHA256
         id: cli-hash

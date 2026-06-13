@@ -1179,14 +1179,25 @@ fn rqlite_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
 
 fn turso_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
     let trimmed = host.trim();
-    if let Some(rest) = trimmed.strip_prefix("https://").or_else(|| trimmed.strip_prefix("libsql://")) {
+
+    // Handle libsql:// protocol (Turso native)
+    if let Some(rest) = trimmed.strip_prefix("libsql://") {
         return format!("https://{}", trim_http_host_port(rest, port));
     }
+
+    // Handle explicit https://
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return format!("https://{}", trim_http_host_port(rest, port));
+    }
+
+    // Handle explicit http:// (respect ssl config)
     if let Some(rest) = trimmed.strip_prefix("http://") {
         let scheme = if config.ssl { "https" } else { "http" };
         return format!("{scheme}://{}", trim_http_host_port(rest, port));
     }
-    let scheme = if config.ssl { "https" } else { "http" };
+
+    // Default: bare hostname -> prefer HTTPS for Turso (default port 443)
+    let scheme = if port == 443 || config.ssl { "https" } else { "http" };
     format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
 }
 

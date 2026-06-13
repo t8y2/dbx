@@ -2559,6 +2559,34 @@ function openExternalUrl(url: string) {
                   </template>
                 </template>
 
+                <!-- Turso: simplified form (URL + Token) -->
+                <template v-else-if="form.db_type === 'turso'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-3" placeholder="your-database.turso.io 或 libsql://your-database.turso.io" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs text-muted-foreground">支持 libsql:// 或 https:// 协议，也可以只填主机名（自动使用 HTTPS）</p>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">Auth Token</Label>
+                    <Input v-model="form.password" type="password" class="col-span-3" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs text-muted-foreground">使用 <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code> 创建 token</p>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.urlParams") }}</Label>
+                    <Input v-model="form.url_params" class="col-span-3" placeholder="authToken=xxx（可选，优先使用上面的 Token 字段）" />
+                  </div>
+                </template>
+
                 <!-- MySQL / PostgreSQL: host, port, user, password, database -->
                 <template v-else>
                   <div class="grid grid-cols-4 items-center gap-4">

@@ -71,6 +71,7 @@ const databaseSupport = [
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
   { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
+  { name: "Manticore Search", icon: "/icons/database/manticoresearch.png", tone: "#b8e646" },
   { name: "Redshift", icon: "/icons/database/redshift.svg", tone: "#8c4fff" },
   { name: "Dameng", icon: "/icons/database/dm.svg", tone: "#3857ff" },
   { name: "GaussDB", icon: "/icons/database/gaussdb.svg", tone: "#ff5a3d" },

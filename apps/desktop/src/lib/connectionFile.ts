@@ -61,8 +61,16 @@ export function sqliteBackupSourcePath(config: Pick<ConnectionConfig, "db_type" 
 
 export function defaultSqliteBackupFileName(config: Pick<ConnectionConfig, "host" | "name">): string {
   const source = (config.host || config.name || "database").trim();
-  const fileName = source.split(/[\\/]/).filter(Boolean).pop() || "database.db";
+  const rawFileName = isMemorySqlitePath(source) ? "memory.db" : source.split(/[\\/]/).filter(Boolean).pop() || "database.db";
+  const fileName = sanitizeFileName(rawFileName) || "database.db";
   const dotIndex = fileName.lastIndexOf(".");
   if (dotIndex <= 0) return `${fileName}.backup.db`;
   return `${fileName.slice(0, dotIndex)}.backup${fileName.slice(dotIndex)}`;
+}
+
+function sanitizeFileName(fileName: string): string {
+  return fileName
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .trim()
+    .replace(/[. ]+$/g, "");
 }

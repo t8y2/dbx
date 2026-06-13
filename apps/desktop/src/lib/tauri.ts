@@ -999,6 +999,10 @@ export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
 }
 
+export async function backupSqliteDatabase(connectionId: string, destinationPath: string): Promise<void> {
+  return invoke("backup_sqlite_database", { connectionId, destinationPath });
+}
+
 export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promise<void> {
   return invoke("sync_saved_sql_directory", { request });
 }

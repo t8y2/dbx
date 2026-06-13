@@ -42,6 +42,7 @@ pub mod sql_dialect;
 pub mod sql_editability;
 pub mod sql_file_import;
 pub mod sql_risk;
+pub mod sqlite_backup;
 pub mod storage;
 pub mod table_export;
 pub mod table_import;

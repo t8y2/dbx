@@ -1154,18 +1154,42 @@ export const useQueryStore = defineStore("query", () => {
       const settingsStore = useSettingsStore();
       await previousResultSessionClose;
 
-      // Redis command execution
+      // Redis command execution — split multi-line input into individual commands
       if (conn?.db_type === "redis") {
         await connStore.ensureConnected(tab.connectionId);
         const redisDb = Number(tab.database) || 0;
-        console.info("[DBX][executeTabSql:redis:start]", { traceId, db: redisDb, sql });
-        const result = await api.redisExecuteCommand(tab.connectionId, redisDb, sql, options?.skipRedisSafetyCheck);
-        console.info("[DBX][executeTabSql:redis:done]", { traceId, elapsed: elapsed() });
+        const commands = sql
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+        if (commands.length === 0) return;
+        console.info("[DBX][executeTabSql:redis:start]", { traceId, db: redisDb, commandCount: commands.length, sql });
+
+        const allResults: QueryResult[] = [];
+        const skipSafety = options?.skipRedisSafetyCheck;
+        for (const command of commands) {
+          try {
+            const result = await api.redisExecuteCommand(tab.connectionId, redisDb, command, skipSafety);
+            allResults.push(markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command)));
+          } catch (e: any) {
+            allResults.push({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 });
+          }
+        }
+        console.info("[DBX][executeTabSql:redis:done]", { traceId, commandCount: commands.length, elapsed: elapsed() });
+
         const current = tabs.value.find((t) => t.id === id);
         if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command));
+          if (allResults.length > 1) {
+            const activeResultIndex = allResults.findIndex((r) => !r.columns.includes("Error"));
+            const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
+            current.results = allResults;
+            current.activeResultIndex = resultIndex;
+            current.result = allResults[resultIndex];
+          } else {
+            current.results = undefined;
+            current.activeResultIndex = undefined;
+            current.result = allResults[0];
+          }
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;

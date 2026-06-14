@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Lock, Loader2, ShieldCheck } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 
@@ -70,11 +71,11 @@ async function submit() {
         </div>
         <div class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input v-model="password" type="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" class="pl-10 h-11" autocomplete="off" autofocus />
+          <PasswordInput v-model="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" inputClass="pl-10 h-11" autocomplete="off" autofocus />
         </div>
         <div v-if="setupMode" class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input v-model="confirmPassword" type="password" :placeholder="t('auth.confirmPassword')" class="pl-10 h-11" autocomplete="off" />
+          <PasswordInput v-model="confirmPassword" :placeholder="t('auth.confirmPassword')" inputClass="pl-10 h-11" autocomplete="off" />
         </div>
         <p v-if="error" class="text-sm text-destructive text-center">{{ error }}</p>
         <Button type="submit" class="w-full h-11 text-sm font-medium" :disabled="loading || !password || (setupMode && !confirmPassword)">

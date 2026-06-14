@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -2257,7 +2258,7 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" />
+                    <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label class="text-right mt-2">{{ t("connection.jdbcDriverPaths") }}</Label>
@@ -2378,7 +2379,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.password") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
-                      <Input v-model="form.password" type="password" class="col-span-3" />
+                      <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                   </template>
                 </template>
@@ -2424,7 +2425,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.redisSentinelPassword") }}</Label>
-                      <Input v-model="form.redis_sentinel_password" type="password" class="col-span-3" />
+                      <PasswordInput v-model="form.redis_sentinel_password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.redisSentinelTls") }}</Label>
@@ -2451,7 +2452,7 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+                    <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right text-xs">{{ t("connection.redisKeySeparator") }}</Label>
@@ -2486,7 +2487,7 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" />
+                    <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                 </template>
 
@@ -2528,7 +2529,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.password") }}</Label>
-                      <Input v-model="form.password" type="password" class="col-span-3" />
+                      <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.defaultDatabase") }}</Label>
@@ -2578,7 +2579,7 @@ function openExternalUrl(url: string) {
 
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">Auth Token</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." />
+                    <PasswordInput v-model="form.password" class="col-span-3" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." />
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
@@ -2612,7 +2613,7 @@ function openExternalUrl(url: string) {
 
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" />
+                    <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -3061,7 +3062,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshPassword") }}</Label>
-                      <Input v-model="selectedSshLayer.password" type="password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshKeyPath") }}</Label>
@@ -3079,7 +3080,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshKeyPassphrase") }}</Label>
-                      <Input v-model="selectedSshLayer.key_passphrase" type="password" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
@@ -3124,7 +3125,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.proxyPassword") }}</Label>
-                      <Input v-model="selectedProxyLayer.password" type="password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" :disabled="selectedProxyLayer.enabled === false" />
+                      <PasswordInput v-model="selectedProxyLayer.password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" :disabled="selectedProxyLayer.enabled === false" />
                     </div>
                   </template>
                 </template>

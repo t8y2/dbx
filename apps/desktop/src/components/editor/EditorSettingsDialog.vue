@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -2055,7 +2056,7 @@ watch(
                 <div class="space-y-2">
                   <Label for="webdav-password">{{ t("settings.syncPassword") }}</Label>
                   <div class="relative">
-                    <Input id="webdav-password" v-model="webdavPassword" type="password" :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')" :disabled="webdavHasSavedPassword" autocomplete="current-password" />
+                    <PasswordInput id="webdav-password" v-model="webdavPassword" :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')" :disabled="webdavHasSavedPassword" autocomplete="current-password" />
                     <Button
                       v-if="webdavHasSavedPassword"
                       variant="ghost"
@@ -2109,7 +2110,7 @@ watch(
                 </div>
                 <div v-if="webdavSyncSecrets" class="space-y-2">
                   <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
-                  <Input id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" type="password" autocomplete="new-password" />
+                  <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" autocomplete="new-password" />
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
                 </div>
               </div>
@@ -2121,7 +2122,7 @@ watch(
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
                   <Select :model-value="aiEditProvider" @update:model-value="(v: any) => aiSelectProvider(v)">
-                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                    <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue>
                         <span class="flex items-center gap-2">
                           <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" />
@@ -2143,7 +2144,7 @@ watch(
                 <div v-if="aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
-                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                    <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -2155,7 +2156,7 @@ watch(
 
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
-                  <Input v-model="aiEditApiKey" type="password" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
+                  <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
                 <div class="grid grid-cols-3 items-start gap-3">
@@ -2243,7 +2244,7 @@ watch(
 
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
-                  <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2 h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
+                  <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
               </div>
             </section>
@@ -2401,9 +2402,9 @@ watch(
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
                 <p class="text-sm text-muted-foreground">{{ t("auth.changePasswordDescription") }}</p>
-                <Input v-model="oldPassword" type="password" :placeholder="t('auth.oldPassword')" class="h-9" autocomplete="off" />
-                <Input v-model="newPassword" type="password" :placeholder="t('auth.newPassword')" class="h-9" autocomplete="off" />
-                <Input v-model="confirmNewPassword" type="password" :placeholder="t('auth.confirmPassword')" class="h-9" autocomplete="off" />
+                <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
                 <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>

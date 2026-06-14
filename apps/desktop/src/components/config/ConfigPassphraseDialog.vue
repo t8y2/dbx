@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Lock } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -76,12 +77,12 @@ const displayError = computed(() => error.value || props.externalError || "");
 
         <div class="grid gap-2">
           <Label>{{ t("configExport.passphrase") }}</Label>
-          <Input v-model="passphrase" type="password" :placeholder="t('configExport.passphrasePlaceholder')" @keydown.enter="mode === 'import' ? confirm() : undefined" />
+          <PasswordInput v-model="passphrase" :placeholder="t('configExport.passphrasePlaceholder')" @keydown.enter="mode === 'import' ? confirm() : undefined" />
         </div>
 
         <div v-if="mode === 'export'" class="grid gap-2">
           <Label>{{ t("configExport.passphraseConfirm") }}</Label>
-          <Input v-model="passphraseConfirm" type="password" :placeholder="t('configExport.passphraseConfirmPlaceholder')" @keydown.enter="confirm" />
+          <PasswordInput v-model="passphraseConfirm" :placeholder="t('configExport.passphraseConfirmPlaceholder')" @keydown.enter="confirm" />
         </div>
 
         <p v-if="displayError" class="text-sm text-destructive">{{ displayError }}</p>

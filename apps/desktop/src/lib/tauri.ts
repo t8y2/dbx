@@ -1192,6 +1192,10 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
   return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count });
 }
 
+export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
+  return invoke("redis_pubsub_publish", { connectionId, db, channel, message });
+}
+
 // --- etcd ---
 export type KvValueEncoding = "utf8" | "base64";
 

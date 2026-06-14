@@ -68,6 +68,13 @@ pub struct RedisCommandResult {
     pub value: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PubSubMessage {
+    pub channel: String,
+    pub pattern: Option<String>,
+    pub payload: String,
+}
+
 pub enum RedisConnection {
     Direct(Mutex<redis::aio::MultiplexedConnection>),
     Cluster(RedisClusterPool),
@@ -454,6 +461,54 @@ pub async fn connect_direct_node(
         redis::Client::open(connection_info(&endpoint.host, endpoint.port, tls, insecure, username, password, 0))
             .map_err(|e| format!("Redis connection failed: {e}"))?;
     connect_client(client).await
+}
+
+pub async fn connect_pubsub(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    timeout: std::time::Duration,
+) -> Result<redis::aio::PubSub, String> {
+    let mut last_error = None;
+    for auth in redis_auth_candidates(&config.username, &config.password) {
+        let client = redis::Client::open(connection_info(
+            host,
+            port,
+            config.ssl,
+            config.redis_tls_insecure(),
+            &auth.username,
+            &auth.password,
+            redis_database_index(config),
+        ))
+        .map_err(|e| format!("Redis connection failed: {e}"))?;
+        match tokio::time::timeout(timeout, client.get_async_pubsub()).await {
+            Ok(Ok(pubsub)) => return Ok(pubsub),
+            Ok(Err(err)) => {
+                let err_str = err.to_string();
+                if last_error.is_none() || is_redis_auth_error(&err_str) {
+                    let should_retry = is_redis_auth_error(&err_str);
+                    last_error = Some(err_str);
+                    if !should_retry {
+                        break;
+                    }
+                } else {
+                    return Err(err_str);
+                }
+            }
+            Err(_) => {
+                last_error = Some(format!("Redis PubSub connection timed out ({}s)", timeout.as_secs()));
+                break;
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Redis PubSub connection failed".to_string()))
+}
+
+pub async fn publish_message<C>(con: &mut C, channel: &str, message: &str) -> Result<u64, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    redis::cmd("PUBLISH").arg(channel).arg(message).query_async(con).await.map_err(|e| e.to_string())
 }
 
 pub async fn list_databases<C>(con: &mut C) -> Result<Vec<RedisDatabaseInfo>, String>

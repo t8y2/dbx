@@ -75,14 +75,13 @@ export default defineConfig(async () => ({
           port: 1421,
         }
       : undefined,
-    proxy: isTauri
-      ? undefined
-      : {
-          "/api": {
-            target: "http://localhost:4224",
-            changeOrigin: true,
-          },
-        },
+    proxy: {
+      "/api": {
+        target: "http://localhost:4224",
+        changeOrigin: true,
+        ws: true,
+      },
+    },
     watch: {
       ignored: ["**/src-tauri/**"],
     },

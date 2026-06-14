@@ -261,6 +261,12 @@ export const redisDeleteKeys = forward("redisDeleteKeys");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
+export const redisPubSubPublish = forward("redisPubSubPublish");
+
+export function redisPubSubConnect(connectionId: string): WebSocket {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(`${protocol}//${window.location.host}/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`);
+}
 
 // etcd
 export const etcdListPrefix = forward("etcdListPrefix");

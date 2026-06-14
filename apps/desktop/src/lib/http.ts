@@ -1354,6 +1354,10 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
   return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count });
 }
 
+export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
+  return post("/api/redis/pubsub/publish", { connectionId, db, channel, message });
+}
+
 // ---------------------------------------------------------------------------
 // etcd
 // ---------------------------------------------------------------------------

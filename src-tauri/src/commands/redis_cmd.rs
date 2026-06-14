@@ -303,3 +303,15 @@ pub async fn redis_load_more(
     dbx_core::redis_ops::redis_load_more_in_db_core(&state, &connection_id, db, &key_raw, &key_type, cursor, count)
         .await
 }
+
+#[tauri::command]
+pub async fn redis_pubsub_publish(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    channel: String,
+    message: String,
+) -> Result<u64, String> {
+    ensure_connection_writable(&state, &connection_id, "PUBLISH").await?;
+    dbx_core::redis_ops::redis_publish_core(&state, &connection_id, db, &channel, &message).await
+}

@@ -156,6 +156,15 @@ pub struct RedisCommandRequest {
     pub skip_safety_check: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisPubSubPublishRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub channel: String,
+    pub message: String,
+}
+
 pub async fn list_databases(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisConnectionRequest>,
@@ -451,4 +460,16 @@ pub async fn execute_command(
     .await
     .map_err(AppError)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn publish_message(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisPubSubPublishRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "PUBLISH").await?;
+    let count =
+        dbx_core::redis_ops::redis_publish_core(&state.app, &req.connection_id, req.db, &req.channel, &req.message)
+            .await
+            .map_err(AppError)?;
+    Ok(Json(serde_json::json!({ "subscribers": count })))
 }

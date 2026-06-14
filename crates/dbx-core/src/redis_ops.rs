@@ -739,3 +739,43 @@ pub async fn redis_load_more_in_db_core(
         _ => Err("Not a Redis connection".to_string()),
     }
 }
+
+pub async fn redis_publish_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    channel: &str,
+    message: &str,
+) -> Result<u64, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => match redis {
+            RedisConnection::Direct(con) => {
+                let mut con = con.lock().await;
+                redis_driver::select_db(&mut *con, db).await?;
+                redis_driver::publish_message(&mut *con, channel, message).await
+            }
+            RedisConnection::Cluster(cluster) => {
+                redis_driver::ensure_cluster_db(db)?;
+                let mut con = cluster.connection.lock().await;
+                redis_driver::publish_message(&mut *con, channel, message).await
+            }
+        },
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_create_pubsub_core(state: &AppState, connection_id: &str) -> Result<redis::aio::PubSub, String> {
+    let configs = state.configs.read().await;
+    let config = configs.get(connection_id).ok_or("Connection config not found")?.clone();
+    drop(configs);
+
+    if config.db_type != crate::models::connection::DatabaseType::Redis {
+        return Err("Not a Redis connection".to_string());
+    }
+
+    let (host, port) = state.connection_host_port(connection_id, &config).await?;
+    let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
+    redis_driver::connect_pubsub(&config, &host, port, timeout).await
+}

@@ -42,7 +42,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     }
 
     let sql = match options.database_type {
-        Some(DatabaseType::MongoDb) => {
+        Some(DatabaseType::Postgres | DatabaseType::MongoDb) => {
             format!("EXPLAIN (FORMAT JSON) {source}")
         }
         Some(DatabaseType::Dameng | DatabaseType::Questdb) => {

@@ -20,6 +20,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Vertica
             | DatabaseType::Exasol
             | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Gbase
             | DatabaseType::Databend

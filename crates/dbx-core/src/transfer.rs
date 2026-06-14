@@ -1471,6 +1471,10 @@ pub fn pagination_sql(
                 "SELECT {col_list} FROM {full_table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
         }
+        DatabaseType::Questdb => {
+            let upper_bound = offset + limit as u64;
+            format!("SELECT {col_list} FROM {full_table} LIMIT {offset}, {upper_bound}")
+        }
         _ => {
             format!("SELECT {col_list} FROM {full_table} LIMIT {limit} OFFSET {offset}")
         }
@@ -1496,6 +1500,11 @@ pub fn pagination_sql_with_order(
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
+        }
+        DatabaseType::Questdb => {
+            let upper_bound = offset + limit as u64;
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            format!("SELECT {col_list} FROM {full_table}{order_by} LIMIT {offset}, {upper_bound}")
         }
         _ => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();

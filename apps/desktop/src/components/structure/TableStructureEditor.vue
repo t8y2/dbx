@@ -37,6 +37,7 @@ import {
   getColumnEditorControls,
   getDataTypeOptions,
   getDefaultLengthForType,
+  isDataTypeLengthDisabled,
   isProtectedManticoreIdColumn,
   splitDataType,
   toColumnNames,
@@ -509,10 +510,11 @@ function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
-  if (isColumnTypeDisabled(column)) return true;
-  if (databaseType.value !== "manticoresearch") return false;
+  if (isColumnTypeDisabled(column)) {
+    return true;
+  }
   const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
-  return baseType !== "bit" && baseType !== "float_vector";
+  return isDataTypeLengthDisabled(databaseType.value, baseType);
 }
 
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {

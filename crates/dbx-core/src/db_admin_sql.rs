@@ -193,6 +193,7 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                         | DatabaseType::Gaussdb
                         | DatabaseType::Kwdb
                         | DatabaseType::OpenGauss
+                        | DatabaseType::Questdb
                         | DatabaseType::Highgo
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
@@ -223,6 +224,7 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                         | DatabaseType::Gaussdb
                         | DatabaseType::Kwdb
                         | DatabaseType::OpenGauss
+                        | DatabaseType::Questdb
                         | DatabaseType::Highgo
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
@@ -249,7 +251,9 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
     match options.database_type {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
         Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
-        Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin) => format!("TRUNCATE TABLE {table};"),
+        Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin | DatabaseType::Questdb) => {
+            format!("TRUNCATE TABLE {table};")
+        }
         Some(DatabaseType::Iotdb) => format!("DELETE FROM {};", iotdb_timeseries_pattern(&table)),
         _ => format!("DELETE FROM {table};"),
     }
@@ -288,6 +292,9 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
     if options.database_type == Some(DatabaseType::Mysql) {
         return format!("CREATE TABLE {target} LIKE {source};");
+    }
+    if options.database_type == Some(DatabaseType::Questdb) {
+        return format!("CREATE TABLE {target} (LIKE {source});");
     }
     if options.database_type.is_some_and(is_postgres_like_structure_copy) {
         return format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);");
@@ -400,6 +407,7 @@ fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
     )
 }
 

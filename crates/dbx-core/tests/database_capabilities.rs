@@ -141,6 +141,7 @@ fn classifies_agent_database_types() {
     assert!(!is_agent_type(&DatabaseType::Gaussdb));
     assert!(!is_agent_type(&DatabaseType::Kwdb));
     assert!(!is_agent_type(&DatabaseType::OpenGauss));
+    assert!(!is_agent_type(&DatabaseType::Questdb));
 }
 
 #[test]
@@ -192,6 +193,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
     assert!(!skips_tcp_probe(&DatabaseType::Kwdb));
     assert!(!skips_tcp_probe(&DatabaseType::OpenGauss));
+    assert!(!skips_tcp_probe(&DatabaseType::Questdb));
 }
 
 #[test]

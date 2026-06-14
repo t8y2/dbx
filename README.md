@@ -37,6 +37,7 @@
     <img src="https://img.shields.io/badge/KingBase-003B8E?logoColor=white" />
     <img src="https://img.shields.io/badge/TDengine-2F6FFF?logoColor=white" />
     <img src="https://img.shields.io/badge/CockroachDB-6933FF?logoColor=white" />
+    <img src="https://img.shields.io/badge/InfluxDB-d30971?logo=influxdb&logoColor=white" />
     <img src="https://img.shields.io/badge/JDBC-4B5563?logoColor=white" />
     <img src="https://img.shields.io/badge/and%20more...-555555?logoColor=white" />
   </p>
@@ -87,7 +88,7 @@
 
 ### 50+ Databases, One Tool
 
-MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend DBX to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase, Databend, RQLite, Turso, InfluxDB, IoTDB, etcd, IRIS, and more. All in a single ~15 MB app. No bundled Chromium.
+MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend DBX to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, IRIS, and more. All in a single ~15 MB app. No bundled Chromium.
 
 ### Query Editor
 
@@ -324,7 +325,7 @@ DBX is 15 MB with no runtime dependencies (no Java, no Python). It includes AI a
 
 <details>
 <summary><strong>What databases are supported?</strong></summary>
-MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend support to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase, Databend, RQLite, Turso, InfluxDB, IoTDB, etcd, IRIS, and custom JDBC connections.
+MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingBase, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, and more. Agent/JDBC-oriented profiles extend support to H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, IRIS, and custom JDBC connections.
 </details>
 
 <details>

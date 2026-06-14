@@ -292,6 +292,8 @@ pub enum DatabaseType {
     Turso,
     #[serde(rename = "influxdb")]
     InfluxDb,
+    #[serde(rename = "questdb")]
+    Questdb,
     Jdbc,
 }
 
@@ -725,6 +727,7 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Questdb => format!("questdb://{host}:{port}{db_part}"),
             DatabaseType::Gbase => format!("gbase://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
@@ -885,6 +888,9 @@ impl ConnectionConfig {
                 } else {
                     format!("{base}?{params}")
                 }
+            }
+            DatabaseType::Questdb => {
+                format!("questdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Gbase => {
                 format!("gbase://{}:{}@{host}:{port}{db_part}", username, password)

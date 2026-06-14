@@ -64,7 +64,7 @@ test("treats Access as a local single-database agent driver", () => {
 });
 
 test("exposes the extended JDBC agent ecosystem through driver management", () => {
-  for (const dbType of ["databricks", "saphana", "teradata", "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle", "gbase"] as const) {
+  for (const dbType of ["databricks", "saphana", "teradata", "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle", "gbase", "questdb"] as const) {
     assert.equal(supportsDriverManagement(dbType), true, `${dbType} should be agent-managed`);
     assert.equal(supportsDatabaseSearch(dbType), true, `${dbType} should support database search`);
   }

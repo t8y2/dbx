@@ -371,6 +371,7 @@ impl AppState {
             | DatabaseType::Redshift
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
+            | DatabaseType::Questdb
             | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
             DatabaseType::Sqlite => {
                 let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
@@ -1154,7 +1155,7 @@ fn external_driver_connect_timeout(config: &ConnectionConfig) -> std::time::Dura
 
 fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionConfig> {
     match config.db_type {
-        DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::OpenGauss => {
+        DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::OpenGauss | DatabaseType::Questdb => {
             let mut normalized = config.clone();
             normalized.database = normalized.effective_database().map(str::to_string);
             if matches!(config.db_type, DatabaseType::Gaussdb | DatabaseType::Kwdb) {

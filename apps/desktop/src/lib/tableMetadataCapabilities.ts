@@ -36,6 +36,11 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     foreignKeys: false,
     triggers: false,
   },
+  questdb: {
+    indexes: true,
+    foreignKeys: false,
+    triggers: false,
+  },
 };
 
 export function getTableMetadataCapabilities(dbType?: DatabaseType): TableMetadataCapabilities {

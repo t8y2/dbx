@@ -16,15 +16,15 @@ export interface ExplainPlanNode {
 }
 
 export interface ParsedExplainPlan {
-  databaseType: "mysql" | "postgres" | "dameng";
+  databaseType: "mysql" | "postgres" | "dameng" | "questdb";
   raw: unknown;
   nodes: ExplainPlanNode[];
 }
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng"]);
-export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" {
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb"]);
+export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
@@ -32,9 +32,11 @@ export function buildExplainSql(databaseType: DatabaseType | undefined, sql: str
   return api.buildExplainSql({ databaseType, sql }) as Promise<BuildExplainSqlResult>;
 }
 
-export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng", result: QueryResult): ParsedExplainPlan {
+export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb", result: QueryResult): ParsedExplainPlan {
   if (databaseType === "dameng") {
     return parseDamengExplain(result);
+  } else if (databaseType === "questdb") {
+    return parseQuestdbExplain(result);
   }
   const raw = parseExplainCell(result.rows[0]?.[0]);
   const nodes = databaseType === "postgres" ? parsePostgresExplain(raw) : parseMysqlExplain(raw);
@@ -509,6 +511,26 @@ function parseMysqlTable(table: Record<string, unknown>, id: string): ExplainPla
     details,
     children: [],
   };
+}
+
+// ── QuestDB explain parser ─────────────────────────────────────────
+function parseQuestdbExplain(result: QueryResult): ParsedExplainPlan {
+  let nodes: ExplainPlanNode[] = result.rows.map((row: unknown[], index: number) => {
+    const text = String(row[0] ?? "");
+    const node: ExplainPlanNode = {
+      id: `plan_${index}`,
+      title: text,
+      nodeType: "Plan",
+      relation: "",
+      index: String(index),
+      cost: undefined,
+      rows: undefined,
+      details: [text],
+      children: [],
+    };
+    return node;
+  });
+  return { databaseType: "questdb", raw: result, nodes };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

@@ -267,6 +267,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "datetime year to fraction",
     "interval day to second",
   ],
+  questdb: ["boolean", "ipv4", "byte", "short", "char", "int", "float", "symbol", "varchar", "string", "long", "date", "timestamp", "timestamp_ns", "double", "uuid", "binary", "long256", "geohash", "array", "interval", "decimal"],
 };
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
@@ -278,6 +279,7 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   gaussdb: "postgres",
   kwdb: "postgres",
   opengauss: "postgres",
+  questdb: "questdb",
   redshift: "postgres",
   highgo: "postgres",
   vastbase: "postgres",
@@ -365,6 +367,13 @@ export const DEFAULT_TYPE_LENGTHS: Record<string, string> = {
   year: "4",
 };
 
+export const QUESTDB_TYPE_LENGTHS: Record<string, string> = {
+  geohash: "8c",
+  decimal: "10,2",
+};
+
+export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -378,7 +387,7 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
     if (lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
-  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "opengauss" || databaseType === "highgo" || databaseType === "vastbase" || databaseType === "kingbase") {
+  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "opengauss" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "vastbase" || databaseType === "kingbase") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
     if (identityMatch) {
       const sequenceMatch = lower.match(/start\s+with\s*(-?\d+)\s+increment\s+by\s*(-?\d+)/i);
@@ -635,6 +644,8 @@ function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: str
     case "dameng":
     case "oceanbase-oracle":
       return ["timestamp", "timestamp with time zone", "timestamp with local time zone"].includes(normalized);
+    case "questdb":
+      return ["timestamp"].includes(normalized);
     default:
       return false;
   }
@@ -649,7 +660,22 @@ function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: stri
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string): string {
   const key = baseType.trim().toLowerCase();
-  return DEFAULT_TYPE_LENGTHS[key] ?? "";
+  if (_dbType === "questdb") {
+    return QUESTDB_TYPE_LENGTHS[key] ?? "";
+  } else {
+    return DEFAULT_TYPE_LENGTHS[key] ?? "";
+  }
+}
+
+export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
+  const key = baseType.trim().toLowerCase();
+  if (_dbType === "questdb") {
+    return key !== "geohash" && key !== "decimal";
+  } else if (_dbType === "manticoresearch") {
+    return key !== "bit" && key !== "float_vector";
+  } else {
+    return DEFAULT_TYPE_LENGTH_DISABLES.includes(key);
+  }
 }
 
 export function buildStructureTargetLabel(connectionName: string | undefined, database: string | undefined, schema: string | undefined, tableName: string | undefined): string {

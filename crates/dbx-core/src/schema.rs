@@ -549,6 +549,9 @@ async fn list_tables_once(
             dispatch_mysql!(p, mode, db::mysql::list_tables, db::ob_oracle::list_tables, schema)
                 .map(|tables| filter_table_infos(tables, filter, limit, offset))
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
+            db::questdb::list_tables(p, schema).await.map(|tables| filter_table_infos(tables, filter, limit, offset))
+        }
         PoolKind::Postgres(p) => db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await,
         PoolKind::Sqlite(p) => {
             db::sqlite::list_tables(p, schema).await.map(|tables| filter_table_infos(tables, filter, limit, offset))
@@ -944,6 +947,9 @@ async fn list_objects_once(
                 db::mysql::list_objects(p, database).await
             }
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
+            db::questdb::list_objects(p, schema).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await,
         _ => {
             drop(connections);
@@ -1048,6 +1054,9 @@ async fn list_completion_objects_once(
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_objects(p, schema).await.map(filter_completion_objects)
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
+            db::questdb::list_objects(p, schema).await.map(filter_completion_objects)
         }
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(filter_completion_objects),
         PoolKind::SqlServer(_) => {
@@ -1243,6 +1252,9 @@ pub async fn get_columns_core(
             dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, database, table)
                 .map(deduplicate_column_infos)
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
+            db::questdb::get_columns(p, schema, table).await.map(deduplicate_column_infos)
+        }
         PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await.map(deduplicate_column_infos),
         PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await.map(deduplicate_column_infos),
         PoolKind::Rqlite(client) => {
@@ -1320,6 +1332,9 @@ pub async fn list_indexes_core(
                 return db::manticoresearch::list_indexes(p, table).await;
             }
             dispatch_mysql!(p, mode, db::mysql::list_indexes, db::ob_oracle::list_indexes, schema, table)
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
+            db::questdb::list_indexes(p, schema, table).await
         }
         PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
         PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,
@@ -1513,6 +1528,12 @@ pub async fn get_table_ddl_core(
                 Err(_) => pg_ddl(p, schema, table).await,
             }
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
+            match db::questdb::questdb_table_or_view_ddl(p, table).await {
+                Ok(ddl) => Ok(ddl),
+                Err(_) => pg_ddl(p, schema, table).await,
+            }
+        }
         PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
@@ -1560,6 +1581,10 @@ fn filter_mysql_system_databases_for_config(
 
 fn is_mysql_system_database(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "information_schema" | "mysql" | "performance_schema" | "sys")
+}
+
+fn is_questdb_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Questdb) || matches!(config.driver_profile.as_deref(), Some("questdb"))
 }
 
 fn sql_string(value: &str) -> String {
@@ -1793,6 +1818,10 @@ pub async fn get_object_source_core(
         } else {
             match connections.get(&pool_key).ok_or("Pool not found")? {
                 PoolKind::Mysql(pool, _) => mysql_object_source(pool, name, &object_type).await?,
+                PoolKind::Postgres(pool) if db_config.as_ref().is_some_and(is_questdb_config) => {
+                    // only view
+                    db::questdb::questdb_object_source(pool, name).await?
+                }
                 PoolKind::Postgres(pool) => postgres_object_source(pool, schema, name, &object_type).await?,
                 PoolKind::Sqlite(pool) => first_string_cell(
                     db::sqlite::execute_query(pool, &sqlite_object_source_sql(name, &object_type)).await?,

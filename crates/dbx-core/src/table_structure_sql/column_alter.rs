@@ -551,6 +551,29 @@ pub(super) fn build_sqlite_existing_column_sql(
     statements
 }
 
+pub(super) fn build_questdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let current_name = &column.name;
+    if column.name != original.name {
+        statements.push(format!(
+            "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+            quote_ident(StructureDialect::Questdb, &original.name),
+            quote_ident(StructureDialect::Questdb, &column.name)
+        ));
+    }
+    if column.data_type.trim() != original.data_type.trim() {
+        statements.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
+            quote_ident(StructureDialect::Questdb, current_name),
+            column_data_type(StructureDialect::Questdb, column)
+        ));
+    }
+    statements
+}
+
 pub(super) fn has_existing_column_attribute_change(column: &EditableStructureColumn) -> bool {
     let Some(original) = &column.original else {
         return false;

@@ -75,15 +75,12 @@ function binaryPayload(value: unknown): Uint8Array | undefined {
   return undefined;
 }
 
-function arrayBufferFromBytes(bytes: Uint8Array): ArrayBuffer {
-  return bytes.slice().buffer;
-}
-
 async function transformBytes(bytes: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
+  const output = new Response(stream.readable).arrayBuffer();
   const writer = stream.writable.getWriter();
-  await writer.write(arrayBufferFromBytes(bytes));
+  await writer.write(bytes.slice());
   await writer.close();
-  return new Uint8Array(await new Response(stream.readable).arrayBuffer());
+  return new Uint8Array(await output);
 }
 
 async function gzipBytes(bytes: Uint8Array): Promise<Uint8Array> {

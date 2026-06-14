@@ -110,3 +110,81 @@ test("query result archives are compact for repeated tabular values", async () =
 
   assert.ok(bytes.length < jsonSize, `expected archive ${bytes.length} bytes to be smaller than JSON ${jsonSize} bytes`);
 });
+
+test("query result archive compression starts reading before writing to avoid stream backpressure", async () => {
+  const originalCompressionStream = Object.getOwnPropertyDescriptor(globalThis, "CompressionStream");
+  const originalResponse = Object.getOwnPropertyDescriptor(globalThis, "Response");
+  class BackpressureCompressionStream {
+    private chunk?: Uint8Array;
+    private readerStarted = false;
+    private releaseWrite?: () => void;
+
+    readable = {
+      startReading: () => {
+        this.readerStarted = true;
+        this.releaseWrite?.();
+        this.releaseWrite = undefined;
+      },
+      arrayBuffer: () => {
+        const bytes = this.chunk ?? new Uint8Array();
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      },
+    };
+
+    writable = {
+      getWriter: () => ({
+        write: async (chunk: Uint8Array | ArrayBuffer) => {
+          this.chunk = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+          if (!this.readerStarted) {
+            await new Promise<void>((resolve) => {
+              this.releaseWrite = resolve;
+            });
+          }
+        },
+        close: async () => {},
+      }),
+    };
+  }
+
+  class BackpressureResponse {
+    constructor(private readonly readable: { startReading?: () => void; arrayBuffer?: () => ArrayBuffer }) {
+      this.readable.startReading?.();
+    }
+
+    async arrayBuffer() {
+      return this.readable.arrayBuffer?.() ?? new ArrayBuffer(0);
+    }
+  }
+
+  Object.defineProperty(globalThis, "CompressionStream", {
+    configurable: true,
+    value: BackpressureCompressionStream,
+  });
+  Object.defineProperty(globalThis, "Response", {
+    configurable: true,
+    value: BackpressureResponse,
+  });
+
+  try {
+    const tab = queryTab({
+      result: {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    });
+    const snapshot = buildTabResultSnapshot(tab);
+    assert.ok(snapshot);
+
+    const result = await Promise.race([encodeQueryResultArchive(tab, snapshot), new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100))]);
+
+    assert.notEqual(result, "timeout");
+    assert.ok(result instanceof Uint8Array);
+  } finally {
+    if (originalCompressionStream) Object.defineProperty(globalThis, "CompressionStream", originalCompressionStream);
+    else Reflect.deleteProperty(globalThis, "CompressionStream");
+    if (originalResponse) Object.defineProperty(globalThis, "Response", originalResponse);
+    else Reflect.deleteProperty(globalThis, "Response");
+  }
+});

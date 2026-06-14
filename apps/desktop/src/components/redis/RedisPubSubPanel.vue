@@ -182,14 +182,14 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex flex-col h-full">
     <!-- Connection bar -->
-    <div class="flex items-center gap-2 px-3 py-1.5 border-b bg-muted/30">
-      <span class="text-xs font-medium">{{ t("redis.pubsub") }}</span>
+    <div class="flex items-center gap-2 px-3 py-1.5 border-b bg-muted/30 min-h-0 shrink-0">
+      <span class="text-xs font-medium whitespace-nowrap">{{ t("redis.pubsub") }}</span>
       <span class="flex-1"></span>
-      <span class="inline-flex items-center gap-1 text-xs" :class="connected ? 'text-green-600' : 'text-muted-foreground'">
+      <span class="inline-flex items-center gap-1 text-xs whitespace-nowrap" :class="connected ? 'text-green-600' : 'text-muted-foreground'">
         <span class="inline-block w-2 h-2 rounded-full" :class="connected ? 'bg-green-500' : 'bg-gray-400'"></span>
         {{ connected ? t("redis.pubsubConnected") : connecting ? t("redis.pubsubConnecting") : t("redis.pubsubDisconnected") }}
       </span>
-      <button v-if="!connected" class="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90" :disabled="connecting" @click="connect">
+      <button v-if="!connected" class="text-xs px-2 py-0.5 rounded border border-transparent bg-primary text-primary-foreground hover:bg-primary/90" :disabled="connecting" @click="connect">
         {{ t("redis.pubsubConnect") }}
       </button>
       <button v-else class="text-xs px-2 py-0.5 rounded border hover:bg-muted" @click="disconnect">
@@ -198,13 +198,13 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Subscriptions -->
-    <div class="px-3 py-2 border-b space-y-2">
+    <div class="px-3 py-2 border-b space-y-2" :class="{ 'opacity-50 pointer-events-none': !connected }">
       <!-- Channel subscriptions -->
       <div>
         <div class="text-xs font-medium mb-1">{{ t("redis.pubsubChannels") }}</div>
         <div class="flex gap-1 mb-1">
-          <input v-model="newChannel" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-7 px-2 text-xs border rounded bg-background" :placeholder="t('redis.pubsubChannelPlaceholder')" @keydown.enter="subscribe" />
-          <button class="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90" @click="subscribe">
+          <input v-model="newChannel" type="text" :disabled="!connected" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-7 px-2 text-xs border rounded bg-background" :placeholder="t('redis.pubsubChannelPlaceholder')" @keydown.enter="subscribe" />
+          <button :disabled="!connected" class="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50" @click="subscribe">
             {{ t("redis.pubsubSubscribe") }}
           </button>
         </div>
@@ -220,8 +220,8 @@ onBeforeUnmount(() => {
       <div>
         <div class="text-xs font-medium mb-1">{{ t("redis.pubsubPatterns") }}</div>
         <div class="flex gap-1 mb-1">
-          <input v-model="newPattern" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-7 px-2 text-xs border rounded bg-background" :placeholder="t('redis.pubsubPatternPlaceholder')" @keydown.enter="psubscribe" />
-          <button class="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90" @click="psubscribe">
+          <input v-model="newPattern" type="text" :disabled="!connected" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-7 px-2 text-xs border rounded bg-background" :placeholder="t('redis.pubsubPatternPlaceholder')" @keydown.enter="psubscribe" />
+          <button :disabled="!connected" class="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50" @click="psubscribe">
             {{ t("redis.pubsubPsubscribe") }}
           </button>
         </div>

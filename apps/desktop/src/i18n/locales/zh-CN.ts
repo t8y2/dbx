@@ -444,6 +444,7 @@
     resultN: "结果 {n}",
     runN: "执行 {n}",
     resultRuns: "执行结果",
+    removeRun: "删除执行 {n}",
     missingResultRun: "此结果已不可用",
     exportResultArchive: "导出结果",
     importResultArchive: "导入结果",

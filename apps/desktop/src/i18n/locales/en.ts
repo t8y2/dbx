@@ -443,6 +443,7 @@
     resultN: "Result {n}",
     runN: "Run {n}",
     resultRuns: "Result runs",
+    removeRun: "Remove run {n}",
     missingResultRun: "This result is no longer available",
     exportResultArchive: "Export Results",
     importResultArchive: "Import Results",

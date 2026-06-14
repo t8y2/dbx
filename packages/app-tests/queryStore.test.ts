@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { isReactive } from "vue";
+import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/queryResultArchive.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
@@ -169,6 +170,129 @@ test("selecting a result run restores its displayed result without changing SQL 
   assert.deepEqual(tab.result?.columns, ["one"]);
   assert.deepEqual(tab.result?.rows, [[1]]);
   assert.equal(tab.resultBaseSql, "select 1");
+});
+
+test("removing the active result run selects an adjacent run", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.sql = "select draft";
+  tab.resultRuns = [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1",
+      createdAt: 1,
+      result: { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 1",
+    },
+    {
+      id: "run-2",
+      title: "Run 2",
+      sequence: 2,
+      sql: "select 2",
+      createdAt: 2,
+      result: { columns: ["two"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 2",
+    },
+    {
+      id: "run-3",
+      title: "Run 3",
+      sequence: 3,
+      sql: "select 3",
+      createdAt: 3,
+      result: { columns: ["three"], rows: [[3]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 3",
+    },
+  ];
+  store.setActiveResultRun(tabId, "run-2");
+
+  assert.equal(store.removeResultRun(tabId, "run-2"), true);
+
+  assert.deepEqual(tab.resultRuns?.map((run) => run.id), ["run-1", "run-3"]);
+  assert.equal(tab.activeResultRunId, "run-3");
+  assert.deepEqual(tab.result?.columns, ["three"]);
+  assert.deepEqual(tab.result?.rows, [[3]]);
+  assert.equal(tab.sql, "select draft");
+
+  assert.equal(store.removeResultRun(tabId, "run-3"), true);
+
+  assert.deepEqual(tab.resultRuns?.map((run) => run.id), ["run-1"]);
+  assert.equal(tab.activeResultRunId, "run-1");
+  assert.deepEqual(tab.result?.columns, ["one"]);
+});
+
+test("removed result runs are excluded from result archives", async () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db", "Revenue checks", "query", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.sql = "select draft";
+  tab.resultRuns = [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1",
+      createdAt: 1,
+      result: { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 1",
+    },
+    {
+      id: "run-2",
+      title: "Run 2",
+      sequence: 2,
+      sql: "select 2",
+      createdAt: 2,
+      result: { columns: ["two"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 2",
+    },
+  ];
+  store.setActiveResultRun(tabId, "run-2");
+
+  assert.equal(store.removeResultRun(tabId, "run-1"), true);
+  const archive = await store.exportResultArchive(tabId);
+  assert.ok(archive);
+  const decoded = await decodeQueryResultArchive(archive);
+
+  assert.deepEqual(decoded?.snapshot.resultRuns?.map((run) => run.id), ["run-2"]);
+  assert.deepEqual(decoded?.snapshot.resultRuns?.[0]?.result?.columns, ["two"]);
+  assert.deepEqual(decoded?.snapshot.resultRuns?.[0]?.result?.rows, [[2]]);
+});
+
+test("removing the last result run clears output and makes result archive unavailable", async () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.resultRuns = [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1",
+      createdAt: 1,
+      result: { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 1",
+    },
+  ];
+  store.setActiveResultRun(tabId, "run-1");
+
+  assert.equal(store.removeResultRun(tabId, "run-1"), true);
+
+  assert.deepEqual(tab.resultRuns, []);
+  assert.equal(tab.activeResultRunId, undefined);
+  assert.equal(tab.result, undefined);
+  assert.equal(tab.results, undefined);
+  assert.equal(await store.exportResultArchive(tabId), undefined);
 });
 
 test("result archives import into a new query tab with switchable runs", async () => {

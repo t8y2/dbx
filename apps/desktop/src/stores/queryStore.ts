@@ -233,6 +233,28 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
+  function removeResultRun(id: string, runId: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    const runIndex = tab?.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
+    if (!tab || !tab.resultRuns || runIndex < 0) return false;
+
+    const wasActive = tab.activeResultRunId === runId;
+    const remainingRuns = tab.resultRuns.filter((run) => run.id !== runId);
+    tab.resultRuns = remainingRuns;
+
+    if (!wasActive) return true;
+
+    const nextRun = remainingRuns[Math.min(runIndex, remainingRuns.length - 1)];
+    if (nextRun) {
+      projectResultRun(tab, nextRun);
+      return true;
+    }
+
+    tab.activeResultRunId = undefined;
+    clearResultPayload(tab);
+    return true;
+  }
+
   function nextResultRunSequence(tab: QueryTab): number {
     return (tab.resultRuns?.reduce((max, run) => Math.max(max, run.sequence), 0) ?? 0) + 1;
   }
@@ -1893,6 +1915,7 @@ export const useQueryStore = defineStore("query", () => {
     setExecuting,
     setErrorResult,
     setActiveResultRun,
+    removeResultRun,
     setActiveResultIndex,
     executeCurrentTab,
     executeCurrentSql,

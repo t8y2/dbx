@@ -2,7 +2,7 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Square, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks, Download } from "@lucide/vue";
+import { Check, Columns3, Loader2, Search, Square, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks, Download, X } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -438,6 +438,12 @@ function toggleExecutionSummary() {
   emit("update:activeOutputView", nextExecutionSummaryView(props.activeOutputView, canShowResultOutput.value));
 }
 
+function removeResultRun(runId: string) {
+  const removedActiveRun = props.activeTab.activeResultRunId === runId;
+  const removed = queryStore.removeResultRun(props.activeTab.id, runId);
+  if (removed && removedActiveRun) emit("update:activeOutputView", "result");
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -500,22 +506,25 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   {{ t("tabs.tableData") }}
                 </Button>
               </div>
-              <template v-if="resultRuns.length > 1">
+              <template v-if="resultRuns.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div class="flex min-w-0 max-w-[35%] items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :aria-label="t('tabs.resultRuns')">
-                  <Button
-                    v-for="run in resultRuns"
-                    :key="run.id"
-                    size="sm"
-                    :variant="run.active ? 'default' : 'ghost'"
-                    class="h-6 shrink-0 px-2 text-xs"
-                    @click="
-                      queryStore.setActiveResultRun(activeTab.id, run.id);
-                      emit('update:activeOutputView', 'result');
-                    "
-                  >
-                    {{ t("tabs.runN", { n: run.sequence }) }}
-                  </Button>
+                  <div v-for="run in resultRuns" :key="run.id" class="inline-flex shrink-0 items-center">
+                    <Button
+                      size="sm"
+                      :variant="run.active ? 'default' : 'ghost'"
+                      class="h-6 rounded-r-none px-2 text-xs"
+                      @click="
+                        queryStore.setActiveResultRun(activeTab.id, run.id);
+                        emit('update:activeOutputView', 'result');
+                      "
+                    >
+                      {{ t("tabs.runN", { n: run.sequence }) }}
+                    </Button>
+                    <Button size="icon" :variant="run.active ? 'default' : 'ghost'" class="h-6 w-6 rounded-l-none border-l border-border/50 px-0" :title="t('tabs.removeRun', { n: run.sequence })" :aria-label="t('tabs.removeRun', { n: run.sequence })" @click.stop="removeResultRun(run.id)">
+                      <X class="h-3 w-3" />
+                    </Button>
+                  </div>
                 </div>
               </template>
               <template v-if="tabularResults.length > 1">

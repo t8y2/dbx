@@ -31,14 +31,17 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
     for column in &active_columns {
         let data_type = column_data_type(dialect, column);
         let mut parts = vec![quote_ident(dialect, &column.name), data_type];
-        if !column.is_nullable && !column.is_primary_key && dialect != StructureDialect::ClickHouse {
+        if !column.is_nullable
+            && !column.is_primary_key
+            && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)
+        {
             parts.push("NOT NULL".to_string());
         }
         if let Some(extra_clause) = column_extra_clause(dialect, column) {
             parts.push(extra_clause);
         }
         let default_value = normalize_default(Some(&column.default_value));
-        if !default_value.is_empty() {
+        if !default_value.is_empty() && dialect != StructureDialect::ManticoreSearch {
             parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
         }
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
@@ -52,7 +55,10 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
         column_definitions.push(parts.join(" "));
     }
 
-    let pk_columns: Vec<_> = active_columns.iter().filter(|column| column.is_primary_key).collect();
+    let pk_columns: Vec<_> = active_columns
+        .iter()
+        .filter(|column| column.is_primary_key && dialect != StructureDialect::ManticoreSearch)
+        .collect();
     if !pk_columns.is_empty() {
         let pk_list = pk_columns.iter().map(|column| quote_ident(dialect, &column.name)).collect::<Vec<_>>().join(", ");
         column_definitions.push(format!("PRIMARY KEY ({pk_list})"));

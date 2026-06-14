@@ -4,8 +4,8 @@ use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
 use super::util::{
-    clean, format_default_for_sql, normalize_default, original_comment, original_default, qualified_table, quote_ident,
-    quote_string,
+    clean, format_default_for_sql, is_protected_manticore_id_column, normalize_default, original_comment,
+    original_default, qualified_table, quote_ident, quote_string,
 };
 use crate::table_structure_sql::ColumnExtra;
 
@@ -28,6 +28,10 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         }
         if original.is_primary_key {
             warnings.push(format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name));
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if is_protected_manticore_id_column(dialect, &original.name) {
+            warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
             return TableStructureSqlResult { statements, warnings };
         }
         statements.push(build_drop_column_sql(dialect, &table, &original.name));
@@ -95,6 +99,22 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
         && extra.identity.is_none()
+        && !extra.manticore_indexed.unwrap_or(false)
+        && !extra.manticore_stored.unwrap_or(false)
+        && !extra.manticore_attribute.unwrap_or(false)
+        && !extra.manticore_secondary_index.unwrap_or(false)
+}
+
+fn original_manticore_extra_flags(extra: &str) -> (bool, bool, bool, bool) {
+    let lower = extra.to_lowercase();
+    (
+        lower.split_whitespace().any(|token| token == "indexed"),
+        lower.split_whitespace().any(|token| token == "stored"),
+        lower.split_whitespace().any(|token| token == "attribute"),
+        lower.contains("secondary_index='1'")
+            || lower.contains("secondary_index=\"1\"")
+            || lower.contains("secondary_index=1"),
+    )
 }
 
 pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool {
@@ -103,8 +123,18 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
     match (current_extra, original.extra.as_deref()) {
         // Neither has extra → no change
         (None, None | Some("")) => false,
-        // Current extra is empty (all None) → no effective extra
-        (Some(curr), _) if is_column_extra_empty(curr) => false,
+        // Current extra is empty (all None) → changed only if the original had effective extra
+        (Some(curr), None | Some("")) if is_column_extra_empty(curr) => false,
+        (Some(curr), Some(orig)) if is_column_extra_empty(curr) => {
+            let (indexed, stored, attribute, secondary_index) = original_manticore_extra_flags(orig);
+            let orig_lower = orig.to_lowercase();
+            orig_lower.contains("auto_increment")
+                || orig_lower.contains("on update")
+                || indexed
+                || stored
+                || attribute
+                || secondary_index
+        }
         // Extra added or removed
         (Some(_), None | Some("")) => true,
         (None, Some(_)) => true,
@@ -116,8 +146,18 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             let curr_has_on_update = curr.on_update_current_timestamp.unwrap_or(false);
             let orig_has_on_update = orig_lower.contains("on update");
             let curr_has_identity = curr.identity.is_some();
+            let curr_manticore = (
+                curr.manticore_indexed.unwrap_or(false),
+                curr.manticore_stored.unwrap_or(false),
+                curr.manticore_attribute.unwrap_or(false),
+                curr.manticore_secondary_index.unwrap_or(false),
+            );
+            let orig_manticore = original_manticore_extra_flags(orig);
             // identity is harder to detect in free-form original.extra, so treat it as changed if present
-            curr_has_ai != orig_has_ai || curr_has_on_update != orig_has_on_update || curr_has_identity
+            curr_has_ai != orig_has_ai
+                || curr_has_on_update != orig_has_on_update
+                || curr_has_identity
+                || curr_manticore != orig_manticore
         }
     }
 }

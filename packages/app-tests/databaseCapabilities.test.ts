@@ -129,6 +129,15 @@ test("describes table editing capabilities for special database engines", () => 
     transaction: false,
   });
 
+  assert.deepEqual(getDatabaseCapability("manticoresearch").tableData, {
+    insert: true,
+    updateRequiresPrimaryKey: false,
+    deleteRequiresPrimaryKey: false,
+    keylessRowPredicate: true,
+    requiresTransactionalTableForExistingRows: false,
+    transaction: false,
+  });
+
   assert.deepEqual(getDatabaseCapability("jdbc").tableData, {
     insert: false,
     updateRequiresPrimaryKey: true,
@@ -227,7 +236,7 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableStructureEditing("informix"), true);
   assert.equal(supportsTableStructureEditing("rqlite"), true);
   assert.equal(supportsTableStructureEditing("mongodb"), false);
-  assert.equal(supportsTableStructureEditing("manticoresearch"), false);
+  assert.equal(supportsTableStructureEditing("manticoresearch"), true);
   assert.equal(supportsDatabaseCreation("clickhouse"), true);
   assert.equal(supportsDatabaseCreation("manticoresearch"), false);
   assert.equal(supportsDatabaseCreation("sqlite"), false);
@@ -257,7 +266,7 @@ test("describes feature support through capability helpers", () => {
 test("loads product support levels and capabilities from the driver manifest", () => {
   assert.equal(manifestDatabaseTypes().includes("mysql"), true);
   assert.equal(databaseSupportLevel("mysql"), "operate");
-  assert.equal(databaseSupportLevel("manticoresearch"), "browse");
+  assert.equal(databaseSupportLevel("manticoresearch"), "operate");
   assert.equal(databaseSupportLevel("jdbc"), "browse");
   assert.equal(databaseSupportLevel("redis"), "connect");
 
@@ -290,8 +299,8 @@ test("loads product support levels and capabilities from the driver manifest", (
       queryExecution: true,
       metadataBrowse: true,
       objectBrowser: false,
-      tableDataEdit: false,
-      tableStructureEdit: false,
+      tableDataEdit: true,
+      tableStructureEdit: true,
       sqlFileExecution: true,
       userAdmin: false,
     },
@@ -310,6 +319,7 @@ test("object browser entry follows database tree shape", () => {
 
 test("sidebar object capability registry describes object groups by database type", () => {
   assert.deepEqual(sidebarObjectKindsForDatabase("databend"), ["TABLE", "VIEW"]);
+  assert.deepEqual(sidebarObjectKindsForDatabase("manticoresearch"), ["TABLE", "FUNCTION"]);
   assert.deepEqual(sidebarObjectKindsForDatabase("postgres"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"]);
   assert.deepEqual(sidebarObjectKindsForDatabase("oracle"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"]);
 });

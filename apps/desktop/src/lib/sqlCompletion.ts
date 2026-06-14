@@ -416,6 +416,8 @@ const MYSQL_SQL_KEYWORDS = [
   "DATE_FORMAT",
 ];
 
+const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SHOW TABLES", "CALL", "CALL PQ", "PQ", "META", "TABLES", "OPTION", "WITHIN GROUP ORDER BY"];
+
 const SQLITE_SQL_KEYWORDS = ["AUTOINCREMENT", "INTEGER", "BLOB", "BOOLEAN", "WITHOUT ROWID", "VACUUM", "PRAGMA", "JSON_EXTRACT", "JSON_SET", "STRFTIME"];
 
 const SQLSERVER_SQL_KEYWORDS = ["TOP", "IDENTITY", "UNIQUEIDENTIFIER", "NVARCHAR", "DATETIME2", "DATETIMEOFFSET", "BIT", "GO", "MERGE", "OUTPUT", "TRY_CAST", "TRY_CONVERT", "OPENJSON", "JSON_VALUE", "JSON_QUERY"];
@@ -427,6 +429,7 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   rqlite: SQLITE_SQL_KEYWORDS,
   turso: SQLITE_SQL_KEYWORDS,
   sqlserver: SQLSERVER_SQL_KEYWORDS,
+  manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
 };
 
 // Keywords that appear in nearly every SQL query — boosted so frequency beats length tie-breaking.
@@ -680,6 +683,39 @@ export const DEFAULT_SQL_SNIPPETS: SqlSnippet[] = [
   },
 ];
 
+const MANTICORESEARCH_SQL_SNIPPETS: SqlSnippet[] = [
+  {
+    id: "builtin-manticore-match",
+    label: "match query",
+    prefix: "match",
+    body: "MATCH('query')",
+  },
+  {
+    id: "builtin-manticore-facet",
+    label: "facet",
+    prefix: "facet",
+    body: "FACET column",
+  },
+  {
+    id: "builtin-manticore-show-meta",
+    label: "show meta",
+    prefix: "m",
+    body: "SHOW META;",
+  },
+  {
+    id: "builtin-manticore-show-tables",
+    label: "show tables",
+    prefix: "tab",
+    body: "SHOW TABLES;",
+  },
+  {
+    id: "builtin-manticore-call-pq",
+    label: "call pq",
+    prefix: "p",
+    body: "CALL PQ ('pq', ('{\"title\":\"query\"}'));",
+  },
+];
+
 const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   // Aggregate
   ["COUNT", ["expression"]],
@@ -810,6 +846,40 @@ const SQLSERVER_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["NEWID", []],
 ]);
 
+const MANTICORESEARCH_FUNCTION_SIGNATURES = new Map<string, string[]>([
+  ["MATCH", ["query"]],
+  ["BM25F", ["field=weight", "...fields"]],
+  ["EXIST", ["attribute", "default"]],
+  ["IDF", ["keyword"]],
+  ["PACKEDFACTORS", []],
+  ["QUERY", []],
+  ["REMAP", ["expression", "from_values", "to_values"]],
+  ["SNIPPET", ["field", "query"]],
+  ["WEIGHT", []],
+  ["ZONESPANLIST", []],
+  ["BIGINT", ["expression"]],
+  ["DOUBLE", ["expression"]],
+  ["INTEGER", ["expression"]],
+  ["SINT", ["expression"]],
+  ["TO_STRING", ["expression"]],
+  ["UINT", ["expression"]],
+  ["UINT64", ["expression"]],
+  ["GEODIST", ["lat1", "lon1", "lat2", "lon2"]],
+  ["CONTAINS", ["polygon", "point"]],
+  ["POLY2D", ["...points"]],
+  ["CRC32", ["expression"]],
+  ["FIBONACCI", ["number"]],
+  ["KNN_DIST", []],
+  ["NOW", []],
+  ["DATE_FORMAT", ["timestamp", "format"]],
+  ["DAY", ["timestamp"]],
+  ["MONTH", ["timestamp"]],
+  ["YEAR", ["timestamp"]],
+  ["HOUR", ["timestamp"]],
+  ["MINUTE", ["timestamp"]],
+  ["SECOND", ["timestamp"]],
+]);
+
 const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, string[]>>> = {
   mysql: MYSQL_FUNCTION_SIGNATURES,
   postgres: POSTGRES_FUNCTION_SIGNATURES,
@@ -817,6 +887,7 @@ const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, str
   rqlite: SQLITE_FUNCTION_SIGNATURES,
   turso: SQLITE_FUNCTION_SIGNATURES,
   sqlserver: SQLSERVER_FUNCTION_SIGNATURES,
+  manticoresearch: MANTICORESEARCH_FUNCTION_SIGNATURES,
 };
 
 const COMMON_SQL_FUNCTION_NAMES = new Set([
@@ -1076,8 +1147,18 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
-      this.items.push(...buildSnippetItems(context.prefix, this.input.snippets ?? DEFAULT_SQL_SNIPPETS));
+      const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
+      this.items.push(...buildSnippetItems(context.prefix, snippets));
       this.items.push(...buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType));
+    }
+
+    if (this.databaseType === "manticoresearch" && context.exclusiveRoutineSuggestions) {
+      this.items.push(
+        ...buildSnippetItems(
+          context.prefix,
+          MANTICORESEARCH_SQL_SNIPPETS.filter((snippet) => snippet.id === "builtin-manticore-call-pq"),
+        ),
+      );
     }
 
     if (context.preferredKeywords.length > 0) {

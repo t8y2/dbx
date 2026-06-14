@@ -699,6 +699,20 @@ mod tests {
     }
 
     #[test]
+    fn manticoresearch_show_metadata_uses_unqualified_table_names() {
+        let config = test_connection_config(DatabaseType::ManticoreSearch);
+
+        assert_eq!(super::mysql_show_metadata_database_for_config(Some(&config), "Manticore"), "");
+    }
+
+    #[test]
+    fn doris_show_metadata_keeps_database_qualifier() {
+        let config = test_connection_config(DatabaseType::Doris);
+
+        assert_eq!(super::mysql_show_metadata_database_for_config(Some(&config), "analytics"), "analytics");
+    }
+
+    #[test]
     fn doris_database_list_keeps_system_databases() {
         let databases = vec![test_database_info("information_schema"), test_database_info("analytics")];
         let config = test_connection_config(DatabaseType::Doris);
@@ -922,6 +936,8 @@ async fn list_objects_once(
             // Note: mysql and ob_oracle take different second args (database vs schema)
             if *mode == MysqlMode::OceanBaseOracle {
                 db::ob_oracle::list_objects(p, schema).await
+            } else if db_config.as_ref().is_some_and(is_manticoresearch_config) {
+                db::manticoresearch::list_objects(p, database).await
             } else if db_config.as_ref().is_some_and(is_doris_family_config) {
                 db::mysql::list_table_objects_show(p, database).await
             } else {
@@ -1215,8 +1231,13 @@ pub async fn get_columns_core(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
     match pool {
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_manticoresearch_config) => {
+            let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
+            db::manticoresearch::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
+        }
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
-            db::mysql::get_columns_show(p, database, table).await.map(deduplicate_column_infos)
+            let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
+            db::mysql::get_columns_show(p, metadata_database, table).await.map(deduplicate_column_infos)
         }
         PoolKind::Mysql(p, mode) => {
             dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, database, table)
@@ -1282,6 +1303,7 @@ pub async fn list_indexes_core(
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    let db_config = connection_config(state, connection_id).await;
 
     {
         let connections = state.connections.read().await;
@@ -1294,6 +1316,9 @@ pub async fn list_indexes_core(
 
     match pool {
         PoolKind::Mysql(p, mode) => {
+            if db_config.as_ref().is_some_and(is_manticoresearch_config) {
+                return db::manticoresearch::list_indexes(p, table).await;
+            }
             dispatch_mysql!(p, mode, db::mysql::list_indexes, db::ob_oracle::list_indexes, schema, table)
         }
         PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
@@ -1512,6 +1537,14 @@ fn is_doris_family_config(config: &ConnectionConfig) -> bool {
 fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::ManticoreSearch)
         || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
+}
+
+fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {
+    if config.is_some_and(is_manticoresearch_config) {
+        ""
+    } else {
+        database
+    }
 }
 
 fn filter_mysql_system_databases_for_config(

@@ -47,6 +47,7 @@ const DEFAULT_CAPABILITY: DatabaseCapability = {
 
 const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "mysql",
+  "manticoresearch",
   "postgres",
   "sqlite",
   "rqlite",
@@ -99,6 +100,16 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       insert: false,
       updateRequiresPrimaryKey: true,
       deleteRequiresPrimaryKey: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
+  manticoresearch: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
     },

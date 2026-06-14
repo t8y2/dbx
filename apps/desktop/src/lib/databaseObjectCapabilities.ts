@@ -9,10 +9,12 @@ export interface DatabaseObjectCapabilities {
 }
 
 const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
+const TABLE_FUNCTION_OBJECTS: SidebarObjectKind[] = ["TABLE", "FUNCTION"];
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
 const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
 
+const TABLE_FUNCTION_TYPES = new Set<DatabaseType>(["manticoresearch"]);
 const TABLE_VIEW_ONLY_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "duckdb", "clickhouse", "doris", "starrocks", "databend", "hive", "trino", "cassandra", "bigquery", "kylin", "tdengine", "iotdb", "neo4j"]);
 
 const ORACLE_PACKAGE_TYPES = new Set<DatabaseType>(["oracle", "oceanbase-oracle"]);
@@ -30,6 +32,7 @@ export function databaseObjectCapabilities(dbType?: DatabaseType): DatabaseObjec
 export function sidebarObjectKindsForDatabase(dbType?: DatabaseType): SidebarObjectKind[] {
   if (!dbType) return [...TABLE_VIEW_OBJECTS];
   if (ORACLE_PACKAGE_TYPES.has(dbType)) return [...ORACLE_OBJECTS];
+  if (TABLE_FUNCTION_TYPES.has(dbType)) return [...TABLE_FUNCTION_OBJECTS];
   if (TABLE_VIEW_ONLY_TYPES.has(dbType)) return [...TABLE_VIEW_OBJECTS];
   if (POSTGRES_SEQUENCE_TYPES.has(dbType)) return [...POSTGRES_OBJECTS];
   return [...ROUTINE_OBJECTS];

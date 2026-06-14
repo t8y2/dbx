@@ -69,6 +69,9 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_objects(p, schema).await.map(Some)
         }
+        PoolKind::Mysql(p, _) if config.is_some_and(is_manticoresearch_config) => {
+            db::manticoresearch::list_objects(p, database).await.map(Some)
+        }
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
             db::mysql::list_table_objects_show(p, database).await.map(Some)
         }
@@ -103,8 +106,13 @@ pub(in crate::schema) async fn get_columns(
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     match pool {
+        PoolKind::Mysql(p, _) if config.is_some_and(is_manticoresearch_config) => {
+            let metadata_database = mysql_show_metadata_database_for_config(config, database);
+            db::manticoresearch::get_columns(p, metadata_database, table).await
+        }
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
-            db::mysql::get_columns_show(p, database, table).await
+            let metadata_database = mysql_show_metadata_database_for_config(config, database);
+            db::mysql::get_columns_show(p, metadata_database, table).await
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::get_columns(p, database, table).await
@@ -271,6 +279,17 @@ fn is_doris_family_config(config: &ConnectionConfig) -> bool {
 fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::ManticoreSearch)
         || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
+}
+
+fn mysql_show_metadata_database_for_config<'a>(
+    config: Option<&ConnectionConfig>,
+    database: &'a str,
+) -> &'a str {
+    if config.is_some_and(is_manticoresearch_config) {
+        ""
+    } else {
+        database
+    }
 }
 
 fn filter_mysql_system_databases_for_config(

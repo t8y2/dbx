@@ -107,7 +107,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Firebird, None), Some("firebird"));
     assert_eq!(agent_key(&DatabaseType::Exasol, None), Some("exasol"));
     assert_eq!(agent_key(&DatabaseType::OceanbaseOracle, None), Some("oceanbase-oracle"));
-    assert_eq!(agent_key(&DatabaseType::Gbase, None), Some("gbase"));
+    assert_eq!(agent_key(&DatabaseType::Gbase, None), Some("gbase8a"));
     assert_eq!(agent_key(&DatabaseType::Access, None), Some("access"));
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
@@ -278,6 +278,14 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(jdbc.capabilities.sql_file_execution);
     assert!(!jdbc.capabilities.table_structure_edit);
     assert!(!jdbc.capabilities.user_admin);
+
+    let manticore = find_driver(DatabaseType::ManticoreSearch);
+    assert_eq!(manticore.support_level, "operate");
+    assert!(manticore.capabilities.metadata_browse);
+    assert!(manticore.capabilities.sql_file_execution);
+    assert!(manticore.capabilities.table_structure_edit);
+    assert!(!manticore.capabilities.object_browser);
+    assert!(manticore.capabilities.table_data_edit);
 
     let redis = find_driver(DatabaseType::Redis);
     assert_eq!(redis.support_level, "connect");

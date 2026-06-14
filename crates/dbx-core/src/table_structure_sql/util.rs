@@ -18,7 +18,7 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
 
 pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
     match dialect {
-        StructureDialect::Mysql => format!("`{}`", name.replace('`', "``")),
+        StructureDialect::Mysql | StructureDialect::ManticoreSearch => format!("`{}`", name.replace('`', "``")),
         StructureDialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
         StructureDialect::Informix if is_simple_informix_identifier(name) => name.to_string(),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
@@ -40,6 +40,10 @@ pub(super) fn quote_string(value: &str) -> String {
 
 pub(super) fn clean(value: &str) -> String {
     value.trim().to_string()
+}
+
+pub(super) fn is_protected_manticore_id_column(dialect: StructureDialect, column_name: &str) -> bool {
+    dialect == StructureDialect::ManticoreSearch && column_name.trim().eq_ignore_ascii_case("id")
 }
 
 pub(super) fn is_temporal_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {

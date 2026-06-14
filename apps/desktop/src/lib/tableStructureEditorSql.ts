@@ -10,6 +10,10 @@ export interface ColumnExtra {
   autoIncrement?: boolean;
   onUpdateCurrentTimestamp?: boolean;
   identity?: ColumnIdentity;
+  manticoreIndexed?: boolean;
+  manticoreStored?: boolean;
+  manticoreAttribute?: boolean;
+  manticoreSecondaryIndex?: boolean;
 }
 
 export interface EditableStructureColumn {

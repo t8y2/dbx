@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { canEditTableStructure, getTableStructureCapabilities } from "../../apps/desktop/src/lib/tableStructureCapabilities.ts";
+import { canAddTableStructureColumn, canEditTableStructure, getTableStructureCapabilities } from "../../apps/desktop/src/lib/tableStructureCapabilities.ts";
 
 test("sqlite-family and duckdb do not support table comments", () => {
   for (const dbType of ["sqlite", "rqlite", "duckdb"] as const) {
@@ -108,6 +108,32 @@ test("limited analytic engines can open the editor for supported operations only
   assert.equal(canEditTableStructure("clickhouse"), true);
 });
 
+test("manticore search can open the editor for limited table structure changes", () => {
+  const caps = getTableStructureCapabilities("manticoresearch");
+  assert.equal(caps.dialect, "mysql");
+  assert.equal(caps.createTable, true);
+  assert.equal(caps.addColumn, true);
+  assert.equal(caps.dropColumn, true);
+  assert.equal(caps.renameColumn, false);
+  assert.equal(caps.alterExistingColumn, false);
+  assert.equal(caps.createIndex, false);
+  assert.equal(caps.dropIndex, false);
+  assert.equal(canEditTableStructure("manticoresearch"), true);
+  assert.equal(canAddTableStructureColumn("manticoresearch", true), true);
+  assert.equal(canAddTableStructureColumn("manticoresearch", false), true);
+});
+
+test("manticore search keeps generic index DDL disabled", () => {
+  const caps = getTableStructureCapabilities("manticoresearch");
+  assert.equal(caps.createIndex, false);
+  assert.equal(caps.dropIndex, false);
+  assert.equal(caps.rebuildIndex, false);
+  assert.equal(caps.indexType, false);
+  assert.equal(caps.indexInclude, false);
+  assert.equal(caps.indexFilter, false);
+  assert.equal(caps.indexComment, false);
+});
+
 test("informix exposes conservative structure editing capabilities", () => {
   const caps = getTableStructureCapabilities("informix");
   assert.equal(caps.dialect, "informix");
@@ -126,7 +152,7 @@ test("informix exposes conservative structure editing capabilities", () => {
 });
 
 test("unsupported non-relational databases do not open the structure editor", () => {
-  for (const dbType of ["redis", "mongodb", "elasticsearch", "manticoresearch", "neo4j", undefined] as const) {
+  for (const dbType of ["redis", "mongodb", "elasticsearch", "neo4j", undefined] as const) {
     const caps = getTableStructureCapabilities(dbType);
     assert.equal(caps.dialect, "unsupported");
     assert.equal(canEditTableStructure(dbType), false);

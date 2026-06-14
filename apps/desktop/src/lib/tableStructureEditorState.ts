@@ -236,6 +236,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "MultiPolygon",
     "JSON",
   ],
+  manticoresearch: ["text", "string", "int", "bit", "bigint", "bool", "timestamp", "float", "json", "float_vector", "multi", "mva"],
   informix: [
     "smallint",
     "integer",
@@ -289,6 +290,43 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
 export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
   const key = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
   return DATA_TYPE_OPTIONS[key] ?? [];
+}
+
+export interface ColumnEditorControls {
+  length: boolean;
+  nullable: boolean;
+  primaryKey: boolean;
+  defaultValue: boolean;
+  comment: boolean;
+}
+
+const DEFAULT_COLUMN_EDITOR_CONTROLS: ColumnEditorControls = {
+  length: true,
+  nullable: true,
+  primaryKey: true,
+  defaultValue: true,
+  comment: true,
+};
+
+export function getColumnEditorControls(dbType: DatabaseType | undefined): ColumnEditorControls {
+  if (dbType === "manticoresearch") {
+    return {
+      length: true,
+      nullable: false,
+      primaryKey: false,
+      defaultValue: false,
+      comment: false,
+    };
+  }
+  return DEFAULT_COLUMN_EDITOR_CONTROLS;
+}
+
+export function isProtectedManticoreIdColumn(dbType: DatabaseType | undefined, columnName: string): boolean {
+  return dbType === "manticoresearch" && columnName.trim().toLowerCase() === "id";
+}
+
+export function canEditManticoreColumnProperties(dbType: DatabaseType | undefined, hasOriginalColumn: boolean): boolean {
+  return dbType === "manticoresearch" && !hasOriginalColumn;
 }
 
 export const DEFAULT_TYPE_LENGTHS: Record<string, string> = {
@@ -363,9 +401,66 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
         };
       }
     }
+  } else if (databaseType === "manticoresearch") {
+    const tokens = new Set(lower.split(/\s+/).filter(Boolean));
+    if (tokens.has("indexed")) result.manticoreIndexed = true;
+    if (tokens.has("stored")) result.manticoreStored = true;
+    if (tokens.has("attribute")) result.manticoreAttribute = true;
+    if (/secondary_index\s*=\s*['"]?1['"]?/.test(lower)) result.manticoreSecondaryIndex = true;
   }
 
   return result;
+}
+
+const MANTICORE_COLUMN_PROPERTY_TOKENS = new Set(["indexed", "stored", "attribute"]);
+
+function splitManticoreDdlColumnLine(line: string): { name: string; dataType: string; extra: string } | null {
+  const trimmed = line.trim().replace(/,$/, "").trim();
+  if (!trimmed || trimmed.startsWith(")") || trimmed.startsWith("(")) return null;
+
+  let name = "";
+  let rest = "";
+  const quoted = trimmed.match(/^`((?:``|[^`])+)`\s+(.+)$/);
+  if (quoted) {
+    name = quoted[1]!.replace(/``/g, "`");
+    rest = quoted[2]!.trim();
+  } else {
+    const plain = trimmed.match(/^([A-Za-z_][\w$]*)\s+(.+)$/);
+    if (!plain) return null;
+    name = plain[1]!;
+    rest = plain[2]!.trim();
+  }
+
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const dataType = parts.shift() ?? "";
+  const properties = parts.filter((part) => {
+    const normalized = part.toLowerCase();
+    return MANTICORE_COLUMN_PROPERTY_TOKENS.has(normalized) || /^secondary_index\s*=/.test(normalized);
+  });
+  if (!name || !dataType || properties.length === 0) return null;
+
+  return { name, dataType, extra: properties.join(" ") };
+}
+
+export function applyManticoreDdlColumnExtras(columns: ColumnInfo[], ddl: string): ColumnInfo[] {
+  if (!ddl.trim()) return columns;
+  const extrasByColumn = new Map<string, { dataType: string; extra: string }>();
+  for (const line of ddl.split(/\r?\n/)) {
+    const parsed = splitManticoreDdlColumnLine(line);
+    if (parsed) extrasByColumn.set(parsed.name.toLowerCase(), { dataType: parsed.dataType, extra: parsed.extra });
+  }
+  if (extrasByColumn.size === 0) return columns;
+
+  return columns.map((column) => {
+    const ddlColumn = extrasByColumn.get(column.name.toLowerCase());
+    if (!ddlColumn) return column;
+    const existingExtra = column.extra?.trim();
+    return {
+      ...column,
+      data_type: ddlColumn.dataType || column.data_type,
+      extra: existingExtra ? `${existingExtra} ${ddlColumn.extra}` : ddlColumn.extra,
+    };
+  });
 }
 
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {

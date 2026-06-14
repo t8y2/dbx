@@ -115,6 +115,50 @@ test("suggests PostgreSQL-specific data types and functions", () => {
   );
 });
 
+test("suggests Manticore Search SQL functions and command snippets", () => {
+  const matchItems = buildSqlCompletionItems("select * from products where mat", "select * from products where mat".length, {
+    tables,
+    columnsByTable,
+    databaseType: "manticoresearch",
+  });
+  const facetItems = buildSqlCompletionItems("select * from products fac", "select * from products fac".length, {
+    tables,
+    columnsByTable,
+    databaseType: "manticoresearch",
+  });
+  const showItems = buildSqlCompletionItems("show m", "show m".length, {
+    tables,
+    columnsByTable,
+    databaseType: "manticoresearch",
+  });
+  const showTablesItems = buildSqlCompletionItems("show tab", "show tab".length, {
+    tables,
+    columnsByTable,
+    databaseType: "manticoresearch",
+  });
+  const callPqItems = buildSqlCompletionItems("call p", "call p".length, {
+    tables,
+    columnsByTable,
+    databaseType: "manticoresearch",
+  });
+  const rankingItems = buildSqlCompletionItems("select bm", "select bm".length, {
+    tables,
+    columnsByTable,
+    databaseType: "manticoresearch",
+  });
+
+  assert.ok(
+    matchItems.some((item) => item.type === "function" && item.label === "MATCH" && item.apply === "MATCH(${query})"),
+  );
+  assert.ok(facetItems.some((item) => item.type === "keyword" && item.label === "FACET"));
+  assert.ok(showItems.some((item) => item.type === "snippet" && item.label === "show meta" && item.apply === "SHOW META;"));
+  assert.ok(showTablesItems.some((item) => item.type === "snippet" && item.label === "show tables" && item.apply === "SHOW TABLES;"));
+  assert.ok(
+    callPqItems.some((item) => item.type === "snippet" && item.label === "call pq" && item.apply === "CALL PQ ('pq', ('{\"title\":\"query\"}'));"),
+  );
+  assert.ok(rankingItems.some((item) => item.type === "function" && item.label === "BM25F"));
+});
+
 test("MongoDB completion avoids SQL keywords", () => {
   const items = buildSqlCompletionItems("fi", 2, {
     tables: [],

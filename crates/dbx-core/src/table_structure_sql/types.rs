@@ -25,7 +25,7 @@ pub struct EditableStructureColumn {
     pub marked_for_drop: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnExtra {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,6 +34,14 @@ pub struct ColumnExtra {
     pub on_update_current_timestamp: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ColumnIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_indexed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_stored: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_attribute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_secondary_index: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

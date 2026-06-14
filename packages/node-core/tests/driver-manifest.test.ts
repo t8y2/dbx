@@ -79,12 +79,12 @@ test("driver manifest declares support levels and product capabilities", () => {
   assert.equal(jdbc?.capabilities.tableStructureEdit, false);
 
   const manticore = manifest.drivers.find((driver) => driver.dbType === "manticoresearch");
-  assert.equal(manticore?.supportLevel, "browse");
+  assert.equal(manticore?.supportLevel, "operate");
   assert.equal(manticore?.capabilities.queryExecution, true);
   assert.equal(manticore?.capabilities.metadataBrowse, true);
   assert.equal(manticore?.capabilities.objectBrowser, false);
-  assert.equal(manticore?.capabilities.tableDataEdit, false);
-  assert.equal(manticore?.capabilities.tableStructureEdit, false);
+  assert.equal(manticore?.capabilities.tableDataEdit, true);
+  assert.equal(manticore?.capabilities.tableStructureEdit, true);
   assert.equal(manticore?.capabilities.databaseCreate, false);
   assert.equal(manticore?.capabilities.userAdmin, false);
 });

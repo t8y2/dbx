@@ -52,12 +52,14 @@ test("allows updateable SQL table data editing even without declared primary key
   assert.equal(isTableDataEditable("informix", []), true);
   assert.equal(isTableDataEditable("tdengine", []), true);
   assert.equal(isTableDataEditable("mysql", []), true);
+  assert.equal(isTableDataEditable("manticoresearch", []), true);
   assert.equal(isTableDataEditable("postgres", []), true);
   assert.equal(isTableDataEditable("postgres", ["id"]), true);
 });
 
 test("does not use transactional grid saves for non-transactional engines", () => {
   assert.equal(supportsDataGridTransaction("hive"), false);
+  assert.equal(supportsDataGridTransaction("manticoresearch"), false);
   assert.equal(supportsDataGridTransaction("trino"), false);
   assert.equal(supportsDataGridTransaction("jdbc"), false);
   assert.equal(supportsDataGridTransaction("yashandb"), true);
@@ -75,6 +77,7 @@ test("allows existing row edits according to database-specific key requirements"
   assert.equal(canEditExistingTableRows("trino", undefined, []), false);
   assert.equal(canEditExistingTableRows("trino", undefined, ["id"]), true);
   assert.equal(canEditExistingTableRows("mysql", undefined, []), true);
+  assert.equal(canEditExistingTableRows("manticoresearch", undefined, []), true);
   assert.equal(canEditExistingTableRows("postgres", undefined, []), true);
   assert.equal(canEditExistingTableRows("sqlite", undefined, []), true);
   assert.equal(canEditExistingTableRows("sqlite", undefined, ["id"]), true);

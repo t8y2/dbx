@@ -23,7 +23,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/tableStructureEditorSql";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
-import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import {
   buildStructureTargetLabel,
@@ -34,10 +34,14 @@ import {
   createTriggerDrafts,
   generateIndexName,
   generateUniqueIndexName,
+  getColumnEditorControls,
   getDataTypeOptions,
   getDefaultLengthForType,
+  isProtectedManticoreIdColumn,
   splitDataType,
   toColumnNames,
+  applyManticoreDdlColumnExtras,
+  canEditManticoreColumnProperties,
 } from "@/lib/tableStructureEditorState";
 import * as api from "@/lib/api";
 
@@ -250,7 +254,7 @@ function onColResize(e: MouseEvent, col: number) {
   const onMove = (ev: MouseEvent) => {
     if (!colResizing.value) return;
     const delta = ev.clientX - colResizing.value.startX;
-    colWidths.value[col] = Math.max(structureDensityMetric.value.minColumnWidth, colResizing.value.startW + delta);
+    colWidths.value[widthIndex] = Math.max(structureDensityMetric.value.minColumnWidth, colResizing.value.startW + delta);
   };
   const onUp = () => {
     colResizing.value = null;
@@ -285,6 +289,7 @@ const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(da
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
 const dataTypeOptions = computed(() => getDataTypeOptions(databaseType.value));
+const columnEditorControls = computed(() => getColumnEditorControls(databaseType.value));
 
 const indexTypesByDb: Record<string, string[]> = {
   postgres: ["BTREE", "HASH", "GIST", "SPGIST", "GIN", "BRIN"],
@@ -301,21 +306,31 @@ function isPostgresIdentityType(dbType: string | undefined): boolean {
 
 const showExtendedProperties = computed(() => {
   const dt = databaseType.value;
-  return dt === "mysql" || isPostgresIdentityType(dt) || dt === "sqlserver";
+  return dt === "mysql" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
 });
 const extendedPropertiesColumnIndex = 8;
-const visibleColWidths = computed(() => (showExtendedProperties.value ? colWidths.value : colWidths.value.filter((_, index) => index !== extendedPropertiesColumnIndex)));
+const visibleColumnIndexes = computed(() => colLabels.value.map((column) => column.widthIndex));
+const visibleColWidths = computed(() => visibleColumnIndexes.value.map((index) => colWidths.value[index] ?? structureDensityMetric.value.minColumnWidth));
 
 function columnWidthIndex(visibleIndex: number) {
-  return !showExtendedProperties.value && visibleIndex >= extendedPropertiesColumnIndex ? visibleIndex + 1 : visibleIndex;
+  return visibleColumnIndexes.value[visibleIndex] ?? visibleIndex;
 }
 
 const colLabels = computed(() => {
-  const labels = ["#", t("structureEditor.columnName"), t("structureEditor.dataType"), t("structureEditor.length"), t("structureEditor.nullable"), t("structureEditor.primaryKey"), t("structureEditor.defaultValue"), t("structureEditor.comment")];
+  const labels = [
+    { key: "ordinal", label: "#", widthIndex: 0 },
+    { key: "name", label: t("structureEditor.columnName"), widthIndex: 1 },
+    { key: "type", label: t("structureEditor.dataType"), widthIndex: 2 },
+  ];
+  if (columnEditorControls.value.length) labels.push({ key: "length", label: t("structureEditor.length"), widthIndex: 3 });
+  if (columnEditorControls.value.nullable) labels.push({ key: "nullable", label: t("structureEditor.nullable"), widthIndex: 4 });
+  if (columnEditorControls.value.primaryKey) labels.push({ key: "primaryKey", label: t("structureEditor.primaryKey"), widthIndex: 5 });
+  if (columnEditorControls.value.defaultValue) labels.push({ key: "defaultValue", label: t("structureEditor.defaultValue"), widthIndex: 6 });
+  if (columnEditorControls.value.comment) labels.push({ key: "comment", label: t("structureEditor.comment"), widthIndex: 7 });
   if (showExtendedProperties.value) {
-    labels.push(t("structureEditor.extendedProperties"));
+    labels.push({ key: "extendedProperties", label: t("structureEditor.extendedProperties"), widthIndex: extendedPropertiesColumnIndex });
   }
-  labels.push(t("structureEditor.actions"));
+  labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 9 });
   return labels;
 });
 const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
@@ -325,10 +340,22 @@ const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
 const metadataSchema = computed(() => connectionObjectTreeQuerySchema(connection.value, props.database, props.schema));
 const refreshVersion = computed(() => (props.connectionId && props.tableName ? queryStore.tableStructureRefreshVersion(props.connectionId, props.database, props.schema, props.tableName) : 0));
 const isCreateMode = computed(() => !props.tableName);
+const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value));
 const newTableName = ref("");
 const tableComment = ref("");
 const originalTableComment = ref("");
 const targetLabel = computed(() => buildStructureTargetLabel(connection.value?.name, props.database, props.schema, isCreateMode.value ? undefined : props.tableName));
+
+function isManticoreTextColumn(column: EditableStructureColumn): boolean {
+  if (databaseType.value !== "manticoresearch") return false;
+  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  return baseType === "text" || baseType === "string";
+}
+
+function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
+  if (databaseType.value !== "manticoresearch") return false;
+  return splitDataType(column.dataType).baseType.trim().toLowerCase() === "json";
+}
 
 let sqlPreviewRequestId = 0;
 let keydownListenerRegistered = false;
@@ -388,7 +415,17 @@ async function loadStructure(silent = false) {
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.connectionId);
-    const nextColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    let nextColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
+      try {
+        const ddl = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName);
+        ddlContent.value = ddl;
+        ddlFetched.value = true;
+        nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
+      } catch {
+        /* ignore — Manticore column properties can still come from SHOW COLUMNS when available */
+      }
+    }
     const [nextIndexes, nextForeignKeys, nextTriggers] = await Promise.all([
       tableMetadataCapabilities.value.indexes ? api.listIndexes(props.connectionId, props.database, metadataSchema.value, props.tableName).catch(() => []) : Promise.resolve([]),
       tableMetadataCapabilities.value.foreignKeys ? api.listForeignKeys(props.connectionId, props.database, metadataSchema.value, props.tableName).catch(() => []) : Promise.resolve([]),
@@ -414,12 +451,13 @@ async function loadStructure(silent = false) {
 }
 
 async function addColumn() {
-  if (!structureCapabilities.value.addColumn) return;
+  if (!canAddColumn.value) return;
   activeTab.value = "columns";
+  const dataType = databaseType.value === "manticoresearch" ? combineDataTypeForDatabase(databaseType.value, dataTypeOptions.value[0] ?? "text", getDefaultLengthForType(databaseType.value, dataTypeOptions.value[0] ?? "text")) : "varchar(255)";
   columns.value.push({
     id: `new:${uuid()}`,
     name: "",
-    dataType: "varchar(255)",
+    dataType,
     isNullable: true,
     defaultValue: "",
     comment: "",
@@ -470,6 +508,13 @@ function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterType);
 }
 
+function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
+  if (isColumnTypeDisabled(column)) return true;
+  if (databaseType.value !== "manticoresearch") return false;
+  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  return baseType !== "bit" && baseType !== "float_vector";
+}
+
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || column.isPrimaryKey || (!!column.original && !structureCapabilities.value.alterNullability);
 }
@@ -489,7 +534,11 @@ function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
 }
 
 function canDropColumn(column: EditableStructureColumn): boolean {
-  return !!column.original && !column.isPrimaryKey && structureCapabilities.value.dropColumn;
+  return !!column.original && !column.isPrimaryKey && !isProtectedManticoreIdColumn(databaseType.value, column.original.name) && structureCapabilities.value.dropColumn;
+}
+
+function isManticoreColumnPropertyDisabled(column: EditableStructureColumn): boolean {
+  return !canEditManticoreColumnProperties(databaseType.value, !!column.original) || column.markedForDrop;
 }
 
 function addIndex() {
@@ -740,7 +789,7 @@ async function applyChanges() {
 }
 
 function addItemForActiveTab(): boolean {
-  if (activeTab.value === "columns" && structureCapabilities.value.addColumn) {
+  if (activeTab.value === "columns" && canAddColumn.value) {
     void addColumn();
     return true;
   }
@@ -903,7 +952,7 @@ watch(activeTab, (tab) => {
                   </SelectContent>
                 </Select>
               </div>
-              <Button v-if="activeTab === 'columns'" size="sm" :class="structureToolbarButtonClass" :disabled="!structureCapabilities.addColumn" @click="addColumn">
+              <Button v-if="activeTab === 'columns'" size="sm" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="addColumn">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addColumn") }}
               </Button>
@@ -926,8 +975,8 @@ watch(activeTab, (tab) => {
             <table class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
-                  <th v-for="(label, i) in colLabels" :key="i" :class="[structureHeaderCellClass, { 'text-center': i === 5 }]" :style="{ width: visibleColWidths[i] + 'px', minWidth: visibleColWidths[i] + 'px' }">
-                    {{ label }}
+                  <th v-for="(columnLabel, i) in colLabels" :key="columnLabel.key" :class="[structureHeaderCellClass, { 'text-center': columnLabel.key === 'primaryKey' }]" :style="{ width: visibleColWidths[i] + 'px', minWidth: visibleColWidths[i] + 'px' }">
+                    {{ columnLabel.label }}
                     <div v-if="i < colLabels.length - 1" class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30" :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''" @mousedown="onColResize($event, i)" />
                   </th>
                 </tr>
@@ -958,16 +1007,16 @@ watch(activeTab, (tab) => {
                     />
                     <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
-                  <td :class="structureCellClass">
-                    <Input :model-value="splitDataType(column.dataType).params" :class="structureMonoControlClass" :disabled="isColumnTypeDisabled(column)" @update:model-value="column.dataType = combineDataTypeForDatabase(databaseType, splitDataType(column.dataType).baseType, String($event))" />
+                  <td v-if="columnEditorControls.length" :class="structureCellClass">
+                    <Input :model-value="splitDataType(column.dataType).params" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="column.dataType = combineDataTypeForDatabase(databaseType, splitDataType(column.dataType).baseType, String($event))" />
                   </td>
-                  <td :class="structureCellClass">
+                  <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
                       <input v-model="column.isNullable" type="checkbox" :class="structureCheckboxClass" :disabled="isColumnNullableDisabled(column)" />
                       <span>{{ column.isNullable ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
                     </label>
                   </td>
-                  <td :class="[structureCellClass, 'text-center']">
+                  <td v-if="columnEditorControls.primaryKey" :class="[structureCellClass, 'text-center']">
                     <input
                       v-model="column.isPrimaryKey"
                       type="checkbox"
@@ -980,10 +1029,10 @@ watch(activeTab, (tab) => {
                       "
                     />
                   </td>
-                  <td :class="structureCellClass">
+                  <td v-if="columnEditorControls.defaultValue" :class="structureCellClass">
                     <Input v-model="column.defaultValue" :class="structureMonoControlClass" :disabled="isColumnDefaultDisabled(column)" />
                   </td>
-                  <td :class="structureCellClass">
+                  <td v-if="columnEditorControls.comment" :class="structureCellClass">
                     <div class="flex min-w-0 items-center gap-1">
                       <Input v-model="column.comment" :class="[structureControlClass, 'flex-1']" :disabled="isColumnCommentDisabled(column)" />
                       <Popover>
@@ -1013,8 +1062,31 @@ watch(activeTab, (tab) => {
                   </td>
                   <td v-if="showExtendedProperties" :class="structureCellClass">
                     <div class="flex items-center gap-2">
+                      <!-- Manticore Search: character data type properties -->
+                      <template v-if="databaseType === 'manticoresearch'">
+                        <template v-if="isManticoreTextColumn(column)">
+                          <label class="flex items-center gap-1 whitespace-nowrap">
+                            <input :checked="!!column.extra.manticoreIndexed" type="checkbox" :class="structureCheckboxClass" :disabled="isManticoreColumnPropertyDisabled(column)" @change="column.extra.manticoreIndexed = ($event.target as HTMLInputElement).checked" />
+                            indexed
+                          </label>
+                          <label class="flex items-center gap-1 whitespace-nowrap">
+                            <input :checked="!!column.extra.manticoreStored" type="checkbox" :class="structureCheckboxClass" :disabled="isManticoreColumnPropertyDisabled(column)" @change="column.extra.manticoreStored = ($event.target as HTMLInputElement).checked" />
+                            stored
+                          </label>
+                          <label class="flex items-center gap-1 whitespace-nowrap">
+                            <input :checked="!!column.extra.manticoreAttribute" type="checkbox" :class="structureCheckboxClass" :disabled="isManticoreColumnPropertyDisabled(column)" @change="column.extra.manticoreAttribute = ($event.target as HTMLInputElement).checked" />
+                            attribute
+                          </label>
+                        </template>
+                        <template v-else-if="isManticoreJsonColumn(column)">
+                          <label class="flex items-center gap-1 whitespace-nowrap">
+                            <input :checked="!!column.extra.manticoreSecondaryIndex" type="checkbox" :class="structureCheckboxClass" :disabled="isManticoreColumnPropertyDisabled(column)" @change="column.extra.manticoreSecondaryIndex = ($event.target as HTMLInputElement).checked" />
+                            secondary_index
+                          </label>
+                        </template>
+                      </template>
                       <!-- MySQL: AUTO_INCREMENT + ON UPDATE CURRENT_TIMESTAMP -->
-                      <template v-if="structureDialect === 'mysql'">
+                      <template v-else-if="structureDialect === 'mysql'">
                         <label class="flex items-center gap-1 whitespace-nowrap">
                           <input v-model="column.extra.autoIncrement" type="checkbox" :class="structureCheckboxClass" />
                           {{ t("structureEditor.autoIncrement") }}

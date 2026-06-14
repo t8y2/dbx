@@ -71,7 +71,42 @@ pub(super) fn column_data_type(dialect: StructureDialect, column: &EditableStruc
     if dialect == StructureDialect::ClickHouse {
         return clickhouse_column_type(column);
     }
+    if dialect == StructureDialect::ManticoreSearch {
+        return manticore_column_type(column);
+    }
     normalize_column_data_type(dialect, &column.data_type)
+}
+
+fn manticore_column_type(column: &EditableStructureColumn) -> String {
+    let data_type = normalize_column_data_type(StructureDialect::ManticoreSearch, &column.data_type);
+    let normalized = data_type.trim().to_ascii_lowercase();
+    if normalized == "json" {
+        let Some(extra) = column.extra.as_ref() else {
+            return data_type;
+        };
+        if extra.manticore_secondary_index.unwrap_or(false) {
+            return format!("{data_type} secondary_index='1'");
+        }
+        return data_type;
+    }
+    if !matches!(normalized.as_str(), "text" | "string") {
+        return data_type;
+    }
+
+    let Some(extra) = column.extra.as_ref() else {
+        return data_type;
+    };
+    let mut parts = vec![data_type];
+    if extra.manticore_stored.unwrap_or(false) {
+        parts.push("stored".to_string());
+    }
+    if extra.manticore_attribute.unwrap_or(false) {
+        parts.push("attribute".to_string());
+    }
+    if extra.manticore_indexed.unwrap_or(false) {
+        parts.push("indexed".to_string());
+    }
+    parts.join(" ")
 }
 
 pub(super) fn normalize_column_data_type(dialect: StructureDialect, data_type: &str) -> String {

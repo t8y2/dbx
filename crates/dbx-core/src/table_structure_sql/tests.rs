@@ -216,6 +216,76 @@ fn mysql_create_index_with_comment() {
 }
 
 #[test]
+fn manticoresearch_builds_create_table_sql_only() {
+    let mut title = column("title");
+    title.data_type = "text".to_string();
+    title.is_nullable = false;
+    let mut views = column("views");
+    views.data_type = "int".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![title, views],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE TABLE `materials` (\n  `title` text,\n  `views` int\n);"]);
+}
+
+#[test]
+fn manticoresearch_builds_add_and_drop_column_sql() {
+    let mut old_code = column("code");
+    old_code.data_type = "string".to_string();
+    old_code.marked_for_drop = true;
+    old_code.original = Some(ColumnInfo {
+        name: "code".to_string(),
+        data_type: "string".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut name = column("name");
+    name.data_type = "string".to_string();
+    name.extra =
+        Some(ColumnExtra { manticore_attribute: Some(true), manticore_indexed: Some(true), ..Default::default() });
+    let mut resource = column("resource");
+    resource.data_type = "json".to_string();
+    resource.extra = Some(ColumnExtra { manticore_secondary_index: Some(true), ..Default::default() });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![old_code, name, resource],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `materials` DROP COLUMN `code`;",
+            "ALTER TABLE `materials` ADD COLUMN `name` string attribute indexed;",
+            "ALTER TABLE `materials` ADD COLUMN `resource` json secondary_index='1';",
+        ]
+    );
+}
+
+#[test]
 fn gbase8a_uses_limited_mysql_ddl() {
     let mut renamed = column("display_email");
     renamed.data_type = "varchar(255)".to_string();
@@ -276,6 +346,193 @@ fn gbase8a_uses_limited_mysql_ddl() {
         result.warnings,
         vec!["Editing existing indexes is not supported for gbase from this editor.".to_string()]
     );
+}
+
+#[test]
+fn manticoresearch_does_not_drop_id_column() {
+    let mut id = column("id");
+    id.data_type = "bigint".to_string();
+    id.marked_for_drop = true;
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "bigint".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(result.warnings, vec!["Manticore Search id column cannot be dropped from this editor."]);
+}
+
+#[test]
+fn manticoresearch_warns_when_existing_column_properties_change() {
+    let mut name = column("name");
+    name.data_type = "string".to_string();
+    name.extra = Some(ColumnExtra {
+        manticore_indexed: Some(true),
+        manticore_stored: Some(true),
+        manticore_attribute: Some(true),
+        ..Default::default()
+    });
+    name.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "string".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut resource = column("resource");
+    resource.data_type = "json".to_string();
+    resource.extra = Some(ColumnExtra { manticore_secondary_index: Some(true), ..Default::default() });
+    resource.original = Some(ColumnInfo {
+        name: "resource".to_string(),
+        data_type: "json".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut old_resource = column("old_resource");
+    old_resource.data_type = "json".to_string();
+    old_resource.extra = Some(ColumnExtra::default());
+    old_resource.original = Some(ColumnInfo {
+        name: "old_resource".to_string(),
+        data_type: "json".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("secondary_index='1'".to_string()),
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![name, resource, old_resource],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Editing existing columns is not supported for manticoresearch yet.",
+            "Editing existing columns is not supported for manticoresearch yet.",
+            "Editing existing columns is not supported for manticoresearch yet.",
+        ]
+    );
+}
+
+#[test]
+fn manticoresearch_ignores_mysql_column_options() {
+    let mut title = column("title");
+    title.data_type = "text".to_string();
+    title.is_nullable = false;
+    title.is_primary_key = true;
+    title.default_value = "'untitled'".to_string();
+    title.comment = "Title text".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![title],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE TABLE `materials` (\n  `title` text\n);"]);
+}
+
+#[test]
+fn manticoresearch_builds_text_column_properties() {
+    let mut title = column("title");
+    title.data_type = "text".to_string();
+    title.extra =
+        Some(ColumnExtra { manticore_indexed: Some(true), manticore_stored: Some(true), ..Default::default() });
+    let mut sku = column("sku");
+    sku.data_type = "string".to_string();
+    sku.extra =
+        Some(ColumnExtra { manticore_indexed: Some(true), manticore_attribute: Some(true), ..Default::default() });
+    let mut name = column("name");
+    name.data_type = "string".to_string();
+    name.extra = Some(ColumnExtra {
+        manticore_indexed: Some(true),
+        manticore_stored: Some(true),
+        manticore_attribute: Some(true),
+        ..Default::default()
+    });
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![title, sku, name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE `materials` (\n  `title` text stored indexed,\n  `sku` string attribute indexed,\n  `name` string stored attribute indexed\n);"
+        ]
+    );
+}
+
+#[test]
+fn manticoresearch_builds_json_secondary_index_property() {
+    let mut metadata = column("metadata");
+    metadata.data_type = "json".to_string();
+    metadata.extra = Some(ColumnExtra { manticore_secondary_index: Some(true), ..Default::default() });
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::ManticoreSearch),
+        schema: None,
+        table_name: "materials".to_string(),
+        columns: vec![metadata],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE TABLE `materials` (\n  `metadata` json secondary_index='1'\n);"]);
 }
 
 #[test]
@@ -854,7 +1111,7 @@ fn mysql_create_table_with_auto_increment() {
     col.data_type = "int".to_string();
     col.is_nullable = false;
     col.is_primary_key = true;
-    col.extra = Some(ColumnExtra { auto_increment: Some(true), on_update_current_timestamp: None, identity: None });
+    col.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
 
     let result = build_create_table_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Mysql),
@@ -879,7 +1136,7 @@ fn mysql_create_table_with_on_update_current_timestamp() {
     col.data_type = "timestamp".to_string();
     col.is_nullable = false;
     col.default_value = "CURRENT_TIMESTAMP".to_string();
-    col.extra = Some(ColumnExtra { auto_increment: None, on_update_current_timestamp: Some(true), identity: None });
+    col.extra = Some(ColumnExtra { on_update_current_timestamp: Some(true), ..Default::default() });
 
     let result = build_create_table_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Mysql),
@@ -903,9 +1160,8 @@ fn postgres_create_table_with_identity() {
     col.data_type = "integer".to_string();
     col.is_nullable = false;
     col.extra = Some(ColumnExtra {
-        auto_increment: None,
-        on_update_current_timestamp: None,
         identity: Some(ColumnIdentity { generation: Some("BY DEFAULT".to_string()), seed: None, increment: None }),
+        ..Default::default()
     });
 
     let result = build_create_table_sql(TableStructureSqlOptions {
@@ -931,8 +1187,8 @@ fn sqlserver_create_table_with_identity() {
     col.is_nullable = false;
     col.extra = Some(ColumnExtra {
         auto_increment: Some(true),
-        on_update_current_timestamp: None,
         identity: Some(ColumnIdentity { generation: None, seed: Some(100), increment: Some(5) }),
+        ..Default::default()
     });
 
     let result = build_create_table_sql(TableStructureSqlOptions {

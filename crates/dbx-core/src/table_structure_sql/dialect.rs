@@ -11,6 +11,7 @@ pub(super) enum StructureDialect {
     Oracle,
     H2,
     ClickHouse,
+    ManticoreSearch,
     Informix,
     Unsupported,
 }
@@ -204,6 +205,12 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             comment: true,
             ..base
         },
+        Some(DatabaseType::ManticoreSearch) => TableStructureCapabilities {
+            dialect: StructureDialect::ManticoreSearch,
+            add_column: true,
+            drop_column: true,
+            ..base
+        },
         Some(DatabaseType::Informix) => TableStructureCapabilities {
             dialect: StructureDialect::Informix,
             add_column: true,
@@ -245,6 +252,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::Oracle => "oracle",
         StructureDialect::H2 => "h2",
         StructureDialect::ClickHouse => "clickhouse",
+        StructureDialect::ManticoreSearch => "manticoresearch",
         StructureDialect::Informix => "informix",
         StructureDialect::Unsupported => "this database",
     }
@@ -262,6 +270,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
         StructureDialect::H2 => Some(DatabaseType::H2),
         StructureDialect::ClickHouse => Some(DatabaseType::ClickHouse),
+        StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),
         StructureDialect::Informix => Some(DatabaseType::Informix),
         StructureDialect::Unsupported => None,
     }

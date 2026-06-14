@@ -21,6 +21,10 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     foreignKeys: false,
     triggers: false,
   },
+  manticoresearch: {
+    foreignKeys: false,
+    triggers: false,
+  },
   elasticsearch: {
     indexes: false,
     foreignKeys: false,

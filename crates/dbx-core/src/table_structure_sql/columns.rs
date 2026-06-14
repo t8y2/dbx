@@ -9,7 +9,8 @@ use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{
-    clean, normalize_default, original_comment, original_default, qualified_table, quote_ident, quote_string,
+    clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
+    quote_ident, quote_string,
 };
 
 pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
@@ -32,6 +33,10 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             }
             if original.is_primary_key {
                 warnings.push(format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name));
+                continue;
+            }
+            if is_protected_manticore_id_column(dialect, &original.name) {
+                warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
                 continue;
             }
             statements.push(build_drop_column_sql(dialect, &table, &original.name));

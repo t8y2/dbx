@@ -171,6 +171,61 @@ test("selecting a result run restores its displayed result without changing SQL 
   assert.equal(tab.resultBaseSql, "select 1");
 });
 
+test("result archives import into a new query tab with switchable runs", async () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db", "Revenue checks", "query", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.sql = "select draft";
+  tab.lastExecutedSql = "select 2";
+  tab.resultRuns = [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1",
+      createdAt: 1,
+      result: { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 1",
+    },
+    {
+      id: "run-2",
+      title: "Run 2",
+      sequence: 2,
+      sql: "select 2",
+      createdAt: 2,
+      result: { columns: ["two"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+      resultBaseSql: "select 2",
+    },
+  ];
+  tab.activeResultRunId = "run-2";
+  store.setActiveResultRun(tabId, "run-2");
+
+  const archive = await store.exportResultArchive(tabId);
+  assert.ok(archive);
+
+  const importedTabId = await store.importResultArchive(archive);
+  assert.ok(importedTabId);
+  assert.notEqual(importedTabId, tabId);
+
+  const imported = store.tabs.find((item) => item.id === importedTabId);
+  assert.equal(imported?.title, "Revenue checks");
+  assert.equal(imported?.customTitle, true);
+  assert.equal(imported?.connectionId, "conn-1");
+  assert.equal(imported?.database, "db");
+  assert.equal(imported?.schema, "public");
+  assert.equal(imported?.sql, "select draft");
+  assert.equal(imported?.activeResultRunId, "run-2");
+  assert.deepEqual(imported?.result?.columns, ["two"]);
+  assert.deepEqual(imported?.result?.rows, [[2]]);
+
+  store.setActiveResultRun(importedTabId, "run-1");
+  assert.deepEqual(imported?.result?.columns, ["one"]);
+  assert.deepEqual(imported?.result?.rows, [[1]]);
+});
+
 test("completed query executions append result runs and select the latest run", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

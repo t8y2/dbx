@@ -32,6 +32,7 @@ import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionCont
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabResultCache";
+import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/queryResultArchive";
 import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -305,6 +306,14 @@ export const useQueryStore = defineStore("query", () => {
       queryEditabilityReason: tab.queryEditabilityReason,
       tableMeta: tab.tableMeta,
     };
+  }
+
+  function resultRunHasPayload(run: NonNullable<QueryTab["resultRuns"]>[number]): boolean {
+    return !!run.result || !!run.results?.length;
+  }
+
+  function resultSnapshotHasPayload(snapshot: NonNullable<ReturnType<typeof buildTabResultSnapshot>>): boolean {
+    return !!snapshot.result || !!snapshot.results?.length || !!snapshot.resultRuns?.some(resultRunHasPayload);
   }
 
   async function evictCachedResult(tab: QueryTab) {
@@ -1644,6 +1653,56 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
+  async function resultArchiveSnapshotForTab(tab: QueryTab) {
+    let snapshot = buildTabResultSnapshot(tab);
+    if (tab.resultCacheKey && (!snapshot || tab.resultEvicted || !resultSnapshotHasPayload(snapshot))) {
+      snapshot = (await readTabResultSnapshot(tab.resultCacheKey)) ?? snapshot;
+    }
+    return snapshot && resultSnapshotHasPayload(snapshot) ? snapshot : undefined;
+  }
+
+  async function exportResultArchive(id: string): Promise<Uint8Array | undefined> {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "query") return undefined;
+    const snapshot = await resultArchiveSnapshotForTab(tab);
+    if (!snapshot) return undefined;
+    return encodeQueryResultArchive(tab, snapshot);
+  }
+
+  function openResultArchiveTab(archive: DecodedQueryResultArchive): string | undefined {
+    const id = uuid();
+    const title = archive.tab.title.trim() || t("tabs.importedResultArchive");
+    const tab: QueryTab = {
+      id,
+      title,
+      customTitle: true,
+      connectionId: archive.tab.connectionId,
+      database: archive.tab.database,
+      schema: archive.tab.schema,
+      sql: archive.tab.sql,
+      originalSql: archive.tab.sql,
+      lastExecutedSql: archive.tab.lastExecutedSql,
+      resultBaseSql: archive.tab.resultBaseSql,
+      resultSortedSql: archive.tab.resultSortedSql,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "query",
+    };
+    if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
+    const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];
+    if (activeRun) projectResultRun(tab, activeRun);
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  async function importResultArchive(bytes: Uint8Array | ArrayBuffer): Promise<string | undefined> {
+    const archive = await decodeQueryResultArchive(bytes);
+    if (!archive) return undefined;
+    return openResultArchiveTab(archive);
+  }
+
   async function reloadEvictedTab(id: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || !tab.resultEvicted) return;
@@ -1842,6 +1901,8 @@ export const useQueryStore = defineStore("query", () => {
     cancelTabExecution,
     cancelTabExplain,
     reloadEvictedTab,
+    exportResultArchive,
+    importResultArchive,
     fetchTabResultForExport,
     notifyConnectionMayBeLost,
   };

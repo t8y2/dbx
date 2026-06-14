@@ -1,5 +1,5 @@
 import { createI18n } from "vue-i18n";
-import zhCN from "./locales/zh-CN";
+import en from "./locales/en";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 
 export type Locale = "en" | "es" | "it" | "pt-BR" | "zh-CN" | "zh-TW";
@@ -10,13 +10,13 @@ type I18nGlobal = {
 };
 
 const supportedLocales: Locale[] = ["en", "es", "it", "pt-BR", "zh-CN", "zh-TW"];
-const defaultLocale: Locale = "zh-CN";
+const defaultLocale: Locale = "en";
 const loadedLocales = new Set<Locale>([defaultLocale]);
-const localeLoaders: Record<Exclude<Locale, "zh-CN">, () => Promise<{ default: LocaleMessages }>> = {
-  en: () => import("./locales/en"),
+const localeLoaders: Record<Exclude<Locale, "en">, () => Promise<{ default: LocaleMessages }>> = {
   es: () => import("./locales/es"),
   it: () => import("./locales/it"),
   "pt-BR": () => import("./locales/pt-BR"),
+  "zh-CN": () => import("./locales/zh-CN"),
   "zh-TW": () => import("./locales/zh-TW"),
 };
 
@@ -71,14 +71,14 @@ const i18n = createI18n({
   locale: initialLocale,
   fallbackLocale: defaultLocale,
   messages: {
-    "zh-CN": zhCN,
+    en,
   },
 });
 const i18nGlobal = i18n.global as unknown as I18nGlobal;
 
 export async function loadLocaleMessages(locale: Locale) {
   if (loadedLocales.has(locale)) return;
-  const loader = localeLoaders[locale as Exclude<Locale, "zh-CN">];
+  const loader = localeLoaders[locale as Exclude<Locale, "en">];
   if (!loader) return;
   const messages = await loader();
   i18nGlobal.setLocaleMessage(locale, messages.default);

@@ -29,6 +29,18 @@ test("adds a MongoDB URL encoding hint for reserved password characters", () => 
   assert.match(mongodbAuthFailureHint(message), /@ becomes %40/);
 });
 
+test("adds a MongoDB SRV DNS hint for IP endpoints", () => {
+  const message = 'MongoDB connection failed: Kind: An error occurred during DNS resolution: DNS error: no records found for Query { name: Name("_mongodb._tcp.172.17.0.1."), query_type: SRV }';
+
+  assert.match(mongodbAuthFailureHint(message), /use mongodb:\/\/host:port instead of mongodb\+srv:\/\/host/);
+});
+
+test("adds a MongoDB replica set localhost advertisement hint", () => {
+  const message = "MongoDB connection failed: Kind: Server selection timeout: No available servers. Topology: { Type: ReplicaSetNoPrimary, Set Name: LIMLIU, Servers: [ { Address: 127.0.0.1:27017, Type: Unknown, Error: Kind: I/O error: Connection refused (os error 111) } ] }";
+
+  assert.match(mongodbAuthFailureHint(message), /Add directConnection=true/);
+});
+
 test("adds a MongoDB listDatabases permission hint", () => {
   const message = "Command failed with error 13 (Unauthorized): not authorized on admin to execute command { listDatabases: 1 }";
 

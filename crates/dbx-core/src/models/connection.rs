@@ -695,10 +695,7 @@ impl ConnectionConfig {
                         suffix.push_str("&directConnection=true");
                     }
                 }
-                let scheme = if self.ssl { "mongodb+srv" } else { "mongodb" };
-                // SRV URLs resolve the port via DNS SRV records, so we omit the explicit port.
-                let addr = if self.ssl { host.to_string() } else { format!("{host}:{port}") };
-                format!("{scheme}://{addr}{db_part}{suffix}")
+                format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch => {
@@ -823,13 +820,10 @@ impl ConnectionConfig {
                         suffix.push_str("&directConnection=true");
                     }
                 }
-                let scheme = if self.ssl { "mongodb+srv" } else { "mongodb" };
-                // SRV URLs resolve the port via DNS SRV records, so we omit the explicit port.
-                let addr = if self.ssl { host.to_string() } else { format!("{host}:{port}") };
                 if self.username.is_empty() {
-                    format!("{scheme}://{addr}{db_part}{suffix}")
+                    format!("mongodb://{host}:{port}{db_part}{suffix}")
                 } else {
-                    format!("{scheme}://{username}:{password}@{addr}{db_part}{suffix}")
+                    format!("mongodb://{username}:{password}@{host}:{port}{db_part}{suffix}")
                 }
             }
             DatabaseType::Oracle => {
@@ -975,7 +969,7 @@ impl ConnectionConfig {
                 normalize_bare_mysql_url_params(value)
             }
             DatabaseType::Postgres | DatabaseType::Redshift => normalize_postgres_url_params(value, self.ssl),
-            DatabaseType::MongoDb => value.trim_start_matches('?').to_string(),
+            DatabaseType::MongoDb => normalize_mongo_url_params(value, self.ssl),
             _ => value.trim_start_matches('?').to_string(),
         }
     }
@@ -1060,6 +1054,18 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
 
     if !parts.iter().any(|part| url_param_key_is(part, "charset")) {
         parts.push("charset=utf8mb4".to_string());
+    }
+
+    parts.join("&")
+}
+
+fn normalize_mongo_url_params(value: &str, force_tls: bool) -> String {
+    let value = value.trim_start_matches('?');
+    let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
+
+    if force_tls {
+        parts.retain(|part| !url_param_key_is(part, "tls") && !url_param_key_is(part, "ssl"));
+        parts.insert(0, "tls=true".to_string());
     }
 
     parts.join("&")
@@ -2009,6 +2015,24 @@ mod tests {
         assert_eq!(url, "mongodb://10.1.2.3:17000/admin?authSource=admin&authMechanism=SCRAM-SHA-1");
         assert!(!url.contains("root"));
         assert!(!url.contains("secret"));
+    }
+
+    #[test]
+    fn mongodb_form_tls_uses_standard_scheme_and_tls_param() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.ssl = true;
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/admin?tls=true");
+        assert_eq!(config.redacted_connection_url(), "mongodb://10.1.2.3:17000/admin?tls=true");
+    }
+
+    #[test]
+    fn mongodb_form_tls_replaces_existing_tls_params() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.ssl = true;
+        config.url_params = Some("authSource=admin&ssl=false&tls=false".to_string());
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/admin?tls=true&authSource=admin");
     }
 
     #[test]

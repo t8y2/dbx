@@ -20,10 +20,18 @@ const props = withDefaults(
 );
 
 const triggerRef = ref<HTMLElement>();
+const tooltipRef = ref<HTMLElement>();
 const show = ref(false);
 const x = ref(0);
 const y = ref(0);
 let timer: ReturnType<typeof setTimeout> | null = null;
+let closeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearCloseTimer() {
+  if (!closeTimer) return;
+  clearTimeout(closeTimer);
+  closeTimer = null;
+}
 
 function triggerElement(): HTMLElement | undefined {
   const root = triggerRef.value;
@@ -69,7 +77,7 @@ function isTriggerActive(): boolean {
   const el = triggerElement();
   if (!el || !el.isConnected) return false;
   const active = document.activeElement;
-  return el.matches(":hover") || (active instanceof Node && el.contains(active));
+  return el.matches(":hover") || tooltipRef.value?.matches(":hover") || (active instanceof Node && el.contains(active));
 }
 
 function isDisabled(): boolean {
@@ -104,12 +112,30 @@ function updatePosition() {
 
 function close() {
   clearTimer();
+  clearCloseTimer();
   show.value = false;
   removeGlobalListeners();
 }
 
 function closeIfTriggerInactive() {
-  if (!isTriggerActive()) close();
+  if (isTriggerActive()) {
+    clearCloseTimer();
+  } else {
+    scheduleClose();
+  }
+}
+
+function scheduleClose() {
+  if (closeTimer) return;
+  closeTimer = setTimeout(() => {
+    closeTimer = null;
+    if (!isTriggerActive()) close();
+  }, 100);
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (tooltipRef.value?.contains(e.target as Node)) return;
+  close();
 }
 
 function addGlobalListeners() {
@@ -118,7 +144,7 @@ function addGlobalListeners() {
   window.addEventListener("blur", close);
   document.addEventListener("visibilitychange", close);
   document.addEventListener("pointermove", closeIfTriggerInactive, true);
-  document.addEventListener("pointerdown", close, true);
+  document.addEventListener("pointerdown", onPointerDown, true);
   document.addEventListener("contextmenu", close, true);
 }
 
@@ -128,7 +154,7 @@ function removeGlobalListeners() {
   window.removeEventListener("blur", close);
   document.removeEventListener("visibilitychange", close);
   document.removeEventListener("pointermove", closeIfTriggerInactive, true);
-  document.removeEventListener("pointerdown", close, true);
+  document.removeEventListener("pointerdown", onPointerDown, true);
   document.removeEventListener("contextmenu", close, true);
 }
 
@@ -166,11 +192,20 @@ watch(
 </script>
 
 <template>
-  <span ref="triggerRef" class="contents" @mouseenter="scheduleOpen" @mouseleave="close" @focusin="scheduleFocusOpen" @focusout="close">
+  <span ref="triggerRef" class="contents" @mouseenter="scheduleOpen" @mouseleave="scheduleClose" @focusin="scheduleFocusOpen" @focusout="close">
     <slot />
   </span>
   <Teleport to="body">
-    <div v-if="show" class="pointer-events-none fixed z-50 rounded-md bg-foreground text-xs text-background" :class="[slots.content ? '' : 'inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', tooltipTransformClass]" :style="{ left: `${x}px`, top: `${y}px` }" role="tooltip">
+    <div
+      v-if="show"
+      ref="tooltipRef"
+      class="fixed z-50 rounded-md bg-foreground text-xs text-background"
+      :class="[slots.content ? '' : 'inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', tooltipTransformClass]"
+      :style="{ left: `${x}px`, top: `${y}px` }"
+      role="tooltip"
+      @mouseenter="clearCloseTimer"
+      @mouseleave="scheduleClose"
+    >
       <slot name="content">{{ text }}</slot>
       <span :class="[arrowClass, 'size-2.5 rotate-45 rounded-[2px] bg-foreground']" aria-hidden="true" />
     </div>

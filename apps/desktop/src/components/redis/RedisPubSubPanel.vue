@@ -174,9 +174,6 @@ function clearMessages() {
   messages.value = [];
 }
 
-// Auto-connect with a short delay for server readiness
-setTimeout(connect, 500);
-
 onBeforeUnmount(() => {
   disconnect();
 });

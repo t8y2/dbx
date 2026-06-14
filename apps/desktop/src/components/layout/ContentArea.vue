@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
+import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
 let dataGridComponentPromise: Promise<typeof import("@/components/grid/DataGrid.vue")> | undefined;
 function loadDataGridComponent() {

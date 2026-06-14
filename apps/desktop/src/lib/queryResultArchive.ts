@@ -75,9 +75,13 @@ function binaryPayload(value: unknown): Uint8Array | undefined {
   return undefined;
 }
 
+function arrayBufferFromBytes(bytes: Uint8Array): ArrayBuffer {
+  return bytes.slice().buffer;
+}
+
 async function transformBytes(bytes: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
   const writer = stream.writable.getWriter();
-  await writer.write(bytes);
+  await writer.write(arrayBufferFromBytes(bytes));
   await writer.close();
   return new Uint8Array(await new Response(stream.readable).arrayBuffer());
 }

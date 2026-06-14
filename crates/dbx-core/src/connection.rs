@@ -782,6 +782,9 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).map(|c| c.db_type)
         };
+        if database.is_some() && db_type.is_some_and(|db_type| shares_database_pool_with_connection(&db_type)) {
+            return Ok(false);
+        }
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
         let session_prefix = format!("{base_pool_key}:session:");
         let mut conns = self.connections.write().await;
@@ -1095,7 +1098,7 @@ fn base_pool_key_for(
     let is_single_connection_pool = db_type.as_ref().is_some_and(|db_type| {
         let is_single = database_capabilities::is_single_connection_pool(db_type)
             || (include_elasticsearch_single_pool && *db_type == DatabaseType::Elasticsearch);
-        is_single && !database_capabilities::is_agent_type(db_type)
+        is_single && (!database_capabilities::is_agent_type(db_type) || shares_database_pool_with_connection(db_type))
     });
 
     if is_single_connection_pool {
@@ -1106,6 +1109,10 @@ fn base_pool_key_for(
             None => connection_id.to_string(),
         }
     }
+}
+
+fn shares_database_pool_with_connection(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Oracle)
 }
 
 fn default_plugin_dir() -> PathBuf {
@@ -1915,14 +1922,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_single_connection_types_keep_database_scoped_pool_keys() {
+    fn oracle_reuses_connection_scoped_pool_for_schema_database_keys() {
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Oracle), "oracle-conn", Some("ORCLPDB1"), false),
+            "oracle-conn"
+        );
+    }
+
+    #[test]
+    fn other_agent_single_connection_types_keep_database_scoped_pool_keys() {
         assert_eq!(
             super::base_pool_key_for(Some(DatabaseType::Kingbase), "kingbase-conn", Some("app1"), false),
             "kingbase-conn:app1"
-        );
-        assert_eq!(
-            super::base_pool_key_for(Some(DatabaseType::Oracle), "oracle-conn", Some("ORCLPDB1"), false),
-            "oracle-conn:ORCLPDB1"
         );
         assert_eq!(
             super::base_pool_key_for(Some(DatabaseType::MongoDb), "mongo-conn", Some("shop"), false),

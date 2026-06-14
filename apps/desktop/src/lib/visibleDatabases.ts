@@ -11,6 +11,7 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
   gaussdb: new Set(["template0", "template1"]),
   kwdb: new Set(["template0", "template1"]),
   opengauss: new Set(["template0", "template1"]),
+  questdb: new Set(["template0", "template1"]),
   kingbase: new Set(["template0", "template1"]),
   highgo: new Set(["template0", "template1"]),
   vastbase: new Set(["template0", "template1"]),

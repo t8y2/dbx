@@ -167,6 +167,7 @@ const sourceFormatDialect = computed<SqlFormatDialect>(() => {
     case "gaussdb":
     case "kwdb":
     case "opengauss":
+    case "questdb":
       return "postgres";
     default:
       return "generic";

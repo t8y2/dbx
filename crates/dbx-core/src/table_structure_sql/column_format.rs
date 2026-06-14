@@ -5,6 +5,11 @@ use super::util::{clean, format_default_for_sql, normalize_default, quote_ident,
 pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStructureColumn) -> String {
     let data_type = column_data_type(dialect, column);
     let mut parts = vec![quote_ident(dialect, &column.name), data_type];
+    // QuestDB SQL Syntax: ```ALTER TABLE tableName ADD COLUMN [IF NOT EXISTS] columnName typeDef```
+    if dialect == StructureDialect::Questdb {
+        parts.insert(0, "IF NOT EXISTS".to_string());
+        return parts.join(" ");
+    }
     if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse {
         parts.push("NOT NULL".to_string());
     }
@@ -73,6 +78,9 @@ pub(super) fn column_data_type(dialect: StructureDialect, column: &EditableStruc
     }
     if dialect == StructureDialect::ManticoreSearch {
         return manticore_column_type(column);
+    }
+    if dialect == StructureDialect::Questdb {
+        return questdb_column_type(column);
     }
     normalize_column_data_type(dialect, &column.data_type)
 }
@@ -184,5 +192,24 @@ pub(super) fn unwrap_clickhouse_nullable_type(data_type: &str) -> String {
         trimmed[trimmed.find('(').unwrap_or(0) + 1..trimmed.len() - 1].trim().to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+/// QuestDB 类型处理
+/// geohash, decimal 这2种类型才能带()
+pub(super) fn questdb_column_type(column: &EditableStructureColumn) -> String {
+    let data_type = column.data_type.trim().to_ascii_lowercase();
+    let length_types: [&str; 2] = ["geohash", "decimal"];
+    match data_type.find('(') {
+        Some(pos) => {
+            let base_type = &data_type[..pos];
+            let params = &data_type[pos..];
+            if length_types.contains(&base_type) {
+                format!("{}{}", base_type, params)
+            } else {
+                base_type.to_string()
+            }
+        }
+        None => data_type,
     }
 }

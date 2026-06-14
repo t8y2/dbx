@@ -287,6 +287,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             | DatabaseType::Redshift
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
+            | DatabaseType::Questdb
             | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
                 Ok(pool) => {
                     pool.close();
@@ -497,6 +498,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         | DatabaseType::Redshift
         | DatabaseType::Gaussdb
         | DatabaseType::Kwdb
+        | DatabaseType::Questdb
         | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
         DatabaseType::Sqlite => {
             let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())

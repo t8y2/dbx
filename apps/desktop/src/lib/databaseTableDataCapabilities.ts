@@ -73,6 +73,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "firebird",
   "exasol",
   "opengauss",
+  "questdb",
   "oceanbase-oracle",
   "gbase",
   "access",

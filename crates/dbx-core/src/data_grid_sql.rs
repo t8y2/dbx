@@ -1318,6 +1318,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Firebird
                 | DatabaseType::Exasol
                 | DatabaseType::OpenGauss
+                | DatabaseType::Questdb
                 | DatabaseType::OceanbaseOracle
                 | DatabaseType::Gbase
                 | DatabaseType::Access

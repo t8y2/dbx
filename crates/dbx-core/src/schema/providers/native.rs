@@ -45,6 +45,9 @@ pub(in crate::schema) async fn list_tables(
             let db = if schema.is_empty() { database } else { schema };
             db::mysql::list_tables(p, db).await
         }
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
+            db::questdb::list_tables(p, schema).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_tables(p, schema).await,
         PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema).await,
@@ -76,6 +79,9 @@ pub(in crate::schema) async fn list_objects(
             db::mysql::list_table_objects_show(p, database).await.map(Some)
         }
         PoolKind::Mysql(p, _) => db::mysql::list_objects(p, database).await.map(Some),
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
+            db::questdb::list_objects(p, schema).await.map(Some)
+        }
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
         _ => Ok(None),
     }
@@ -83,6 +89,7 @@ pub(in crate::schema) async fn list_objects(
 
 pub(in crate::schema) async fn list_completion_objects(
     pool: &PoolKind,
+    config: Option<&ConnectionConfig>,
     database: &str,
     schema: &str,
 ) -> Result<Option<Vec<db::ObjectInfo>>, String> {
@@ -92,6 +99,9 @@ pub(in crate::schema) async fn list_completion_objects(
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_objects(p, schema).await.map(Some)
+        }
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
+            db::questdb::list_objects(p, schema).await.map(Some)
         }
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
         _ => Ok(None),
@@ -118,6 +128,9 @@ pub(in crate::schema) async fn get_columns(
             db::ob_oracle::get_columns(p, database, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::get_columns(p, database, table).await,
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
+            db::questdb::get_columns(p, schema, table).await
+        }
         PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await,
         PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::get_columns(client, schema, table).await,
@@ -129,6 +142,7 @@ pub(in crate::schema) async fn get_columns(
 
 pub(in crate::schema) async fn list_indexes(
     pool: &PoolKind,
+    config: Option<&ConnectionConfig>,
     database: &str,
     schema: &str,
     table: &str,
@@ -138,6 +152,9 @@ pub(in crate::schema) async fn list_indexes(
             db::ob_oracle::list_indexes(p, schema, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::list_indexes(p, schema, table).await,
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
+            db::questdb::list_indexes(p, schema, table).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
         PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_indexes(client, schema, table).await,
@@ -196,6 +213,12 @@ pub(in crate::schema) async fn table_ddl(
         PoolKind::Mysql(p, _) => super::super::mysql_ddl(p, table).await,
         PoolKind::Postgres(p) if config.is_some_and(is_opengauss_family_config) => {
             match super::super::opengauss_table_ddl(p, schema, table).await {
+                Ok(ddl) => Ok(ddl),
+                Err(_) => super::super::pg_ddl(p, schema, table).await,
+            }
+        }
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
+            match db::questdb::questdb_table_or_view_ddl(p, table).await {
                 Ok(ddl) => Ok(ddl),
                 Err(_) => super::super::pg_ddl(p, schema, table).await,
             }
@@ -305,4 +328,9 @@ fn filter_mysql_system_databases_for_config(
 
 fn is_mysql_system_database(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "information_schema" | "mysql" | "performance_schema" | "sys")
+}
+
+fn is_questdb_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Questdb)
+        || matches!(config.driver_profile.as_deref(), Some("questdb"))
 }

@@ -7,7 +7,7 @@ use crate::sql::find_statement_at_cursor;
 use crate::sql_dialect::{quote_table_identifier, uses_fetch_first};
 
 static LIMIT_OFFSET_STRIP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?|\s+OFFSET\s+\d+(\s+LIMIT\s+\d+)?|\s+OFFSET\s+\d+\s+ROWS?\s+FETCH\s+(?:FIRST|NEXT)\s+\d+\s+ROWS?\s+ONLY|\s+FETCH\s+(?:FIRST|NEXT)\s+\d+\s+ROWS?\s+ONLY)\s*$").unwrap()
+    Regex::new(r"(?i)(\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?|\s+LIMIT\s+\d+(\s*,\s*\d+)?|\s+OFFSET\s+\d+(\s+LIMIT\s+\d+)?|\s+OFFSET\s+\d+\s+ROWS?\s+FETCH\s+(?:FIRST|NEXT)\s+\d+\s+ROWS?\s+ONLY|\s+FETCH\s+(?:FIRST|NEXT)\s+\d+\s+ROWS?\s+ONLY)\s*$").unwrap()
 });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,6 +176,10 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
 
     if options.database_type == Some(DatabaseType::Mysql) {
         return ok(add_mysql_limit(&statement, safe_limit, safe_offset));
+    }
+
+    if options.database_type == Some(DatabaseType::Questdb) {
+        return ok(add_questdb_limit(&statement, safe_limit, safe_offset));
     }
 
     if options.database_type == Some(DatabaseType::Elasticsearch) {
@@ -429,6 +433,18 @@ fn add_informix_first_limit(statement: &str, limit: usize, offset: usize) -> Str
         return format!("SELECT {row_limit}{rest};");
     }
     format!("SELECT {row_limit} * FROM ({statement}) dbx_page;")
+}
+
+fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
+    if has_top_level_limit(statement) {
+        return format!("{statement};");
+    }
+    if offset > 0 {
+        let upper_bound = offset + limit;
+        format!("{statement} LIMIT {offset}, {upper_bound};")
+    } else {
+        format!("{statement} LIMIT {limit};")
+    }
 }
 
 fn has_top_level_limit(sql: &str) -> bool {

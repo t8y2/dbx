@@ -251,6 +251,7 @@ export const useConnectionStore = defineStore("connection", () => {
       redshift: "Redshift",
       dameng: "DM (Dameng)",
       gaussdb: "GaussDB",
+      questdb: "QuestDB",
       kwdb: "KWDB",
       kingbase: "KingBase",
       highgo: "瀚高 HighGo",
@@ -278,6 +279,8 @@ export const useConnectionStore = defineStore("connection", () => {
       dbType = "gaussdb" as ConnectionConfig["db_type"];
     } else if (profile === "kwdb" && dbType === "postgres") {
       dbType = "kwdb" as ConnectionConfig["db_type"];
+    } else if (profile === "questdb" && dbType === "postgres") {
+      dbType = "questdb" as ConnectionConfig["db_type"];
     } else if (profile === "redshift" && dbType === "postgres") {
       dbType = "redshift" as ConnectionConfig["db_type"];
     } else if (profile === "kingbase" && dbType === "postgres") {

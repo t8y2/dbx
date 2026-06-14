@@ -914,6 +914,35 @@
       }
     },
     {
+      "dbType": "questdb",
+      "label": "QuestDB",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8812,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": true,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "oceanbase-oracle",
       "label": "OceanBase Oracle Mode",
       "runtimeMode": "agent",

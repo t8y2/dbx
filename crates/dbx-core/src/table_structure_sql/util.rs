@@ -18,7 +18,9 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
 
 pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
     match dialect {
-        StructureDialect::Mysql | StructureDialect::ManticoreSearch => format!("`{}`", name.replace('`', "``")),
+        StructureDialect::Mysql | StructureDialect::ManticoreSearch | StructureDialect::Questdb => {
+            format!("`{}`", name.replace('`', "``"))
+        }
         StructureDialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
         StructureDialect::Informix if is_simple_informix_identifier(name) => name.to_string(),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),

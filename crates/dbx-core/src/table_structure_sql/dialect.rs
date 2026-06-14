@@ -13,6 +13,7 @@ pub(super) enum StructureDialect {
     ClickHouse,
     ManticoreSearch,
     Informix,
+    Questdb,
     Unsupported,
 }
 
@@ -115,6 +116,23 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_comment: true,
             alter_primary_key: true,
             ..base
+        },
+        Some(DatabaseType::Questdb) => TableStructureCapabilities {
+            dialect: StructureDialect::Questdb,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            reorder_column: false,
+            comment: false,
+            create_index: false,
+            drop_index: false,
+            rebuild_index: false,
+            index_type: false,
+            index_include: false,
+            index_filter: false,
+            index_comment: false,
+            alter_primary_key: false,
         },
         Some(DatabaseType::Redshift | DatabaseType::Vertica) => TableStructureCapabilities {
             dialect: StructureDialect::Postgres,
@@ -254,6 +272,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::ClickHouse => "clickhouse",
         StructureDialect::ManticoreSearch => "manticoresearch",
         StructureDialect::Informix => "informix",
+        StructureDialect::Questdb => "questdb",
         StructureDialect::Unsupported => "this database",
     }
     .to_string()
@@ -272,6 +291,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::ClickHouse => Some(DatabaseType::ClickHouse),
         StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),
         StructureDialect::Informix => Some(DatabaseType::Informix),
+        StructureDialect::Questdb => Some(DatabaseType::Questdb),
         StructureDialect::Unsupported => None,
     }
 }

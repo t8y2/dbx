@@ -90,6 +90,7 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "kwdb":
     case "yashandb":
     case "redshift":
+    case "questdb":
       return "postgresql://user:password@host:port/database";
 
     case "redis":

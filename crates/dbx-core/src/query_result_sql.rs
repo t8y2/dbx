@@ -195,6 +195,10 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         return ok(format!("{statement};"));
     }
 
+    if options.database_type == Some(DatabaseType::Informix) {
+        return ok(add_informix_first_limit(&statement, safe_limit, safe_offset));
+    }
+
     if options.database_type.is_some_and(uses_fetch_first) {
         return ok(add_fetch_first_limit(&statement, safe_limit, safe_offset));
     }
@@ -406,8 +410,46 @@ fn add_mysql_limit(statement: &str, limit: usize, offset: usize) -> String {
     format!("{statement} LIMIT {limit}{offset_sql};")
 }
 
+fn add_informix_first_limit(statement: &str, limit: usize, offset: usize) -> String {
+    if has_top_level_informix_row_limit(statement) {
+        return format!("{statement};");
+    }
+    let row_limit = if offset > 0 { format!("SKIP {offset} FIRST {limit}") } else { format!("FIRST {limit}") };
+    if statement.len() >= 6 && statement[..6].eq_ignore_ascii_case("SELECT") {
+        let rest = &statement[6..];
+        if let Some((leading, after_modifier)) = strip_sql_server_select_modifier(rest, "DISTINCT") {
+            return format!("SELECT{leading}DISTINCT {row_limit}{after_modifier};");
+        }
+        if let Some((leading, after_modifier)) = strip_sql_server_select_modifier(rest, "UNIQUE") {
+            return format!("SELECT{leading}UNIQUE {row_limit}{after_modifier};");
+        }
+        if let Some((leading, after_modifier)) = strip_sql_server_select_modifier(rest, "ALL") {
+            return format!("SELECT{leading}ALL {row_limit}{after_modifier};");
+        }
+        return format!("SELECT {row_limit}{rest};");
+    }
+    format!("SELECT {row_limit} * FROM ({statement}) dbx_page;")
+}
+
 fn has_top_level_limit(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
+}
+
+fn has_top_level_informix_row_limit(sql: &str) -> bool {
+    if has_top_level_limit(sql) {
+        return true;
+    }
+    let tokens = top_level_sql_tokens(sql);
+    let Some(select_index) = tokens.iter().position(|token| token.text == "SELECT") else {
+        return false;
+    };
+    let from_index = tokens
+        .iter()
+        .enumerate()
+        .find(|(index, token)| *index > select_index && token.text == "FROM")
+        .map(|(index, _)| index)
+        .unwrap_or(tokens.len());
+    tokens[select_index + 1..from_index].iter().any(|token| token.text == "FIRST" || token.text == "SKIP")
 }
 
 fn has_top_level_fetch_first(sql: &str) -> bool {
@@ -829,6 +871,30 @@ mod tests {
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT id FROM users FETCH FIRST 100 ROWS ONLY;");
+    }
+
+    #[test]
+    fn uses_skip_first_pagination_for_informix() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id FROM users WHERE active = 1".to_string(),
+            database_type: Some(DatabaseType::Informix),
+            limit: 50,
+            offset: 100,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT SKIP 100 FIRST 50 id FROM users WHERE active = 1;");
+    }
+
+    #[test]
+    fn informix_pagination_keeps_existing_first() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT FIRST 20 id FROM users".to_string(),
+            database_type: Some(DatabaseType::Informix),
+            limit: 50,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT FIRST 20 id FROM users;");
     }
 
     #[test]

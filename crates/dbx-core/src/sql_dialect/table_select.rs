@@ -68,6 +68,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         return format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}");
     }
 
+    if database_type == Some(DatabaseType::Informix) {
+        let row_limit = informix_row_limit_clause(limit, options.offset.unwrap_or(0));
+        return format!("SELECT {row_limit} {select_columns} FROM {table_alias}{where_clause}{order}");
+    }
+
     if database_type == Some(DatabaseType::Db2) && options.offset.is_some_and(|offset| offset > 0) {
         return build_db2_table_select_page_sql(
             &table_alias,
@@ -142,6 +147,10 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
         return format!("SELECT TOP {limit} {select_columns} FROM {table}{order_by}");
     }
 
+    if database_type == Some(DatabaseType::Informix) {
+        return format!("SELECT FIRST {limit} {select_columns} FROM {table}{order_by}");
+    }
+
     if database_type.is_some_and(uses_fetch_first) {
         return format!("SELECT {select_columns} FROM {table}{order_by} FETCH FIRST {limit} ROWS ONLY");
     }
@@ -151,6 +160,14 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
     }
 
     format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {limit};")
+}
+
+fn informix_row_limit_clause(limit: usize, offset: usize) -> String {
+    if offset > 0 {
+        format!("SKIP {offset} FIRST {limit}")
+    } else {
+        format!("FIRST {limit}")
+    }
 }
 
 pub(super) fn is_oracle_row_id(database_type: Option<DatabaseType>, name: &str) -> bool {

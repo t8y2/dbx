@@ -1,4 +1,5 @@
 use super::column_format::{clickhouse_column_type, column_data_type, column_definition};
+use super::columns::build_drop_column_sql;
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
@@ -29,7 +30,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             warnings.push(format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name));
             return TableStructureSqlResult { statements, warnings };
         }
-        statements.push(format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, &original.name)));
+        statements.push(build_drop_column_sql(dialect, &table, &original.name));
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -74,6 +75,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         StructureDialect::ClickHouse => {
             statements.extend(build_clickhouse_existing_column_sql(&table, &options.column, ""))
         }
+        StructureDialect::Informix => statements.extend(build_informix_existing_column_sql(&table, &options.column)),
         StructureDialect::SqlServer => statements.extend(build_sqlserver_existing_column_sql(
             &table,
             &options.column,
@@ -187,6 +189,42 @@ pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableS
             "COMMENT ON COLUMN {table}.{} IS {comment_value};",
             quote_ident(StructureDialect::Postgres, current_name)
         ));
+    }
+    statements
+}
+
+pub(super) fn build_informix_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let dialect = StructureDialect::Informix;
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "RENAME COLUMN {table}.{} TO {};",
+            quote_ident(dialect, &original.name),
+            quote_ident(dialect, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    if type_changed || nullable_changed || default_changed {
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        if column.is_nullable {
+            parts.push("NULL".to_string());
+        } else {
+            parts.push("NOT NULL".to_string());
+        }
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        } else if default_changed {
+            parts.push("DEFAULT NULL".to_string());
+        }
+        statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
     }
     statements
 }

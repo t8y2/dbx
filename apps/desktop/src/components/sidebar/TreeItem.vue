@@ -91,7 +91,7 @@ import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType }
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
@@ -164,12 +164,20 @@ function currentDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
 }
 
+function currentTableStructureDatabaseType(): DatabaseType | undefined {
+  return props.node.connectionId ? tableStructureDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
+}
+
 function rawDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? connectionStore.getConfig(props.node.connectionId)?.db_type : undefined;
 }
 
 function databaseTypeForNode(node: TreeNode): DatabaseType | undefined {
   return node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
+}
+
+function tableStructureDatabaseTypeForNode(node: TreeNode): DatabaseType | undefined {
+  return node.connectionId ? tableStructureDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
 }
 
 function hasNodeDatabaseContext(node: TreeNode): node is TreeNode & { connectionId: string; database: string } {
@@ -361,9 +369,10 @@ async function toggle() {
       queryStore.updateSql(tab, node.label);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       const config = connectionStore.getConfig(node.connectionId);
+      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
       if (config?.db_type === "sqlserver") {
         await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database);
-      } else if (usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config)) {
+      } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
         await connectionStore.loadSchemas(node.connectionId, node.database);
       } else {
         await connectionStore.loadTables(node.connectionId, node.database);
@@ -701,6 +710,20 @@ async function openData() {
     return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema);
   })();
   console.info("[DBX][openData:tab-created]", { traceId, tabId, elapsed: elapsed() });
+
+  // Cancel any previous execution on this tab before starting a new one
+  const existingTab = queryStore.tabs.find((t) => t.id === tabId);
+  if (existingTab?.isExecuting && existingTab.executionId) {
+    await queryStore.cancelTabExecution(tabId);
+  }
+
+  const openDataId = uuid();
+  // Clear previous result so DataGrid doesn't show its internal loading overlay (without stop button)
+  const tab = queryStore.tabs.find((t) => t.id === tabId);
+  if (tab) {
+    tab.result = undefined;
+    tab.results = undefined;
+  }
   queryStore.setTableMeta(tabId, {
     schema: tableSchema,
     tableName: node.label,
@@ -708,11 +731,15 @@ async function openData() {
     columns: [],
     primaryKeys: [],
   });
-  queryStore.setExecuting(tabId, true);
+  queryStore.setExecutingWithId(tabId, openDataId);
+
+  // Helper to check if this openData call is still active (not superseded by a newer click)
+  const isActive = () => queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
 
   try {
     console.info("[DBX][openData:ensure-connected:start]", { traceId, elapsed: elapsed() });
     await connectionStore.ensureConnected(node.connectionId);
+    if (!isActive()) return;
     console.info("[DBX][openData:ensure-connected:done]", { traceId, elapsed: elapsed() });
     if (!config) throw new Error("Connection config not found");
 
@@ -730,6 +757,7 @@ async function openData() {
         elapsed: elapsed(),
       });
       columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+      if (!isActive()) return;
       primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : "TABLE");
       console.info("[DBX][openData:get-columns:done]", {
         traceId,
@@ -747,6 +775,9 @@ async function openData() {
     } catch (error) {
       console.warn("[DBX][openData:get-columns:error]", { traceId, elapsed: elapsed(), error });
     }
+
+    // Check if superseded by a newer openData call
+    if (!isActive()) return;
 
     const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
     const fallbackOrderColumns = effectiveDbType === "sqlserver" && !primaryKeys.length ? columns.slice(0, 1).map((column) => column.name) : undefined;
@@ -773,6 +804,7 @@ async function openData() {
     await queryStore.executeTabSql(tabId, sql);
     console.info("[DBX][openData:execute:done]", { traceId, tabId, elapsed: elapsed() });
   } catch (e: any) {
+    if (!isActive()) return;
     console.error("[DBX][openData:error]", { traceId, elapsed: elapsed(), error: e });
     queryStore.setErrorResult(tabId, e);
   }
@@ -980,7 +1012,7 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
   if (node.type !== "view" && node.type !== "procedure" && node.type !== "function") return null;
   return {
-    databaseType: databaseTypeForNode(node),
+    databaseType: tableStructureDatabaseTypeForNode(node),
     objectType: node.type === "view" ? "VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
     schema: node.schema,
     name: node.label,
@@ -1421,7 +1453,7 @@ const supportsTruncate = computed(() => {
 
 const canCreateTable = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !!props.node.database && supportsTableStructureEditing(effectiveDatabaseTypeForConnection(config));
+  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !!props.node.database && supportsTableStructureEditing(tableStructureDatabaseTypeForConnection(config));
 });
 
 const canCreateDatabase = computed(() => {
@@ -1446,12 +1478,12 @@ const canDropDatabase = computed(() => {
 
 const canCreateSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return props.node.type === "database" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
+  return props.node.type === "database" && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canDropSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return props.node.type === "schema" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
+  return props.node.type === "schema" && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 function tableAdminSqlOptions(): TableAdminSqlOptions {
@@ -2325,7 +2357,7 @@ const canOpenTableImport = computed(() => {
   return props.node.type === "table" && !!props.node.database && supportsTableImport(currentDatabaseType());
 });
 const canOpenStructureEditor = computed(() => {
-  return props.node.type === "table" && !!props.node.database && supportsTableStructureEditing(currentDatabaseType());
+  return props.node.type === "table" && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
 });
 const canOpenFieldLineage = computed(() => {
   return props.node.type === "column" && !!props.node.database && !!props.node.tableName && supportsFieldLineage(currentDatabaseType());

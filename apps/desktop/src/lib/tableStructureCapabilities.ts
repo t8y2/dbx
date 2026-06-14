@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "influxdb" | "unsupported";
+export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "unsupported";
 
 export interface TableStructureCapabilities {
   dialect: TableStructureDialect;
@@ -68,6 +68,14 @@ const mysqlCapabilities = capabilities({
   indexType: true,
   indexComment: true,
   alterPrimaryKey: true,
+});
+
+const gbaseCapabilities = capabilities({
+  dialect: "mysql",
+  createTable: true,
+  addColumn: true,
+  dropColumn: true,
+  renameColumn: true,
 });
 
 const postgresCapabilities = capabilities({
@@ -193,6 +201,21 @@ const clickhouseCapabilities = capabilities({
   comment: true,
 });
 
+const informixCapabilities = capabilities({
+  dialect: "informix",
+  createTable: true,
+  addColumn: true,
+  dropColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
+  createIndex: true,
+  dropIndex: true,
+  rebuildIndex: true,
+});
+
 const accessCapabilities = capabilities({
   dialect: "h2",
   createTable: true,
@@ -221,7 +244,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   goldendb: mysqlCapabilities,
   sundb: mysqlCapabilities,
   databend: mysqlCapabilities,
-  gbase: mysqlCapabilities,
+  gbase: gbaseCapabilities,
   postgres: postgresCapabilities,
   gaussdb: postgresCapabilities,
   kwdb: postgresCapabilities,
@@ -246,6 +269,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   h2: h2Capabilities,
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
+  informix: informixCapabilities,
   influxdb: influxdbCapabilities,
 };
 

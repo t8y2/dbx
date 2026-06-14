@@ -41,6 +41,21 @@ test("mysql-like databases expose index rebuild and type capabilities", () => {
   }
 });
 
+test("gbase 8a exposes limited mysql-compatible structure editing capabilities", () => {
+  const caps = getTableStructureCapabilities("gbase");
+  assert.equal(caps.dialect, "mysql");
+  assert.equal(caps.createTable, true);
+  assert.equal(caps.addColumn, true);
+  assert.equal(caps.dropColumn, true);
+  assert.equal(caps.renameColumn, true);
+  assert.equal(caps.alterExistingColumn, false);
+  assert.equal(caps.createIndex, false);
+  assert.equal(caps.dropIndex, false);
+  assert.equal(caps.rebuildIndex, false);
+  assert.equal(caps.comment, false);
+  assert.equal(canEditTableStructure("gbase"), true);
+});
+
 test("redshift reuses postgres column DDL but keeps indexes disabled", () => {
   const caps = getTableStructureCapabilities("redshift");
   assert.equal(caps.dialect, "postgres");
@@ -91,6 +106,23 @@ test("limited analytic engines can open the editor for supported operations only
   assert.equal(clickhouse.createIndex, false);
   assert.equal(clickhouse.rebuildIndex, false);
   assert.equal(canEditTableStructure("clickhouse"), true);
+});
+
+test("informix exposes conservative structure editing capabilities", () => {
+  const caps = getTableStructureCapabilities("informix");
+  assert.equal(caps.dialect, "informix");
+  assert.equal(caps.createTable, true);
+  assert.equal(caps.addColumn, true);
+  assert.equal(caps.dropColumn, true);
+  assert.equal(caps.renameColumn, true);
+  assert.equal(caps.alterExistingColumn, true);
+  assert.equal(caps.comment, false);
+  assert.equal(caps.createIndex, true);
+  assert.equal(caps.dropIndex, true);
+  assert.equal(caps.rebuildIndex, true);
+  assert.equal(caps.indexType, false);
+  assert.equal(caps.alterPrimaryKey, false);
+  assert.equal(canEditTableStructure("informix"), true);
 });
 
 test("unsupported non-relational databases do not open the structure editor", () => {

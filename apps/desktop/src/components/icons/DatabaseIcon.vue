@@ -66,6 +66,7 @@ const assetIcons: Record<string, string> = {
   firebird: "firebird.webp",
   exasol: "exasol.webp",
   gbase: "gbase.webp",
+  gbase8a: "gbase.webp",
   gbase8s: "gbase.webp",
   tdsql: "tdsql.webp",
   polardb: "polardb.webp",

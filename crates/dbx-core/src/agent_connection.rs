@@ -48,6 +48,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "client_cert_path": config.client_cert_path,
         "client_key_path": config.client_key_path,
         "etcd_endpoints": etcd_endpoints,
+        "gbase_server": config.gbase_server,
         "jdbc_driver_class": config.jdbc_driver_class.as_deref().unwrap_or(""),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
     })
@@ -537,6 +538,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            gbase_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

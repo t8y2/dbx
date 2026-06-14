@@ -22,8 +22,10 @@ const ORACLE_PROFILES: &[AgentDriverProfile] = &[
     AgentDriverProfile { profile: "oracle-10g", key: "oracle", label: "Oracle", store_visible: false },
 ];
 
-const GBASE_PROFILES: &[AgentDriverProfile] =
-    &[AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true }];
+const GBASE_PROFILES: &[AgentDriverProfile] = &[
+    AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true },
+    AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "GBase 8a", store_visible: true },
+];
 
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
@@ -119,8 +121,8 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Gbase,
-        key: "gbase",
-        label: "GBase",
+        key: "gbase8a",
+        label: "GBase 8a",
         store_visible: true,
         profiles: GBASE_PROFILES,
     },

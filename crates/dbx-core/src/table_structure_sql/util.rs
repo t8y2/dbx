@@ -4,7 +4,11 @@ use super::types::EditableStructureColumn;
 pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, table_name: &str) -> String {
     if matches!(
         dialect,
-        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::SqlServer | StructureDialect::H2
+        StructureDialect::Postgres
+            | StructureDialect::Oracle
+            | StructureDialect::SqlServer
+            | StructureDialect::H2
+            | StructureDialect::Informix
     ) && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
         return format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, table_name));
@@ -16,8 +20,18 @@ pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
     match dialect {
         StructureDialect::Mysql => format!("`{}`", name.replace('`', "``")),
         StructureDialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
+        StructureDialect::Informix if is_simple_informix_identifier(name) => name.to_string(),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
+}
+
+fn is_simple_informix_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
 pub(super) fn quote_string(value: &str) -> String {
@@ -78,6 +92,7 @@ pub(super) fn is_temporal_type_for_default(dialect: StructureDialect, base_type:
         StructureDialect::Sqlite => {
             matches!(normalized.as_str(), "date" | "datetime" | "timestamp" | "time")
         }
+        StructureDialect::Informix => matches!(normalized.as_str(), "date" | "datetime"),
         _ => false,
     }
 }

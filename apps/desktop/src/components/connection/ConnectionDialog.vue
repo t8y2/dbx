@@ -129,6 +129,7 @@ const defaultForm = (): ConnectionForm => ({
   redis_cluster_nodes: "",
   redis_key_separator: ":",
   etcd_endpoints: "",
+  gbase_server: "",
   read_only: false,
   visible_databases: undefined,
 });
@@ -388,7 +389,8 @@ const driverProfiles: Record<
   vertica: { type: "vertica", port: 5433, user: "dbadmin", label: "Vertica", icon: "vertica" },
   firebird: { type: "firebird", port: 3050, user: "SYSDBA", label: "Firebird", icon: "firebird" },
   exasol: { type: "exasol", port: 8563, user: "sys", label: "Exasol", icon: "exasol" },
-  gbase: { type: "gbase", port: 5258, user: "gbasedbt", label: "GBase", icon: "gbase" },
+  gbase: { type: "gbase", port: 5258, user: "gbasedbt", label: "GBase 8a", icon: "gbase" },
+  gbase8a: { type: "gbase", port: 5258, user: "gbasedbt", label: "GBase 8a", icon: "gbase" },
   gbase8s: { type: "gbase", port: 9088, user: "gbasedbt", label: "GBase 8s", icon: "gbase" },
   opengauss: {
     type: "opengauss",
@@ -545,7 +547,7 @@ function switchOceanbaseMode(mode: "mysql" | "oracle") {
   resetTestState();
 }
 
-function switchGbaseProfile(profile: "gbase" | "gbase8s") {
+function switchGbaseProfile(profile: "gbase8a" | "gbase8s") {
   applyProfile(profile, false);
   selectedType.value = "gbase";
   resetTestState();
@@ -603,7 +605,7 @@ watch(
       if (profile === "oceanbase") {
         oceanbaseSubMode.value = config.driver_profile === "oceanbase-oracle" ? "oracle" : "mysql";
       }
-      if (profile === "gbase8s") {
+      if (profile === "gbase8a" || profile === "gbase8s") {
         selectedType.value = "gbase";
       }
       mongoUseUrl.value = !!config.connection_string;
@@ -1590,7 +1592,7 @@ function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
     oceanbaseSubMode.value = "oracle";
     selectedType.value = "oceanbase";
   }
-  if (draft.driverProfile === "gbase8s") {
+  if (draft.driverProfile === "gbase8a" || draft.driverProfile === "gbase8s") {
     selectedType.value = "gbase";
   }
   customDriverName.value = isCustomCompatibleProfile() ? draft.driverLabel : "";
@@ -2184,7 +2186,7 @@ function openExternalUrl(url: string) {
                 <div v-if="selectedType === 'gbase'" class="grid grid-cols-4 items-center gap-4">
                   <Label class="text-right text-xs">{{ t("connection.version") }}</Label>
                   <div class="col-span-3 flex gap-2">
-                    <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'outline' : 'default'" @click="switchGbaseProfile('gbase')"> GBase </Button>
+                    <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'outline' : 'default'" @click="switchGbaseProfile('gbase8a')"> GBase 8a </Button>
                     <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'default' : 'outline'" @click="switchGbaseProfile('gbase8s')"> GBase 8s </Button>
                   </div>
                 </div>
@@ -2593,6 +2595,11 @@ function openExternalUrl(url: string) {
                     <Label class="text-right">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" />
+                  </div>
+
+                  <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">{{ t("connection.gbaseServer") }}</Label>
+                    <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">

@@ -643,6 +643,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   {{ t(queryExecutionLabelKey(activeTab)) }}
                   <span class="ml-1 tabular-nums text-muted-foreground/80">· {{ queryRunningElapsedSeconds }}s</span>
                 </div>
+                <Button variant="destructive" size="sm" class="h-7 gap-1.5" :disabled="!canCancelQueryExecution(activeTab)" @click="emit('cancel')">
+                  <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
+                  <Square v-else class="h-3.5 w-3.5 fill-current" />
+                  {{ t("toolbar.stopQuery") }}
+                </Button>
               </div>
               <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
                 <div>{{ t("editor.pressToExecute", { mod: shortcutModifier }) }}</div>

@@ -64,6 +64,8 @@ pub struct ConnectionConfig {
     pub redis_key_separator: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gbase_server: String,
     /// Typed configuration for external tabular sources.
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
@@ -356,6 +358,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
+    pub gbase_server: String,
+    #[serde(default)]
     pub external_config: Option<serde_json::Value>,
     #[serde(default)]
     pub jdbc_driver_class: Option<String>,
@@ -404,6 +408,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_cluster_nodes: data.redis_cluster_nodes,
             redis_key_separator: data.redis_key_separator,
             etcd_endpoints: data.etcd_endpoints,
+            gbase_server: data.gbase_server,
             external_config: data.external_config,
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
@@ -1412,6 +1417,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            gbase_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

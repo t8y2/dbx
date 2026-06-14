@@ -279,6 +279,38 @@ fn builds_table_data_where_and_schema_queries() {
 }
 
 #[test]
+fn builds_informix_table_data_with_skip_first_pagination() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Informix),
+            schema: Some("ignored".to_string()),
+            table_name: "users".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: vec!["id".to_string(), "name".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(50),
+            offset: Some(100),
+            where_input: Some("WHERE active = 1".to_string()),
+            include_row_id: false,
+        }),
+        "SELECT SKIP 100 FIRST 50 * FROM users WHERE (active = 1) ORDER BY id ASC"
+    );
+
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Informix),
+            schema: None,
+            table_name: "systables",
+            columns: &["tabname".to_string()],
+            order_columns: &[],
+            limit: 1,
+        }),
+        "SELECT FIRST 1 tabname FROM systables"
+    );
+}
+
+#[test]
 fn explicit_table_data_order_overrides_default_key_order() {
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

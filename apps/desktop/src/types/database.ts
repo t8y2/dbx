@@ -97,6 +97,7 @@ export interface ConnectionConfig {
   redis_cluster_nodes?: string;
   redis_key_separator?: string;
   etcd_endpoints?: string;
+  gbase_server?: string;
   one_time?: boolean;
   read_only?: boolean;
 }

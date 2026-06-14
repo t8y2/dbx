@@ -118,6 +118,75 @@ fn builds_mysql_column_and_index_changes() {
 }
 
 #[test]
+fn builds_informix_column_and_index_changes() {
+    let mut renamed = column("display_name");
+    renamed.data_type = "varchar(120)".to_string();
+    renamed.is_nullable = false;
+    renamed.default_value = "'guest'".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(80)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some(String::new()),
+    });
+    let mut email = column("email");
+    email.is_nullable = false;
+    let mut old_col = column("old_col");
+    old_col.marked_for_drop = true;
+    old_col.original = Some(ColumnInfo {
+        name: "old_col".to_string(),
+        data_type: "varchar(20)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+    let mut old_index = index("idx_old", &["name"]);
+    old_index.marked_for_drop = true;
+    old_index.original = Some(IndexInfo {
+        name: "idx_old".to_string(),
+        columns: vec!["name".to_string()],
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+    let mut email_index = index("uniq_users_email", &["email"]);
+    email_index.is_unique = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Informix),
+        schema: Some("gbasedbt".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![renamed, email, old_col],
+        indexes: vec![old_index, email_index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "RENAME COLUMN gbasedbt.users.name TO display_name;",
+            "ALTER TABLE gbasedbt.users MODIFY (display_name varchar(120) NOT NULL DEFAULT 'guest');",
+            "ALTER TABLE gbasedbt.users ADD (email varchar(255) NOT NULL);",
+            "ALTER TABLE gbasedbt.users DROP (old_col);",
+            "DROP INDEX gbasedbt.idx_old;",
+            "CREATE UNIQUE INDEX uniq_users_email ON gbasedbt.users (email);",
+        ]
+    );
+}
+
+#[test]
 fn mysql_create_index_with_comment() {
     let mut col = column("name");
     col.data_type = "varchar(120)".to_string();
@@ -143,6 +212,69 @@ fn mysql_create_index_with_comment() {
             "ALTER TABLE `users` ADD COLUMN `name` varchar(120);",
             "CREATE INDEX `idx_users_name` ON `users` (`name`) COMMENT 'Search index';",
         ]
+    );
+}
+
+#[test]
+fn gbase8a_uses_limited_mysql_ddl() {
+    let mut renamed = column("display_email");
+    renamed.data_type = "varchar(255)".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "email".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+    let new_col = column("nickname");
+    let mut old_col = column("old_col");
+    old_col.marked_for_drop = true;
+    old_col.original = Some(ColumnInfo {
+        name: "old_col".to_string(),
+        data_type: "varchar(20)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+    let mut index = index("idx_users_email", &["display_email"]);
+    index.original = Some(IndexInfo {
+        name: "idx_users_email".to_string(),
+        columns: vec!["email".to_string()],
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Gbase),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![renamed, new_col, old_col],
+        indexes: vec![index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` CHANGE COLUMN `email` `display_email` varchar(255);",
+            "ALTER TABLE `users` ADD COLUMN `nickname` varchar(255);",
+            "ALTER TABLE `users` DROP COLUMN `old_col`;",
+        ]
+    );
+    assert_eq!(
+        result.warnings,
+        vec!["Editing existing indexes is not supported for gbase from this editor.".to_string()]
     );
 }
 

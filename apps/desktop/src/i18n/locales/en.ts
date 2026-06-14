@@ -167,6 +167,7 @@
     driverName: "Driver Name",
     driverNamePlaceholder: "Vendor or environment name",
     urlParams: "URL Params",
+    gbaseServer: "GBASEDBTSERVER",
     sslEnable: "Enable encrypted connection",
     caCertPath: "CA Certificate",
     caCertPathPlaceholder: "Optional, e.g. ~/.yandex/RootCA.crt",

@@ -223,6 +223,8 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableStructureEditing("opengauss"), true);
   assert.equal(supportsTableStructureEditing("redshift"), true);
   assert.equal(supportsTableStructureEditing("clickhouse"), true);
+  assert.equal(supportsTableStructureEditing("gbase"), true);
+  assert.equal(supportsTableStructureEditing("informix"), true);
   assert.equal(supportsTableStructureEditing("rqlite"), true);
   assert.equal(supportsTableStructureEditing("mongodb"), false);
   assert.equal(supportsTableStructureEditing("manticoresearch"), false);

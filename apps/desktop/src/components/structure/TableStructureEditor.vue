@@ -24,7 +24,7 @@ import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/tableStructureEditorSql";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import { connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -279,7 +279,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 }
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
-const databaseType = computed(() => effectiveDatabaseTypeForConnection(connection.value));
+const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);

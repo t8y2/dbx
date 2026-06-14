@@ -698,6 +698,15 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function setExecutingWithId(id: string, executionId: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return;
+    tab.isExecuting = true;
+    tab.executionId = executionId;
+    tab.isCancelling = false;
+    tab.queryExecutionStartedAt = Date.now();
+  }
+
   function clearExplain(tab: QueryTab) {
     tab.explainPlan = undefined;
     tab.explainError = undefined;
@@ -952,7 +961,9 @@ export const useQueryStore = defineStore("query", () => {
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     tab.isExecuting = true;
     tab.isCancelling = false;
-    tab.queryExecutionStartedAt = Date.now();
+    if (!tab.queryExecutionStartedAt) {
+      tab.queryExecutionStartedAt = Date.now();
+    }
     tab.executionId = executionId;
     tab.lastExecutedSql = sql;
     if (!options?.preserveTotalRowCountDuringExecution) {
@@ -1413,7 +1424,12 @@ export const useQueryStore = defineStore("query", () => {
       const canceled = await api.cancelQuery(executionId);
       if (!canceled) {
         const current = tabs.value.find((t) => t.id === id);
-        if (current && current.executionId === executionId) current.isCancelling = false;
+        if (current && current.executionId === executionId) {
+          current.isExecuting = false;
+          current.isCancelling = false;
+          current.executionId = undefined;
+          current.queryExecutionStartedAt = undefined;
+        }
       }
       return canceled;
     } catch (e: any) {
@@ -1698,6 +1714,7 @@ export const useQueryStore = defineStore("query", () => {
     tableStructureRefreshVersion,
     setObjectSource,
     setExecuting,
+    setExecutingWithId,
     setErrorResult,
     setActiveResultIndex,
     executeCurrentTab,

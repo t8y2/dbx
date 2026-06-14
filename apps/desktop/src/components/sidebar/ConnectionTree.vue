@@ -326,7 +326,9 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
   if (!dbNode) return;
   const targetSchema = "schema" in target ? target.schema : undefined;
   const databaseChildrenLoaded = !!dbNode.children && dbNode.children.length > 0;
-  const shouldLoadSchemaTables = target.type === "table" && !!targetSchema && usesTreeSchemaMode(config.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
+  const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+  const usesSchemaTree = usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config);
+  const shouldLoadSchemaTables = target.type === "table" && !!targetSchema && usesSchemaTree;
   if (!force && databaseChildrenLoaded && !shouldLoadSchemaTables) return;
 
   // Load database contents
@@ -335,7 +337,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
       if (force || !databaseChildrenLoaded) {
         await store.loadSqlServerDatabaseObjects(connId, target.database, loadOptions);
       }
-    } else if (usesTreeSchemaMode(config.db_type) && !connectionUsesDatabaseObjectTreeMode(config)) {
+    } else if (usesSchemaTree) {
       if (force || !databaseChildrenLoaded) {
         await store.loadSchemas(connId, target.database, loadOptions);
       }

@@ -945,10 +945,10 @@
     },
     {
       "dbType": "gbase",
-      "label": "GBase",
+      "label": "GBase 8a",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
-      "agentKey": "gbase",
+      "agentKey": "gbase8a",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -958,6 +958,11 @@
           "profile": "gbase8s",
           "label": "GBase 8s",
           "agentKey": "gbase8s"
+        },
+        {
+          "profile": "gbase8a",
+          "label": "GBase 8a",
+          "agentKey": "gbase8a"
         }
       ],
       "supportLevel": "operate",
@@ -1178,7 +1183,7 @@
         "schemaSearch": true,
         "diagram": false,
         "tableDataEdit": true,
-        "tableStructureEdit": false,
+        "tableStructureEdit": true,
         "tableImport": false,
         "dataTransfer": false,
         "sqlFileExecution": true,

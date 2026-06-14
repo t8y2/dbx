@@ -1,8 +1,27 @@
+use std::future::Future;
 use std::sync::Arc;
 use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::mongo_driver::MongoDocumentResult;
+
+async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let registered_query =
+        execution_id.as_ref().filter(|id| !id.trim().is_empty()).map(|id| state.running_queries.register(id.clone()));
+    if let Some(query) = registered_query.as_ref() {
+        let token = query.token();
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(dbx_core::query::canceled_error()),
+            result = future => result,
+        }
+    } else {
+        future.await
+    }
+}
 
 #[tauri::command]
 pub async fn mongo_list_databases(
@@ -32,16 +51,22 @@ pub async fn mongo_find_documents(
     limit: i64,
     filter: Option<String>,
     sort: Option<String>,
+    execution_id: Option<String>,
 ) -> Result<MongoDocumentResult, String> {
-    dbx_core::mongo_ops::mongo_find_documents_core(
-        &state,
-        &connection_id,
-        &database,
-        &collection,
-        skip,
-        limit,
-        filter.as_deref(),
-        sort.as_deref(),
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_find_documents_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            skip,
+            limit,
+            filter.as_deref(),
+            sort.as_deref(),
+        ),
     )
     .await
 }
@@ -57,16 +82,22 @@ pub async fn document_find_documents(
     limit: i64,
     filter: Option<String>,
     sort: Option<String>,
+    execution_id: Option<String>,
 ) -> Result<MongoDocumentResult, String> {
-    dbx_core::mongo_ops::document_find_documents_core(
-        &state,
-        &connection_id,
-        &database,
-        &collection,
-        skip,
-        limit,
-        filter.as_deref(),
-        sort.as_deref(),
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::document_find_documents_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            skip,
+            limit,
+            filter.as_deref(),
+            sort.as_deref(),
+        ),
     )
     .await
 }
@@ -79,14 +110,20 @@ pub async fn mongo_aggregate_documents(
     collection: String,
     pipeline_json: String,
     max_rows: Option<usize>,
+    execution_id: Option<String>,
 ) -> Result<MongoDocumentResult, String> {
-    dbx_core::mongo_ops::mongo_aggregate_documents_core(
-        &state,
-        &connection_id,
-        &database,
-        &collection,
-        &pipeline_json,
-        max_rows,
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_aggregate_documents_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            &pipeline_json,
+            max_rows,
+        ),
     )
     .await
 }

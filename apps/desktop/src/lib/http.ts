@@ -545,7 +545,8 @@ export async function executeInTransaction(connectionId: string, database: strin
 }
 
 export async function cancelQuery(executionId: string): Promise<boolean> {
-  return post("/api/query/cancel", { executionId });
+  const result = await post<boolean | { cancelled?: boolean }>("/api/query/cancel", { executionId });
+  return typeof result === "boolean" ? result : result.cancelled === true;
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -1389,16 +1390,16 @@ export async function elasticsearchListIndices(connectionId: string): Promise<st
   return mongoListCollections(connectionId, "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string): Promise<MongoDocumentResult> {
-  return post("/api/mongo/find-documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/find-documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string): Promise<MongoDocumentResult> {
-  return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number): Promise<MongoDocumentResult> {
-  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows });
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
 export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {

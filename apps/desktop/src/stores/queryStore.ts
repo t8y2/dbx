@@ -1225,7 +1225,7 @@ export const useQueryStore = defineStore("query", () => {
       if (mongoFind) {
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-find:start]", { traceId, collection: mongoFind.collection });
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoFind.collection, mongoFind.skip, mongoFind.limit, mongoFind.filter, mongoFind.sort);
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoFind.collection, mongoFind.skip, mongoFind.limit, mongoFind.filter, mongoFind.sort, executionId);
         console.info("[DBX][executeTabSql:mongo-find:done]", {
           traceId,
           rowCount: result.documents.length,
@@ -1252,7 +1252,7 @@ export const useQueryStore = defineStore("query", () => {
       if (mongoCount) {
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCount.collection });
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCount.collection, 0, 1, mongoCount.filter);
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCount.collection, 0, 1, mongoCount.filter, undefined, executionId);
         console.info("[DBX][executeTabSql:mongo-count:done]", {
           traceId,
           total: result.total,
@@ -1283,7 +1283,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-aggregate:start]", { traceId, collection: mongoAggregate.collection });
-        const result = await api.mongoAggregateDocuments(tab.connectionId, tab.database, mongoAggregate.collection, mongoAggregate.pipeline, pageLimit);
+        const result = await api.mongoAggregateDocuments(tab.connectionId, tab.database, mongoAggregate.collection, mongoAggregate.pipeline, pageLimit, executionId);
         console.info("[DBX][executeTabSql:mongo-aggregate:done]", {
           traceId,
           rowCount: result.documents.length,

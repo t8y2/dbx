@@ -62,6 +62,7 @@ import {
   TableProperties,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -7256,7 +7257,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         </div>
       </div>
     </CustomContextMenu>
-    <div v-if="!hasData" class="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+    <QueryLoadingState v-if="!hasData && loading" class="flex-1 min-h-0" />
+    <div v-else-if="!hasData" class="flex-1 flex items-center justify-center text-muted-foreground text-sm">
       {{ t("grid.querySuccess") }}
     </div>
 

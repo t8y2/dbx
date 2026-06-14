@@ -2,13 +2,14 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Square, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks, Download, X } from "@lucide/vue";
+import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks, Download, X } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
@@ -700,18 +701,16 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   </Button>
                 </template>
               </DataGrid>
-              <div v-else-if="!activeTab.result && activeTab.isExecuting" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
-                <div class="flex items-center">
-                  <Loader2 class="h-5 w-5 animate-spin mr-2" />
-                  {{ t(queryExecutionLabelKey(activeTab)) }}
-                  <span class="ml-1 tabular-nums text-muted-foreground/80">· {{ queryRunningElapsedSeconds }}s</span>
-                </div>
-                <Button variant="destructive" size="sm" class="h-7 gap-1.5" :disabled="!canCancelQueryExecution(activeTab)" @click="emit('cancel')">
-                  <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
-                  <Square v-else class="h-3.5 w-3.5 fill-current" />
-                  {{ t("toolbar.stopQuery") }}
-                </Button>
-              </div>
+              <QueryLoadingState
+                v-else-if="!activeTab.result && activeTab.isExecuting"
+                class="flex-1 min-h-0"
+                :label-key="queryExecutionLabelKey(activeTab)"
+                :elapsed-seconds="queryRunningElapsedSeconds"
+                show-cancel
+                :cancel-disabled="!canCancelQueryExecution(activeTab)"
+                :cancelling="activeTab.isCancelling"
+                @cancel="emit('cancel')"
+              />
               <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
                 <div>{{ t("editor.pressToExecute", { mod: shortcutModifier }) }}</div>
                 <div>{{ t("editor.pressToSaveSql", { mod: shortcutModifier }) }}</div>
@@ -847,18 +846,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string) => emit('sort', column, columnIndex, direction, whereInput)"
         />
-        <div v-else-if="activeTab.isExecuting" class="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
-          <div class="flex items-center">
-            <Loader2 class="h-5 w-5 animate-spin mr-2" />
-            {{ t(queryExecutionLabelKey(activeTab)) }}
-            <span class="ml-1 tabular-nums text-muted-foreground/80">· {{ queryRunningElapsedSeconds }}s</span>
-          </div>
-          <Button variant="destructive" size="sm" class="h-7 gap-1.5" :disabled="!canCancelQueryExecution(activeTab)" @click="emit('cancel')">
-            <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
-            <Square v-else class="h-3.5 w-3.5 fill-current" />
-            {{ t("toolbar.stopQuery") }}
-          </Button>
-        </div>
+        <QueryLoadingState v-else-if="activeTab.isExecuting" class="h-full" :label-key="queryExecutionLabelKey(activeTab)" :elapsed-seconds="queryRunningElapsedSeconds" show-cancel :cancel-disabled="!canCancelQueryExecution(activeTab)" :cancelling="activeTab.isCancelling" @cancel="emit('cancel')" />
         <div v-else class="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
           <Inbox class="h-8 w-8 opacity-60" />
           <div>{{ t("grid.dataUnavailable") }}</div>

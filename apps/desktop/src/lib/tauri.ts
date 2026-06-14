@@ -1268,16 +1268,16 @@ export async function elasticsearchListIndices(connectionId: string): Promise<st
   return mongoListCollections(connectionId, "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string): Promise<MongoDocumentResult> {
-  return invoke("mongo_find_documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_find_documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string): Promise<MongoDocumentResult> {
-  return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number): Promise<MongoDocumentResult> {
-  return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows });
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
 export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {

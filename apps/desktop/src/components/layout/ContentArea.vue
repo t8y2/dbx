@@ -2,14 +2,14 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks, Download, X } from "@lucide/vue";
+import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
@@ -41,6 +41,7 @@ const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
@@ -75,6 +76,10 @@ type DataGridHandle = {
   toggleDdl: () => void;
   multiRowTranspose: boolean;
   setMultiRowTranspose: (value: boolean) => void;
+  exportCsv: () => Promise<void>;
+  exportJson: () => Promise<void>;
+  exportSql: () => Promise<void>;
+  exportXlsx: () => Promise<void>;
 };
 
 type SearchableBrowserHandle = {
@@ -117,6 +122,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+const connectionStore = useConnectionStore();
 const { toast } = useToast();
 
 onMounted(() => {
@@ -337,6 +343,29 @@ watch(
     }
   },
 );
+
+// Table toolbox handlers
+function handleTableImport() {
+  const tab = props.activeTab;
+  if (!tab.tableMeta || !tab.connectionId) return;
+  connectionStore.tableImportSource = {
+    connectionId: tab.connectionId,
+    database: tab.database,
+    schema: tab.tableMeta.schema,
+    tableName: tab.tableMeta.tableName,
+  };
+}
+
+function handleTableDataGenerate() {
+  const tab = props.activeTab;
+  if (!tab.tableMeta || !tab.connectionId) return;
+  connectionStore.tableDataGenerateSource = {
+    connectionId: tab.connectionId,
+    database: tab.database,
+    schema: tab.tableMeta.schema,
+    tableName: tab.tableMeta.tableName,
+  };
+}
 
 // Column info panel handlers
 async function onHandleClickColumn(matchedCols: Array<{ name: string; table: string; schema?: string }>, errorMsg?: string) {
@@ -775,7 +804,41 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               </div>
             </PopoverContent>
           </Popover>
-          <Button v-if="activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"> <TableProperties class="h-3.5 w-3.5" /> {{ t("grid.tableInfo") }} </Button>
+          <Button v-if="activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"><TableProperties class="h-3.5 w-3.5" />{{ t("grid.tableInfo") }}</Button>
+          <DropdownMenu v-if="activeTab.tableMeta && activeTab.connectionId">
+            <DropdownMenuTrigger as-child>
+              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"><Toolbox class="h-3.5 w-3.5" />{{ t("tableToolbox.title") }}</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="w-max min-w-44 gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl">
+              <div class="border-b bg-muted/40 px-3 py-2">
+                <div class="text-xs font-semibold">{{ t("tableToolbox.title") }}</div>
+              </div>
+              <div class="p-1">
+                <DropdownMenuItem class="gap-2" @click="handleTableDataGenerate">
+                  <Database class="h-4 w-4" />
+                  {{ t("tableToolbox.generateData") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem class="gap-2" @click="handleTableImport">
+                  <FileUp class="h-4 w-4" />
+                  {{ t("tableToolbox.importData") }}
+                </DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger class="gap-2">
+                    <FileUp class="h-4 w-4" />
+                    {{ t("tableToolbox.exportData") }}
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuSubContent>
+                      <DropdownMenuItem @click="dataGridRef?.exportCsv()"> CSV </DropdownMenuItem>
+                      <DropdownMenuItem @click="dataGridRef?.exportJson()"> JSON </DropdownMenuItem>
+                      <DropdownMenuItem @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
+                      <DropdownMenuItem @click="dataGridRef?.exportXlsx()"> XLSX </DropdownMenuItem>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuSub>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
               <Button

@@ -10,6 +10,7 @@ const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showTableImportDialog = ref(false);
+const showTableDataGenerateDialog = ref(false);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
 const showDatabaseExportDialog = ref(false);
@@ -39,6 +40,10 @@ const tableImportPrefillConnectionId = ref("");
 const tableImportPrefillDatabase = ref("");
 const tableImportPrefillSchema = ref("");
 const tableImportPrefillTable = ref("");
+const tableDataGeneratePrefillConnectionId = ref("");
+const tableDataGeneratePrefillDatabase = ref("");
+const tableDataGeneratePrefillSchema = ref("");
+const tableDataGeneratePrefillTable = ref("");
 const lineagePrefillConnectionId = ref("");
 const lineagePrefillDatabase = ref("");
 const lineagePrefillSchema = ref("");
@@ -139,6 +144,20 @@ export function useDialogSources() {
           tableImportPrefillTable.value = v.tableName;
           showTableImportDialog.value = true;
           connectionStore.tableImportSource = null;
+        }
+      },
+    );
+
+    watch(
+      () => connectionStore.tableDataGenerateSource,
+      (v) => {
+        if (v) {
+          tableDataGeneratePrefillConnectionId.value = v.connectionId;
+          tableDataGeneratePrefillDatabase.value = v.database;
+          tableDataGeneratePrefillSchema.value = v.schema ?? "";
+          tableDataGeneratePrefillTable.value = v.tableName;
+          showTableDataGenerateDialog.value = true;
+          connectionStore.tableDataGenerateSource = null;
         }
       },
     );
@@ -263,6 +282,7 @@ export function useDialogSources() {
     showSqlFileDialog,
     showDiagramDialog,
     showTableImportDialog,
+    showTableDataGenerateDialog,
     showFieldLineageDialog,
     showDatabaseSearchDialog,
     showDatabaseExportDialog,
@@ -291,6 +311,10 @@ export function useDialogSources() {
     tableImportPrefillDatabase,
     tableImportPrefillSchema,
     tableImportPrefillTable,
+    tableDataGeneratePrefillConnectionId,
+    tableDataGeneratePrefillDatabase,
+    tableDataGeneratePrefillSchema,
+    tableDataGeneratePrefillTable,
     lineagePrefillConnectionId,
     lineagePrefillDatabase,
     lineagePrefillSchema,

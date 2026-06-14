@@ -16,6 +16,7 @@ const FieldLineageDialog = defineAsyncComponent(() => import("@/components/linea
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
+const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
@@ -143,6 +144,14 @@ watch(
     :prefill-database="dialogs.tableImportPrefillDatabase.value"
     :prefill-schema="dialogs.tableImportPrefillSchema.value"
     :prefill-table="dialogs.tableImportPrefillTable.value"
+  />
+  <DataGenerateDialog
+    v-if="dialogs.showTableDataGenerateDialog.value"
+    v-model:open="dialogs.showTableDataGenerateDialog.value"
+    :prefill-connection-id="dialogs.tableDataGeneratePrefillConnectionId.value"
+    :prefill-database="dialogs.tableDataGeneratePrefillDatabase.value"
+    :prefill-schema="dialogs.tableDataGeneratePrefillSchema.value"
+    :prefill-table="dialogs.tableDataGeneratePrefillTable.value"
   />
   <FieldLineageDialog
     v-if="dialogs.showFieldLineageDialog.value"

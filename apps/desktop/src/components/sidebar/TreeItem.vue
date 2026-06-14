@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, computed, nextTick, watch, onBeforeUnmount, inject } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
@@ -158,7 +158,7 @@ const emit = defineEmits<{
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
-const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 flex-1 truncate"));
+const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 truncate"));
 
 function currentDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
@@ -300,7 +300,7 @@ const tableInfoTooltip = computed(() => {
 });
 
 function isTooltipDisabled(): boolean {
-  if (tableInfoTooltip.value?.rows.length) return isRenamingGroup.value;
+  if (tableInfoTooltip.value?.rows.length && !settingsStore.editorSettings.sidebarHideTableComments) return true;
   return isRenamingGroup.value || !isLabelTruncated();
 }
 
@@ -2368,8 +2368,8 @@ const hasTypeMenu = computed(() => {
   const t = props.node.type;
   return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "package" || t === "package-body" || isGroupLabel(props.node);
 });
-const columnComment = computed(() => (props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null));
-const tableComment = computed(() => ((props.node.type === "table" || props.node.type === "view" || props.node.type === "mongo-collection" || props.node.type === "elasticsearch-index") && props.node.comment ? props.node.comment : null));
+const columnComment = computed(() => (!settingsStore.editorSettings.sidebarHideTableComments && props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null));
+const tableComment = computed(() => (!settingsStore.editorSettings.sidebarHideTableComments && (props.node.type === "table" || props.node.type === "view" || props.node.type === "mongo-collection" || props.node.type === "elasticsearch-index") && props.node.comment ? props.node.comment : null));
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const isConnected = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId));
 const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
@@ -3209,8 +3209,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
             {{ t("editor.defaultDatabase") }}
           </Badge>
-          <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{ columnComment }}</span>
-          <span v-if="tableComment && !settingsStore.editorSettings.sidebarHideTableComments" class="truncate text-muted-foreground/60 text-[10px] max-w-[25%] group-hover:hidden" :title="tableComment">{{ tableComment }}</span>
+          <span v-if="columnComment" class="ml-auto truncate text-muted-foreground/60 text-[10px] max-w-[20%] shrink-0 text-right">{{ columnComment }}</span>
+          <span v-if="tableComment" class="ml-auto truncate text-muted-foreground/60 text-[10px] max-w-[20%] shrink-0 text-right">{{ tableComment }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
           <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
           <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />

@@ -135,6 +135,12 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName: string;
   } | null>(null);
+  const tableDataGenerateSource = ref<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    tableName: string;
+  } | null>(null);
   const fieldLineageSource = ref<{
     connectionId: string;
     database: string;
@@ -2735,6 +2741,7 @@ export const useConnectionStore = defineStore("connection", () => {
     sqlFileSource,
     diagramSource,
     tableImportSource,
+    tableDataGenerateSource,
     fieldLineageSource,
     databaseSearchSource,
     databaseExportSource,

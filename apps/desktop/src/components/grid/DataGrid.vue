@@ -5652,6 +5652,10 @@ defineExpose({
   canToggleAllNullColumns,
   toggleAllNullColumns,
   openCellDetailSearch,
+  exportCsv,
+  exportJson,
+  exportSql,
+  exportXlsx,
 });
 
 // ---- CustomContextMenu ----

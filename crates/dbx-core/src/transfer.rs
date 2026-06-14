@@ -3611,6 +3611,21 @@ mod tests {
     }
 
     #[test]
+    fn questdb_pagination_uses_stable_primary_key_order() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "public",
+            &DatabaseType::Questdb,
+            200,
+            100,
+            &[String::from("id")],
+        );
+
+        assert_eq!(sql, "SELECT `id`, `name` FROM `users` ORDER BY `id` LIMIT 200, 300");
+    }
+
+    #[test]
     fn filtered_pagination_preserves_where_and_order() {
         let sql = pagination_sql_with_filter_order(
             &[String::from("id"), String::from("status")],

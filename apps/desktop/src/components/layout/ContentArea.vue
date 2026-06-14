@@ -42,7 +42,7 @@ const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryCh
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/tableEditing";
@@ -234,6 +234,7 @@ const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
   return tabularResults.value.length > 0;
 });
+const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const resultsPaneOpen = ref(false);
 const queryRunningElapsed = ref(0);
 let queryRunningElapsedTimer: ReturnType<typeof setInterval> | undefined;
@@ -433,6 +434,10 @@ async function exportResultArchive() {
   }
 }
 
+function toggleExecutionSummary() {
+  emit("update:activeOutputView", nextExecutionSummaryView(props.activeOutputView, canShowResultOutput.value));
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -537,7 +542,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 </div>
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
-                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="emit('update:activeOutputView', 'summary')">
+                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="toggleExecutionSummary">
                   <ListChecks class="h-3.5 w-3.5" />
                   {{ t("tabs.executionSummary") }}
                 </Button>

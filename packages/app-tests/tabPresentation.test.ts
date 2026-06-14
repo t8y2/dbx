@@ -1,7 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { activeResultRun, databaseDisplayNameForTab, executionSummaryItems, resultGridCacheKey, resultRunItems, tabDisplayTitle, tabularResultItems } from "../../apps/desktop/src/lib/tabPresentation.ts";
+import {
+  activeResultRun,
+  databaseDisplayNameForTab,
+  executionSummaryItems,
+  nextExecutionSummaryView,
+  resultGridCacheKey,
+  resultRunItems,
+  tabDisplayTitle,
+  tabularResultItems,
+} from "../../apps/desktop/src/lib/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
@@ -175,4 +184,11 @@ test("execution summary items include table and non-table statement results", ()
       { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, isError: true },
     ],
   );
+});
+
+test("execution summary button toggles back to result only when result view is available", () => {
+  assert.equal(nextExecutionSummaryView("result", true), "summary");
+  assert.equal(nextExecutionSummaryView("chart", true), "summary");
+  assert.equal(nextExecutionSummaryView("summary", true), "result");
+  assert.equal(nextExecutionSummaryView("summary", false), "summary");
 });

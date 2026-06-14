@@ -3,6 +3,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import type { ConnectionConfig, QueryResult, QueryTab } from "@/types/database";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
+export type OutputView = "result" | "summary" | "explain" | "chart";
 
 export function connectionDisplayName(connectionId: string): string {
   const connectionStore = useConnectionStore();
@@ -134,6 +135,11 @@ export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultR
 
 export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex">): string {
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
+}
+
+export function nextExecutionSummaryView(currentView: OutputView, canShowResult: boolean): OutputView {
+  if (currentView === "summary" && canShowResult) return "result";
+  return "summary";
 }
 
 export interface ExecutionSummaryItem {

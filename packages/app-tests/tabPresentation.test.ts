@@ -1,7 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { databaseDisplayNameForTab, executionSummaryItems, tabDisplayTitle, tabularResultItems } from "../../apps/desktop/src/lib/tabPresentation.ts";
+import {
+  activeResultRun,
+  databaseDisplayNameForTab,
+  executionSummaryItems,
+  nextExecutionSummaryView,
+  resultGridCacheKey,
+  resultRunItems,
+  tabDisplayTitle,
+  tabularResultItems,
+} from "../../apps/desktop/src/lib/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
@@ -118,6 +127,44 @@ test("tabular result items hide statement results without returned columns", () 
   assert.deepEqual(tabularResultItems(undefined), []);
 });
 
+test("result run items expose ordered labels and active state", () => {
+  const tab = queryTab({
+    activeResultRunId: "run-2",
+    resultRuns: [
+      {
+        id: "run-1",
+        title: "Run 1",
+        sequence: 1,
+        sql: "select 1",
+        createdAt: 10,
+        result: result(["one"]),
+      },
+      {
+        id: "run-2",
+        title: "Run 2",
+        sequence: 2,
+        sql: "select 2",
+        createdAt: 20,
+        result: result(["two"]),
+      },
+    ],
+  });
+
+  assert.deepEqual(resultRunItems(tab), [
+    { id: "run-1", title: "Run 1", sequence: 1, active: false },
+    { id: "run-2", title: "Run 2", sequence: 2, active: true },
+  ]);
+  assert.equal(activeResultRun(tab)?.id, "run-2");
+  assert.deepEqual(resultRunItems(queryTab()).map((item) => item.title), []);
+});
+
+test("result grid cache key includes result run id and statement result index", () => {
+  const tab = queryTab({ activeResultRunId: "run-7", activeResultIndex: 3 });
+
+  assert.equal(resultGridCacheKey(tab), "tab-1-run-7-3");
+  assert.equal(resultGridCacheKey(queryTab({ activeResultIndex: undefined })), "tab-1-current-0");
+});
+
 test("execution summary items include table and non-table statement results", () => {
   const items = executionSummaryItems({
     results: [result([]), result(["id"]), { ...result(["Error"]), rows: [["boom"]] }],
@@ -137,4 +184,11 @@ test("execution summary items include table and non-table statement results", ()
       { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, isError: true },
     ],
   );
+});
+
+test("execution summary button toggles back to result only when result view is available", () => {
+  assert.equal(nextExecutionSummaryView("result", true), "summary");
+  assert.equal(nextExecutionSummaryView("chart", true), "summary");
+  assert.equal(nextExecutionSummaryView("summary", true), "result");
+  assert.equal(nextExecutionSummaryView("summary", false), "summary");
 });

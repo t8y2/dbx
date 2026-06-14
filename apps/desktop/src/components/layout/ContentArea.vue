@@ -2,7 +2,7 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Square, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks } from "@lucide/vue";
+import { Check, Columns3, Loader2, Search, Square, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks, Download, X } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -40,8 +40,11 @@ const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
+import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, tabularResultItems } from "@/lib/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
+import { defaultQueryResultArchiveFileName } from "@/lib/queryResultArchive";
+import { saveQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/tableEditing";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
@@ -113,6 +116,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+const { toast } = useToast();
 
 onMounted(() => {
   const preload = () => preloadDataGridComponent();
@@ -214,6 +218,10 @@ const activeQueryError = computed(() => {
 });
 const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
+const resultRuns = computed(() => resultRunItems(props.activeTab));
+const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
+const resultArchiveExporting = ref(false);
+const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 watch(
   () => tabularResults.value.map((item) => item.index).join(","),
   () => {
@@ -226,6 +234,7 @@ const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
   return tabularResults.value.length > 0;
 });
+const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const resultsPaneOpen = ref(false);
 const queryRunningElapsed = ref(0);
 let queryRunningElapsedTimer: ReturnType<typeof setInterval> | undefined;
@@ -407,6 +416,34 @@ function refreshData(): boolean {
   return true;
 }
 
+async function exportResultArchive() {
+  if (resultArchiveExporting.value) return;
+  resultArchiveExporting.value = true;
+  try {
+    const bytes = await queryStore.exportResultArchive(props.activeTab.id);
+    if (!bytes) {
+      toast(t("tabs.resultArchiveUnavailable"), 4000);
+      return;
+    }
+    const saved = await saveQueryResultArchiveFile(defaultQueryResultArchiveFileName(props.activeTab.title), bytes);
+    if (saved) toast(t("tabs.resultArchiveExported"), 2500);
+  } catch (error: any) {
+    toast(t("tabs.resultArchiveExportFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    resultArchiveExporting.value = false;
+  }
+}
+
+function toggleExecutionSummary() {
+  emit("update:activeOutputView", nextExecutionSummaryView(props.activeOutputView, canShowResultOutput.value));
+}
+
+function removeResultRun(runId: string) {
+  const removedActiveRun = props.activeTab.activeResultRunId === runId;
+  const removed = queryStore.removeResultRun(props.activeTab.id, runId);
+  if (removed && removedActiveRun) emit("update:activeOutputView", "result");
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -469,6 +506,27 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   {{ t("tabs.tableData") }}
                 </Button>
               </div>
+              <template v-if="resultRuns.length > 0">
+                <span class="mx-1 h-4 w-px shrink-0 bg-border" />
+                <div class="flex min-w-0 max-w-[35%] items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :aria-label="t('tabs.resultRuns')">
+                  <div v-for="run in resultRuns" :key="run.id" class="inline-flex shrink-0 items-center">
+                    <Button
+                      size="sm"
+                      :variant="run.active ? 'default' : 'ghost'"
+                      class="h-6 rounded-r-none px-2 text-xs"
+                      @click="
+                        queryStore.setActiveResultRun(activeTab.id, run.id);
+                        emit('update:activeOutputView', 'result');
+                      "
+                    >
+                      {{ t("tabs.runN", { n: run.sequence }) }}
+                    </Button>
+                    <Button size="icon" :variant="run.active ? 'default' : 'ghost'" class="h-6 w-6 rounded-l-none border-l border-border/50 px-0" :title="t('tabs.removeRun', { n: run.sequence })" :aria-label="t('tabs.removeRun', { n: run.sequence })" @click.stop="removeResultRun(run.id)">
+                      <X class="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+              </template>
               <template v-if="tabularResults.length > 1">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div class="relative min-w-0 flex-1 self-stretch">
@@ -493,7 +551,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 </div>
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
-                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="emit('update:activeOutputView', 'summary')">
+                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="toggleExecutionSummary">
                   <ListChecks class="h-3.5 w-3.5" />
                   {{ t("tabs.executionSummary") }}
                 </Button>
@@ -505,6 +563,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 <Button size="sm" :variant="activeOutputView === 'explain' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!activeTab.explainPlan && !activeTab.explainError && !activeTab.isExplaining" @click="emit('update:activeOutputView', 'explain')">
                   <GitBranch class="h-3.5 w-3.5" />
                   {{ t("explain.title") }}
+                </Button>
+                <Button v-if="canExportResultArchive" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="resultArchiveExporting" @click="exportResultArchive">
+                  <Loader2 v-if="resultArchiveExporting" class="h-3.5 w-3.5 animate-spin" />
+                  <Download v-else class="h-3.5 w-3.5" />
+                  {{ t("tabs.exportResultArchive") }}
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
@@ -600,8 +663,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               <DataGrid
                 v-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
-                :key="`${activeTab.id}-${activeTab.activeResultIndex ?? 0}`"
-                :cache-key="`${activeTab.id}-${activeTab.activeResultIndex ?? 0}`"
+                :key="activeResultGridCacheKey"
+                :cache-key="activeResultGridCacheKey"
                 class="flex-1 min-h-0"
                 :result="activeTab.result"
                 :sort-column="activeTab.resultSortColumn"

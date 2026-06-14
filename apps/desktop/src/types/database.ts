@@ -324,6 +324,38 @@ export interface QueryResult {
   has_more?: boolean;
 }
 
+export interface QueryResultRun {
+  id: string;
+  title: string;
+  sequence: number;
+  sql: string;
+  createdAt: number;
+  result?: QueryResult;
+  results?: QueryResult[];
+  activeResultIndex?: number;
+  resultBaseSql?: string;
+  resultSortedSql?: string;
+  resultSortColumn?: string;
+  resultSortColumnIndex?: number;
+  resultSortDirection?: "asc" | "desc";
+  orderByInput?: string;
+  resultPageSql?: string;
+  resultPageLimit?: number;
+  resultPageOffset?: number;
+  resultCountSql?: string;
+  resultTotalRowCount?: number;
+  resultTotalRowCountLoading?: boolean;
+  resultSessionId?: string;
+  resultAccessedAt?: number;
+  resultCacheKey?: string;
+  resultCacheState?: "memory" | "disk" | "missing";
+  resultEvicted?: boolean;
+  queryAnalysis?: QueryTab["queryAnalysis"];
+  querySourceColumns?: QueryTab["querySourceColumns"];
+  queryEditabilityReason?: QueryTab["queryEditabilityReason"];
+  tableMeta?: QueryTab["tableMeta"];
+}
+
 export interface SqlTextSpan {
   start_line: number;
   start_column: number;
@@ -459,6 +491,8 @@ export interface QueryTab {
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
+  resultRuns?: QueryResultRun[];
+  activeResultRunId?: string;
   explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;

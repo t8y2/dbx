@@ -37,6 +37,7 @@ import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } 
 import { resolveExecutableSql, resolveExecutableSqlWithBackend } from "@/lib/sqlExecutionTarget";
 import { uuid } from "@/lib/utils";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { openQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { sqlFileTitleFromPath } from "@/lib/sqlFileOpen";
 import type { ConnectionConfig } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
@@ -536,6 +537,22 @@ async function openSqlFile() {
     }
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function importResultArchive() {
+  try {
+    const bytes = await openQueryResultArchiveFile();
+    if (!bytes) return;
+    const tabId = await queryStore.importResultArchive(bytes);
+    if (!tabId) {
+      toast(t("tabs.resultArchiveImportInvalid"), 5000);
+      return;
+    }
+    activeOutputView.value = "result";
+    toast(t("tabs.resultArchiveImported"), 2500);
+  } catch (e: any) {
+    toast(t("tabs.resultArchiveImportFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 
@@ -1141,6 +1158,7 @@ onUnmounted(() => {
                   @format-sql="formatActiveSql"
                   @save-sql="void openSaveSqlDialog()"
                   @open-sql="openSqlFile"
+                  @import-result-archive="importResultArchive"
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
                   @change-schema="changeActiveSchema"

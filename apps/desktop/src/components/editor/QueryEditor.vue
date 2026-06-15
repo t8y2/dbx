@@ -37,6 +37,7 @@ import { selectionMatchOccurrences } from "@/lib/codemirrorSelectionMatches";
 import { isSchemaAware, isSingleDatabase } from "@/lib/databaseFeatureSupport";
 import * as api from "@/lib/api";
 import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, shouldRunSqlSemanticDiagnostics, type SqlSemanticDiagnostic } from "@/lib/sqlSemanticDiagnostics";
+import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redisSyntaxDiagnostics";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject } from "@/lib/sqlCompletion";
 import type { DatabaseType, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
@@ -730,8 +731,17 @@ async function refreshSemanticDiagnostics() {
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "redis") {
+  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch") {
     setSemanticDiagnostics([]);
+    return;
+  }
+  if (props.databaseType === "redis") {
+    // Redis has no SQL semantics; run command-name / arity / quote / danger checks instead.
+    if (!shouldRunRedisDiagnostics(sql, currentView.state.selection.main.head)) {
+      scheduleSemanticDiagnostics(900);
+      return;
+    }
+    setSemanticDiagnostics(buildRedisSyntaxDiagnostics(sql));
     return;
   }
   if (!shouldRunSqlSemanticDiagnostics(sql, currentView.state.selection.main.head, { databaseType: props.databaseType })) {

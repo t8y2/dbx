@@ -2,19 +2,20 @@ import { createI18n } from "vue-i18n";
 import en from "./locales/en";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 
-export type Locale = "en" | "es" | "it" | "pt-BR" | "zh-CN" | "zh-TW";
+export type Locale = "en" | "es" | "it" | "ja" | "pt-BR" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
 type I18nGlobal = {
   locale: { value: Locale };
   setLocaleMessage: (locale: Locale, messages: LocaleMessages) => void;
 };
 
-const supportedLocales: Locale[] = ["en", "es", "it", "pt-BR", "zh-CN", "zh-TW"];
+const supportedLocales: Locale[] = ["en", "es", "it", "ja", "pt-BR", "zh-CN", "zh-TW"];
 const defaultLocale: Locale = "en";
 const loadedLocales = new Set<Locale>([defaultLocale]);
 const localeLoaders: Record<Exclude<Locale, "en">, () => Promise<{ default: LocaleMessages }>> = {
   es: () => import("./locales/es"),
   it: () => import("./locales/it"),
+  ja: () => import("./locales/ja"),
   "pt-BR": () => import("./locales/pt-BR"),
   "zh-CN": () => import("./locales/zh-CN"),
   "zh-TW": () => import("./locales/zh-TW"),
@@ -39,6 +40,7 @@ export function localeFromLanguageTag(value: string | null | undefined): Locale 
   if (normalized === "en" || normalized.startsWith("en-")) return "en";
   if (normalized === "es" || normalized.startsWith("es-")) return "es";
   if (normalized === "it" || normalized.startsWith("it-")) return "it";
+  if (normalized === "ja" || normalized.startsWith("ja-")) return "ja";
   if (normalized === "pt" || normalized.startsWith("pt-")) return "pt-BR";
   return null;
 }

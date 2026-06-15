@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
+import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
 import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, Loader2, Moon, PackageSearch, Pencil, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
@@ -147,12 +148,12 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
-const iconThemeDescTruncated = { default: ref<Boolean>(false), black: ref<Boolean>(false) };
+const iconThemeDescTruncated = { default: ref<boolean>(false), black: ref<boolean>(false) };
 const iconThemeDescRef = {
   default: ref<HTMLElement | null>(null),
   black: ref<HTMLElement | null>(null),
 };
-const layoutDescTruncated = { separated: ref<Boolean>(false), classic: ref<Boolean>(false) };
+const layoutDescTruncated = { separated: ref<boolean>(false), classic: ref<boolean>(false) };
 const layoutDescRefs = {
   separated: ref<HTMLElement | null>(null),
   classic: ref<HTMLElement | null>(null),

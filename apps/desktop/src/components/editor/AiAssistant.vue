@@ -77,36 +77,6 @@ const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
 const agentTokens = ref<{ input: number; output: number } | null>(null);
 
-function estimateCost(model: string, inputTokens: number, outputTokens: number): string | null {
-  const m = model.toLowerCase();
-  let inputRate: number, outputRate: number;
-  if (m.includes("claude-opus")) {
-    inputRate = 15;
-    outputRate = 75;
-  } else if (m.includes("claude-sonnet")) {
-    inputRate = 3;
-    outputRate = 15;
-  } else if (m.includes("claude-haiku")) {
-    inputRate = 0.25;
-    outputRate = 1.25;
-  } else if (m.includes("gpt-4o")) {
-    inputRate = 2.5;
-    outputRate = 10;
-  } else if (m.includes("gpt-4")) {
-    inputRate = 30;
-    outputRate = 60;
-  } else if (m.includes("gemini-1.5-pro")) {
-    inputRate = 1.25;
-    outputRate = 5;
-  } else if (m.includes("deepseek")) {
-    inputRate = 0.27;
-    outputRate = 1.1;
-  } else return null;
-  const cost = (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000;
-  if (cost < 0.0001) return "< $0.0001";
-  return `~$${cost.toFixed(4)}`;
-}
-
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
 const pendingCompaction = ref<{ summary: string; compactedMessages: number } | null>(null);
 
@@ -163,7 +133,13 @@ function selectAction(action: AiAction) {
 const visibleMessages = computed(() => messages.value.filter((m) => m.kind !== "contextSummary"));
 
 function messagesForAgentHistory(historyMessages: ChatMessage[]): AiMessage[] {
-  const latestSummaryIndex = historyMessages.findLastIndex((m) => m.kind === "contextSummary");
+  let latestSummaryIndex = -1;
+  for (let i = historyMessages.length - 1; i >= 0; i--) {
+    if (historyMessages[i].kind === "contextSummary") {
+      latestSummaryIndex = i;
+      break;
+    }
+  }
   if (latestSummaryIndex < 0) {
     return historyMessages.map((m) => ({ role: m.role, content: m.content }));
   }
@@ -998,7 +974,6 @@ const messageRenderer = computed(() => {
         </div>
         <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
           <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
-          <span v-if="estimateCost(settings.aiConfig.model, agentTokens.input, agentTokens.output)" class="ml-1">· {{ estimateCost(settings.aiConfig.model, agentTokens.input, agentTokens.output) }}</span>
         </div>
       </div>
     </ScrollArea>

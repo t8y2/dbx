@@ -3,7 +3,6 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Lock } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";

@@ -379,6 +379,35 @@
       }
     },
     {
+      "dbType": "manticoresearch",
+      "label": "Manticore Search",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 9306,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "redshift",
       "label": "Redshift",
       "runtimeMode": "native",
@@ -575,7 +604,7 @@
         "objectSource": false,
         "schemaSearch": false,
         "diagram": false,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": false,
         "dataTransfer": false,
@@ -885,6 +914,35 @@
       }
     },
     {
+      "dbType": "questdb",
+      "label": "QuestDB",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8812,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": true,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "oceanbase-oracle",
       "label": "OceanBase Oracle Mode",
       "runtimeMode": "agent",
@@ -916,10 +974,10 @@
     },
     {
       "dbType": "gbase",
-      "label": "GBase",
+      "label": "GBase 8a",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
-      "agentKey": "gbase",
+      "agentKey": "gbase8a",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -929,6 +987,11 @@
           "profile": "gbase8s",
           "label": "GBase 8s",
           "agentKey": "gbase8s"
+        },
+        {
+          "profile": "gbase8a",
+          "label": "GBase 8a",
+          "agentKey": "gbase8a"
         }
       ],
       "supportLevel": "operate",
@@ -1149,7 +1212,7 @@
         "schemaSearch": true,
         "diagram": false,
         "tableDataEdit": true,
-        "tableStructureEdit": false,
+        "tableStructureEdit": true,
         "tableImport": false,
         "dataTransfer": false,
         "sqlFileExecution": true,

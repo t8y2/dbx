@@ -27,6 +27,7 @@ export const SCHEMA_AWARE_TYPES = new Set<DatabaseType>([
   "hive",
   "databend",
   "db2",
+  "informix",
   "tdengine",
   "xugu",
   "iotdb",
@@ -34,7 +35,7 @@ export const SCHEMA_AWARE_TYPES = new Set<DatabaseType>([
   "duckdb",
 ]);
 
-export const SINGLE_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "firebird", "oceanbase-oracle", "access"]);
+export const SINGLE_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "firebird", "oceanbase-oracle", "access", "questdb"]);
 
 export const FETCH_FIRST_TYPES = new Set<DatabaseType>(["oracle", "dameng"]);
 
@@ -60,6 +61,7 @@ export const TREE_SCHEMA_TYPES = new Set<DatabaseType>([
   "jdbc",
   "trino",
   "h2",
+  "informix",
   "tdengine",
   "xugu",
   "iotdb",
@@ -69,6 +71,6 @@ export const TREE_SCHEMA_TYPES = new Set<DatabaseType>([
 
 export const DATABASE_OBJECT_TREE_TYPES = new Set<DatabaseType>(["jdbc"]);
 
-export const PG_LIKE_STRUCTURE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "opengauss"]);
+export const PG_LIKE_STRUCTURE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb"]);
 
-export const DIAGRAM_SQL_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlite", "rqlite", "turso", "sqlserver", "oracle", "redshift", "dameng", "gaussdb", "kwdb", "opengauss", "oceanbase-oracle"]);
+export const DIAGRAM_SQL_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlite", "rqlite", "turso", "sqlserver", "oracle", "redshift", "dameng", "gaussdb", "kwdb", "opengauss", "questdb", "oceanbase-oracle"]);

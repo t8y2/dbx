@@ -209,11 +209,24 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         options.table_name.as_deref(),
         options.qualified_table_name.as_deref(),
     )?;
-    let batch_size = options.batch_size.unwrap_or(DATABASE_EXPORT_INSERT_BATCH_SIZE).max(1);
-    let columns = options
+    let insert_columns = options
         .columns
         .iter()
-        .map(|column| quote_table_identifier(options.database_type, column))
+        .enumerate()
+        .filter(|(index, _)| {
+            !is_postgres_tsvector_export_column(
+                options.database_type,
+                options.column_types.get(*index).and_then(|value| value.as_deref()),
+            )
+        })
+        .collect::<Vec<_>>();
+    if insert_columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let batch_size = options.batch_size.unwrap_or(DATABASE_EXPORT_INSERT_BATCH_SIZE).max(1);
+    let columns = insert_columns
+        .iter()
+        .map(|(_, column)| quote_table_identifier(options.database_type, column))
         .collect::<Vec<_>>()
         .join(", ");
     let mut statements = Vec::new();
@@ -222,14 +235,14 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         let values = rows
             .iter()
             .map(|row| {
-                let values = row
+                let values = insert_columns
                     .iter()
-                    .enumerate()
-                    .map(|(index, value)| {
+                    .map(|(index, _)| {
+                        let value = row.get(*index).unwrap_or(&Value::Null);
                         format_export_sql_literal_typed(
                             value,
                             options.database_type,
-                            options.column_types.get(index).and_then(|value| value.as_deref()),
+                            options.column_types.get(*index).and_then(|value| value.as_deref()),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -242,6 +255,16 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     }
 
     Ok(statements)
+}
+
+fn is_postgres_tsvector_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_type
+            .map(|column_type| {
+                let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
+                normalized == "tsvector" || normalized.ends_with(".tsvector")
+            })
+            .unwrap_or(false)
 }
 
 pub fn build_export_sql_insert(options: BuildExportSqlInsertOptions) -> Result<String, String> {
@@ -847,6 +870,23 @@ mod tests {
             statements,
             vec!["INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES (b'1', b'1010', '1010'), (b'0', 3, 'off');"]
         );
+    }
+
+    #[test]
+    fn postgres_tsvector_columns_are_omitted_from_sql_insert_export() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("articles".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "title".to_string(), "search_vector".to_string()],
+            column_types: vec![Some("integer".to_string()), Some("text".to_string()), Some("tsvector".to_string())],
+            rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"articles\" (\"id\", \"title\") VALUES (1, 'Hello');"]);
     }
 
     #[test]

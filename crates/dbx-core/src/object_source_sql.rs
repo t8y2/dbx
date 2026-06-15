@@ -127,7 +127,11 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
 
     if matches!(
         input.database_type,
-        DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::OpenGauss
+        DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
     ) && input.object_type == ObjectSourceKind::View
     {
         return Ok(vec![format!(
@@ -159,9 +163,11 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     };
 
     if input.database_type.is_none()
-        || input
-            .database_type
-            .is_some_and(|database_type| is_postgres_like(database_type) || database_type == DatabaseType::OpenGauss)
+        || input.database_type.is_some_and(|database_type| {
+            is_postgres_like(database_type)
+                || database_type == DatabaseType::OpenGauss
+                || database_type == DatabaseType::Questdb
+        })
     {
         return format!("CREATE OR REPLACE VIEW {qualified_name} AS\n{}", ensure_semicolon(source));
     }
@@ -215,6 +221,7 @@ fn is_postgres_like(database_type: DatabaseType) -> bool {
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Vastbase

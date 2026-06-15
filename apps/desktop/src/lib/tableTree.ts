@@ -223,7 +223,13 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
     });
     const tableSchema = schema ?? (matchingObject?.schema ? normalizeDatabaseObjectName(matchingObject.schema) : undefined);
     const key = `${objectType}\0${(tableSchema || "").toLowerCase()}\0${name.toLowerCase()}`;
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      // Table already in objects — merge comment if missing
+      if (matchingObject && table.comment && !matchingObject.comment) {
+        matchingObject.comment = table.comment;
+      }
+      continue;
+    }
     seen.add(key);
     merged.push({
       name,

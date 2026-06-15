@@ -288,7 +288,8 @@ export type AgentEvent =
   | { type: "tool_call_start"; tool_call_id: string; tool_name: string; args: Record<string, unknown> }
   | { type: "tool_call_end"; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
   | { type: "turn_end"; turn: number }
-  | { type: "agent_end"; total_tokens?: number }
+  | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
+  | { type: "context_compacted"; summary: string; summary_tokens: number; compacted_messages: number; estimated_before: number; estimated_after: number }
   | { type: "error"; message: string };
 
 export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void, mode?: string, _signal?: AbortSignal): Promise<string> {
@@ -424,6 +425,7 @@ export interface AiChatMessage {
   role: string;
   content: string;
   reasoning?: string;
+  kind?: "contextSummary";
 }
 
 export interface AiConversation {
@@ -999,6 +1001,10 @@ export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
 }
 
+export async function backupSqliteDatabase(connectionId: string, destinationPath: string): Promise<void> {
+  return invoke("backup_sqlite_database", { connectionId, destinationPath });
+}
+
 export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promise<void> {
   return invoke("sync_saved_sql_directory", { request });
 }
@@ -1037,6 +1043,10 @@ export interface McpServerStatus {
 
 export async function checkMcpServerStatus(): Promise<McpServerStatus> {
   return invoke("check_mcp_server_status");
+}
+
+export async function installMcpServer(): Promise<string> {
+  return invoke("install_mcp_server");
 }
 
 export async function checkForUpdates(): Promise<UpdateInfo> {
@@ -1098,6 +1108,10 @@ export async function redisListDatabases(connectionId: string): Promise<RedisDat
 
 export async function redisScanKeys(connectionId: string, db: number, cursor: number, pattern: string, count: number): Promise<RedisScanResult> {
   return invoke("redis_scan_keys", { connectionId, db, cursor, pattern, count });
+}
+
+export async function redisScanKeysBatch(connectionId: string, db: number, cursor: number, pattern: string, count: number, maxIterations: number): Promise<RedisScanResult> {
+  return invoke("redis_scan_keys_batch", { connectionId, db, cursor, pattern, count, maxIterations });
 }
 
 export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number, includeKeyMatches = false): Promise<RedisScanResult> {
@@ -1184,6 +1198,10 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
   return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count });
 }
 
+export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
+  return invoke("redis_pubsub_publish", { connectionId, db, channel, message });
+}
+
 // --- etcd ---
 export type KvValueEncoding = "utf8" | "base64";
 
@@ -1260,16 +1278,16 @@ export async function elasticsearchListIndices(connectionId: string): Promise<st
   return mongoListCollections(connectionId, "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string): Promise<MongoDocumentResult> {
-  return invoke("mongo_find_documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_find_documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string): Promise<MongoDocumentResult> {
-  return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number): Promise<MongoDocumentResult> {
-  return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows });
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
 export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {

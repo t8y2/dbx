@@ -5,11 +5,13 @@ pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;
 pub mod influxdb_driver;
+pub mod manticoresearch;
 pub mod mongo_driver;
 pub mod mysql;
 pub mod ob_oracle;
 pub mod postgres;
 pub mod proxy_tunnel;
+pub mod questdb;
 pub mod redis_driver;
 pub mod rqlite_driver;
 pub mod sqlite;
@@ -52,6 +54,27 @@ pub fn safe_u64_to_json(v: u64) -> serde_json::Value {
         serde_json::Value::String(v.to_string())
     } else {
         serde_json::Value::Number(v.into())
+    }
+}
+
+pub fn json_value_for_js(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                safe_i64_to_json(value)
+            } else if let Some(value) = number.as_u64() {
+                safe_u64_to_json(value)
+            } else {
+                serde_json::Value::Number(number)
+            }
+        }
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(json_value_for_js).collect())
+        }
+        serde_json::Value::Object(entries) => {
+            serde_json::Value::Object(entries.into_iter().map(|(key, value)| (key, json_value_for_js(value))).collect())
+        }
+        value => value,
     }
 }
 

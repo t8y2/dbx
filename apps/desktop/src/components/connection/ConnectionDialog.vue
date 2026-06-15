@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -27,7 +28,7 @@ import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
-import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
+import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
 
@@ -129,6 +130,7 @@ const defaultForm = (): ConnectionForm => ({
   redis_cluster_nodes: "",
   redis_key_separator: ":",
   etcd_endpoints: "",
+  gbase_server: "",
   read_only: false,
   visible_databases: undefined,
 });
@@ -388,7 +390,8 @@ const driverProfiles: Record<
   vertica: { type: "vertica", port: 5433, user: "dbadmin", label: "Vertica", icon: "vertica" },
   firebird: { type: "firebird", port: 3050, user: "SYSDBA", label: "Firebird", icon: "firebird" },
   exasol: { type: "exasol", port: 8563, user: "sys", label: "Exasol", icon: "exasol" },
-  gbase: { type: "gbase", port: 5258, user: "gbasedbt", label: "GBase", icon: "gbase" },
+  gbase: { type: "gbase", port: 5258, user: "gbasedbt", label: "GBase 8a", icon: "gbase" },
+  gbase8a: { type: "gbase", port: 5258, user: "gbasedbt", label: "GBase 8a", icon: "gbase" },
   gbase8s: { type: "gbase", port: 9088, user: "gbasedbt", label: "GBase 8s", icon: "gbase" },
   opengauss: {
     type: "opengauss",
@@ -399,6 +402,7 @@ const driverProfiles: Record<
   },
   gaussdb: { type: "gaussdb", port: 5432, user: "gaussdb", label: "GaussDB", icon: "gaussdb" },
   kwdb: { type: "kwdb", port: 26257, user: "root", label: "KWDB", icon: "kwdb" },
+  questdb: { type: "questdb", port: 8812, user: "questdb", label: "QuestDB", icon: "questdb" },
   kingbase: { type: "kingbase", port: 54321, user: "system", label: "KingBase", icon: "kingbase" },
   highgo: { type: "highgo", port: 5866, user: "highgo", label: "瀚高 HighGo", icon: "highgo" },
   yashandb: { type: "yashandb", port: 1688, user: "sys", label: "崖山 YashanDB", icon: "yashandb" },
@@ -418,6 +422,14 @@ const driverProfiles: Record<
     user: "root",
     label: "StarRocks",
     icon: "starrocks",
+    urlParams: "",
+  },
+  manticoresearch: {
+    type: "manticoresearch",
+    port: 9306,
+    user: "root",
+    label: "Manticore Search",
+    icon: "manticoresearch",
     urlParams: "",
   },
   redshift: { type: "redshift", port: 5439, user: "awsuser", label: "Redshift", icon: "redshift" },
@@ -537,7 +549,7 @@ function switchOceanbaseMode(mode: "mysql" | "oracle") {
   resetTestState();
 }
 
-function switchGbaseProfile(profile: "gbase" | "gbase8s") {
+function switchGbaseProfile(profile: "gbase8a" | "gbase8s") {
   applyProfile(profile, false);
   selectedType.value = "gbase";
   resetTestState();
@@ -595,7 +607,7 @@ watch(
       if (profile === "oceanbase") {
         oceanbaseSubMode.value = config.driver_profile === "oceanbase-oracle" ? "oracle" : "mysql";
       }
-      if (profile === "gbase8s") {
+      if (profile === "gbase8a" || profile === "gbase8s") {
         selectedType.value = "gbase";
       }
       mongoUseUrl.value = !!config.connection_string;
@@ -727,6 +739,7 @@ const iconTypeMap: Record<string, string> = {
   opengauss: "opengauss",
   gaussdb: "gaussdb",
   kwdb: "kwdb",
+  questdb: "questdb",
   kingbase: "kingbase",
   highgo: "highgo",
   yashandb: "yashandb",
@@ -734,6 +747,7 @@ const iconTypeMap: Record<string, string> = {
   doris: "doris",
   selectdb: "selectdb",
   starrocks: "starrocks",
+  manticoresearch: "manticoresearch",
   redshift: "redshift",
   cockroachdb: "cockroachdb",
   tdengine: "tdengine",
@@ -778,6 +792,7 @@ const dbOptions: DbOption[] = [
   { value: "clickhouse", label: "ClickHouse" },
   { value: "gaussdb", label: "GaussDB" },
   { value: "kwdb", label: "KWDB" },
+  { value: "questdb", label: "QuestDB" },
   { value: "tidb", label: "TiDB" },
   { value: "oceanbase", label: "OceanBase" },
   { value: "goldendb", label: "GoldenDB" },
@@ -819,6 +834,9 @@ const dbOptions: DbOption[] = [
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
   { value: "jdbc", label: "JDBC" },
+  { value: "manticoresearch", label: "Manticore Search" },
+  { value: "custom_mysql", label: "Custom (MySQL)" },
+  { value: "custom_postgres", label: "Custom (PostgreSQL)" },
 ];
 
 const dbCategories = computed<DbCategory[]>(() => [{ key: "all", title: "", options: dbOptions }]);
@@ -864,9 +882,10 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "redis", "etcd", "clickhouse", "elasticsearch", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "redis", "etcd", "clickhouse", "elasticsearch", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
 const bareMysqlProfiles = new Set(["doris", "starrocks", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
 const mysqlTlsMode = computed({
@@ -979,6 +998,13 @@ const mongoAuthMechanism = computed({
     form.value.url_params = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
   },
 });
+const mongoDriverMode = computed({
+  get: () => (form.value.driver_profile === "mongodb-legacy" ? "legacy" : "auto"),
+  set: (value: string) => {
+    form.value.driver_profile = value === "legacy" ? "mongodb-legacy" : "mongodb";
+    form.value.driver_label = value === "legacy" ? "MongoDB (Legacy)" : "MongoDB";
+  },
+});
 
 function goToConnectionStep(value = selectedType.value) {
   if (value !== selectedType.value) {
@@ -1010,6 +1036,9 @@ async function testConnection() {
     const config = connectionConfigForSubmit(editingId.value || uuid());
     const msg = await api.testConnection(config);
     if (runId !== testRunId) return;
+    if (config.db_type === "mongodb" && /legacy driver/i.test(msg)) {
+      mongoDriverMode.value = "legacy";
+    }
     testResult.value = { ok: true, message: msg };
   } catch (e: any) {
     if (runId !== testRunId) return;
@@ -1072,12 +1101,19 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   config.query_timeout_secs = Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
   const idleTimeout = Number(config.idle_timeout_secs);
   config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
+  if (config.db_type === "manticoresearch") {
+    config.url_params = "";
+  }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
     config.connection_string = undefined;
   } else if (config.db_type === "mongodb") {
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
+  }
+  if (config.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy") {
+    config.driver_profile = "mongodb";
+    config.driver_label = "MongoDB";
   }
   if (config.db_type !== "oracle") {
     config.sysdba = undefined;
@@ -1574,7 +1610,7 @@ function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
     oceanbaseSubMode.value = "oracle";
     selectedType.value = "oceanbase";
   }
-  if (draft.driverProfile === "gbase8s") {
+  if (draft.driverProfile === "gbase8a" || draft.driverProfile === "gbase8s") {
     selectedType.value = "gbase";
   }
   customDriverName.value = isCustomCompatibleProfile() ? draft.driverLabel : "";
@@ -2168,7 +2204,7 @@ function openExternalUrl(url: string) {
                 <div v-if="selectedType === 'gbase'" class="grid grid-cols-4 items-center gap-4">
                   <Label class="text-right text-xs">{{ t("connection.version") }}</Label>
                   <div class="col-span-3 flex gap-2">
-                    <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'outline' : 'default'" @click="switchGbaseProfile('gbase')"> GBase </Button>
+                    <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'outline' : 'default'" @click="switchGbaseProfile('gbase8a')"> GBase 8a </Button>
                     <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'default' : 'outline'" @click="switchGbaseProfile('gbase8s')"> GBase 8s </Button>
                   </div>
                 </div>
@@ -2236,7 +2272,7 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" />
+                    <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label class="text-right mt-2">{{ t("connection.jdbcDriverPaths") }}</Label>
@@ -2357,7 +2393,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.password") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
-                      <Input v-model="form.password" type="password" class="col-span-3" />
+                      <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                   </template>
                 </template>
@@ -2403,7 +2439,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.redisSentinelPassword") }}</Label>
-                      <Input v-model="form.redis_sentinel_password" type="password" class="col-span-3" />
+                      <PasswordInput v-model="form.redis_sentinel_password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.redisSentinelTls") }}</Label>
@@ -2430,7 +2466,7 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+                    <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right text-xs">{{ t("connection.redisKeySeparator") }}</Label>
@@ -2465,12 +2501,27 @@ function openExternalUrl(url: string) {
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" />
+                    <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                 </template>
 
                 <!-- MongoDB: URL or form -->
                 <template v-else-if="form.db_type === 'mongodb'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">{{ t("connection.driverMode") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'outline' : 'default'" @click="mongoDriverMode = 'auto'">{{ t("connection.mongoDriverAuto") }}</Button>
+                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" align="center" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("connection.mongoLegacyHint") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 flex gap-2">
@@ -2492,13 +2543,13 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.host") }}</Label>
                       <Input v-model="form.host" class="col-span-2" />
-                      <Input v-model.number="form.port" type="number" class="col-span-1" :disabled="form.ssl" />
+                      <Input v-model.number="form.port" type="number" class="col-span-1" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <label class="col-span-3 flex items-center gap-2 text-sm">
                         <input type="checkbox" v-model="form.ssl" class="mr-0" />
-                        <span>SRV (MongoDB Atlas)</span>
+                        <span>{{ t("connection.sslEnable") }}</span>
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
@@ -2507,7 +2558,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.password") }}</Label>
-                      <Input v-model="form.password" type="password" class="col-span-3" />
+                      <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.defaultDatabase") }}</Label>
@@ -2534,13 +2585,35 @@ function openExternalUrl(url: string) {
                       <Label class="text-right">{{ t("connection.urlParams") }}</Label>
                       <Input v-model="form.url_params" class="col-span-3" placeholder="authSource=admin&authMechanism=SCRAM-SHA-1" />
                     </div>
-                    <div class="grid grid-cols-4 items-start gap-4">
-                      <span />
-                      <p class="col-span-3 text-xs text-muted-foreground">
-                        {{ t("connection.mongoLegacyHint") }}
-                      </p>
-                    </div>
                   </template>
+                </template>
+
+                <!-- Turso: simplified form (URL + Token) -->
+                <template v-else-if="form.db_type === 'turso'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-3" placeholder="your-database.turso.io 或 libsql://your-database.turso.io" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs text-muted-foreground">支持 libsql:// 或 https:// 协议，也可以只填主机名（自动使用 HTTPS）</p>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">Auth Token</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs text-muted-foreground">使用 <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code> 创建 token</p>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.urlParams") }}</Label>
+                    <Input v-model="form.url_params" class="col-span-3" placeholder="authToken=xxx（可选，优先使用上面的 Token 字段）" />
+                  </div>
                 </template>
 
                 <!-- MySQL / PostgreSQL: host, port, user, password, database -->
@@ -2551,6 +2624,11 @@ function openExternalUrl(url: string) {
                     <Input v-model.number="form.port" type="number" class="col-span-1" />
                   </div>
 
+                  <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">{{ t("connection.gbaseServer") }}</Label>
+                    <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
+                  </div>
+
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
@@ -2558,7 +2636,7 @@ function openExternalUrl(url: string) {
 
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.password") }}</Label>
-                    <Input v-model="form.password" type="password" class="col-span-3" />
+                    <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -2606,7 +2684,7 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.urlParams") }}</Label>
                     <Input
                       v-model="form.url_params"
@@ -3007,7 +3085,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshPassword") }}</Label>
-                      <Input v-model="selectedSshLayer.password" type="password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshKeyPath") }}</Label>
@@ -3025,7 +3103,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.sshKeyPassphrase") }}</Label>
-                      <Input v-model="selectedSshLayer.key_passphrase" type="password" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
@@ -3070,7 +3148,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right text-xs">{{ t("connection.proxyPassword") }}</Label>
-                      <Input v-model="selectedProxyLayer.password" type="password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" :disabled="selectedProxyLayer.enabled === false" />
+                      <PasswordInput v-model="selectedProxyLayer.password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" :disabled="selectedProxyLayer.enabled === false" />
                     </div>
                   </template>
                 </template>

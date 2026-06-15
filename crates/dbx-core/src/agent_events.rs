@@ -17,7 +17,15 @@ pub enum AgentEvent {
     /// A turn in the agent loop has ended.
     TurnEnd { turn: u32 },
     /// The agent loop has finished.
-    AgentEnd { total_tokens: Option<u64> },
+    AgentEnd { input_tokens: Option<u32>, output_tokens: Option<u32> },
+    /// Context was compacted to stay within context window limits.
+    ContextCompacted {
+        summary: String,
+        summary_tokens: u32,
+        compacted_messages: usize,
+        estimated_before: u32,
+        estimated_after: u32,
+    },
     /// An error occurred during the agent loop.
     Error { message: String },
 }
@@ -37,6 +45,10 @@ pub struct ToolResult {
     pub tool_name: String,
     pub content: String,
     pub is_error: bool,
+    /// Structured explain data (QueryResult) for explain_query tool results.
+    /// Set only by execute_explain_query; None for all other tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain_data: Option<serde_json::Value>,
 }
 
 /// Definition of a tool available to the agent.
@@ -46,6 +58,9 @@ pub struct ToolDefinition {
     pub description: &'static str,
     pub parameters: serde_json::Value,
     pub read_only: bool,
+    /// Whether this tool can be executed in parallel with other tools.
+    /// false = must run sequentially (e.g. execute_query).
+    pub parallel_ok: bool,
 }
 
 impl ToolDefinition {

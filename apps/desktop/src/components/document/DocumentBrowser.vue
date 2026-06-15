@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
+import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/api";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
 import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, defaultDocumentFilterRule, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/documentStoreProvider";
@@ -40,6 +41,9 @@ const documents = ref<JsonRecord[]>([]);
 const lastGridColumns = ref<string[]>([]);
 const total = ref(0);
 const loading = ref(false);
+const documentLoadExecutionId = ref("");
+const documentLoadCancelling = ref(false);
+const documentLoadingElapsedSeconds = ref("0.0");
 const page = ref(0);
 const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSize));
 const selectedIdx = ref<number | null>(null);
@@ -145,6 +149,8 @@ const gridResult = computed<QueryResult>(() => {
 });
 const documentFilterFieldOptions = computed(() => gridResult.value.columns);
 const documentStructuredFilterCount = computed(() => (appliedDocumentFilter.value ? 1 : 0));
+const documentLoadingLabelKey = computed(() => (documentLoadCancelling.value ? "common.stopping" : "common.loading"));
+let documentLoadingTimer: ReturnType<typeof setInterval> | undefined;
 
 function createDocumentFilterRule(): DocumentFilterRule {
   return defaultDocumentFilterRule(uuid(), documentFilterFieldOptions.value[0] ?? "");
@@ -362,15 +368,35 @@ const customSaveHandler = computed<CustomSaveHandler>(() => ({
   preview: previewDocumentChanges,
 }));
 
+function stopDocumentLoadingTimer() {
+  if (documentLoadingTimer) clearInterval(documentLoadingTimer);
+  documentLoadingTimer = undefined;
+}
+
+function startDocumentLoadingTimer() {
+  stopDocumentLoadingTimer();
+  const startedAt = Date.now();
+  documentLoadingElapsedSeconds.value = "0.0";
+  documentLoadingTimer = setInterval(() => {
+    documentLoadingElapsedSeconds.value = ((Date.now() - startedAt) / 1000).toFixed(1);
+  }, 100);
+}
+
 async function load() {
+  if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
+  const executionId = uuid();
   loading.value = true;
+  documentLoadExecutionId.value = executionId;
+  documentLoadCancelling.value = false;
+  startDocumentLoadingTimer();
   error.value = "";
   const previousSelectedIdx = selectedIdx.value;
   const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
     const filter = currentDocumentFilter();
     const sort = sortInput.value.trim() || undefined;
-    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, sort);
+    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, sort, executionId);
+    if (documentLoadExecutionId.value !== executionId) return;
     const nextDocuments = result.documents.map(asRecord);
     documents.value = nextDocuments;
     if (nextDocuments.length > 0) {
@@ -386,9 +412,30 @@ async function load() {
     total.value = result.total;
     syncSelectedDocumentAfterLoad(previousSelectedIdx, previousSelectedId);
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e);
+    if (documentLoadExecutionId.value === executionId) error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    loading.value = false;
+    if (documentLoadExecutionId.value === executionId) {
+      loading.value = false;
+      documentLoadExecutionId.value = "";
+      documentLoadCancelling.value = false;
+      stopDocumentLoadingTimer();
+    }
+  }
+}
+
+async function cancelDocumentLoad() {
+  const executionId = documentLoadExecutionId.value;
+  if (!executionId || documentLoadCancelling.value) return;
+  documentLoadCancelling.value = true;
+  try {
+    await api.cancelQuery(executionId);
+  } finally {
+    if (documentLoadExecutionId.value === executionId) {
+      loading.value = false;
+      documentLoadExecutionId.value = "";
+      documentLoadCancelling.value = false;
+      stopDocumentLoadingTimer();
+    }
   }
 }
 
@@ -675,6 +722,8 @@ function highlightedJson(json: string): string {
 
 onMounted(load);
 onBeforeUnmount(() => {
+  if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
+  stopDocumentLoadingTimer();
   endTableSearchSplitResize();
 });
 
@@ -817,8 +866,18 @@ function resetTableSearchSplitWidth() {
     </div>
 
     <!-- Table view -->
+    <QueryLoadingState
+      v-if="viewMode === 'table' && loading && gridResult.columns.length === 0"
+      class="flex-1 min-h-0"
+      :label-key="documentLoadingLabelKey"
+      :elapsed-seconds="documentLoadingElapsedSeconds"
+      show-cancel
+      :cancel-disabled="!documentLoadExecutionId || documentLoadCancelling"
+      :cancelling="documentLoadCancelling"
+      @cancel="cancelDocumentLoad"
+    />
     <DataGrid
-      v-if="viewMode === 'table'"
+      v-else-if="viewMode === 'table'"
       ref="dataGridRef"
       class="flex-1 min-h-0"
       :result="gridResult"

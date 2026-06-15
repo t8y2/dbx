@@ -47,6 +47,7 @@ const DEFAULT_CAPABILITY: DatabaseCapability = {
 
 const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "mysql",
+  "manticoresearch",
   "postgres",
   "sqlite",
   "rqlite",
@@ -72,6 +73,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "firebird",
   "exasol",
   "opengauss",
+  "questdb",
   "oceanbase-oracle",
   "gbase",
   "access",
@@ -81,6 +83,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "informix",
   "bigquery",
   "sundb",
+  "databend",
 ]);
 
 const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<DatabaseCapability>>> = {
@@ -99,6 +102,16 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       insert: false,
       updateRequiresPrimaryKey: true,
       deleteRequiresPrimaryKey: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
+  manticoresearch: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
     },

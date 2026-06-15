@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
@@ -502,7 +503,7 @@ onMounted(loadUsers);
             {{ t("userAdmin.allowLogin") }}
           </label>
           <label class="block text-xs font-medium">{{ t("connection.password") }}</label>
-          <Input v-model="createPassword" type="password" />
+          <PasswordInput v-model="createPassword" />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="createDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -518,7 +519,7 @@ onMounted(loadUsers);
         <DialogHeader>
           <DialogTitle>{{ t("userAdmin.changePassword") }}</DialogTitle>
         </DialogHeader>
-        <Input v-model="newPassword" type="password" :placeholder="t('userAdmin.newPassword')" />
+        <PasswordInput v-model="newPassword" :placeholder="t('userAdmin.newPassword')" />
         <DialogFooter>
           <Button variant="outline" @click="passwordDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button :disabled="!newPassword" @click="previewPasswordChange">{{ t("userAdmin.previewSql") }}</Button>

@@ -46,6 +46,32 @@ test("result snapshots strip live session handles and clone result rows", () => 
   assert.deepEqual(snapshot?.result?.rows, [[1]]);
 });
 
+test("result snapshots strip session handles from result runs", () => {
+  const tab = queryTab({
+    resultRuns: [
+      {
+        id: "run-1",
+        title: "Run 1",
+        sequence: 1,
+        sql: "select 1",
+        createdAt: 1,
+        result: {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          session_id: "live-run-session",
+        },
+      },
+    ],
+  });
+
+  const snapshot = buildTabResultSnapshot(tab);
+
+  assert.equal(snapshot?.resultRuns?.[0]?.result?.session_id, undefined);
+  assert.deepEqual(snapshot?.resultRuns?.[0]?.result?.rows, [[1]]);
+});
+
 test("result snapshots encode as binary columnar payloads and decode back to rows", () => {
   const snapshot = buildTabResultSnapshot(
     queryTab({

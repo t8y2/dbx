@@ -48,3 +48,29 @@ export function connectionFilePath(config: Pick<ConnectionConfig, "db_type" | "h
 export function isLocalFileDb(config: Pick<ConnectionConfig, "db_type" | "host" | "connection_string">): boolean {
   return connectionFilePath(config) !== null;
 }
+
+export function isMemorySqlitePath(path: string | undefined | null): boolean {
+  return (path ?? "").trim().toLowerCase() === ":memory:";
+}
+
+export function sqliteBackupSourcePath(config: Pick<ConnectionConfig, "db_type" | "host">): string | null {
+  if (config.db_type !== "sqlite") return null;
+  const host = (config.host ?? "").trim();
+  return host || null;
+}
+
+export function defaultSqliteBackupFileName(config: Pick<ConnectionConfig, "host" | "name">): string {
+  const source = (config.host || config.name || "database").trim();
+  const rawFileName = isMemorySqlitePath(source) ? "memory.db" : source.split(/[\\/]/).filter(Boolean).pop() || "database.db";
+  const fileName = sanitizeFileName(rawFileName) || "database.db";
+  const dotIndex = fileName.lastIndexOf(".");
+  if (dotIndex <= 0) return `${fileName}.backup.db`;
+  return `${fileName.slice(0, dotIndex)}.backup${fileName.slice(dotIndex)}`;
+}
+
+function sanitizeFileName(fileName: string): string {
+  return fileName
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .trim()
+    .replace(/[. ]+$/g, "");
+}

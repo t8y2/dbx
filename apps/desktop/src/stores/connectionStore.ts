@@ -135,6 +135,12 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName: string;
   } | null>(null);
+  const tableDataGenerateSource = ref<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    tableName: string;
+  } | null>(null);
   const fieldLineageSource = ref<{
     connectionId: string;
     database: string;
@@ -241,9 +247,11 @@ export const useConnectionStore = defineStore("connection", () => {
       elasticsearch: "Elasticsearch",
       doris: "Doris",
       starrocks: "StarRocks",
+      manticoresearch: "Manticore Search",
       redshift: "Redshift",
       dameng: "DM (Dameng)",
       gaussdb: "GaussDB",
+      questdb: "QuestDB",
       kwdb: "KWDB",
       kingbase: "KingBase",
       highgo: "瀚高 HighGo",
@@ -271,6 +279,8 @@ export const useConnectionStore = defineStore("connection", () => {
       dbType = "gaussdb" as ConnectionConfig["db_type"];
     } else if (profile === "kwdb" && dbType === "postgres") {
       dbType = "kwdb" as ConnectionConfig["db_type"];
+    } else if (profile === "questdb" && dbType === "postgres") {
+      dbType = "questdb" as ConnectionConfig["db_type"];
     } else if (profile === "redshift" && dbType === "postgres") {
       dbType = "redshift" as ConnectionConfig["db_type"];
     } else if (profile === "kingbase" && dbType === "postgres") {
@@ -914,10 +924,11 @@ export const useConnectionStore = defineStore("connection", () => {
         );
         const visibleNameSet = new Set(visibleNames);
         const visibleDatabases = databases.filter((database) => visibleNameSet.has(database.name));
+        const effectiveDbType = effectiveDatabaseTypeForConnection(config);
         const children = withSavedSqlRoot(
           connectionId,
           buildDatabaseTreeNodes(connectionId, visibleDatabases, {
-            includeDefaultWhenEmpty: usesTreeSchemaMode(config?.db_type) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
+            includeDefaultWhenEmpty: usesTreeSchemaMode(effectiveDbType) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
           }),
           node,
         );
@@ -1587,9 +1598,10 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       const config = getConfig(node.connectionId);
+      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
       if (config?.db_type === "sqlserver") {
         await loadSqlServerDatabaseObjects(node.connectionId, node.database, options);
-      } else if (usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config)) {
+      } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
         await loadSchemas(node.connectionId, node.database, options);
       } else {
         await loadTables(node.connectionId, node.database, undefined, options);
@@ -2732,6 +2744,7 @@ export const useConnectionStore = defineStore("connection", () => {
     sqlFileSource,
     diagramSource,
     tableImportSource,
+    tableDataGenerateSource,
     fieldLineageSource,
     databaseSearchSource,
     databaseExportSource,

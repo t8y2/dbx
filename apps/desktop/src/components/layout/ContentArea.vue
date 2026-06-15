@@ -2,15 +2,17 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Square, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, ListChecks } from "@lucide/vue";
+import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
+import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
 let dataGridComponentPromise: Promise<typeof import("@/components/grid/DataGrid.vue")> | undefined;
 function loadDataGridComponent() {
@@ -40,8 +42,12 @@ const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, tabularResultItems } from "@/lib/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
+import { defaultQueryResultArchiveFileName } from "@/lib/queryResultArchive";
+import { saveQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/tableEditing";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
@@ -71,6 +77,10 @@ type DataGridHandle = {
   toggleDdl: () => void;
   multiRowTranspose: boolean;
   setMultiRowTranspose: (value: boolean) => void;
+  exportCsv: () => Promise<void>;
+  exportJson: () => Promise<void>;
+  exportSql: () => Promise<void>;
+  exportXlsx: () => Promise<void>;
 };
 
 type SearchableBrowserHandle = {
@@ -113,6 +123,8 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+const connectionStore = useConnectionStore();
+const { toast } = useToast();
 
 onMounted(() => {
   const preload = () => preloadDataGridComponent();
@@ -214,6 +226,10 @@ const activeQueryError = computed(() => {
 });
 const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
+const resultRuns = computed(() => resultRunItems(props.activeTab));
+const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
+const resultArchiveExporting = ref(false);
+const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 watch(
   () => tabularResults.value.map((item) => item.index).join(","),
   () => {
@@ -226,6 +242,7 @@ const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
   return tabularResults.value.length > 0;
 });
+const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const resultsPaneOpen = ref(false);
 const queryRunningElapsed = ref(0);
 let queryRunningElapsedTimer: ReturnType<typeof setInterval> | undefined;
@@ -328,6 +345,29 @@ watch(
   },
 );
 
+// Table toolbox handlers
+function handleTableImport() {
+  const tab = props.activeTab;
+  if (!tab.tableMeta || !tab.connectionId) return;
+  connectionStore.tableImportSource = {
+    connectionId: tab.connectionId,
+    database: tab.database,
+    schema: tab.tableMeta.schema,
+    tableName: tab.tableMeta.tableName,
+  };
+}
+
+function handleTableDataGenerate() {
+  const tab = props.activeTab;
+  if (!tab.tableMeta || !tab.connectionId) return;
+  connectionStore.tableDataGenerateSource = {
+    connectionId: tab.connectionId,
+    database: tab.database,
+    schema: tab.tableMeta.schema,
+    tableName: tab.tableMeta.tableName,
+  };
+}
+
 // Column info panel handlers
 async function onHandleClickColumn(matchedCols: Array<{ name: string; table: string; schema?: string }>, errorMsg?: string) {
   if (!props.activeTab.connectionId || !props.activeTab.database) return;
@@ -407,6 +447,34 @@ function refreshData(): boolean {
   return true;
 }
 
+async function exportResultArchive() {
+  if (resultArchiveExporting.value) return;
+  resultArchiveExporting.value = true;
+  try {
+    const bytes = await queryStore.exportResultArchive(props.activeTab.id);
+    if (!bytes) {
+      toast(t("tabs.resultArchiveUnavailable"), 4000);
+      return;
+    }
+    const saved = await saveQueryResultArchiveFile(defaultQueryResultArchiveFileName(props.activeTab.title), bytes);
+    if (saved) toast(t("tabs.resultArchiveExported"), 2500);
+  } catch (error: any) {
+    toast(t("tabs.resultArchiveExportFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    resultArchiveExporting.value = false;
+  }
+}
+
+function toggleExecutionSummary() {
+  emit("update:activeOutputView", nextExecutionSummaryView(props.activeOutputView, canShowResultOutput.value));
+}
+
+function removeResultRun(runId: string) {
+  const removedActiveRun = props.activeTab.activeResultRunId === runId;
+  const removed = queryStore.removeResultRun(props.activeTab.id, runId);
+  if (removed && removedActiveRun) emit("update:activeOutputView", "result");
+}
+
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
@@ -469,6 +537,27 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   {{ t("tabs.tableData") }}
                 </Button>
               </div>
+              <template v-if="resultRuns.length > 0">
+                <span class="mx-1 h-4 w-px shrink-0 bg-border" />
+                <div class="flex min-w-0 max-w-[35%] items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :aria-label="t('tabs.resultRuns')">
+                  <div v-for="run in resultRuns" :key="run.id" class="inline-flex shrink-0 items-center">
+                    <Button
+                      size="sm"
+                      :variant="run.active ? 'default' : 'ghost'"
+                      class="h-6 rounded-r-none px-2 text-xs"
+                      @click="
+                        queryStore.setActiveResultRun(activeTab.id, run.id);
+                        emit('update:activeOutputView', 'result');
+                      "
+                    >
+                      {{ t("tabs.runN", { n: run.sequence }) }}
+                    </Button>
+                    <Button size="icon" :variant="run.active ? 'default' : 'ghost'" class="h-6 w-6 rounded-l-none border-l border-border/50 px-0" :title="t('tabs.removeRun', { n: run.sequence })" :aria-label="t('tabs.removeRun', { n: run.sequence })" @click.stop="removeResultRun(run.id)">
+                      <X class="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+              </template>
               <template v-if="tabularResults.length > 1">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div class="relative min-w-0 flex-1 self-stretch">
@@ -493,7 +582,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 </div>
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
-                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="emit('update:activeOutputView', 'summary')">
+                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="toggleExecutionSummary">
                   <ListChecks class="h-3.5 w-3.5" />
                   {{ t("tabs.executionSummary") }}
                 </Button>
@@ -505,6 +594,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 <Button size="sm" :variant="activeOutputView === 'explain' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!activeTab.explainPlan && !activeTab.explainError && !activeTab.isExplaining" @click="emit('update:activeOutputView', 'explain')">
                   <GitBranch class="h-3.5 w-3.5" />
                   {{ t("explain.title") }}
+                </Button>
+                <Button v-if="canExportResultArchive" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="resultArchiveExporting" @click="exportResultArchive">
+                  <Loader2 v-if="resultArchiveExporting" class="h-3.5 w-3.5 animate-spin" />
+                  <Download v-else class="h-3.5 w-3.5" />
+                  {{ t("tabs.exportResultArchive") }}
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
@@ -600,8 +694,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               <DataGrid
                 v-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
-                :key="`${activeTab.id}-${activeTab.activeResultIndex ?? 0}`"
-                :cache-key="`${activeTab.id}-${activeTab.activeResultIndex ?? 0}`"
+                :key="activeResultGridCacheKey"
+                :cache-key="activeResultGridCacheKey"
                 class="flex-1 min-h-0"
                 :result="activeTab.result"
                 :sort-column="activeTab.resultSortColumn"
@@ -631,19 +725,22 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string) => emit('sort', column, columnIndex, direction, whereInput)"
               >
                 <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
-                  <Button variant="outline" size="sm" class="mt-2 h-7 gap-1.5 border-destructive/30 bg-background px-2.5 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive" @click="emit('fixWithAi', String(errorMessage))">
+                  <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('fixWithAi', String(errorMessage))">
                     <Bot class="h-3.5 w-3.5" />
                     {{ t("ai.fixWithAi") }}
                   </Button>
                 </template>
               </DataGrid>
-              <div v-else-if="!activeTab.result && activeTab.isExecuting" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
-                <div class="flex items-center">
-                  <Loader2 class="h-5 w-5 animate-spin mr-2" />
-                  {{ t(queryExecutionLabelKey(activeTab)) }}
-                  <span class="ml-1 tabular-nums text-muted-foreground/80">· {{ queryRunningElapsedSeconds }}s</span>
-                </div>
-              </div>
+              <QueryLoadingState
+                v-else-if="!activeTab.result && activeTab.isExecuting"
+                class="flex-1 min-h-0"
+                :label-key="queryExecutionLabelKey(activeTab)"
+                :elapsed-seconds="queryRunningElapsedSeconds"
+                show-cancel
+                :cancel-disabled="!canCancelQueryExecution(activeTab)"
+                :cancelling="activeTab.isCancelling"
+                @cancel="emit('cancel')"
+              />
               <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
                 <div>{{ t("editor.pressToExecute", { mod: shortcutModifier }) }}</div>
                 <div>{{ t("editor.pressToSaveSql", { mod: shortcutModifier }) }}</div>
@@ -708,7 +805,41 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               </div>
             </PopoverContent>
           </Popover>
-          <Button v-if="activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"> <TableProperties class="h-3.5 w-3.5" /> {{ t("grid.tableInfo") }} </Button>
+          <Button v-if="activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"><TableProperties class="h-3.5 w-3.5" />{{ t("grid.tableInfo") }}</Button>
+          <DropdownMenu v-if="activeTab.tableMeta && activeTab.connectionId">
+            <DropdownMenuTrigger as-child>
+              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"><Toolbox class="h-3.5 w-3.5" />{{ t("tableToolbox.title") }}</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="w-max min-w-44 gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl">
+              <div class="border-b bg-muted/40 px-3 py-2">
+                <div class="text-xs font-semibold">{{ t("tableToolbox.title") }}</div>
+              </div>
+              <div class="p-1">
+                <DropdownMenuItem class="gap-2" @click="handleTableDataGenerate">
+                  <Database class="h-4 w-4" />
+                  {{ t("tableToolbox.generateData") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem class="gap-2" @click="handleTableImport">
+                  <FileUp class="h-4 w-4" />
+                  {{ t("tableToolbox.importData") }}
+                </DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger class="gap-2">
+                    <FileUp class="h-4 w-4" />
+                    {{ t("tableToolbox.exportData") }}
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuSubContent>
+                      <DropdownMenuItem @click="dataGridRef?.exportCsv()"> CSV </DropdownMenuItem>
+                      <DropdownMenuItem @click="dataGridRef?.exportJson()"> JSON </DropdownMenuItem>
+                      <DropdownMenuItem @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
+                      <DropdownMenuItem @click="dataGridRef?.exportXlsx()"> XLSX </DropdownMenuItem>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuSub>
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
               <Button
@@ -779,18 +910,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string) => emit('sort', column, columnIndex, direction, whereInput)"
         />
-        <div v-else-if="activeTab.isExecuting" class="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
-          <div class="flex items-center">
-            <Loader2 class="h-5 w-5 animate-spin mr-2" />
-            {{ t(queryExecutionLabelKey(activeTab)) }}
-            <span class="ml-1 tabular-nums text-muted-foreground/80">· {{ queryRunningElapsedSeconds }}s</span>
-          </div>
-          <Button variant="destructive" size="sm" class="h-7 gap-1.5" :disabled="!canCancelQueryExecution(activeTab)" @click="emit('cancel')">
-            <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
-            <Square v-else class="h-3.5 w-3.5 fill-current" />
-            {{ t("toolbar.stopQuery") }}
-          </Button>
-        </div>
+        <QueryLoadingState v-else-if="activeTab.isExecuting" class="h-full" :label-key="queryExecutionLabelKey(activeTab)" :elapsed-seconds="queryRunningElapsedSeconds" show-cancel :cancel-disabled="!canCancelQueryExecution(activeTab)" :cancelling="activeTab.isCancelling" @cancel="emit('cancel')" />
         <div v-else class="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
           <Inbox class="h-8 w-8 opacity-60" />
           <div>{{ t("grid.dataUnavailable") }}</div>

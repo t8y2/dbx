@@ -302,17 +302,26 @@ impl AgentDriverClient {
         let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
         start_stderr_collector(child_stderr, stderr_tail.clone());
 
-        // Wait for the agent to signal readiness with {"ready":true}
+        // Wait for the agent to signal readiness with {"ready":true}.
+        // Some JDBC drivers (e.g. DM8) write banners to stdout during class
+        // loading.  Skip non-JSON lines so driver output doesn't break the
+        // JSON-RPC handshake.
         let startup_result = tokio::time::timeout(
             Duration::from_secs(STARTUP_TIMEOUT_SECS),
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || loop {
                 let line = read_agent_line(&mut stdout, "startup line")?;
-                let v: Value = serde_json::from_str(line.trim())
-                    .map_err(|e| format!("Invalid JSON from agent during startup: {e}"))?;
-                if v.get("ready") != Some(&Value::Bool(true)) {
-                    return Err(format!("Agent did not send ready signal, got: {line}"));
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                Ok(stdout)
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(v) if v.get("ready") == Some(&Value::Bool(true)) => return Ok(stdout),
+                    Ok(_) => return Err(format!("Agent did not send ready signal, got: {line}")),
+                    Err(_) => {
+                        log::warn!("[agent:stdout] ignoring non-JSON line during startup: {trimmed}");
+                        continue;
+                    }
+                }
             }),
         )
         .await;

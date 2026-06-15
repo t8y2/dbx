@@ -85,6 +85,10 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 }
 
 pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
+    if state.password_disabled {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     // Only allow setup when no password is configured
     if state.password_hash.read().await.is_some() {
         return Err(StatusCode::FORBIDDEN);
@@ -115,6 +119,9 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 }
 
 pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Json<AuthCheckResponse> {
+    if state.password_disabled {
+        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false });
+    }
     let has_password = state.password_hash.read().await.is_some();
     if !has_password {
         return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true });

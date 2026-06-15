@@ -286,6 +286,7 @@ pub fn run() {
                 Arc::new(AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION")))
             };
             app.manage(state.clone());
+            commands::redis_pubsub_server::start_pubsub_server(state.clone());
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
@@ -463,6 +464,7 @@ pub fn run() {
             commands::table_import::cancel_table_import,
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
+            commands::redis_cmd::redis_scan_keys_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
             commands::redis_cmd::redis_set_string,
@@ -484,6 +486,7 @@ pub fn run() {
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
             commands::redis_cmd::redis_load_more,
+            commands::redis_cmd::redis_pubsub_publish,
             commands::etcd_cmd::etcd_list_prefix,
             commands::etcd_cmd::etcd_get,
             commands::etcd_cmd::etcd_put,
@@ -497,6 +500,7 @@ pub fn run() {
             commands::saved_sql::open_saved_sql_storage_dir,
             commands::saved_sql::sync_saved_sql_directory,
             commands::fs_open::reveal_path_in_file_manager,
+            commands::sqlite_backup::backup_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
             commands::mongo_cmd::document_find_documents,
@@ -513,6 +517,7 @@ pub fn run() {
             commands::history::clear_history,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
+            commands::mcp::install_mcp_server,
             commands::update::check_for_updates,
             commands::update::get_system_proxy_url,
             commands::transfer::start_transfer,

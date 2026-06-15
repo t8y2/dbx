@@ -1,14 +1,16 @@
 use super::column_alter::{
-    build_clickhouse_existing_column_sql, build_h2_existing_column_sql, build_mysql_existing_column_sql,
-    build_oracle_like_existing_column_sql, build_postgres_existing_column_sql, build_sqlite_existing_column_sql,
-    build_sqlserver_existing_column_sql, has_column_extra_change, has_existing_column_attribute_change,
+    build_clickhouse_existing_column_sql, build_h2_existing_column_sql, build_informix_existing_column_sql,
+    build_mysql_existing_column_sql, build_oracle_like_existing_column_sql, build_postgres_existing_column_sql,
+    build_questdb_existing_column_sql, build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql,
+    has_column_extra_change, has_existing_column_attribute_change,
 };
 use super::column_format::column_definition;
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{
-    clean, normalize_default, original_comment, original_default, qualified_table, quote_ident, quote_string,
+    clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
+    quote_ident, quote_string,
 };
 
 pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
@@ -33,7 +35,11 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings.push(format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name));
                 continue;
             }
-            statements.push(format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, &original.name)));
+            if is_protected_manticore_id_column(dialect, &original.name) {
+                warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
+                continue;
+            }
+            statements.push(build_drop_column_sql(dialect, &table, &original.name));
             continue;
         }
 
@@ -106,6 +112,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 column,
                 if has_position_change { &position_clause } else { "" },
             )),
+            StructureDialect::Informix => statements.extend(build_informix_existing_column_sql(&table, column)),
             StructureDialect::SqlServer => statements.extend(build_sqlserver_existing_column_sql(
                 &table,
                 column,
@@ -113,6 +120,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 &options.table_name,
             )),
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
+            StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
         }
     }
@@ -185,11 +193,13 @@ pub(super) fn build_add_column_sql(
     schema: Option<&str>,
     table_name: &str,
 ) -> Vec<String> {
-    let add_keyword = if dialect == StructureDialect::SqlServer { "ADD" } else { "ADD COLUMN" };
     let definition = column_definition(dialect, column);
     let mut statements = if dialect == StructureDialect::Oracle {
         vec![format!("ALTER TABLE {table} ADD ({definition});")]
+    } else if dialect == StructureDialect::Informix {
+        vec![format!("ALTER TABLE {table} ADD ({definition});")]
     } else {
+        let add_keyword = if dialect == StructureDialect::SqlServer { "ADD" } else { "ADD COLUMN" };
         vec![format!("ALTER TABLE {table} {add_keyword} {definition}{position_clause};")]
     };
     if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle) && !clean(&column.comment).is_empty() {
@@ -210,6 +220,13 @@ pub(super) fn build_add_column_sql(
         statements.extend(build_sqlserver_column_comment_sql(table, schema, table_name, &column.name, &column.comment));
     }
     statements
+}
+
+pub(super) fn build_drop_column_sql(dialect: StructureDialect, table: &str, column_name: &str) -> String {
+    if dialect == StructureDialect::Informix {
+        return format!("ALTER TABLE {table} DROP ({});", quote_ident(dialect, column_name));
+    }
+    format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, column_name))
 }
 
 pub(super) fn column_position_clause(

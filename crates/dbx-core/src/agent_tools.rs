@@ -6,6 +6,7 @@ use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::query::QueryExecutionOptions;
+use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
 use crate::sql_risk::SqlRisk;
 use crate::types::QueryResult;
 
@@ -21,14 +22,24 @@ const SAMPLE_DATA_LIMIT: usize = 20;
 /// Absolute maximum rows any query tool may request.
 const MAX_ALLOWED_ROWS: usize = 100;
 
-/// Get all available tool definitions for Phase 1 (read-only tools).
+/// Get read-only tool definitions (list_tables + get_columns).
 pub fn read_only_tools() -> Vec<ToolDefinition> {
     vec![list_tables_tool(), get_columns_tool()]
 }
 
-/// Get all available tool definitions (Phase 2: read-only + execute_query + get_sample_data).
-pub fn all_tools() -> Vec<ToolDefinition> {
-    vec![list_tables_tool(), get_columns_tool(), execute_query_tool(), get_sample_data_tool()]
+/// Get all available tool definitions for the given database type.
+/// Includes read-only tools plus execute_query, get_sample_data, and
+/// explain_query for database types that support them.
+pub fn all_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
+    let mut tools = vec![list_tables_tool(), get_columns_tool()];
+    if supports_sql_query(db_type) {
+        tools.push(execute_query_tool());
+        tools.push(get_sample_data_tool());
+    }
+    if supports_explain_plan(Some(db_type)) {
+        tools.push(explain_query_tool());
+    }
+    tools
 }
 
 /// list_tables tool definition.
@@ -47,6 +58,7 @@ fn list_tables_tool() -> ToolDefinition {
             "required": []
         }),
         read_only: true,
+        parallel_ok: true,
     }
 }
 
@@ -73,9 +85,10 @@ fn get_columns_tool() -> ToolDefinition {
             "required": ["table"]
         }),
         read_only: true,
+        parallel_ok: true,
     }
 }
-/// execute_query tool definition (Phase 2).
+/// execute_query tool definition.
 fn execute_query_tool() -> ToolDefinition {
     ToolDefinition {
         name: "execute_query",
@@ -97,10 +110,11 @@ fn execute_query_tool() -> ToolDefinition {
             "required": ["sql"]
         }),
         read_only: true,
+        parallel_ok: false,
     }
 }
 
-/// get_sample_data tool definition (Phase 2).
+/// get_sample_data tool definition.
 fn get_sample_data_tool() -> ToolDefinition {
     ToolDefinition {
         name: "get_sample_data",
@@ -124,6 +138,30 @@ fn get_sample_data_tool() -> ToolDefinition {
             "required": ["table"]
         }),
         read_only: true,
+        parallel_ok: true,
+    }
+}
+
+/// explain_query tool definition (Phase 3).
+fn explain_query_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "explain_query",
+        description: "Get the execution plan for a SQL query using EXPLAIN. \
+                      Shows how the database will execute the query (scan type, indexes, cost). \
+                      Only read-only queries (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN) are allowed. \
+                      Use this to analyze query performance and suggest index optimizations.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The SQL query to explain (must be read-only)"
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: true,
     }
 }
 
@@ -140,6 +178,30 @@ pub async fn execute_tool(
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, db_type).await,
         "execute_query" => execute_execute_query(tool_call, state, connection_id, database, db_type).await,
         "get_sample_data" => execute_get_sample_data(tool_call, state, connection_id, database, db_type).await,
+        "explain_query" => {
+            let (text_result, explain_data) =
+                execute_explain_query(tool_call, state, connection_id, database, db_type).await;
+            match text_result {
+                Ok(content) => {
+                    return ToolResult {
+                        tool_call_id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        content,
+                        is_error: false,
+                        explain_data,
+                    };
+                }
+                Err(err) => {
+                    return ToolResult {
+                        tool_call_id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        content: format!("Error: {err}"),
+                        is_error: true,
+                        explain_data: None,
+                    };
+                }
+            }
+        }
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -149,12 +211,14 @@ pub async fn execute_tool(
             tool_name: tool_call.name.clone(),
             content,
             is_error: false,
+            explain_data: None,
         },
         Err(err) => ToolResult {
             tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
             content: format!("Error: {err}"),
             is_error: true,
+            explain_data: None,
         },
     }
 }
@@ -408,4 +472,80 @@ async fn execute_get_sample_data(
         arguments: serde_json::json!({ "sql": sql, "limit": limit }),
     };
     execute_execute_query(&synthetic_call, state, connection_id, database, db_type).await
+}
+
+/// Execute an EXPLAIN query via the explain_query tool.
+/// Returns (text_for_llm, optional_explain_data_for_frontend).
+async fn execute_explain_query(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    db_type: &DatabaseType,
+) -> (Result<String, String>, Option<serde_json::Value>) {
+    let sql = match tool_call.arguments.get("sql").and_then(|v| v.as_str()) {
+        Some(s) => s.trim(),
+        None => return (Err("Missing required parameter: sql".to_string()), None),
+    };
+
+    if sql.is_empty() {
+        return (Err("SQL query cannot be empty".to_string()), None);
+    }
+
+    // Classify SQL risk – only ReadOnly queries can be explained
+    let db_type_str = format!("{:?}", db_type).to_lowercase();
+    let risk = match crate::sql_risk::classify_sql_risk(sql, &db_type_str) {
+        Ok(r) => r,
+        Err(e) => return (Err(e), None),
+    };
+    match risk {
+        SqlRisk::ReadOnly => { /* proceed */ }
+        _ => {
+            return (
+                Err(format!(
+                    "Blocked: {} statement detected. Only read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN) can be analyzed.",
+                    risk
+                )),
+                None,
+            );
+        }
+    }
+
+    // Build the database-specific EXPLAIN SQL
+    let explain_result = build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), sql: sql.to_string() });
+
+    let explain_sql = match (explain_result.ok, explain_result.sql) {
+        (true, Some(sql)) => sql,
+        (true, None) => return (Err("EXPLAIN SQL is empty".to_string()), None),
+        (false, _) => {
+            let reason = explain_result.reason.unwrap_or_else(|| "unknown".to_string());
+            return (Err(format!("Cannot explain this query: {}. The database type may not support EXPLAIN, or the query may be unsafe.", reason)), None);
+        }
+    };
+
+    // Execute the EXPLAIN query
+    let options = QueryExecutionOptions { max_rows: Some(100), timeout_secs: Some(30), ..Default::default() };
+    let result = match crate::query::execute_sql_statement_with_options(
+        state,
+        connection_id,
+        database,
+        &explain_sql,
+        None,
+        None,
+        options,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return (Err(e), None),
+    };
+
+    // Serialize the raw QueryResult for the frontend ExplainPlanViewer
+    let explain_data = serde_json::to_value(&result).ok();
+    let text = match format_query_result_as_text(&result, 100) {
+        Ok(t) => t,
+        Err(e) => return (Err(e), None),
+    };
+
+    (Ok(text), explain_data)
 }

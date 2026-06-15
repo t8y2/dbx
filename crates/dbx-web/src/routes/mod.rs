@@ -12,6 +12,7 @@ pub mod mongo;
 pub mod plugins;
 pub mod query;
 pub mod redis;
+pub mod redis_pubsub_ws;
 pub mod saved_sql;
 pub mod schema;
 pub mod schema_cache;

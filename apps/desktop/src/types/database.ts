@@ -13,6 +13,7 @@ export type DatabaseType =
   | "elasticsearch"
   | "doris"
   | "starrocks"
+  | "manticoresearch"
   | "databend"
   | "redshift"
   | "dameng"
@@ -31,6 +32,7 @@ export type DatabaseType =
   | "exasol"
   | "opengauss"
   | "oceanbase-oracle"
+  | "questdb"
   | "gbase"
   | "access"
   | "h2"
@@ -96,6 +98,7 @@ export interface ConnectionConfig {
   redis_cluster_nodes?: string;
   redis_key_separator?: string;
   etcd_endpoints?: string;
+  gbase_server?: string;
   one_time?: boolean;
   read_only?: boolean;
 }
@@ -322,6 +325,38 @@ export interface QueryResult {
   has_more?: boolean;
 }
 
+export interface QueryResultRun {
+  id: string;
+  title: string;
+  sequence: number;
+  sql: string;
+  createdAt: number;
+  result?: QueryResult;
+  results?: QueryResult[];
+  activeResultIndex?: number;
+  resultBaseSql?: string;
+  resultSortedSql?: string;
+  resultSortColumn?: string;
+  resultSortColumnIndex?: number;
+  resultSortDirection?: "asc" | "desc";
+  orderByInput?: string;
+  resultPageSql?: string;
+  resultPageLimit?: number;
+  resultPageOffset?: number;
+  resultCountSql?: string;
+  resultTotalRowCount?: number;
+  resultTotalRowCountLoading?: boolean;
+  resultSessionId?: string;
+  resultAccessedAt?: number;
+  resultCacheKey?: string;
+  resultCacheState?: "memory" | "disk" | "missing";
+  resultEvicted?: boolean;
+  queryAnalysis?: QueryTab["queryAnalysis"];
+  querySourceColumns?: QueryTab["querySourceColumns"];
+  queryEditabilityReason?: QueryTab["queryEditabilityReason"];
+  tableMeta?: QueryTab["tableMeta"];
+}
+
 export interface SqlTextSpan {
   start_line: number;
   start_column: number;
@@ -457,6 +492,8 @@ export interface QueryTab {
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
+  resultRuns?: QueryResultRun[];
+  activeResultRunId?: string;
   explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;

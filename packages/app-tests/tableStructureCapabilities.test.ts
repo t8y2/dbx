@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { canEditTableStructure, getTableStructureCapabilities } from "../../apps/desktop/src/lib/tableStructureCapabilities.ts";
+import { canAddTableStructureColumn, canEditTableStructure, getTableStructureCapabilities } from "../../apps/desktop/src/lib/tableStructureCapabilities.ts";
 
 test("sqlite-family and duckdb do not support table comments", () => {
   for (const dbType of ["sqlite", "rqlite", "duckdb"] as const) {
@@ -39,6 +39,21 @@ test("mysql-like databases expose index rebuild and type capabilities", () => {
     assert.equal(caps.reorderColumn, true);
     assert.equal(canEditTableStructure(dbType), true);
   }
+});
+
+test("gbase 8a exposes limited mysql-compatible structure editing capabilities", () => {
+  const caps = getTableStructureCapabilities("gbase");
+  assert.equal(caps.dialect, "mysql");
+  assert.equal(caps.createTable, true);
+  assert.equal(caps.addColumn, true);
+  assert.equal(caps.dropColumn, true);
+  assert.equal(caps.renameColumn, true);
+  assert.equal(caps.alterExistingColumn, false);
+  assert.equal(caps.createIndex, false);
+  assert.equal(caps.dropIndex, false);
+  assert.equal(caps.rebuildIndex, false);
+  assert.equal(caps.comment, false);
+  assert.equal(canEditTableStructure("gbase"), true);
 });
 
 test("redshift reuses postgres column DDL but keeps indexes disabled", () => {
@@ -91,6 +106,49 @@ test("limited analytic engines can open the editor for supported operations only
   assert.equal(clickhouse.createIndex, false);
   assert.equal(clickhouse.rebuildIndex, false);
   assert.equal(canEditTableStructure("clickhouse"), true);
+});
+
+test("manticore search can open the editor for limited table structure changes", () => {
+  const caps = getTableStructureCapabilities("manticoresearch");
+  assert.equal(caps.dialect, "mysql");
+  assert.equal(caps.createTable, true);
+  assert.equal(caps.addColumn, true);
+  assert.equal(caps.dropColumn, true);
+  assert.equal(caps.renameColumn, false);
+  assert.equal(caps.alterExistingColumn, false);
+  assert.equal(caps.createIndex, false);
+  assert.equal(caps.dropIndex, false);
+  assert.equal(canEditTableStructure("manticoresearch"), true);
+  assert.equal(canAddTableStructureColumn("manticoresearch", true), true);
+  assert.equal(canAddTableStructureColumn("manticoresearch", false), true);
+});
+
+test("manticore search keeps generic index DDL disabled", () => {
+  const caps = getTableStructureCapabilities("manticoresearch");
+  assert.equal(caps.createIndex, false);
+  assert.equal(caps.dropIndex, false);
+  assert.equal(caps.rebuildIndex, false);
+  assert.equal(caps.indexType, false);
+  assert.equal(caps.indexInclude, false);
+  assert.equal(caps.indexFilter, false);
+  assert.equal(caps.indexComment, false);
+});
+
+test("informix exposes conservative structure editing capabilities", () => {
+  const caps = getTableStructureCapabilities("informix");
+  assert.equal(caps.dialect, "informix");
+  assert.equal(caps.createTable, true);
+  assert.equal(caps.addColumn, true);
+  assert.equal(caps.dropColumn, true);
+  assert.equal(caps.renameColumn, true);
+  assert.equal(caps.alterExistingColumn, true);
+  assert.equal(caps.comment, false);
+  assert.equal(caps.createIndex, true);
+  assert.equal(caps.dropIndex, true);
+  assert.equal(caps.rebuildIndex, true);
+  assert.equal(caps.indexType, false);
+  assert.equal(caps.alterPrimaryKey, false);
+  assert.equal(canEditTableStructure("informix"), true);
 });
 
 test("unsupported non-relational databases do not open the structure editor", () => {

@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, computed, nextTick, watch, onBeforeUnmount, inject } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
@@ -48,6 +48,9 @@ import {
   Clipboard,
   UsersRound,
   Lock,
+  HardDriveDownload,
+  FilePlus,
+  SquarePen,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -61,8 +64,8 @@ import * as api from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebarTreeItemLayout";
-import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import { connectionFilePath } from "@/lib/connectionFile";
+import { buildTableSelectSql, quoteTableIdentifier, qualifiedTableName } from "@/lib/tableSelectSql";
+import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connectionFile";
 import { revealPathInFileManager } from "@/lib/tauri";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/queryEditorTableDrop";
 import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
@@ -90,7 +93,7 @@ import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType }
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
@@ -157,10 +160,14 @@ const emit = defineEmits<{
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
-const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 flex-1 truncate"));
+const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 truncate"));
 
 function currentDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
+}
+
+function currentTableStructureDatabaseType(): DatabaseType | undefined {
+  return props.node.connectionId ? tableStructureDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
 }
 
 function rawDatabaseType(): DatabaseType | undefined {
@@ -169,6 +176,10 @@ function rawDatabaseType(): DatabaseType | undefined {
 
 function databaseTypeForNode(node: TreeNode): DatabaseType | undefined {
   return node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
+}
+
+function tableStructureDatabaseTypeForNode(node: TreeNode): DatabaseType | undefined {
+  return node.connectionId ? tableStructureDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
 }
 
 function hasNodeDatabaseContext(node: TreeNode): node is TreeNode & { connectionId: string; database: string } {
@@ -291,7 +302,7 @@ const tableInfoTooltip = computed(() => {
 });
 
 function isTooltipDisabled(): boolean {
-  if (tableInfoTooltip.value?.rows.length) return isRenamingGroup.value;
+  if (tableInfoTooltip.value?.rows.length && !settingsStore.editorSettings.sidebarHideTableComments) return true;
   return isRenamingGroup.value || !isLabelTruncated();
 }
 
@@ -360,9 +371,10 @@ async function toggle() {
       queryStore.updateSql(tab, node.label);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       const config = connectionStore.getConfig(node.connectionId);
+      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
       if (config?.db_type === "sqlserver") {
         await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database);
-      } else if (usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config)) {
+      } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
         await connectionStore.loadSchemas(node.connectionId, node.database);
       } else {
         await connectionStore.loadTables(node.connectionId, node.database);
@@ -700,6 +712,20 @@ async function openData() {
     return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema);
   })();
   console.info("[DBX][openData:tab-created]", { traceId, tabId, elapsed: elapsed() });
+
+  // Cancel any previous execution on this tab before starting a new one
+  const existingTab = queryStore.tabs.find((t) => t.id === tabId);
+  if (existingTab?.isExecuting && existingTab.executionId) {
+    await queryStore.cancelTabExecution(tabId);
+  }
+
+  const openDataId = uuid();
+  // Clear previous result so DataGrid doesn't show its internal loading overlay (without stop button)
+  const tab = queryStore.tabs.find((t) => t.id === tabId);
+  if (tab) {
+    tab.result = undefined;
+    tab.results = undefined;
+  }
   queryStore.setTableMeta(tabId, {
     schema: tableSchema,
     tableName: node.label,
@@ -707,11 +733,15 @@ async function openData() {
     columns: [],
     primaryKeys: [],
   });
-  queryStore.setExecuting(tabId, true);
+  queryStore.setExecutingWithId(tabId, openDataId);
+
+  // Helper to check if this openData call is still active (not superseded by a newer click)
+  const isActive = () => queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
 
   try {
     console.info("[DBX][openData:ensure-connected:start]", { traceId, elapsed: elapsed() });
     await connectionStore.ensureConnected(node.connectionId);
+    if (!isActive()) return;
     console.info("[DBX][openData:ensure-connected:done]", { traceId, elapsed: elapsed() });
     if (!config) throw new Error("Connection config not found");
 
@@ -729,6 +759,7 @@ async function openData() {
         elapsed: elapsed(),
       });
       columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+      if (!isActive()) return;
       primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : "TABLE");
       console.info("[DBX][openData:get-columns:done]", {
         traceId,
@@ -746,6 +777,9 @@ async function openData() {
     } catch (error) {
       console.warn("[DBX][openData:get-columns:error]", { traceId, elapsed: elapsed(), error });
     }
+
+    // Check if superseded by a newer openData call
+    if (!isActive()) return;
 
     const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
     const fallbackOrderColumns = effectiveDbType === "sqlserver" && !primaryKeys.length ? columns.slice(0, 1).map((column) => column.name) : undefined;
@@ -772,6 +806,7 @@ async function openData() {
     await queryStore.executeTabSql(tabId, sql);
     console.info("[DBX][openData:execute:done]", { traceId, tabId, elapsed: elapsed() });
   } catch (e: any) {
+    if (!isActive()) return;
     console.error("[DBX][openData:error]", { traceId, elapsed: elapsed(), error: e });
     queryStore.setErrorResult(tabId, e);
   }
@@ -784,7 +819,15 @@ async function newQuery() {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
     if (hasTreeNodeDatabaseContext(node)) {
-      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
+      const tabId = queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
+      // For table/view nodes, generate SELECT * FROM table_name SQL
+      if (node.type === "table" || node.type === "view") {
+        const config = connectionStore.getConfig(node.connectionId);
+        const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
+        const tableSchema = node.schema || node.database;
+        const tableName = qualifiedTableName({ databaseType: dbType, schema: tableSchema, tableName: node.label });
+        queryStore.updateSql(tabId, `SELECT * FROM ${tableName};`);
+      }
       return;
     }
     const connection = connectionStore.getConfig(node.connectionId);
@@ -796,6 +839,209 @@ async function newQuery() {
     if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
       window.dispatchEvent(new Event("dbx-open-driver-store"));
     }
+  }
+}
+
+// ---- SQL template helpers ----
+
+/**
+ * Detect whether a column value is auto-generated by the database
+ * (auto-increment, identity, serial, computed/virtual, etc.).
+ * Such columns should be omitted from INSERT templates.
+ */
+function isAutoGeneratedColumn(column: ColumnInfo, _dbType?: DatabaseType): boolean {
+  const extra = (column.extra ?? "").toLowerCase().trim();
+  const colDefault = (column.column_default ?? "").toLowerCase().trim();
+  const dataType = (column.data_type ?? "").trim();
+
+  if (typeLooksPostgresTextSearchVector(dataType)) return true;
+
+  // MySQL / MariaDB: extra contains "auto_increment"
+  if (extra.includes("auto_increment")) return true;
+
+  // SQLite: extra contains "autoincrement"
+  if (extra.includes("autoincrement")) return true;
+
+  // SQL Server: extra contains "identity"
+  if (extra.includes("identity")) return true;
+
+  // PostgreSQL 10+ / GaussDB / Kingbase / etc.: GENERATED … AS IDENTITY
+  if (extra.includes("generated") && (extra.includes("as identity") || extra.includes("always as"))) return true;
+
+  // PostgreSQL legacy SERIAL / Oracle sequences: column_default contains nextval
+  if (colDefault.includes("nextval(")) return true;
+  if (colDefault.includes(".nextval")) return true;
+
+  // Virtual / computed columns (MySQL, MariaDB, etc.)
+  if ((extra.includes("virtual") || extra.includes("computed")) && extra.includes("generated")) return true;
+
+  return false;
+}
+
+function typeLooksNumeric(dataType: string): boolean {
+  return /^(tinyint|smallint|mediumint|int\d*|integer\d*|bigint|smallserial|serial\d*|bigserial|number|numeric|decimal|dec|float\d*|double|real|double\s+precision|money|smallmoney|fixed)/i.test(dataType.trim());
+}
+
+function typeLooksBoolean(dataType: string): boolean {
+  return /^(bool|boolean|bit\s*\(\s*1\s*\))$/i.test(dataType.trim());
+}
+
+function typeLooksDateOnly(dataType: string): boolean {
+  return /^date$/i.test(dataType.trim());
+}
+
+function typeLooksTimeOnly(dataType: string): boolean {
+  return /^time\b(?!stamp|stamptz|with|without)/i.test(dataType.trim());
+}
+
+function typeLooksTimestamp(dataType: string): boolean {
+  return /^(datetime|timestamp|timestamptz|timestamp\s+with\s+time\s+zone|timestamp\s+without\s+time\s+zone|smalldatetime|datetime2|datetimeoffset)/i.test(dataType.trim());
+}
+
+function typeLooksJson(dataType: string): boolean {
+  return /^(json|jsonb)$/i.test(dataType.trim());
+}
+
+function typeLooksBinary(dataType: string): boolean {
+  return /^(bytea|blob|binary|varbinary|image|raw|longblob|mediumblob|tinyblob|long\s+raw|bfile)$/i.test(dataType.trim());
+}
+
+function typeLooksUuid(dataType: string): boolean {
+  return /^uuid$/i.test(dataType.trim());
+}
+
+function typeLooksXml(dataType: string): boolean {
+  return /^xml$/i.test(dataType.trim());
+}
+
+function typeLooksSpatial(dataType: string): boolean {
+  return /^(geometry|geography|point|polygon|linestring|box|circle|path|line|lseg)/i.test(dataType.trim());
+}
+
+function typeLooksArray(dataType: string): boolean {
+  return /^(array|vector|_float\d*|_int\d*|_text|_varchar|_bool|_uuid)/i.test(dataType.trim());
+}
+
+function typeLooksPostgresTextSearchVector(dataType: string): boolean {
+  const normalized = dataType
+    .trim()
+    .replace(/^"+|"+$/g, "")
+    .toLowerCase();
+  return normalized === "tsvector" || normalized.endsWith(".tsvector");
+}
+
+/**
+ * Return a type-appropriate placeholder value for a template column.
+ * Inspects column.data_type and database type to produce the right
+ * literal so the user can execute the template immediately after
+ * replacing placeholders.
+ */
+function columnPlaceholderValue(column: ColumnInfo, dbType?: DatabaseType): string {
+  const dataType = (column.data_type ?? "").trim();
+  const colName = column.name;
+
+  if (typeLooksNumeric(dataType)) return "0";
+  if (typeLooksBoolean(dataType)) return dbType === "mysql" || dbType === "sqlite" || dbType === "rqlite" ? "1" : "TRUE";
+  if (typeLooksDateOnly(dataType)) return "'2024-01-01'";
+  if (typeLooksTimeOnly(dataType)) return "'12:00:00'";
+  if (typeLooksTimestamp(dataType)) return "CURRENT_TIMESTAMP";
+  if (typeLooksJson(dataType)) return dbType === "postgres" || dbType === "redshift" ? "'{}'::jsonb" : "'{}'";
+  if (typeLooksBinary(dataType)) return "''";
+  if (typeLooksUuid(dataType)) return dbType === "postgres" || dbType === "redshift" ? "'00000000-0000-0000-0000-000000000000'::uuid" : "'00000000-0000-0000-0000-000000000000'";
+  if (typeLooksXml(dataType)) return "'<root/>'";
+  if (typeLooksSpatial(dataType)) return "NULL";
+  if (typeLooksArray(dataType)) return "'{}'";
+
+  // Fallback: quoted column-name placeholder so user knows what to fill
+  return `'${colName}_value'`;
+}
+
+// ---- Template actions ----
+
+async function newInsertTemplate() {
+  const node = props.node;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
+  if (node.type !== "table" && node.type !== "view") return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const config = connectionStore.getConfig(node.connectionId);
+    const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
+    const tableSchema = node.schema || node.database;
+
+    let columns: ColumnInfo[] = [];
+    try {
+      const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
+      columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+    } catch (e) {
+      console.warn("[DBX][newInsertTemplate:getColumns:error]", e);
+    }
+
+    const tableName = qualifiedTableName({ databaseType: dbType, schema: tableSchema, tableName: node.label });
+
+    // Omit auto-generated columns (auto_increment, identity, serial, computed, etc.)
+    const insertColumns = columns.filter((c) => !isAutoGeneratedColumn(c, dbType));
+
+    let sql: string;
+    if (insertColumns.length === 0) {
+      sql = `INSERT INTO ${tableName}\n/* TODO: add column values */\nVALUES ();`;
+    } else {
+      const colNames = insertColumns.map((c) => quoteTableIdentifier(dbType, c.name));
+      const placeholders = insertColumns.map((c) => columnPlaceholderValue(c, dbType));
+      sql = `INSERT INTO ${tableName} (${colNames.join(", ")})\nVALUES (${placeholders.join(", ")});`;
+    }
+
+    const tabId = queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
+    queryStore.updateSql(tabId, sql);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
+async function newUpdateTemplate() {
+  const node = props.node;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
+  if (node.type !== "table" && node.type !== "view") return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const config = connectionStore.getConfig(node.connectionId);
+    const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
+    const tableSchema = node.schema || node.database;
+
+    let columns: ColumnInfo[] = [];
+    let primaryKeys: string[] = [];
+    try {
+      const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
+      columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+      primaryKeys = columns.filter((c) => c.is_primary_key).map((c) => c.name);
+    } catch (e) {
+      console.warn("[DBX][newUpdateTemplate:getColumns:error]", e);
+    }
+
+    const tableName = qualifiedTableName({ databaseType: dbType, schema: tableSchema, tableName: node.label });
+
+    // SET clause: non-PK columns only (updating PKs is unusual and dangerous)
+    const pkNameSet = new Set(primaryKeys);
+    const updateColumns = columns.filter((c) => !pkNameSet.has(c.name));
+    const setClauses = updateColumns.map((c) => `${quoteTableIdentifier(dbType, c.name)} = ${columnPlaceholderValue(c, dbType)}`);
+
+    // WHERE clause: use primary keys to target a single row
+    let whereClause: string;
+    if (primaryKeys.length > 0) {
+      const pkColumns = columns.filter((c) => pkNameSet.has(c.name));
+      const pkConditions = pkColumns.map((c) => `${quoteTableIdentifier(dbType, c.name)} = ${columnPlaceholderValue(c, dbType)}`);
+      whereClause = `WHERE ${pkConditions.join(" AND ")}`;
+    } else {
+      whereClause = `WHERE /* TODO: add WHERE clause */`;
+    }
+
+    const sql = `UPDATE ${tableName}\nSET ${setClauses.join(",\n    ")}\n${whereClause};`;
+
+    const tabId = queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
+    queryStore.updateSql(tabId, sql);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
 }
 
@@ -979,7 +1225,7 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
   if (node.type !== "view" && node.type !== "procedure" && node.type !== "function") return null;
   return {
-    databaseType: databaseTypeForNode(node),
+    databaseType: tableStructureDatabaseTypeForNode(node),
     objectType: node.type === "view" ? "VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
     schema: node.schema,
     name: node.label,
@@ -1420,7 +1666,7 @@ const supportsTruncate = computed(() => {
 
 const canCreateTable = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !!props.node.database && supportsTableStructureEditing(effectiveDatabaseTypeForConnection(config));
+  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !!props.node.database && supportsTableStructureEditing(tableStructureDatabaseTypeForConnection(config));
 });
 
 const canCreateDatabase = computed(() => {
@@ -1445,12 +1691,12 @@ const canDropDatabase = computed(() => {
 
 const canCreateSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return props.node.type === "database" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
+  return props.node.type === "database" && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canDropSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return props.node.type === "schema" && usesTreeSchemaMode(config?.db_type) && !connectionUsesDatabaseObjectTreeMode(config);
+  return props.node.type === "schema" && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 function tableAdminSqlOptions(): TableAdminSqlOptions {
@@ -2138,6 +2384,44 @@ async function revealDatabaseFile() {
   }
 }
 
+const sqliteBackupSource = computed<string | null>(() => {
+  if (props.node.type !== "connection" || !props.node.connectionId) return null;
+  const config = connectionStore.getConfig(props.node.connectionId);
+  if (!config) return null;
+  return sqliteBackupSourcePath(config);
+});
+
+const canBackupSqliteDatabase = computed(() => {
+  const source = sqliteBackupSource.value;
+  if (!source || !props.node.connectionId) return false;
+  return isTauriRuntime() && (!isMemorySqlitePath(source) || connectionStore.connectedIds.has(props.node.connectionId));
+});
+
+async function backupSqliteDatabase() {
+  const connId = props.node.connectionId;
+  const config = connId ? connectionStore.getConfig(connId) : undefined;
+  const sourcePath = sqliteBackupSource.value;
+  if (!connId || !config || !sourcePath) return;
+
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const destinationPath = await save({
+      defaultPath: defaultSqliteBackupFileName(config),
+      filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }],
+    });
+    if (!destinationPath) return;
+
+    toast(t("contextMenu.backupSqliteDatabaseInProgress"), 2000);
+    if (!isMemorySqlitePath(sourcePath)) {
+      await connectionStore.ensureConnected(connId);
+    }
+    await api.backupSqliteDatabase(connId, destinationPath);
+    toast(t("contextMenu.backupSqliteDatabaseSuccess"), 3000);
+  } catch (e: any) {
+    toast(t("contextMenu.backupSqliteDatabaseFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function disconnectConnection() {
   if (props.node.connectionId) {
     try {
@@ -2286,7 +2570,7 @@ const canOpenTableImport = computed(() => {
   return props.node.type === "table" && !!props.node.database && supportsTableImport(currentDatabaseType());
 });
 const canOpenStructureEditor = computed(() => {
-  return props.node.type === "table" && !!props.node.database && supportsTableStructureEditing(currentDatabaseType());
+  return props.node.type === "table" && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
 });
 const canOpenFieldLineage = computed(() => {
   return props.node.type === "column" && !!props.node.database && !!props.node.tableName && supportsFieldLineage(currentDatabaseType());
@@ -2297,8 +2581,8 @@ const hasTypeMenu = computed(() => {
   const t = props.node.type;
   return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "package" || t === "package-body" || isGroupLabel(props.node);
 });
-const columnComment = computed(() => (props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null));
-const tableComment = computed(() => ((props.node.type === "table" || props.node.type === "view" || props.node.type === "mongo-collection" || props.node.type === "elasticsearch-index") && props.node.comment ? props.node.comment : null));
+const columnComment = computed(() => (!settingsStore.editorSettings.sidebarHideTableComments && props.node.type === "column" && props.node.meta && "comment" in props.node.meta ? (props.node.meta as any).comment : null));
+const tableComment = computed(() => (!settingsStore.editorSettings.sidebarHideTableComments && (props.node.type === "table" || props.node.type === "view" || props.node.type === "mongo-collection" || props.node.type === "elasticsearch-index") && props.node.comment ? props.node.comment : null));
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const isConnected = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId));
 const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
@@ -2740,6 +3024,13 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: FolderOpen,
       });
     }
+    if (canBackupSqliteDatabase.value) {
+      items.push({
+        label: t("contextMenu.backupSqliteDatabase"),
+        action: backupSqliteDatabase,
+        icon: HardDriveDownload,
+      });
+    }
     items.push({ label: t("contextMenu.duplicateConnection"), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
     items.push({
@@ -2910,7 +3201,19 @@ function treeItemMenuItems(): ContextMenuItem[] {
         variant: "destructive" as const,
       });
     }
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (isTableNotView.value) {
+      items.push({
+        label: t("contextMenu.newSql"),
+        icon: FilePlus,
+        children: [
+          { label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare },
+          { label: t("contextMenu.newInsert"), action: newInsertTemplate, icon: FilePlus },
+          { label: t("contextMenu.newUpdate"), action: newUpdateTemplate, icon: SquarePen },
+        ],
+      });
+    } else {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
     const sqlHistoryMenu = savedSqlHistorySubmenu();
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (canOpenDiagram.value) {
@@ -3131,8 +3434,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
             {{ t("editor.defaultDatabase") }}
           </Badge>
-          <span v-if="columnComment" class="truncate text-muted-foreground/60 text-[10px] max-w-[40%]">{{ columnComment }}</span>
-          <span v-if="tableComment && !settingsStore.editorSettings.sidebarHideTableComments" class="truncate text-muted-foreground/60 text-[10px] max-w-[25%] group-hover:hidden" :title="tableComment">{{ tableComment }}</span>
+          <span v-if="columnComment" class="ml-auto truncate text-muted-foreground/60 text-[10px] max-w-[20%] shrink-0 text-right">{{ columnComment }}</span>
+          <span v-if="tableComment" class="ml-auto truncate text-muted-foreground/60 text-[10px] max-w-[20%] shrink-0 text-right">{{ tableComment }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
           <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
           <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />

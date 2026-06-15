@@ -3,6 +3,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import type { ConnectionConfig, QueryResult, QueryTab } from "@/types/database";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
+export type OutputView = "result" | "summary" | "explain" | "chart";
 
 export function connectionDisplayName(connectionId: string): string {
   const connectionStore = useConnectionStore();
@@ -117,6 +118,28 @@ export function tabularResultItems(results: QueryResult[] | undefined): { result
     .map((result, index) => ({ result, index }))
     .filter((item) => item.result.columns.length > 0)
     .map((item, ordinal) => ({ ...item, n: ordinal + 1 }));
+}
+
+export function activeResultRun(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">) {
+  return tab.resultRuns?.find((run) => run.id === tab.activeResultRunId);
+}
+
+export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">): { id: string; title: string; sequence: number; active: boolean }[] {
+  return (tab.resultRuns ?? []).map((run) => ({
+    id: run.id,
+    title: run.title,
+    sequence: run.sequence,
+    active: run.id === tab.activeResultRunId,
+  }));
+}
+
+export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex">): string {
+  return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
+}
+
+export function nextExecutionSummaryView(currentView: OutputView, canShowResult: boolean): OutputView {
+  if (currentView === "summary" && canShowResult) return "result";
+  return "summary";
 }
 
 export interface ExecutionSummaryItem {

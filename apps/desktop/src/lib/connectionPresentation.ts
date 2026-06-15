@@ -82,6 +82,7 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "mysql":
     case "doris":
     case "starrocks":
+    case "manticoresearch":
       return "mysql://user:password@host:port/database";
 
     case "postgres":
@@ -89,6 +90,7 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "kwdb":
     case "yashandb":
     case "redshift":
+    case "questdb":
       return "postgresql://user:password@host:port/database";
 
     case "redis":

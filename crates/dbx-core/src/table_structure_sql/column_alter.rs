@@ -1,10 +1,11 @@
 use super::column_format::{clickhouse_column_type, column_data_type, column_definition};
+use super::columns::build_drop_column_sql;
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
 use super::util::{
-    clean, format_default_for_sql, normalize_default, original_comment, original_default, qualified_table, quote_ident,
-    quote_string,
+    clean, format_default_for_sql, is_protected_manticore_id_column, normalize_default, original_comment,
+    original_default, qualified_table, quote_ident, quote_string,
 };
 use crate::table_structure_sql::ColumnExtra;
 
@@ -29,7 +30,11 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             warnings.push(format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name));
             return TableStructureSqlResult { statements, warnings };
         }
-        statements.push(format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, &original.name)));
+        if is_protected_manticore_id_column(dialect, &original.name) {
+            warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
+            return TableStructureSqlResult { statements, warnings };
+        }
+        statements.push(build_drop_column_sql(dialect, &table, &original.name));
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -74,6 +79,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         StructureDialect::ClickHouse => {
             statements.extend(build_clickhouse_existing_column_sql(&table, &options.column, ""))
         }
+        StructureDialect::Informix => statements.extend(build_informix_existing_column_sql(&table, &options.column)),
         StructureDialect::SqlServer => statements.extend(build_sqlserver_existing_column_sql(
             &table,
             &options.column,
@@ -93,6 +99,22 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
         && extra.identity.is_none()
+        && !extra.manticore_indexed.unwrap_or(false)
+        && !extra.manticore_stored.unwrap_or(false)
+        && !extra.manticore_attribute.unwrap_or(false)
+        && !extra.manticore_secondary_index.unwrap_or(false)
+}
+
+fn original_manticore_extra_flags(extra: &str) -> (bool, bool, bool, bool) {
+    let lower = extra.to_lowercase();
+    (
+        lower.split_whitespace().any(|token| token == "indexed"),
+        lower.split_whitespace().any(|token| token == "stored"),
+        lower.split_whitespace().any(|token| token == "attribute"),
+        lower.contains("secondary_index='1'")
+            || lower.contains("secondary_index=\"1\"")
+            || lower.contains("secondary_index=1"),
+    )
 }
 
 pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool {
@@ -101,8 +123,18 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
     match (current_extra, original.extra.as_deref()) {
         // Neither has extra → no change
         (None, None | Some("")) => false,
-        // Current extra is empty (all None) → no effective extra
-        (Some(curr), _) if is_column_extra_empty(curr) => false,
+        // Current extra is empty (all None) → changed only if the original had effective extra
+        (Some(curr), None | Some("")) if is_column_extra_empty(curr) => false,
+        (Some(curr), Some(orig)) if is_column_extra_empty(curr) => {
+            let (indexed, stored, attribute, secondary_index) = original_manticore_extra_flags(orig);
+            let orig_lower = orig.to_lowercase();
+            orig_lower.contains("auto_increment")
+                || orig_lower.contains("on update")
+                || indexed
+                || stored
+                || attribute
+                || secondary_index
+        }
         // Extra added or removed
         (Some(_), None | Some("")) => true,
         (None, Some(_)) => true,
@@ -114,8 +146,18 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             let curr_has_on_update = curr.on_update_current_timestamp.unwrap_or(false);
             let orig_has_on_update = orig_lower.contains("on update");
             let curr_has_identity = curr.identity.is_some();
+            let curr_manticore = (
+                curr.manticore_indexed.unwrap_or(false),
+                curr.manticore_stored.unwrap_or(false),
+                curr.manticore_attribute.unwrap_or(false),
+                curr.manticore_secondary_index.unwrap_or(false),
+            );
+            let orig_manticore = original_manticore_extra_flags(orig);
             // identity is harder to detect in free-form original.extra, so treat it as changed if present
-            curr_has_ai != orig_has_ai || curr_has_on_update != orig_has_on_update || curr_has_identity
+            curr_has_ai != orig_has_ai
+                || curr_has_on_update != orig_has_on_update
+                || curr_has_identity
+                || curr_manticore != orig_manticore
         }
     }
 }
@@ -187,6 +229,42 @@ pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableS
             "COMMENT ON COLUMN {table}.{} IS {comment_value};",
             quote_ident(StructureDialect::Postgres, current_name)
         ));
+    }
+    statements
+}
+
+pub(super) fn build_informix_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let dialect = StructureDialect::Informix;
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "RENAME COLUMN {table}.{} TO {};",
+            quote_ident(dialect, &original.name),
+            quote_ident(dialect, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    if type_changed || nullable_changed || default_changed {
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        if column.is_nullable {
+            parts.push("NULL".to_string());
+        } else {
+            parts.push("NOT NULL".to_string());
+        }
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        } else if default_changed {
+            parts.push("DEFAULT NULL".to_string());
+        }
+        statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
     }
     statements
 }
@@ -468,6 +546,29 @@ pub(super) fn build_sqlite_existing_column_sql(
         warnings.push(format!(
             "SQLite cannot safely alter existing column \"{}\" without rebuilding the table.",
             original.name
+        ));
+    }
+    statements
+}
+
+pub(super) fn build_questdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let current_name = &column.name;
+    if column.name != original.name {
+        statements.push(format!(
+            "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+            quote_ident(StructureDialect::Questdb, &original.name),
+            quote_ident(StructureDialect::Questdb, &column.name)
+        ));
+    }
+    if column.data_type.trim() != original.data_type.trim() {
+        statements.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
+            quote_ident(StructureDialect::Questdb, current_name),
+            column_data_type(StructureDialect::Questdb, column)
         ));
     }
     statements

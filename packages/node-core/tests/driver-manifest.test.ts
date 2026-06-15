@@ -57,6 +57,11 @@ test("runtime direct query routing matches diagnostic direct query types", () =>
   }
 });
 
+test("Manticore Search is direct-query capable", () => {
+  assert.equal(isDirectQueryType("manticoresearch"), true);
+  assert.equal(DIRECT_QUERY_TYPES.includes("manticoresearch" as any), true);
+});
+
 test("driver manifest declares support levels and product capabilities", () => {
   const manifest = loadManifest();
 
@@ -72,4 +77,14 @@ test("driver manifest declares support levels and product capabilities", () => {
   assert.equal(jdbc?.supportLevel, "browse");
   assert.equal(jdbc?.capabilities.metadataBrowse, true);
   assert.equal(jdbc?.capabilities.tableStructureEdit, false);
+
+  const manticore = manifest.drivers.find((driver) => driver.dbType === "manticoresearch");
+  assert.equal(manticore?.supportLevel, "operate");
+  assert.equal(manticore?.capabilities.queryExecution, true);
+  assert.equal(manticore?.capabilities.metadataBrowse, true);
+  assert.equal(manticore?.capabilities.objectBrowser, false);
+  assert.equal(manticore?.capabilities.tableDataEdit, true);
+  assert.equal(manticore?.capabilities.tableStructureEdit, true);
+  assert.equal(manticore?.capabilities.databaseCreate, false);
+  assert.equal(manticore?.capabilities.userAdmin, false);
 });

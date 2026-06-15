@@ -93,6 +93,9 @@ struct InfluxJsonResult {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct InfluxQueryResult {
+    /// The `statement_id` field may not be included in older versions (such as 1.1)
+    #[serde(default)]
+    #[allow(dead_code)]
     statement_id: usize,
     #[serde(default)]
     #[allow(dead_code)]

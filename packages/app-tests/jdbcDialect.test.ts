@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesSchemaExecutionContext, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/jdbcDialect.ts";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesSchemaExecutionContext, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect, tableStructureDatabaseTypeForConnection } from "../../apps/desktop/src/lib/jdbcDialect.ts";
 import { supportsTableStructureEditing } from "../../apps/desktop/src/lib/databaseFeatureSupport.ts";
 import { qualifiedTableName } from "../../apps/desktop/src/lib/tableSelectSql.ts";
 
@@ -15,6 +15,10 @@ test("infers JDBC dialect from URL, driver class, and driver jar path", () => {
 test("effective database type keeps non-JDBC types and enables compatible JDBC structure editing", () => {
   assert.equal(effectiveDatabaseTypeForConnection({ db_type: "postgres" }), "postgres");
   assert.equal(effectiveDatabaseTypeForConnection({ db_type: "jdbc" }), "jdbc");
+  assert.equal(effectiveDatabaseTypeForConnection({ db_type: "gbase", driver_profile: "gbase8s" }), "informix");
+  assert.equal(effectiveDatabaseTypeForConnection({ db_type: "gbase", driver_profile: "gbase8a" }), "mysql");
+  assert.equal(tableStructureDatabaseTypeForConnection({ db_type: "gbase", driver_profile: "gbase8a" }), "gbase");
+  assert.equal(tableStructureDatabaseTypeForConnection({ db_type: "gbase", driver_profile: "gbase8s" }), "informix");
   assert.equal(
     effectiveDatabaseTypeForConnection({
       db_type: "jdbc",
@@ -54,6 +58,20 @@ test("JDBC tree shape follows the inferred driver dialect", () => {
     }),
     "`test`.`dws_event_analyse`",
   );
+});
+
+test("GBase profiles use their compatible object tree shapes", () => {
+  const gbase8a = { db_type: "gbase" as const, driver_profile: "gbase8a" };
+  const gbase8s = { db_type: "gbase" as const, driver_profile: "gbase8s" };
+
+  assert.equal(connectionUsesDatabaseObjectTreeMode(gbase8a), false);
+  assert.equal(connectionObjectTreeQuerySchema(gbase8a, "testdb", undefined), "");
+  assert.equal(connectionObjectTreeNodeSchema(gbase8a, "testdb", undefined), undefined);
+  assert.equal(connectionUsesDatabaseObjectTreeMode(gbase8s), false);
+  assert.equal(connectionObjectTreeQuerySchema(gbase8s, "testdb", "gbasedbt"), "gbasedbt");
+  assert.equal(connectionObjectTreeNodeSchema(gbase8s, "testdb", "gbasedbt"), "gbasedbt");
+  assert.equal(connectionObjectTreeQuerySchema(gbase8s, "testdb", undefined), "testdb");
+  assert.equal(connectionObjectTreeNodeSchema(gbase8s, "testdb", undefined), "testdb");
 });
 
 test("Databend JDBC keeps database as schema context for table data", () => {

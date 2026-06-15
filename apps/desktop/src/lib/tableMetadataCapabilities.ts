@@ -21,6 +21,10 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     foreignKeys: false,
     triggers: false,
   },
+  manticoresearch: {
+    foreignKeys: false,
+    triggers: false,
+  },
   elasticsearch: {
     indexes: false,
     foreignKeys: false,
@@ -29,6 +33,11 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
   },
   influxdb: {
     indexes: false,
+    foreignKeys: false,
+    triggers: false,
+  },
+  questdb: {
+    indexes: true,
     foreignKeys: false,
     triggers: false,
   },

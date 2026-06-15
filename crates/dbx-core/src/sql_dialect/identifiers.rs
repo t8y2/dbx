@@ -36,11 +36,13 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             DatabaseType::Mysql
             | DatabaseType::Goldendb
             | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
             | DatabaseType::Hive
             | DatabaseType::Databend
             | DatabaseType::Tdengine
             | DatabaseType::Access
-            | DatabaseType::Bigquery,
+            | DatabaseType::Bigquery
+            | DatabaseType::Questdb,
         ) => {
             format!("`{}`", name.replace('`', "``"))
         }
@@ -68,7 +70,8 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
         | DatabaseType::ClickHouse
         | DatabaseType::Doris
         | DatabaseType::StarRocks
-        | DatabaseType::Hive => format!("`{}`", name.replace('`', "``")),
+        | DatabaseType::Hive
+        | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('\"', "\"\"")),
     }
@@ -76,7 +79,8 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
 
 pub(crate) fn qualified_transfer_table(table_name: &str, schema: &str, database_type: &DatabaseType) -> String {
     let table = quote_transfer_identifier(table_name, database_type);
-    if schema.is_empty() || matches!(database_type, DatabaseType::Mysql | DatabaseType::MongoDb) {
+    if schema.is_empty() || matches!(database_type, DatabaseType::Mysql | DatabaseType::MongoDb | DatabaseType::Questdb)
+    {
         table
     } else {
         format!("{}.{}", quote_transfer_identifier(schema, database_type), table)

@@ -34,7 +34,7 @@ impl std::fmt::Display for SqlRisk {
 fn normalize_dialect(dialect: &str) -> &'static str {
     match dialect.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" => "postgres",
-        "mysql" | "mariadb" | "doris" | "starrocks" | "oceanbase" => "mysql",
+        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql",
         "sqlite" => "sqlite",
         "sqlserver" | "mssql" => "sqlserver",
         "clickhouse" => "clickhouse",

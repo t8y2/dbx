@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch, shallowRef, computed, onMounted } from "vue";
+import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
+import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
 import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, Loader2, Moon, PackageSearch, Pencil, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
@@ -7,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -27,6 +29,7 @@ import {
   type AiAuthMethod,
   type EditorTheme,
   type DesktopIconTheme,
+  type InterfaceLayout,
   type DisconnectTabHandlingMode,
   type CustomThemeColors,
   type CustomTheme,
@@ -37,7 +40,22 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/debugLog";
-import { aiListModels, aiTestConnection, checkMcpServerStatus, forgetWebdavSavedPassword, listSystemFonts, saveWebdavSavedPassword, webdavPasswordStatus, webdavSyncDownload, webdavSyncTest, webdavSyncUpload, type AiModelInfo, type McpServerStatus, type WebDavConfig } from "@/lib/api";
+import {
+  aiListModels,
+  aiTestConnection,
+  checkMcpServerStatus,
+  installMcpServer,
+  forgetWebdavSavedPassword,
+  listSystemFonts,
+  saveWebdavSavedPassword,
+  webdavPasswordStatus,
+  webdavSyncDownload,
+  webdavSyncTest,
+  webdavSyncUpload,
+  type AiModelInfo,
+  type McpServerStatus,
+  type WebDavConfig,
+} from "@/lib/api";
 import { eventToShortcut } from "@/lib/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/shortcutRegistry";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
@@ -130,6 +148,85 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
+const iconThemeDescTruncated = { default: ref<boolean>(false), black: ref<boolean>(false) };
+const iconThemeDescRef = {
+  default: ref<HTMLElement | null>(null),
+  black: ref<HTMLElement | null>(null),
+};
+const layoutDescTruncated = { separated: ref<boolean>(false), classic: ref<boolean>(false) };
+const layoutDescRefs = {
+  separated: ref<HTMLElement | null>(null),
+  classic: ref<HTMLElement | null>(null),
+};
+let layoutDescObservers: Record<InterfaceLayout, ResizeObserver | undefined> = {
+  separated: undefined,
+  classic: undefined,
+};
+let iconThemeDescObservers: Record<DesktopIconTheme, ResizeObserver | undefined> = {
+  default: undefined,
+  black: undefined,
+};
+
+function observeElementTruncation(el: Ref<HTMLElement | null>, truncated: Ref<boolean>) {
+  if (!el.value) return;
+
+  const observer = new ResizeObserver(() => {
+    truncated.value = el.value!.scrollWidth > el.value!.clientWidth;
+  });
+
+  observer.observe(el.value);
+  return observer;
+}
+
+function initTruncationObservers() {
+  layoutDescObservers.separated = observeElementTruncation(layoutDescRefs.separated, layoutDescTruncated.separated);
+  layoutDescObservers.classic = observeElementTruncation(layoutDescRefs.classic, layoutDescTruncated.classic);
+  iconThemeDescObservers.default = observeElementTruncation(iconThemeDescRef.default, iconThemeDescTruncated.default);
+  iconThemeDescObservers.black = observeElementTruncation(iconThemeDescRef.black, iconThemeDescTruncated.black);
+}
+
+function cleanupTruncationObservers() {
+  layoutDescObservers.separated?.disconnect();
+  layoutDescObservers.classic?.disconnect();
+  iconThemeDescObservers.default?.disconnect();
+  iconThemeDescObservers.black?.disconnect();
+}
+
+function setLayoutDescRef(layout: InterfaceLayout, el: unknown) {
+  layoutDescRefs[layout].value = el instanceof HTMLElement ? el : null;
+}
+
+function setIconThemeDescRef(theme: DesktopIconTheme, el: unknown) {
+  iconThemeDescRef[theme].value = el instanceof HTMLElement ? el : null;
+}
+
+function checkLayoutDescTruncation() {
+  checkTruncationForRefs([
+    { el: layoutDescRefs.separated, truncated: layoutDescTruncated.separated },
+    { el: layoutDescRefs.classic, truncated: layoutDescTruncated.classic },
+  ]);
+}
+
+function checkIconThemeDescTruncation() {
+  checkTruncationForRefs([
+    { el: iconThemeDescRef.default, truncated: iconThemeDescTruncated.default },
+    { el: iconThemeDescRef.black, truncated: iconThemeDescTruncated.black },
+  ]);
+}
+
+function checkTruncationForRefs(items: Array<{ el: Ref<HTMLElement | null>; truncated: Ref<boolean> }>) {
+  nextTick(() => {
+    for (const item of items) {
+      if (item.el.value) {
+        item.truncated.value = checkElementTruncation(item.el.value);
+      }
+    }
+  });
+}
+
+function checkElementTruncation(el: HTMLElement | null) {
+  return el ? el.scrollWidth > el.clientWidth : false;
+}
 
 function openAddSnippetDialog() {
   snippetEditingId.value = null;
@@ -552,7 +649,7 @@ function clearShortcut(actionId: ShortcutActionId) {
   editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
 }
 
-function setAppLayout(value: "separated" | "classic") {
+function setAppLayout(value: InterfaceLayout) {
   editAppLayout.value = value;
 }
 
@@ -628,6 +725,9 @@ const mcpCopied = ref<"" | "install" | "claude-config" | "codex-config">("");
 const mcpConfigTab = ref<"claude" | "codex">("claude");
 const mcpReadonlyMode = ref(false);
 const mcpAllowDangerous = ref(false);
+const mcpInstalling = ref(false);
+const mcpInstallMessage = ref("");
+const mcpInstallError = ref(false);
 
 const mcpEnvEntries = computed(() => {
   const entries: Array<[string, string]> = [];
@@ -715,6 +815,30 @@ async function copyMcpText(kind: "install" | "claude-config" | "codex-config", v
   window.setTimeout(() => {
     if (mcpCopied.value === kind) mcpCopied.value = "";
   }, 1500);
+}
+
+async function installMcp() {
+  if (mcpInstalling.value) return;
+  mcpInstalling.value = true;
+  mcpInstallMessage.value = "";
+  mcpInstallError.value = false;
+  try {
+    const result = await installMcpServer();
+    mcpInstallMessage.value = result;
+    mcpInstallError.value = false;
+    // 安装成功后刷新状态
+    await refreshMcpStatus();
+  } catch (e: any) {
+    mcpInstallMessage.value = e?.message || String(e);
+    mcpInstallError.value = true;
+  } finally {
+    mcpInstalling.value = false;
+    // 3秒后清除消息
+    window.setTimeout(() => {
+      mcpInstallMessage.value = "";
+      mcpInstallError.value = false;
+    }, 3000);
+  }
 }
 
 // ---------- WebDAV Sync ----------
@@ -876,10 +1000,21 @@ watch(webdavRememberPassword, (val) => {
 
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (tab === "appearance") {
+    checkLayoutDescTruncation();
+    checkIconThemeDescTruncation();
+  }
 });
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
+  checkLayoutDescTruncation();
+  checkIconThemeDescTruncation();
+  initTruncationObservers();
+});
+
+onUnmounted(() => {
+  cleanupTruncationObservers();
 });
 
 async function changePassword() {
@@ -930,6 +1065,7 @@ const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "compl
 const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
 const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
 const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
+const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
 
 const aiModelOptions = ref<AiModelInfo[]>([]);
 const aiModelLoading = ref(false);
@@ -1003,6 +1139,7 @@ function currentAiEditConfig() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
+    contextWindow: aiEditContextWindow.value || undefined,
   };
 }
 
@@ -1076,6 +1213,7 @@ function syncAiEditState() {
   aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
   aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
   aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
+  aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
@@ -1105,7 +1243,8 @@ function aiHasChanges(): boolean {
     aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
     aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
     aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
-    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true)
+    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
+    aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow
   );
 }
 
@@ -1509,39 +1648,76 @@ watch(
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('separated')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutSeparatedDescription") }}</div>
-                    </div>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div class="w-full min-w-0 text-left">
+                            <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
+                            <div :ref="(el) => setLayoutDescRef('separated', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutSeparatedDescription") }}</div>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent v-if="layoutDescTruncated.separated.value" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.appLayoutSeparatedDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </Button>
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('classic')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutClassicDescription") }}</div>
-                    </div>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div class="w-full min-w-0 text-left">
+                            <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
+                            <div :ref="(el) => setLayoutDescRef('classic', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutClassicDescription") }}</div>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent v-if="layoutDescTruncated.classic.value" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.appLayoutClassicDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </Button>
                 </div>
               </div>
 
-              <div v-if="!isWeb" class="space-y-2">
+              <!-- <div v-if="!isWeb" class="space-y-2"> -->
+              <div class="space-y-2">
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
-                    <div class="flex items-center gap-3 text-left">
+                    <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
-                      <div>
-                        <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
-                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeDefaultDescription") }}</div>
-                      </div>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <div class="w-full min-w-0 text-left">
+                              <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
+                              <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeDefaultDescription") }}</div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent v-if="iconThemeDescTruncated.default.value" class="max-w-[320px] text-xs leading-relaxed">
+                            {{ t("settings.iconThemeDefaultDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   </Button>
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
-                    <div class="flex items-center gap-3 text-left">
-                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert" />
-                      <div>
-                        <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
-                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeBlackDescription") }}</div>
-                      </div>
+                    <div class="flex items-center gap-3 text-left w-full min-w-0">
+                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert shrink-0" />
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <div class="w-full min-w-0 text-left">
+                              <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
+                              <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeBlackDescription") }}</div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent v-if="iconThemeDescTruncated.black.value" class="max-w-[320px] text-xs leading-relaxed">
+                            {{ t("settings.iconThemeBlackDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   </Button>
                 </div>
@@ -2013,7 +2189,7 @@ watch(
                 <div class="space-y-2">
                   <Label for="webdav-password">{{ t("settings.syncPassword") }}</Label>
                   <div class="relative">
-                    <Input id="webdav-password" v-model="webdavPassword" type="password" :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')" :disabled="webdavHasSavedPassword" autocomplete="current-password" />
+                    <PasswordInput id="webdav-password" v-model="webdavPassword" :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')" :disabled="webdavHasSavedPassword" autocomplete="current-password" />
                     <Button
                       v-if="webdavHasSavedPassword"
                       variant="ghost"
@@ -2067,7 +2243,7 @@ watch(
                 </div>
                 <div v-if="webdavSyncSecrets" class="space-y-2">
                   <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
-                  <Input id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" type="password" autocomplete="new-password" />
+                  <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" autocomplete="new-password" />
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
                 </div>
               </div>
@@ -2079,7 +2255,7 @@ watch(
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
                   <Select :model-value="aiEditProvider" @update:model-value="(v: any) => aiSelectProvider(v)">
-                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                    <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue>
                         <span class="flex items-center gap-2">
                           <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" />
@@ -2101,7 +2277,7 @@ watch(
                 <div v-if="aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
-                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                    <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -2113,7 +2289,7 @@ watch(
 
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
-                  <Input v-model="aiEditApiKey" type="password" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
+                  <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
                 <div class="grid grid-cols-3 items-start gap-3">
@@ -2191,6 +2367,14 @@ watch(
                   </div>
                 </div>
 
+                <div class="grid grid-cols-3 items-start gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
+                  <div class="col-span-2">
+                    <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
+                    <p class="mt-1 text-xs text-muted-foreground">{{ t("ai.contextWindowHint") }}</p>
+                  </div>
+                </div>
+
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
@@ -2201,7 +2385,7 @@ watch(
 
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
-                  <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2 h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
+                  <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
               </div>
             </section>
@@ -2276,6 +2460,17 @@ watch(
                     <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>
+                  <Button type="button" variant="default" :disabled="mcpInstalling || !mcpStatus?.npm_available || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
+                    <Loader2 v-if="mcpInstalling" class="mr-2 h-4 w-4 animate-spin" />
+                    <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available" class="mr-2 h-4 w-4" />
+                    {{ mcpInstalling ? t("settings.mcpInstalling") : !mcpStatus?.installed ? t("settings.mcpInstallButton") : mcpStatus?.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate") }}
+                  </Button>
+                </div>
+                <div
+                  v-if="mcpInstallMessage"
+                  :class="['text-xs px-3 py-2 rounded-md border', mcpInstallError ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800' : 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-800']"
+                >
+                  {{ mcpInstallMessage }}
                 </div>
               </div>
 
@@ -2348,9 +2543,9 @@ watch(
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
                 <p class="text-sm text-muted-foreground">{{ t("auth.changePasswordDescription") }}</p>
-                <Input v-model="oldPassword" type="password" :placeholder="t('auth.oldPassword')" class="h-9" autocomplete="off" />
-                <Input v-model="newPassword" type="password" :placeholder="t('auth.newPassword')" class="h-9" autocomplete="off" />
-                <Input v-model="confirmNewPassword" type="password" :placeholder="t('auth.confirmPassword')" class="h-9" autocomplete="off" />
+                <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
                 <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>

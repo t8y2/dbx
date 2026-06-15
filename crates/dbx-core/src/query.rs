@@ -481,29 +481,8 @@ pub fn truncate_result_with_max_rows(mut result: db::QueryResult, max_rows: Opti
 }
 
 fn normalize_query_result_for_js(mut result: db::QueryResult) -> db::QueryResult {
-    result.rows = result.rows.into_iter().map(|row| row.into_iter().map(json_value_for_js).collect()).collect();
+    result.rows = result.rows.into_iter().map(|row| row.into_iter().map(db::json_value_for_js).collect()).collect();
     result
-}
-
-fn json_value_for_js(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Number(number) => {
-            if let Some(value) = number.as_i64() {
-                db::safe_i64_to_json(value)
-            } else if let Some(value) = number.as_u64() {
-                db::safe_u64_to_json(value)
-            } else {
-                serde_json::Value::Number(number)
-            }
-        }
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(json_value_for_js).collect())
-        }
-        serde_json::Value::Object(entries) => {
-            serde_json::Value::Object(entries.into_iter().map(|(key, value)| (key, json_value_for_js(value))).collect())
-        }
-        value => value,
-    }
 }
 
 pub fn agent_execute_query_params(
@@ -572,6 +551,9 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 
 pub fn is_connection_error(err: &str) -> bool {
     let lower = err.to_lowercase();
+    if is_dbx_query_timeout_error(&lower) {
+        return false;
+    }
     lower.contains("connection")
         || lower.contains("broken pipe")
         || lower.contains("reset by peer")
@@ -586,6 +568,10 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("idle")
         || lower.contains("communicating with the server")
         || is_os_connection_error(&lower)
+}
+
+fn is_dbx_query_timeout_error(lower: &str) -> bool {
+    lower.starts_with("query timed out after ")
 }
 
 fn is_os_connection_error(lower: &str) -> bool {
@@ -968,6 +954,15 @@ pub async fn execute_sql_statement_with_options(
         return Err("Use MongoDB-specific commands".to_string());
     }
 
+    let db_type = connection_database_type(state, connection_id).await;
+    let has_executable_sql = db_type.map_or_else(
+        || crate::sql::has_executable_sql(sql),
+        |db_type| crate::sql::has_executable_sql_for_database(sql, db_type),
+    );
+    if !has_executable_sql {
+        return Ok(empty_query_result(0));
+    }
+
     // When a query tab has a client session, keep even database-less execution
     // on that tab-scoped pool so connection-level state (for example MySQL @vars)
     // survives across runs.
@@ -1094,6 +1089,9 @@ pub async fn execute_multi_core_with_options(
         || split_sql_statements(sql),
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
+    if statements.is_empty() {
+        return Ok(vec![empty_query_result(0)]);
+    }
 
     let mysql_pool = {
         let connections = state.connections.read().await;
@@ -1198,6 +1196,20 @@ fn error_query_result(message: String) -> db::QueryResult {
         rows: vec![vec![serde_json::Value::String(message)]],
         affected_rows: 0,
         execution_time_ms: 0,
+        truncated: false,
+        session_id: None,
+        has_more: false,
+    }
+}
+
+fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
+    db::QueryResult {
+        columns: vec![],
+        column_types: Vec::new(),
+        column_sortables: vec![],
+        rows: vec![],
+        affected_rows: 0,
+        execution_time_ms,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -1797,6 +1809,7 @@ mod tests {
 
     #[test]
     fn is_connection_error_rejects_non_connection_errors() {
+        assert!(!is_connection_error("Query timed out after 30 seconds"));
         assert!(!is_connection_error("ORA-00942: table or view does not exist"));
         assert!(!is_connection_error("syntax error at position 5"));
         assert!(!is_connection_error("os error 13"));
@@ -1983,6 +1996,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
+            gbase_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

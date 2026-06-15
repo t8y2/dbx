@@ -300,7 +300,7 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
         Bson::Boolean(v) => serde_json::Value::Bool(*v),
         Bson::Null => serde_json::Value::Null,
         Bson::Int32(v) => serde_json::json!(v),
-        Bson::Int64(v) => serde_json::json!(v),
+        Bson::Int64(v) => super::safe_i64_to_json(*v),
         Bson::ObjectId(oid) => serde_json::Value::String(oid.to_hex()),
         Bson::DateTime(dt) => serde_json::Value::String(format!(
             "ISODate(\"{}\")",
@@ -592,6 +592,20 @@ mod tests {
         let value = bson_to_json(&Bson::DateTime(date));
 
         assert_eq!(value, serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
+    }
+
+    #[test]
+    fn bson_to_json_preserves_unsafe_int64_for_js() {
+        let value = bson_to_json(&Bson::Int64(2_326_645_729_978_441_729));
+
+        assert_eq!(value, serde_json::json!("2326645729978441729"));
+    }
+
+    #[test]
+    fn bson_to_json_keeps_safe_int64_as_number() {
+        let value = bson_to_json(&Bson::Int64(42));
+
+        assert_eq!(value, serde_json::json!(42));
     }
 
     #[test]

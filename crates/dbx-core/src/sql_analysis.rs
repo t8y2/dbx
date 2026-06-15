@@ -90,8 +90,10 @@ fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
 
 fn normalize_dialect(dialect: Option<&str>) -> String {
     match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" => "postgres".to_string(),
-        "mysql" | "mariadb" | "doris" | "starrocks" | "oceanbase" => "mysql".to_string(),
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "questdb" => {
+            "postgres".to_string()
+        }
+        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql".to_string(),
         "sqlite" => "sqlite".to_string(),
         "sqlserver" | "mssql" => "sqlserver".to_string(),
         "clickhouse" => "clickhouse".to_string(),

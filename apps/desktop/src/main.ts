@@ -45,6 +45,33 @@ function installStartupErrorHandlers() {
   });
 }
 
+function installGlobalInputAttrs() {
+  const ATTRS: [string, string][] = [
+    ["autocomplete", "off"],
+    ["autocapitalize", "off"],
+    ["autocorrect", "off"],
+    ["spellcheck", "false"],
+  ];
+  const MARKER = "data-input-attrs-set";
+  const apply = (el: Element) => {
+    if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && !el.hasAttribute(MARKER)) {
+      for (const [k, v] of ATTRS) el.setAttribute(k, v);
+      el.setAttribute(MARKER, "");
+    }
+  };
+  document.querySelectorAll("input, textarea").forEach(apply);
+  new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node instanceof Element) {
+          apply(node);
+          node.querySelectorAll("input, textarea").forEach(apply);
+        }
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+}
+
 async function bootstrap() {
   console.log("[STARTUP] frontend bootstrap begin");
   const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./App.vue")]);
@@ -58,6 +85,8 @@ async function bootstrap() {
   app.use(VueVirtualScroller);
   app.mount("#root");
   console.log("[STARTUP] vue mounted");
+
+  installGlobalInputAttrs();
 }
 
 installDebugLogCapture();

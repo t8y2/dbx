@@ -41,12 +41,14 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         return explain_err("unsafe");
     }
 
-    let sql = if options.database_type == Some(DatabaseType::Postgres) {
-        format!("EXPLAIN (FORMAT JSON) {source}")
-    } else if options.database_type == Some(DatabaseType::Dameng) {
-        format!("EXPLAIN {source}")
-    } else {
-        format!("EXPLAIN FORMAT=JSON {source}")
+    let sql = match options.database_type {
+        Some(DatabaseType::Postgres | DatabaseType::MongoDb) => {
+            format!("EXPLAIN (FORMAT JSON) {source}")
+        }
+        Some(DatabaseType::Dameng | DatabaseType::Questdb) => {
+            format!("EXPLAIN {source}")
+        }
+        _ => format!("EXPLAIN FORMAT=JSON {source}"),
     };
     ExplainSqlBuildResult { ok: true, sql: Some(sql), reason: None }
 }
@@ -71,7 +73,24 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 }
 
 pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
-    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Dameng))
+    matches!(
+        database_type,
+        Some(DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Questdb | DatabaseType::Dameng)
+    )
+}
+
+/// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
+/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, Neo4j, etcd) are excluded.
+pub fn supports_sql_query(database_type: DatabaseType) -> bool {
+    !matches!(
+        database_type,
+        DatabaseType::Redis
+            | DatabaseType::MongoDb
+            | DatabaseType::Elasticsearch
+            | DatabaseType::InfluxDb
+            | DatabaseType::Neo4j
+            | DatabaseType::Etcd
+    )
 }
 
 pub fn is_safe_dameng_autotrace_sql(sql: &str) -> bool {

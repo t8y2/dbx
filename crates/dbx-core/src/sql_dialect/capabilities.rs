@@ -30,6 +30,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Hive
             | DatabaseType::Db2
             | DatabaseType::Tdengine
+            | DatabaseType::Xugu
             | DatabaseType::DuckDb
             | DatabaseType::Iris
     )

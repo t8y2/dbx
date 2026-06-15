@@ -5,6 +5,7 @@ import { HeroProductStage } from "@/components/aceternity/HeroProductStage";
 import { InfiniteMovingCards } from "@/components/aceternity/InfiniteMovingCards";
 import { Spotlight } from "@/components/aceternity/Spotlight";
 import { LandingNav } from "@/components/landing/LandingNav";
+import { LandingFooter } from "@/components/landing/LandingFooter";
 import { InstallTabs } from "@/components/landing/InstallTabs";
 import { LandingLatestUpdates } from "@/components/landing/LandingLatestUpdates";
 import { RevealSection } from "@/components/landing/RevealSection";
@@ -71,6 +72,7 @@ const databaseSupport = [
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
   { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
+  { name: "Manticore Search", icon: "/icons/database/manticoresearch.png", tone: "#b8e646" },
   { name: "Redshift", icon: "/icons/database/redshift.svg", tone: "#8c4fff" },
   { name: "Dameng", icon: "/icons/database/dm.svg", tone: "#3857ff" },
   { name: "GaussDB", icon: "/icons/database/gaussdb.svg", tone: "#ff5a3d" },
@@ -101,6 +103,7 @@ const databaseSupport = [
   { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
   { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
   { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
+  { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },  
   { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
   { name: "KWDB", icon: "/icons/database/kwdb.svg", tone: "#6366f1" },
   { name: "Vastbase", icon: "/icons/database/vastbase.png", tone: "#2563eb" },
@@ -583,6 +586,8 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           </Link>
         </div>
       </RevealSection>
+
+      <LandingFooter lang={l} />
     </main>
   );
 }

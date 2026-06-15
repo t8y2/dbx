@@ -17,11 +17,11 @@ export async function loadRoutineParameters(options: LoadRoutineParametersOption
     maxRows: 200,
     pageSize: 200,
   });
-  return routineParametersFromResult(result);
+  return routineParametersFromResult(result, options.databaseType);
 }
 
 export function supportsRoutineParameterMetadata(databaseType?: DatabaseType): boolean {
-  return databaseType === "postgres" || databaseType === "mysql" || databaseType === "doris" || databaseType === "starrocks" || databaseType === "sqlserver" || databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle";
+  return databaseType === "postgres" || databaseType === "mysql" || databaseType === "doris" || databaseType === "starrocks" || databaseType === "sqlserver" || databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle" || databaseType === "databend";
 }
 
 export function routineParametersQuery(options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName">): string | null {
@@ -80,6 +80,14 @@ WHERE SPECIFIC_SCHEMA = ${schema}
   AND ORDINAL_POSITION > 0
 ORDER BY ORDINAL_POSITION;`.trim();
   }
+  if (options.databaseType === "databend") {
+    return `
+SELECT arguments
+FROM system.procedures
+WHERE name = ${name}
+ORDER BY procedure_id
+LIMIT 1;`.trim();
+  }
   if (options.databaseType === "sqlserver") {
     return `
 SELECT
@@ -113,7 +121,8 @@ ORDER BY SEQUENCE;`.trim();
   return null;
 }
 
-export function routineParametersFromResult(result: QueryResult): RoutineParameter[] {
+export function routineParametersFromResult(result: QueryResult, databaseType?: DatabaseType): RoutineParameter[] {
+  if (databaseType === "databend") return databendRoutineParametersFromResult(result);
   return result.rows
     .map((row, index) => ({
       name: String(row[0] || `arg${index + 1}`),
@@ -123,6 +132,54 @@ export function routineParametersFromResult(result: QueryResult): RoutineParamet
       hasDefault: normalizeBoolean(row[4]),
     }))
     .filter((parameter) => parameter.mode !== "RETURN");
+}
+
+function databendRoutineParametersFromResult(result: QueryResult): RoutineParameter[] {
+  const argumentsIndex = result.columns.findIndex((column) => column.toLowerCase() === "arguments");
+  const signature = String(result.rows[0]?.[argumentsIndex >= 0 ? argumentsIndex : 0] || "");
+  const inputTypes = databendInputTypesFromArguments(signature);
+  return inputTypes.map((dataType, index) => ({
+    name: `arg${index + 1}`,
+    dataType,
+    mode: "IN",
+    ordinal: index + 1,
+    hasDefault: false,
+  }));
+}
+
+function databendInputTypesFromArguments(signature: string): string[] {
+  const openIndex = signature.indexOf("(");
+  if (openIndex < 0) return [];
+  let depth = 0;
+  for (let index = openIndex; index < signature.length; index += 1) {
+    const char = signature[index];
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return splitTopLevelComma(signature.slice(openIndex + 1, index)).filter(Boolean);
+      }
+    }
+  }
+  return [];
+}
+
+function splitTopLevelComma(value: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+  for (const char of value) {
+    if (char === "(") depth += 1;
+    if (char === ")") depth = Math.max(0, depth - 1);
+    if (char === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
 }
 
 function normalizeParameterMode(value: unknown): RoutineParameterMode {

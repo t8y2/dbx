@@ -64,7 +64,11 @@ impl SqlParsingOptions {
         Self {
             supports_hash_line_comments: matches!(
                 db_type,
-                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb
+                DatabaseType::Mysql
+                    | DatabaseType::Doris
+                    | DatabaseType::StarRocks
+                    | DatabaseType::ManticoreSearch
+                    | DatabaseType::Goldendb
             ),
             supports_oracle_plsql_blocks: matches!(
                 db_type,
@@ -1203,13 +1207,27 @@ fn executable_sql_keyword_matches(token: &str, keyword: &str) -> bool {
 }
 
 fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
-    matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb)
-        || driver_profile.map(|profile| profile.to_ascii_lowercase()).is_some_and(|profile| {
-            matches!(
-                profile.as_str(),
-                "mariadb" | "tidb" | "oceanbase" | "custom_mysql" | "doris" | "starrocks" | "selectdb" | "goldendb"
-            )
-        })
+    matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Goldendb
+    ) || driver_profile.map(|profile| profile.to_ascii_lowercase()).is_some_and(|profile| {
+        matches!(
+            profile.as_str(),
+            "mariadb"
+                | "tidb"
+                | "oceanbase"
+                | "custom_mysql"
+                | "doris"
+                | "starrocks"
+                | "manticoresearch"
+                | "selectdb"
+                | "goldendb"
+        )
+    })
 }
 
 fn mysql_executable_comment_body(statement: &str) -> Option<&str> {
@@ -1567,8 +1585,12 @@ fn dollar_quote_tag_at(chars: &[char], start: usize) -> Option<String> {
     None
 }
 
-fn has_executable_sql(statement: &str) -> bool {
+pub fn has_executable_sql(statement: &str) -> bool {
     has_executable_sql_with_options(statement, SqlParsingOptions::default())
+}
+
+pub fn has_executable_sql_for_database(statement: &str, db_type: DatabaseType) -> bool {
+    has_executable_sql_with_options(statement, SqlParsingOptions::for_database_type(db_type))
 }
 
 fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<(usize, usize)> {
@@ -1751,6 +1773,15 @@ mod tests {
             split_sql_script("CREATE TABLE a(id int); -- done\n/* no more sql */").unwrap(),
             vec!["CREATE TABLE a(id int)"]
         );
+    }
+
+    #[test]
+    fn skips_comment_only_statement_with_semicolon() {
+        assert_eq!(
+            split_sql_script("-- insert sqluser.tb_a values (6,'006','测试6','无');").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(!super::has_executable_sql("-- insert sqluser.tb_a values (6,'006','测试6','无');"));
     }
 
     #[test]

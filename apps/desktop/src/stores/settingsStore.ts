@@ -25,6 +25,7 @@ export interface AiConfig {
   proxyEnabled?: boolean;
   proxyUrl?: string;
   enableThinking?: boolean;
+  contextWindow?: number;
 }
 
 export interface AiTestConnectionResult {
@@ -46,6 +47,8 @@ export interface DesktopSettings {
 }
 
 export type DesktopIconTheme = "default" | "black";
+
+export type InterfaceLayout = "separated" | "classic";
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
@@ -177,6 +180,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
+    contextWindow: config?.contextWindow ?? undefined,
   };
 }
 

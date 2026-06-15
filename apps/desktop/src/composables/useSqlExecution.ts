@@ -62,12 +62,18 @@ export function useSqlExecution(deps: {
     const tab = deps.activeTab.value;
     const sql = sqlOverride ?? (await resolvedExecutableSql());
     if (!tab || !sql.trim()) return;
-    // Redis: block dangerous commands when toggle is on
+    // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
-      const safety = classifyRedisCommandSafety(sql);
-      if (safety === "blocked") {
-        toast(t("redis.blockedCommand", { command: firstRedisCommandToken(sql) }), 5000);
-        return;
+      const commands = sql
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const cmd of commands) {
+        const safety = classifyRedisCommandSafety(cmd);
+        if (safety === "blocked") {
+          toast(t("redis.blockedCommand", { command: firstRedisCommandToken(cmd) }), 5000);
+          return;
+        }
       }
     }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {

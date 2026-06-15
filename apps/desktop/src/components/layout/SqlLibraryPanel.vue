@@ -588,7 +588,7 @@ function createDragGhost(sourceEl: HTMLElement, x: number, y: number) {
     max-width: 220px;
     height: 24px;
     padding: 0 8px;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 24px;
     white-space: nowrap;
     overflow: hidden;
@@ -748,7 +748,7 @@ function showDropInside(targetId: string) {
 <template>
   <div class="h-full flex flex-col overflow-hidden border-l bg-background select-none">
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
-      <span class="text-xs font-medium">{{ t("sqlLibrary.title") }}</span>
+      <span class="text-[13px] font-medium">{{ t("sqlLibrary.title") }}</span>
       <span class="flex-1" />
       <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('savedSql.newFolder')" @click="openNewFolderInput">
         <FolderPlus class="h-3 w-3" />
@@ -767,7 +767,7 @@ function showDropInside(targetId: string) {
     <div class="border-b shrink-0 px-2 py-1">
       <div class="relative">
         <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-        <input v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="w-full h-6 pl-7 pr-6 text-xs rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" :placeholder="t('grid.search')" />
+        <input v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="w-full h-6 pl-7 pr-6 text-[13px] rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" :placeholder="t('grid.search')" />
         <button v-if="searchText" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchText = ''">
           <X class="h-3 w-3" />
         </button>
@@ -787,7 +787,7 @@ function showDropInside(targetId: string) {
             <div v-for="row in visibleFolderRows" :key="row.type === 'folder' ? row.folder.id : row.file.id" class="mb-0.5">
               <div
                 v-if="row.type === 'folder'"
-                class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-xs cursor-pointer transition-colors group"
+                class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-[13px] cursor-pointer transition-colors group"
                 :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                 :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : 'hover:bg-accent', isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
                 @mousedown="handleDragMouseDown($event, row.folder.id, 'folder')"
@@ -807,7 +807,7 @@ function showDropInside(targetId: string) {
                     :ref="setRenameInputRef"
                     v-model="renameValue"
                     data-no-drag="true"
-                    class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-xs outline-none"
+                    class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                     @keydown.enter.prevent="confirmRename"
                     @keydown.escape.prevent="cancelRename"
                     @blur="confirmRename"
@@ -822,7 +822,7 @@ function showDropInside(targetId: string) {
 
               <div
                 v-else
-                class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-xs cursor-pointer transition-colors group"
+                class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-[13px] cursor-pointer transition-colors group"
                 :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                 :class="[isDraggingItem(row.file.id) ? 'opacity-50' : 'hover:bg-accent']"
                 @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
@@ -842,7 +842,7 @@ function showDropInside(targetId: string) {
                     :ref="setRenameInputRef"
                     v-model="renameValue"
                     data-no-drag="true"
-                    class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-xs outline-none"
+                    class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                     @keydown.enter.prevent="confirmRename"
                     @keydown.escape.prevent="cancelRename"
                     @blur="confirmRename"
@@ -850,7 +850,7 @@ function showDropInside(targetId: string) {
                   />
                 </template>
                 <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate">{{ row.file.name }}</span>
-                <span class="shrink-0 text-xs text-muted-foreground"> [{{ getConnectionLabel(row.file.connectionId) }}] </span>
+                <span class="shrink-0 text-[13px] text-muted-foreground"> [{{ getConnectionLabel(row.file.connectionId) }}] </span>
               </div>
             </div>
 
@@ -866,7 +866,7 @@ function showDropInside(targetId: string) {
               <div
                 v-for="file in visibleFiles"
                 :key="file.id"
-                class="relative flex items-center gap-1 rounded px-2 py-1.5 text-xs cursor-pointer transition-colors group"
+                class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer transition-colors group"
                 :class="[isDraggingItem(file.id) ? 'opacity-50' : 'hover:bg-accent']"
                 @mousedown="handleDragMouseDown($event, file.id, 'file')"
                 @mousemove="updateDropTarget($event, file.id, 'file')"
@@ -885,7 +885,7 @@ function showDropInside(targetId: string) {
                     :ref="setRenameInputRef"
                     v-model="renameValue"
                     data-no-drag="true"
-                    class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-xs outline-none"
+                    class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                     @keydown.enter.prevent="confirmRename"
                     @keydown.escape.prevent="cancelRename"
                     @blur="confirmRename"
@@ -893,13 +893,13 @@ function showDropInside(targetId: string) {
                   />
                 </template>
                 <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate">{{ file.name }}</span>
-                <span class="shrink-0 text-xs text-muted-foreground"> [{{ getConnectionLabel(file.connectionId) }}] </span>
+                <span class="shrink-0 text-[13px] text-muted-foreground"> [{{ getConnectionLabel(file.connectionId) }}] </span>
               </div>
             </div>
 
             <div v-if="!hasAnyVisibleItem" class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
               <Library class="h-8 w-8 opacity-30" />
-              <p class="text-xs">{{ t("sqlLibrary.empty") }}</p>
+              <p class="text-[13px]">{{ t("sqlLibrary.empty") }}</p>
             </div>
           </div>
         </template>

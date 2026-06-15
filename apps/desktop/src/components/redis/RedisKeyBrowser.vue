@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History } from "@lucide/vue";
+import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Splitpanes, Pane } from "splitpanes";
@@ -15,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import RedisValueViewer from "./RedisValueViewer.vue";
+import RedisPubSubPanel from "./RedisPubSubPanel.vue";
 import * as api from "@/lib/api";
 import type { RedisKeyInfo, RedisScanResult, HistoryEntry } from "@/lib/api";
 import { uuid } from "@/lib/utils";
@@ -44,7 +45,7 @@ interface CreateKeyEntry {
   field?: string;
   score?: string;
 }
-type RedisSidePanel = "detail" | "command";
+type RedisSidePanel = "detail" | "command" | "pubsub";
 type RedisCommandHistoryEntry = {
   id: number;
   prompt: string;
@@ -199,13 +200,30 @@ async function fetchScanPage(): Promise<RedisScanResult> {
   return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeys(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize);
 }
 
+/// Batch-scan variant that performs multiple SCAN iterations server-side.
+/// Dramatically reduces frontend↔backend roundtrips for bulk loading.
+async function fetchScanBatchPage(maxIterations: number): Promise<RedisScanResult> {
+  const pageSize = settingsStore.editorSettings.redisScanPageSize;
+  // Value search cannot be batched because each key requires a GET.
+  if (isValueSearchMode.value) {
+    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
+  }
+  return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations);
+}
+
 function appendScanResult(result: RedisScanResult) {
   const existingKeys = new Set(flatKeys.value.map((key) => key.key_raw));
   const newKeys = result.keys.filter((key) => !existingKeys.has(key.key_raw));
   flatKeys.value = [...flatKeys.value, ...newKeys];
   scanCursor.value = result.cursor;
   hasMore.value = result.cursor !== 0;
-  lastTotalKeys.value = result.total_keys;
+  // DBSIZE is only called on the first batch page (cursor==0); subsequent
+  // pages return total_keys=0. Preserve the previously-fetched total when
+  // we get a zero from a continuation. A truly empty DB returns cursor==0
+  // and keys==[] along with total_keys==0, which we do record.
+  if (result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0)) {
+    lastTotalKeys.value = result.total_keys;
+  }
 
   if (treeKeys.value.length === 0) {
     rebuildTree(isSearchMode.value);
@@ -215,7 +233,7 @@ function appendScanResult(result: RedisScanResult) {
 
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
     loaded: isSearchMode.value ? undefined : flatKeys.value.length,
-    total: result.total_keys,
+    total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0) ? result.total_keys : undefined,
   });
 }
 
@@ -235,15 +253,18 @@ async function streamValueSearch(requestId: number) {
 
 async function fillInitialKeyBatch(requestId: number) {
   const targetCount = Math.max(1, settingsStore.editorSettings.redisScanPageSize);
-  let rounds = 0;
-  while (requestId === searchRequestId && searchMode.value === "key" && hasMore.value && flatKeys.value.length < targetCount) {
-    const beforeCount = flatKeys.value.length;
-    const applied = await scanNextPage(requestId);
-    if (!applied) return;
-    rounds += 1;
-    if (flatKeys.value.length >= targetCount) return;
-    if (rounds >= 12 && flatKeys.value.length === beforeCount) return;
-    if (rounds >= 24) return;
+  // Use server-side batching to fill the initial view quickly.
+  // Each batch iteration does one SCAN round-trip; 5 iterations with
+  // COUNT=1000 should return enough keys for most cases.
+  const maxIter = Math.max(1, Math.ceil(targetCount / Math.max(1, settingsStore.editorSettings.redisScanPageSize)));
+  const result = await fetchScanBatchPage(Math.min(maxIter, 8));
+  if (requestId !== searchRequestId) return;
+  appendScanResult(result);
+  // If we still need more keys, do one more batch
+  if (flatKeys.value.length < targetCount && hasMore.value && requestId === searchRequestId) {
+    const result2 = await fetchScanBatchPage(Math.min(maxIter, 8));
+    if (requestId !== searchRequestId) return;
+    appendScanResult(result2);
   }
 }
 
@@ -289,14 +310,22 @@ async function loadMore() {
   }
 }
 
+/// Fetch-all with server-side multi-SCAN batching.
+///
+/// Each call performs up to 15 SCAN→TYPE cycles server-side (~0.5s per
+/// batch at COUNT=1000). This keeps the UI responsive with frequent progress
+/// updates while still avoiding the per-page overhead of single-SCAN calls.
+const FETCH_ALL_BATCH_ITERATIONS = 15;
+
 async function fetchAll() {
   if (!hasMore.value || isFetchingAll.value) return;
   const requestId = searchRequestId;
   isFetchingAll.value = true;
   try {
     while (requestId === searchRequestId && isFetchingAll.value && hasMore.value) {
-      const applied = await scanNextPage(requestId);
-      if (!applied) break;
+      const result = await fetchScanBatchPage(FETCH_ALL_BATCH_ITERATIONS);
+      if (requestId !== searchRequestId) break;
+      appendScanResult(result);
     }
   } finally {
     if (requestId === searchRequestId) {
@@ -942,6 +971,10 @@ defineExpose({ focusSearch });
                   <TerminalSquare class="size-3.5" />
                   {{ t("redis.commandLine") }}
                 </TabsTrigger>
+                <TabsTrigger value="pubsub" class="h-6 flex-none gap-1.5 rounded-md px-2 text-xs">
+                  <Radio class="size-3.5" />
+                  {{ t("redis.pubsub") }}
+                </TabsTrigger>
               </TabsList>
               <Button v-if="activeSidePanel === 'command'" variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearPersistedRedisHistory">
                 <History class="size-3.5" />
@@ -986,6 +1019,10 @@ defineExpose({ focusSearch });
                   <Loader2 v-if="commandRunning" class="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />
                 </form>
               </div>
+            </TabsContent>
+
+            <TabsContent value="pubsub" class="m-0 min-h-0 flex-1 flex flex-col">
+              <RedisPubSubPanel :connection-id="connectionId" :db="db" />
             </TabsContent>
           </Tabs>
         </div>

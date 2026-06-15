@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use base64::Engine;
 use russh::client::{self, Config, Handle};
 use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
-use russh::ChannelMsg;
+use russh::{kex, ChannelMsg, Preferred};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -42,6 +43,19 @@ impl client::Handler for SshClient {
     }
 }
 
+fn ssh_client_config() -> Config {
+    let mut preferred = Preferred::default();
+    let mut kex = preferred.kex.into_owned();
+    for algorithm in [kex::ECDH_SHA2_NISTP256, kex::ECDH_SHA2_NISTP384, kex::ECDH_SHA2_NISTP521, kex::DH_G14_SHA1] {
+        if !kex.contains(&algorithm) {
+            kex.push(algorithm);
+        }
+    }
+    preferred.kex = Cow::Owned(kex);
+
+    Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), preferred, ..Default::default() }
+}
+
 async fn connect_and_authenticate(
     ssh_host: &str,
     ssh_port: u16,
@@ -52,8 +66,7 @@ async fn connect_and_authenticate(
     use_ssh_agent: bool,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
-    let config =
-        Arc::new(Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), ..Default::default() });
+    let config = Arc::new(ssh_client_config());
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
     let mut session =
@@ -737,7 +750,7 @@ fn plan_chain(
 mod tests {
     use super::{
         effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
-        sanitize_unencrypted_openssh_comment_bytes, PlannedTunnel, TunnelManager,
+        sanitize_unencrypted_openssh_comment_bytes, ssh_client_config, PlannedTunnel, TunnelManager,
     };
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
 
@@ -821,6 +834,18 @@ mod tests {
         tunnel.connect_timeout_secs = 0;
 
         assert_eq!(effective_hop_timeout(&tunnel), default_ssh_connect_timeout_secs());
+    }
+
+    #[test]
+    fn ssh_client_config_keeps_legacy_kex_after_safe_defaults() {
+        let config = ssh_client_config();
+        let kex = config.preferred.kex;
+        let curve25519_index = kex.iter().position(|algorithm| *algorithm == russh::kex::CURVE25519).unwrap();
+        let ecdh_index = kex.iter().position(|algorithm| *algorithm == russh::kex::ECDH_SHA2_NISTP256).unwrap();
+        let group14_sha1_index = kex.iter().position(|algorithm| *algorithm == russh::kex::DH_G14_SHA1).unwrap();
+
+        assert!(curve25519_index < ecdh_index);
+        assert!(ecdh_index < group14_sha1_index);
     }
 
     #[test]

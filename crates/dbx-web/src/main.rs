@@ -62,7 +62,13 @@ async fn main() {
     };
 
     // Password hash: env var takes priority, then database
-    let password_hash = if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+    let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    let password_hash = if password_disabled {
+        None
+    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
         let salt = SaltString::generate(&mut OsRng);
         Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
     } else {
@@ -72,6 +78,7 @@ async fn main() {
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
+        password_disabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
@@ -240,6 +247,7 @@ async fn main() {
         // Redis
         .route("/redis/list-databases", post(routes::redis::list_databases))
         .route("/redis/scan-keys", post(routes::redis::scan_keys))
+        .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
         .route("/redis/set-string", post(routes::redis::set_string))
@@ -258,6 +266,8 @@ async fn main() {
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
+        .route("/redis/pubsub/publish", post(routes::redis::publish_message))
+        .route("/redis/pubsub/ws", get(routes::redis_pubsub_ws::ws_handler))
         // etcd
         .route("/etcd/list-prefix", post(routes::etcd::list_prefix))
         .route("/etcd/get", post(routes::etcd::get))
@@ -355,7 +365,9 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     tracing::info!("DBX Web server starting on http://{}", addr);
-    if std::env::var("DBX_PASSWORD").is_ok() {
+    if password_disabled {
+        tracing::info!("Password protection is disabled");
+    } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
     }
 

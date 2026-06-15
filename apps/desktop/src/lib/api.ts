@@ -97,6 +97,7 @@ export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
 export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
+export const backupSqliteDatabase = forward("backupSqliteDatabase");
 export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
@@ -239,6 +240,7 @@ export const cancelTableExport = forward("cancelTableExport");
 // Redis
 export const redisListDatabases = forward("redisListDatabases");
 export const redisScanKeys = forward("redisScanKeys");
+export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
 export const redisSetString = forward("redisSetString");
@@ -260,6 +262,12 @@ export const redisDeleteKeys = forward("redisDeleteKeys");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
+export const redisPubSubPublish = forward("redisPubSubPublish");
+
+export function redisPubSubConnect(connectionId: string): WebSocket {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(`${protocol}//${window.location.host}/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`);
+}
 
 // etcd
 export const etcdListPrefix = forward("etcdListPrefix");
@@ -293,6 +301,7 @@ export const deleteHistoryEntry = forward("deleteHistoryEntry");
 
 // Updates
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
+export const installMcpServer = forward("installMcpServer");
 export const checkForUpdates = forward("checkForUpdates");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const getAppVersion = forward("getAppVersion");

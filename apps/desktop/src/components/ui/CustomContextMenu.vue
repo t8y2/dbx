@@ -19,6 +19,10 @@ const props = defineProps<{
   items: ContextMenuItem[];
 }>();
 
+defineEmits<{
+  close: [];
+}>();
+
 // ---- module-level singleton state ----
 const openMenus = new Set<() => void>();
 let globalSetup = false;

@@ -27,6 +27,7 @@ export interface RoutineParameterValue extends RoutineParameter {
 
 export function qualifiedRoutineName(options: BuildRoutineExecutionSqlOptions): string {
   const { databaseType, schema, routineName } = options;
+  if (databaseType === "databend") return routineName;
   if (isSchemaAware(databaseType) && schema) {
     return `${quoteTableIdentifier(databaseType, schema)}.${quoteTableIdentifier(databaseType, routineName)}`;
   }
@@ -48,6 +49,9 @@ export function buildProcedureExecutionSqlFromValues(options: BuildRoutineExecut
   }
   if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
     return `BEGIN\n  ${routine}(${values.map((parameter) => routineArgumentSql(options.databaseType, parameter, useNamedArguments)).join(", ")});\nEND;`;
+  }
+  if (options.databaseType === "databend") {
+    return `CALL PROCEDURE ${routine}(${values.map((parameter) => routineArgumentSql(options.databaseType, parameter, useNamedArguments)).join(", ")});`;
   }
   return `CALL ${routine}(${values.map((parameter) => routineArgumentSql(options.databaseType, parameter, useNamedArguments)).join(", ")});`;
 }

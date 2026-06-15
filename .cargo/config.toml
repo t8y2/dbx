@@ -1,3 +1,18 @@
+# === Optional build speed-ups (add to your ~/.zshrc or ~/.bashrc; do NOT commit) ===
+#
+# 1. sccache — compile cache, skips recompiling unchanged deps
+#    cargo install sccache
+#    export RUSTC_WRAPPER=sccache
+#
+# 2. lld — LLVM linker, 2-3x faster linking than the system default
+#    macOS:  brew install lld
+#            export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/opt/homebrew/bin/lld
+#    Linux:  apt install lld
+#            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=lld
+#
+# Skip DuckDB during development: cargo check --no-default-features
+# ===================================================================================
+
 [env]
 # Enable SQLite's built-in math functions for rusqlite's bundled libsqlite3.
 LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"

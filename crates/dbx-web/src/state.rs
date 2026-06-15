@@ -13,6 +13,7 @@ pub struct LoginRateLimit {
 pub struct WebState {
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
+    pub password_disabled: bool,
     pub password_hash: RwLock<Option<String>>,
     pub sessions: RwLock<HashSet<String>>,
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,

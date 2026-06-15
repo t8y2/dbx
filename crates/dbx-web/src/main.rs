@@ -62,7 +62,13 @@ async fn main() {
     };
 
     // Password hash: env var takes priority, then database
-    let password_hash = if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+    let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    let password_hash = if password_disabled {
+        None
+    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
         let salt = SaltString::generate(&mut OsRng);
         Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
     } else {
@@ -72,6 +78,7 @@ async fn main() {
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
+        password_disabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
@@ -357,7 +364,9 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     tracing::info!("DBX Web server starting on http://{}", addr);
-    if std::env::var("DBX_PASSWORD").is_ok() {
+    if password_disabled {
+        tracing::info!("Password protection is disabled");
+    } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
     }
 

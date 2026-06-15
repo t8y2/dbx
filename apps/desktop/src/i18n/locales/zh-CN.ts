@@ -978,6 +978,7 @@
       callingTool: "正在调用工具...",
       toolDone: "工具调用完成",
       toolError: "工具调用出错",
+      contextCompacted: "上下文已压缩",
     },
     agentStepTitles: {
       riskCheck: "风险检查：{action} · {category} · {environment} · {reasons}",
@@ -996,6 +997,9 @@
     enableThinkingOn: "已启用",
     enableThinkingOff: "已禁用",
     enableThinkingHint: "此选项仅对 /chat/completions API 且部分支持的模型生效。设为禁用后可大幅节省 token，但生成结果质量可能会略微下降。",
+    contextWindow: "上下文窗口",
+    contextWindowAuto: "自动（根据模型名称推断）",
+    contextWindowHint: "单位：token。留空自动推断，本地/自定义模型建议手动设置。",
     actions: {
       generate: "生成 SQL",
       explain: "解释 SQL",

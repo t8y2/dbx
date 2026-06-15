@@ -46,6 +46,8 @@ interface ChatMessage {
   reasoning?: string;
   isThinking?: boolean;
   agentSteps?: AiAgentStepItem[];
+  /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history. */
+  kind?: "contextSummary";
 }
 
 const props = defineProps<{
@@ -73,6 +75,40 @@ const showConversationList = ref(false);
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
+const agentTokens = ref<{ input: number; output: number } | null>(null);
+
+function estimateCost(model: string, inputTokens: number, outputTokens: number): string | null {
+  const m = model.toLowerCase();
+  let inputRate: number, outputRate: number;
+  if (m.includes("claude-opus")) {
+    inputRate = 15;
+    outputRate = 75;
+  } else if (m.includes("claude-sonnet")) {
+    inputRate = 3;
+    outputRate = 15;
+  } else if (m.includes("claude-haiku")) {
+    inputRate = 0.25;
+    outputRate = 1.25;
+  } else if (m.includes("gpt-4o")) {
+    inputRate = 2.5;
+    outputRate = 10;
+  } else if (m.includes("gpt-4")) {
+    inputRate = 30;
+    outputRate = 60;
+  } else if (m.includes("gemini-1.5-pro")) {
+    inputRate = 1.25;
+    outputRate = 5;
+  } else if (m.includes("deepseek")) {
+    inputRate = 0.27;
+    outputRate = 1.1;
+  } else return null;
+  const cost = (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000;
+  if (cost < 0.0001) return "< $0.0001";
+  return `~$${cost.toFixed(4)}`;
+}
+
+/** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
+const pendingCompaction = ref<{ summary: string; compactedMessages: number } | null>(null);
 
 // 新增：输入框拖拽调整相关常量
 const AI_TEXTAREA_MIN_ROWS = 3;
@@ -123,8 +159,24 @@ function selectAction(action: AiAction) {
   }
 }
 
+/** Messages visible in the chat UI (excludes hidden context summaries). */
+const visibleMessages = computed(() => messages.value.filter((m) => m.kind !== "contextSummary"));
+
+function messagesForAgentHistory(historyMessages: ChatMessage[]): AiMessage[] {
+  const latestSummaryIndex = historyMessages.findLastIndex((m) => m.kind === "contextSummary");
+  if (latestSummaryIndex < 0) {
+    return historyMessages.map((m) => ({ role: m.role, content: m.content }));
+  }
+  const compactedHistory = historyMessages.slice(latestSummaryIndex);
+  const firstMsg = historyMessages[0];
+  if (firstMsg && firstMsg.role === "user" && firstMsg.kind !== "contextSummary") {
+    return [{ role: "user" as const, content: firstMsg.content }, ...compactedHistory.map((m) => ({ role: m.role, content: m.content }))];
+  }
+  return compactedHistory.map((m) => ({ role: m.role, content: m.content }));
+}
+
 const chatTitle = computed(() => {
-  const first = messages.value.find((m) => m.role === "user");
+  const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
   return first ? first.content.slice(0, 30) : t("ai.newChat");
 });
 
@@ -281,6 +333,32 @@ function extractToolResultContent(result: unknown): string | undefined {
     return typeof content === "string" ? content : JSON.stringify(content);
   }
   return JSON.stringify(result);
+}
+
+function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | undefined {
+  if (event.type === "context_compacted") {
+    return {
+      key: `compact-${index}`,
+      labelKey: "ai.agentSteps.contextCompacted",
+      tone: "active",
+      toolResult: `Compacted ${event.compacted_messages} messages. Estimated prompt tokens: ${event.estimated_before.toLocaleString()} -> ${event.estimated_after.toLocaleString()}. Summary: ${event.summary_tokens.toLocaleString()} tokens.`,
+      isError: false,
+    };
+  }
+
+  if (event.type !== "tool_call_start" && event.type !== "tool_call_end") return undefined;
+
+  return {
+    key: `${event.tool_call_id || ""}-${event.type}`,
+    labelKey: event.type === "tool_call_start" ? "ai.agentSteps.callingTool" : event.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone",
+    tone: (event.type === "tool_call_start" ? "active" : event.is_error ? "danger" : "success") as AiAgentStepTone,
+    titleKey: undefined,
+    titleParams: { tool: event.tool_name || "" },
+    toolName: event.tool_name,
+    toolArgs: event.type === "tool_call_start" ? (event.args as Record<string, unknown>) : undefined,
+    toolResult: event.type === "tool_call_end" && !event.is_error ? extractToolResultContent(event.result) : undefined,
+    isError: event.type === "tool_call_end" ? event.is_error : undefined,
+  };
 }
 
 function toggleReasoning(index: number) {
@@ -514,14 +592,12 @@ async function send() {
   const sessionId = uuid();
   currentSessionId.value = sessionId;
   const agentEvents: AgentEvent[] = [];
+  agentTokens.value = null;
   try {
     const context = await buildAiContext(props.tab, props.connection, {
       mentionedTables,
     });
-    const history: AiMessage[] = messages.value.slice(0, -2).map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
         config: settings.aiConfig,
@@ -539,24 +615,27 @@ async function send() {
         if (event.type === "reasoning_delta" && event.delta) {
           appendAssistantReasoning(assistantIdx, event.delta);
         }
+        if (event.type === "agent_end") {
+          if (event.input_tokens || event.output_tokens) {
+            agentTokens.value = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
+          }
+        }
+        if (event.type === "context_compacted") {
+          const msg = messages.value[assistantIdx];
+          if (msg) {
+            if (!msg.agentSteps) msg.agentSteps = [];
+            const step = agentEventToStep(event, agentEvents.length - 1);
+            if (step) msg.agentSteps.push(step);
+          }
+          pendingCompaction.value = { summary: event.summary, compactedMessages: event.compacted_messages };
+        }
         // Real-time agent step rendering
         if (event.type === "tool_call_start" || event.type === "tool_call_end") {
           const msg = messages.value[assistantIdx];
           if (msg) {
-            const steps = agentEvents
-              .filter((e) => e.type === "tool_call_start" || e.type === "tool_call_end")
-              .map((e) => ({
-                key: `${e.tool_call_id || ""}-${e.type}`,
-                labelKey: e.type === "tool_call_start" ? "ai.agentSteps.callingTool" : e.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone",
-                tone: (e.type === "tool_call_start" ? "active" : e.is_error ? "danger" : "success") as AiAgentStepTone,
-                titleKey: undefined,
-                titleParams: { tool: e.tool_name || "" },
-                toolName: e.tool_name,
-                toolArgs: e.type === "tool_call_start" ? (e.args as Record<string, unknown>) : undefined,
-                toolResult: e.type === "tool_call_end" && !e.is_error ? extractToolResultContent(e.result) : undefined,
-                isError: e.type === "tool_call_end" ? e.is_error : undefined,
-              }));
-            msg.agentSteps = steps;
+            if (!msg.agentSteps) msg.agentSteps = [];
+            const step = agentEventToStep(event, agentEvents.length - 1);
+            if (step) msg.agentSteps.push(step);
           }
         }
         scrollToBottom();
@@ -571,20 +650,8 @@ async function send() {
     if (msg) msg.isThinking = false;
     isGenerating.value = false;
     // Render agent tool call steps from agent events
-    if (msg && agentEvents.length > 0) {
-      msg.agentSteps = agentEvents
-        .filter((e) => e.type === "tool_call_start" || e.type === "tool_call_end")
-        .map((e) => ({
-          key: `${e.tool_call_id || ""}-${e.type}`,
-          labelKey: e.type === "tool_call_start" ? "ai.agentSteps.callingTool" : e.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone",
-          tone: e.type === "tool_call_start" ? "active" : e.is_error ? "danger" : "success",
-          titleKey: undefined,
-          titleParams: { tool: e.tool_name || "" },
-          toolName: e.tool_name,
-          toolArgs: e.type === "tool_call_start" ? (e.args as Record<string, unknown>) : undefined,
-          toolResult: e.type === "tool_call_end" && !e.is_error ? extractToolResultContent(e.result) : undefined,
-          isError: e.type === "tool_call_end" ? e.is_error : undefined,
-        }));
+    if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
+      msg.agentSteps = agentEvents.map((e, index) => agentEventToStep(e, index)).filter((step): step is AiAgentStepItem => Boolean(step));
     }
     // Fallback: use aiAgentPlan for backward compatibility
     if (msg && !msg.agentSteps?.length) {
@@ -600,6 +667,20 @@ async function send() {
     }
     activeAction.value = "generate";
     currentSessionId.value = "";
+    // Apply deferred context compaction after streaming so assistantIdx stays stable.
+    // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
+    if (pendingCompaction.value) {
+      const { summary, compactedMessages } = pendingCompaction.value;
+      pendingCompaction.value = null;
+      const insertAt = Math.min(1 + compactedMessages, messages.value.length - 1);
+      if (summary) {
+        messages.value.splice(insertAt, 0, {
+          role: "user",
+          content: summary,
+          kind: "contextSummary",
+        });
+      }
+    }
     persistConversation();
     scrollToBottom();
   }
@@ -643,7 +724,7 @@ function clearMessages() {
 async function persistConversation() {
   if (!messages.value.length || !props.connection) return;
   if (!conversationId.value) conversationId.value = uuid();
-  const first = messages.value.find((m) => m.role === "user");
+  const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
   await saveAiConversation({
     id: conversationId.value,
     title: first ? first.content.slice(0, 50) : "Untitled",
@@ -653,6 +734,7 @@ async function persistConversation() {
       role: m.role,
       content: m.content,
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+      ...(m.kind ? { kind: m.kind } : {}),
     })),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -670,7 +752,10 @@ function selectConversation(conv: AiConversation) {
     role: m.role as "user" | "assistant",
     content: m.content,
     reasoning: m.reasoning,
+    kind: m.kind,
   }));
+  agentTokens.value = null;
+  pendingCompaction.value = null;
   showConversationList.value = false;
   scrollToBottom();
 }
@@ -832,7 +917,7 @@ const messageRenderer = computed(() => {
     </div>
     <ScrollArea v-else ref="scrollRef" class="min-h-0 flex-1 overflow-hidden">
       <div class="flex flex-col gap-3 p-3">
-        <template v-for="(msg, i) in messages" :key="i">
+        <template v-for="(msg, i) in visibleMessages" :key="i">
           <div v-if="msg.role === 'user'" class="flex justify-end">
             <div class="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
               {{ msg.content }}
@@ -910,6 +995,10 @@ const messageRenderer = computed(() => {
         <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 class="h-3.5 w-3.5 animate-spin" />
           <span>{{ t("ai.thinking") }}</span>
+        </div>
+        <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
+          <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
+          <span v-if="estimateCost(settings.aiConfig.model, agentTokens.input, agentTokens.output)" class="ml-1">· {{ estimateCost(settings.aiConfig.model, agentTokens.input, agentTokens.output) }}</span>
         </div>
       </div>
     </ScrollArea>

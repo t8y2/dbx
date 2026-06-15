@@ -979,6 +979,7 @@
       callingTool: "Calling tool...",
       toolDone: "Tool completed",
       toolError: "Tool error",
+      contextCompacted: "Context compressed",
     },
     agentStepTitles: {
       riskCheck: "Risk check: {action} · {category} · {environment} · {reasons}",
@@ -997,6 +998,9 @@
     enableThinkingOn: "Enabled",
     enableThinkingOff: "Disabled",
     enableThinkingHint: "This option only takes effect on /chat/completions APIs and supported models. When disabled, it can significantly reduce token usage, but the quality of generated results may decrease slightly.",
+    contextWindow: "Context Window",
+    contextWindowAuto: "Auto (detect from model name)",
+    contextWindowHint: "Tokens. Leave empty to auto-detect. Set manually for local/custom models.",
     actions: {
       generate: "Generate SQL",
       explain: "Explain SQL",

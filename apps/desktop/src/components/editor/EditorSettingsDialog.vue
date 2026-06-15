@@ -1065,6 +1065,7 @@ const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "compl
 const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
 const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
 const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
+const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
 
 const aiModelOptions = ref<AiModelInfo[]>([]);
 const aiModelLoading = ref(false);
@@ -1138,6 +1139,7 @@ function currentAiEditConfig() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
+    contextWindow: aiEditContextWindow.value || undefined,
   };
 }
 
@@ -1211,6 +1213,7 @@ function syncAiEditState() {
   aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
   aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
   aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
+  aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
@@ -1240,7 +1243,8 @@ function aiHasChanges(): boolean {
     aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
     aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
     aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
-    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true)
+    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
+    aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow
   );
 }
 
@@ -2360,6 +2364,14 @@ watch(
                         {{ t("ai.enableThinkingHint") }}
                       </PopoverContent>
                     </Popover>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-3 items-start gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
+                  <div class="col-span-2">
+                    <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
+                    <p class="mt-1 text-xs text-muted-foreground">{{ t("ai.contextWindowHint") }}</p>
                   </div>
                 </div>
 

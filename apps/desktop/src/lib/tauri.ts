@@ -288,7 +288,8 @@ export type AgentEvent =
   | { type: "tool_call_start"; tool_call_id: string; tool_name: string; args: Record<string, unknown> }
   | { type: "tool_call_end"; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
   | { type: "turn_end"; turn: number }
-  | { type: "agent_end"; total_tokens?: number }
+  | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
+  | { type: "context_compacted"; summary: string; summary_tokens: number; compacted_messages: number; estimated_before: number; estimated_after: number }
   | { type: "error"; message: string };
 
 export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void, mode?: string, _signal?: AbortSignal): Promise<string> {
@@ -424,6 +425,7 @@ export interface AiChatMessage {
   role: string;
   content: string;
   reasoning?: string;
+  kind?: "contextSummary";
 }
 
 export interface AiConversation {

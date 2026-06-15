@@ -25,6 +25,7 @@ export interface AiConfig {
   proxyEnabled?: boolean;
   proxyUrl?: string;
   enableThinking?: boolean;
+  contextWindow?: number;
 }
 
 export interface AiTestConnectionResult {
@@ -179,6 +180,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
+    contextWindow: config?.contextWindow ?? undefined,
   };
 }
 

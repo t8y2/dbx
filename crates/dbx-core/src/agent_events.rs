@@ -17,7 +17,15 @@ pub enum AgentEvent {
     /// A turn in the agent loop has ended.
     TurnEnd { turn: u32 },
     /// The agent loop has finished.
-    AgentEnd { total_tokens: Option<u64> },
+    AgentEnd { input_tokens: Option<u32>, output_tokens: Option<u32> },
+    /// Context was compacted to stay within context window limits.
+    ContextCompacted {
+        summary: String,
+        summary_tokens: u32,
+        compacted_messages: usize,
+        estimated_before: u32,
+        estimated_after: u32,
+    },
     /// An error occurred during the agent loop.
     Error { message: String },
 }

@@ -190,6 +190,30 @@ pub fn mongo_legacy_error_with_auth_hint(err: &str) -> String {
     )
 }
 
+pub fn mongo_uses_legacy_driver(config: &ConnectionConfig) -> bool {
+    config.driver_profile.as_deref().is_some_and(|profile| {
+        profile.eq_ignore_ascii_case("mongodb-legacy")
+            || profile.eq_ignore_ascii_case("mongodb_legacy")
+            || profile.eq_ignore_ascii_case("legacy")
+    })
+}
+
+pub fn should_retry_mongo_with_legacy_driver(err: &str) -> bool {
+    let normalized = err.to_lowercase();
+    if normalized.contains("wire version") {
+        return true;
+    }
+
+    let looks_like_handshake_io_error = normalized.contains("unexpected end of file")
+        || normalized.contains("connection reset by peer")
+        || normalized.contains("broken pipe");
+    looks_like_handshake_io_error
+        && (normalized.contains("server selection timeout")
+            || normalized.contains("no available servers")
+            || normalized.contains("topology:")
+            || normalized.contains("i/o error"))
+}
+
 pub fn oracle_error_with_driver_hint(config: &ConnectionConfig, err: &str) -> String {
     if config.db_type != DatabaseType::Oracle {
         return err.to_string();

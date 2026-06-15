@@ -45,6 +45,10 @@ pub struct ToolResult {
     pub tool_name: String,
     pub content: String,
     pub is_error: bool,
+    /// Structured explain data (QueryResult) for explain_query tool results.
+    /// Set only by execute_explain_query; None for all other tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain_data: Option<serde_json::Value>,
 }
 
 /// Definition of a tool available to the agent.
@@ -54,6 +58,9 @@ pub struct ToolDefinition {
     pub description: &'static str,
     pub parameters: serde_json::Value,
     pub read_only: bool,
+    /// Whether this tool can be executed in parallel with other tools.
+    /// false = must run sequentially (e.g. execute_query).
+    pub parallel_ok: bool,
 }
 
 impl ToolDefinition {

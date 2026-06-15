@@ -27,6 +27,20 @@ pub async fn redis_scan_keys(
 }
 
 #[tauri::command]
+pub async fn redis_scan_keys_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    cursor: u64,
+    pattern: String,
+    count: usize,
+    max_iterations: usize,
+) -> Result<RedisScanResult, String> {
+    dbx_core::redis_ops::redis_scan_keys_batch_core(&state, &connection_id, db, cursor, &pattern, count, max_iterations)
+        .await
+}
+
+#[tauri::command]
 pub async fn redis_scan_values(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

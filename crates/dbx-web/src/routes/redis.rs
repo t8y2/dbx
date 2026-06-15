@@ -40,6 +40,22 @@ pub struct RedisScanRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisScanBatchRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub cursor: u64,
+    pub pattern: String,
+    pub count: usize,
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+}
+
+fn default_max_iterations() -> usize {
+    1
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisValueScanRequest {
     pub connection_id: String,
     pub db: u32,
@@ -185,6 +201,24 @@ pub async fn scan_keys(
         req.cursor,
         &req.pattern,
         req.count,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn scan_keys_batch(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisScanBatchRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::redis_ops::redis_scan_keys_batch_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        req.cursor,
+        &req.pattern,
+        req.count,
+        req.max_iterations,
     )
     .await
     .map_err(AppError)?;

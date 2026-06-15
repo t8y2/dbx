@@ -1,6 +1,6 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisScanResult, RedisValue,
+    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult, RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -34,6 +34,23 @@ pub async fn redis_scan_keys_core(
     pattern: &str,
     count: usize,
 ) -> Result<RedisScanResult, String> {
+    redis_scan_keys_batch_core(state, connection_id, db, cursor, pattern, count, 1).await
+}
+
+/// Batch-scan keys with server-side multi-SCAN support.
+///
+/// Performs up to `max_iterations` SCAN→TYPE cycles server-side in a single
+/// API call, dramatically reducing frontend↔backend roundtrips when fetching
+/// many keys (e.g. "fetch all" in the key browser).
+pub async fn redis_scan_keys_batch_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+) -> Result<RedisScanResult, String> {
     ensure_redis_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
@@ -42,11 +59,30 @@ pub async fn redis_scan_keys_core(
             RedisConnection::Direct(con) => {
                 let mut con = con.lock().await;
                 redis_driver::select_db(&mut *con, db).await?;
-                redis_driver::scan_keys_page(&mut *con, cursor, pattern, count).await
+                redis_driver::scan_keys_batch(&mut *con, cursor, pattern, count, max_iterations).await
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
-                redis_driver::scan_cluster_keys_page(cluster, cursor, pattern, count).await
+                // Cluster scan already iterates across nodes; for batch mode we
+                // loop the cluster-level scan to accumulate keys server-side.
+                if max_iterations <= 1 {
+                    return redis_driver::scan_cluster_keys_page(cluster, cursor, pattern, count).await;
+                }
+                let mut all_keys: Vec<RedisKeyInfo> = Vec::new();
+                let mut current_cursor = cursor;
+                let mut total_keys: u64 = 0;
+                for i in 0..max_iterations {
+                    let page = redis_driver::scan_cluster_keys_page(cluster, current_cursor, pattern, count).await?;
+                    if i == 0 {
+                        total_keys = page.total_keys;
+                    }
+                    all_keys.extend(page.keys);
+                    if page.cursor == 0 {
+                        return Ok(RedisScanResult { cursor: 0, keys: all_keys, total_keys });
+                    }
+                    current_cursor = page.cursor;
+                }
+                Ok(RedisScanResult { cursor: current_cursor, keys: all_keys, total_keys })
             }
         },
         _ => Err("Not a Redis connection".to_string()),

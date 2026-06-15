@@ -5,6 +5,7 @@ import { HeroProductStage } from "@/components/aceternity/HeroProductStage";
 import { InfiniteMovingCards } from "@/components/aceternity/InfiniteMovingCards";
 import { Spotlight } from "@/components/aceternity/Spotlight";
 import { LandingNav } from "@/components/landing/LandingNav";
+import { LandingFooter } from "@/components/landing/LandingFooter";
 import { InstallTabs } from "@/components/landing/InstallTabs";
 import { LandingLatestUpdates } from "@/components/landing/LandingLatestUpdates";
 import { RevealSection } from "@/components/landing/RevealSection";
@@ -585,6 +586,8 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           </Link>
         </div>
       </RevealSection>
+
+      <LandingFooter lang={l} />
     </main>
   );
 }

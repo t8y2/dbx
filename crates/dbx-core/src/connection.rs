@@ -8,8 +8,9 @@ use mysql_async::Row as MysqlRow;
 
 use crate::agent_connection::{
     agent_connect_params, h2_file_path_from_jdbc_url, is_h2_file_connection, mongo_legacy_error_with_auth_hint,
-    oracle_alternate_connect_config_labels, oracle_alternate_connect_configs, oracle_auth_fallback_profiles,
-    oracle_error_with_driver_hint, should_retry_oracle_with_10g_driver,
+    mongo_uses_legacy_driver, oracle_alternate_connect_config_labels, oracle_alternate_connect_configs,
+    oracle_auth_fallback_profiles, oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
+    should_retry_oracle_with_10g_driver,
 };
 use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::database_capabilities;
@@ -358,7 +359,7 @@ impl AppState {
                 .await?;
                 PoolKind::Mysql(pool, mode)
             }
-            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch | DatabaseType::Databend => {
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
                 let pool = if database.is_none() {
                     connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, mysql_pool_max_connections)
                         .await?
@@ -437,35 +438,49 @@ impl AppState {
                 return Err("DuckDB support is not compiled in this build. Rebuild with default features.".to_string());
             }
             DatabaseType::MongoDb => {
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
-                    Ok(client) => match db::mongo_driver::test_connection(
-                        &client,
-                        connect_timeout,
-                        db_config.effective_database(),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            let mut conns = self.connections.write().await;
-                            // Re-check: another task may have created the pool while we were connecting.
-                            if conns.contains_key(&pool_key) {
-                                return Ok(pool_key);
-                            }
-                            conns.insert(pool_key.clone(), PoolKind::MongoDb(client));
-                            return Ok(pool_key);
-                        }
-                        Err(e) => e,
-                    },
-                    Err(e) => e,
-                };
-                if native_err.contains("wire version") {
-                    log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
+                if mongo_uses_legacy_driver(&db_config) {
+                    log::info!("Using configured MongoDB legacy driver for connection_id={connection_id}");
                     let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or("")) });
-                    let mut client = self.agent_manager.spawn(&DatabaseType::MongoDb, None).await?;
+                    let mut client = self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await?;
                     client.connect(connect_params).await.map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
                 } else {
-                    return Err(native_err);
+                    let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
+                        Ok(client) => match db::mongo_driver::test_connection(
+                            &client,
+                            connect_timeout,
+                            db_config.effective_database(),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                let mut conns = self.connections.write().await;
+                                // Re-check: another task may have created the pool while we were connecting.
+                                if conns.contains_key(&pool_key) {
+                                    return Ok(pool_key);
+                                }
+                                conns.insert(pool_key.clone(), PoolKind::MongoDb(client));
+                                return Ok(pool_key);
+                            }
+                            Err(e) => e,
+                        },
+                        Err(e) => e,
+                    };
+                    if should_retry_mongo_with_legacy_driver(&native_err) {
+                        log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
+                        let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or("")) });
+                        let mut client =
+                            self.agent_manager.spawn(&DatabaseType::MongoDb, Some("mongodb-legacy")).await?;
+                        client.connect(connect_params).await.map_err(|err| {
+                            format!(
+                                "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
+                                mongo_legacy_error_with_auth_hint(&err)
+                            )
+                        })?;
+                        PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
+                    } else {
+                        return Err(native_err);
+                    }
                 }
             }
             DatabaseType::ClickHouse => {
@@ -523,6 +538,7 @@ impl AppState {
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
+            | DatabaseType::Databend
             | DatabaseType::Yashandb
             | DatabaseType::Databricks
             | DatabaseType::SapHana
@@ -1116,6 +1132,11 @@ fn shares_database_pool_with_connection(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Oracle)
 }
 
+#[cfg(test)]
+fn uses_bare_mysql_pool(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+}
+
 fn default_plugin_dir() -> PathBuf {
     default_dbx_dir().join("plugins")
 }
@@ -1293,14 +1314,15 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         connection_url_for_endpoint, database_connection_config, metadata_connection_config,
-        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe, validate_h2_database_path,
-        AppState, PoolKind,
+        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_h2_database_path, AppState, PoolKind,
     };
     use crate::agent_connection::{
-        agent_connect_params, mongo_legacy_error_with_auth_hint, oracle_alternate_connect_config,
-        should_retry_oracle_with_10g_driver,
+        agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
+        oracle_alternate_connect_config, should_retry_mongo_with_legacy_driver, should_retry_oracle_with_10g_driver,
     };
     use crate::agent_manager::{AgentState, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
+    use crate::database_capabilities;
     use crate::db;
     use crate::models::connection::{
         default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, ProxyTunnelConfig,
@@ -1373,6 +1395,15 @@ mod tests {
     }
 
     #[test]
+    fn databend_uses_agent_pool_not_bare_mysql_pool() {
+        assert!(uses_bare_mysql_pool(&DatabaseType::Doris));
+        assert!(uses_bare_mysql_pool(&DatabaseType::StarRocks));
+        assert!(uses_bare_mysql_pool(&DatabaseType::ManticoreSearch));
+        assert!(!uses_bare_mysql_pool(&DatabaseType::Databend));
+        assert!(database_capabilities::is_agent_type(&DatabaseType::Databend));
+    }
+
+    #[test]
     fn validates_h2_database_base_path_when_mv_db_file_exists() {
         let dir = std::env::temp_dir().join(format!("dbx-h2-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1431,6 +1462,19 @@ mod tests {
             mongo_legacy_error_with_auth_hint(err),
             "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}\n\nCurrent authentication database: gray_lite_twin_fat. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
         );
+    }
+
+    #[test]
+    fn mongo_legacy_retry_covers_old_server_handshake_eof() {
+        let err = r#"MongoDB connection failed: Kind: Server selection timeout: No available servers. Topology: { Type: Unknown, Servers: [ { Address: db.example.com:27017, Type: Unknown, Error: Kind: I/O error: unexpected end of file } ] }"#;
+
+        assert!(mongo_uses_legacy_driver(&ConnectionConfig {
+            driver_profile: Some("mongodb-legacy".to_string()),
+            ..mysql_config(None)
+        }));
+        assert!(should_retry_mongo_with_legacy_driver(err));
+        assert!(should_retry_mongo_with_legacy_driver("server reports wire version 5, but this driver requires 8"));
+        assert!(!should_retry_mongo_with_legacy_driver("Authentication failed."));
     }
 
     #[test]

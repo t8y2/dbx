@@ -604,7 +604,7 @@
         "objectSource": false,
         "schemaSearch": false,
         "diagram": false,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": false,
         "dataTransfer": false,

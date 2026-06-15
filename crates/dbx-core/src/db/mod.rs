@@ -57,6 +57,27 @@ pub fn safe_u64_to_json(v: u64) -> serde_json::Value {
     }
 }
 
+pub fn json_value_for_js(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                safe_i64_to_json(value)
+            } else if let Some(value) = number.as_u64() {
+                safe_u64_to_json(value)
+            } else {
+                serde_json::Value::Number(number)
+            }
+        }
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(json_value_for_js).collect())
+        }
+        serde_json::Value::Object(entries) => {
+            serde_json::Value::Object(entries.into_iter().map(|(key, value)| (key, json_value_for_js(value))).collect())
+        }
+        value => value,
+    }
+}
+
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

@@ -28,7 +28,7 @@ import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
-import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
+import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
 
@@ -998,6 +998,13 @@ const mongoAuthMechanism = computed({
     form.value.url_params = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
   },
 });
+const mongoDriverMode = computed({
+  get: () => (form.value.driver_profile === "mongodb-legacy" ? "legacy" : "auto"),
+  set: (value: string) => {
+    form.value.driver_profile = value === "legacy" ? "mongodb-legacy" : "mongodb";
+    form.value.driver_label = value === "legacy" ? "MongoDB (Legacy)" : "MongoDB";
+  },
+});
 
 function goToConnectionStep(value = selectedType.value) {
   if (value !== selectedType.value) {
@@ -1029,6 +1036,9 @@ async function testConnection() {
     const config = connectionConfigForSubmit(editingId.value || uuid());
     const msg = await api.testConnection(config);
     if (runId !== testRunId) return;
+    if (config.db_type === "mongodb" && /legacy driver/i.test(msg)) {
+      mongoDriverMode.value = "legacy";
+    }
     testResult.value = { ok: true, message: msg };
   } catch (e: any) {
     if (runId !== testRunId) return;
@@ -1100,6 +1110,10 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.connection_string = undefined;
   } else if (config.db_type === "mongodb") {
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
+  }
+  if (config.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy") {
+    config.driver_profile = "mongodb";
+    config.driver_label = "MongoDB";
   }
   if (config.db_type !== "oracle") {
     config.sysdba = undefined;
@@ -2494,6 +2508,21 @@ function openExternalUrl(url: string) {
                 <!-- MongoDB: URL or form -->
                 <template v-else-if="form.db_type === 'mongodb'">
                   <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">{{ t("connection.driverMode") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'outline' : 'default'" @click="mongoDriverMode = 'auto'">{{ t("connection.mongoDriverAuto") }}</Button>
+                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" align="center" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("connection.mongoLegacyHint") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 flex gap-2">
                       <Button size="sm" :variant="mongoUseUrl ? 'outline' : 'default'" @click="mongoUseUrl = false">{{ t("connection.modeForm") }}</Button>
@@ -2555,12 +2584,6 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.urlParams") }}</Label>
                       <Input v-model="form.url_params" class="col-span-3" placeholder="authSource=admin&authMechanism=SCRAM-SHA-1" />
-                    </div>
-                    <div class="grid grid-cols-4 items-start gap-4">
-                      <span />
-                      <p class="col-span-3 text-xs text-muted-foreground">
-                        {{ t("connection.mongoLegacyHint") }}
-                      </p>
                     </div>
                   </template>
                 </template>

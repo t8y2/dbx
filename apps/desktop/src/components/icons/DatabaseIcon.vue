@@ -15,6 +15,7 @@ const assetIcons: Record<string, string> = {
   turso: "turso.png",
   redis: "redis",
   mongodb: "mongodb",
+  mongodb_legacy: "mongodb",
   clickhouse: "clickhouse",
   duckdb: "duckdb",
   mariadb: "mariadb",

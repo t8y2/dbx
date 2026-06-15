@@ -8,6 +8,7 @@ export interface AgentDriverInstallState {
 
 function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string): string | undefined {
   if (dbType === "oracle") return "oracle";
+  if (dbType === "mongodb") return "mongodb";
   return driverProfile && driverProfile !== dbType ? driverProfile : dbType;
 }
 

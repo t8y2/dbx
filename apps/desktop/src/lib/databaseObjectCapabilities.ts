@@ -10,6 +10,7 @@ export interface DatabaseObjectCapabilities {
 
 const TABLE_OBJECTS: SidebarObjectKind[] = ["TABLE"];
 const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
+const TABLE_VIEW_PROCEDURE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE"];
 const TABLE_FUNCTION_OBJECTS: SidebarObjectKind[] = ["TABLE", "FUNCTION"];
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
 const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
@@ -17,7 +18,8 @@ const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNC
 
 const TABLE_ONLY_TYPES = new Set<DatabaseType>(["influxdb"]);
 const TABLE_FUNCTION_TYPES = new Set<DatabaseType>(["manticoresearch"]);
-const TABLE_VIEW_ONLY_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "duckdb", "clickhouse", "doris", "starrocks", "databend", "hive", "trino", "cassandra", "bigquery", "kylin", "tdengine", "iotdb", "neo4j", "questdb"]);
+const TABLE_VIEW_PROCEDURE_TYPES = new Set<DatabaseType>(["databend"]);
+const TABLE_VIEW_ONLY_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "duckdb", "clickhouse", "doris", "starrocks", "hive", "trino", "cassandra", "bigquery", "kylin", "tdengine", "iotdb", "neo4j", "questdb"]);
 
 const ORACLE_PACKAGE_TYPES = new Set<DatabaseType>(["oracle", "oceanbase-oracle"]);
 const POSTGRES_SEQUENCE_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kwdb", "opengauss"]);
@@ -36,6 +38,7 @@ export function sidebarObjectKindsForDatabase(dbType?: DatabaseType): SidebarObj
   if (ORACLE_PACKAGE_TYPES.has(dbType)) return [...ORACLE_OBJECTS];
   if (TABLE_ONLY_TYPES.has(dbType)) return [...TABLE_OBJECTS];
   if (TABLE_FUNCTION_TYPES.has(dbType)) return [...TABLE_FUNCTION_OBJECTS];
+  if (TABLE_VIEW_PROCEDURE_TYPES.has(dbType)) return [...TABLE_VIEW_PROCEDURE_OBJECTS];
   if (TABLE_VIEW_ONLY_TYPES.has(dbType)) return [...TABLE_VIEW_OBJECTS];
   if (POSTGRES_SEQUENCE_TYPES.has(dbType)) return [...POSTGRES_OBJECTS];
   return [...ROUTINE_OBJECTS];

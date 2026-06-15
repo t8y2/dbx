@@ -27,6 +27,13 @@ const GBASE_PROFILES: &[AgentDriverProfile] = &[
     AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "GBase 8a", store_visible: true },
 ];
 
+const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
+    profile: "mongodb-legacy",
+    key: "mongodb",
+    label: "MongoDB (Legacy)",
+    store_visible: false,
+}];
+
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Dameng,
@@ -246,7 +253,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         key: "mongodb",
         label: "MongoDB (Legacy)",
         store_visible: true,
-        profiles: &[],
+        profiles: MONGODB_PROFILES,
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Iris,

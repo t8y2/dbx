@@ -8,6 +8,7 @@ test("builds procedure execution templates for common dialect families", () => {
   assert.equal(buildProcedureExecutionSql({ databaseType: "mysql", schema: "app", routineName: "refresh_stats" }), "CALL `refresh_stats`();");
   assert.equal(buildProcedureExecutionSql({ databaseType: "sqlserver", schema: "dbo", routineName: "refresh_stats" }), "EXEC [dbo].[refresh_stats];");
   assert.equal(buildProcedureExecutionSql({ databaseType: "dameng", schema: "SYSDBA", routineName: "refresh_stats" }), 'BEGIN\n  "SYSDBA"."refresh_stats"();\nEND;');
+  assert.equal(buildProcedureExecutionSql({ databaseType: "databend", schema: "default", routineName: "refresh_stats" }), "CALL PROCEDURE refresh_stats();");
 });
 
 test("builds procedure execution templates from parameter values", () => {
@@ -122,10 +123,28 @@ test("maps routine parameter query results into form metadata", () => {
   ]);
 });
 
+test("maps Databend procedure signatures into positional input parameters", () => {
+  const parameters = routineParametersFromResult(
+    {
+      columns: ["arguments"],
+      rows: [["convert_weight(Decimal(10, 2), String) RETURN (Decimal(10, 2))"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    },
+    "databend",
+  );
+
+  assert.deepEqual(parameters, [
+    { name: "arg1", dataType: "Decimal(10, 2)", mode: "IN", ordinal: 1, hasDefault: false },
+    { name: "arg2", dataType: "String", mode: "IN", ordinal: 2, hasDefault: false },
+  ]);
+});
+
 test("builds parameter metadata queries for supported dialects", () => {
   assert.match(routineParametersQuery({ database: "app", databaseType: "postgres", schema: "public", routineName: "demo" }) ?? "", /pg_proc/);
   assert.match(routineParametersQuery({ database: "app", databaseType: "sqlserver", schema: "dbo", routineName: "demo" }) ?? "", /sys\.parameters/);
   assert.match(routineParametersQuery({ database: "app", databaseType: "mysql", routineName: "demo" }) ?? "", /SPECIFIC_SCHEMA = 'app'/);
+  assert.match(routineParametersQuery({ database: "default", databaseType: "databend", schema: "default", routineName: "demo" }) ?? "", /system\.procedures/);
   assert.match(routineParametersQuery({ database: "app", databaseType: "postgres", routineName: "demo" }) ?? "", /n\.nspname = 'public'/);
   assert.equal(routineParametersQuery({ database: "app", databaseType: "sqlite", schema: "main", routineName: "demo" }), null);
 });

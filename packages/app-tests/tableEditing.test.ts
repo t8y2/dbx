@@ -53,6 +53,7 @@ test("allows updateable SQL table data editing even without declared primary key
   assert.equal(isTableDataEditable("tdengine", []), true);
   assert.equal(isTableDataEditable("mysql", []), true);
   assert.equal(isTableDataEditable("manticoresearch", []), true);
+  assert.equal(isTableDataEditable("databend", []), true);
   assert.equal(isTableDataEditable("postgres", []), true);
   assert.equal(isTableDataEditable("postgres", ["id"]), true);
 });
@@ -78,6 +79,7 @@ test("allows existing row edits according to database-specific key requirements"
   assert.equal(canEditExistingTableRows("trino", undefined, ["id"]), true);
   assert.equal(canEditExistingTableRows("mysql", undefined, []), true);
   assert.equal(canEditExistingTableRows("manticoresearch", undefined, []), true);
+  assert.equal(canEditExistingTableRows("databend", undefined, []), true);
   assert.equal(canEditExistingTableRows("postgres", undefined, []), true);
   assert.equal(canEditExistingTableRows("sqlite", undefined, []), true);
   assert.equal(canEditExistingTableRows("sqlite", undefined, ["id"]), true);

@@ -79,6 +79,20 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
     )
 }
 
+/// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
+/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, Neo4j, etcd) are excluded.
+pub fn supports_sql_query(database_type: DatabaseType) -> bool {
+    !matches!(
+        database_type,
+        DatabaseType::Redis
+            | DatabaseType::MongoDb
+            | DatabaseType::Elasticsearch
+            | DatabaseType::InfluxDb
+            | DatabaseType::Neo4j
+            | DatabaseType::Etcd
+    )
+}
+
 pub fn is_safe_dameng_autotrace_sql(sql: &str) -> bool {
     let source = strip_trailing_semicolons(sql.trim());
     if source.is_empty() || has_extra_statement_after_semicolon(&source) {

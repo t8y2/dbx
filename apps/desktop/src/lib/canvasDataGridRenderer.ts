@@ -87,7 +87,7 @@ function setCanvasNumericVariant(ctx: CanvasRenderingContext2D, value: "normal" 
 }
 
 function canvasTabularFontFamily(fontFamily: string): string {
-  return `"Geist Variable Tabular", ${fontFamily}`;
+  return fontFamily;
 }
 
 const FIT_CANVAS_TEXT_CACHE_MAX = 10000;
@@ -157,11 +157,11 @@ function crispCanvasLine(value: number, dpr: number): number {
 }
 
 function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, styleKey?: string): CanvasRenderState {
-  const cacheKey = `${styleKey ?? "default"}:${isDark ? "dark" : "light"}`;
+  const canvasStyle = getComputedStyle(canvas);
+  const cacheKey = `${styleKey ?? "default"}:${isDark ? "dark" : "light"}:${canvasStyle.fontFamily}:${canvasStyle.fontSize}`;
   const cached = canvasRenderStateCache.get(canvas);
   if (cached?.cacheKey === cacheKey) return cached;
 
-  const canvasStyle = getComputedStyle(canvas);
   const fontFamily = canvasStyle.fontFamily || `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
   const fontSize = Number.parseFloat(canvasStyle.fontSize) || 12;
   const lineHeight = canvasStyle.lineHeight;

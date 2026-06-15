@@ -1585,8 +1585,12 @@ fn dollar_quote_tag_at(chars: &[char], start: usize) -> Option<String> {
     None
 }
 
-fn has_executable_sql(statement: &str) -> bool {
+pub fn has_executable_sql(statement: &str) -> bool {
     has_executable_sql_with_options(statement, SqlParsingOptions::default())
+}
+
+pub fn has_executable_sql_for_database(statement: &str, db_type: DatabaseType) -> bool {
+    has_executable_sql_with_options(statement, SqlParsingOptions::for_database_type(db_type))
 }
 
 fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<(usize, usize)> {
@@ -1769,6 +1773,15 @@ mod tests {
             split_sql_script("CREATE TABLE a(id int); -- done\n/* no more sql */").unwrap(),
             vec!["CREATE TABLE a(id int)"]
         );
+    }
+
+    #[test]
+    fn skips_comment_only_statement_with_semicolon() {
+        assert_eq!(
+            split_sql_script("-- insert sqluser.tb_a values (6,'006','测试6','无');").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(!super::has_executable_sql("-- insert sqluser.tb_a values (6,'006','测试6','无');"));
     }
 
     #[test]

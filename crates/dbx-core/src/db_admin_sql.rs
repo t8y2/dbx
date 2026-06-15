@@ -302,7 +302,7 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     if options.database_type == Some(DatabaseType::SqlServer) {
         return format!("SELECT TOP 0 * INTO {target} FROM {source};");
     }
-    if options.database_type.is_some_and(uses_fetch_first_duplicate_structure) {
+    if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
         return format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0");
     }
     format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
@@ -411,8 +411,8 @@ fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
     )
 }
 
-fn uses_fetch_first_duplicate_structure(database_type: DatabaseType) -> bool {
-    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng)
+fn uses_false_predicate_duplicate_structure(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::Iris)
 }
 
 fn sqlserver_string(value: &str) -> String {
@@ -787,6 +787,15 @@ mod tests {
                 target_name: "USERS_COPY".to_string(),
             }),
             "CREATE TABLE \"HR\".\"USERS_COPY\" AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Iris),
+                schema: Some("SQLUSER".to_string()),
+                source_name: "tb_a".to_string(),
+                target_name: "tb_a_copy".to_string(),
+            }),
+            "CREATE TABLE \"SQLUSER\".\"tb_a_copy\" AS SELECT * FROM \"SQLUSER\".\"tb_a\" WHERE 1=0"
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {

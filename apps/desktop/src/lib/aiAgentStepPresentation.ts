@@ -16,6 +16,8 @@ export interface AiAgentStepItem {
   toolResult?: string;
   /** Whether this is an error result */
   isError?: boolean;
+  /** Structured explain plan data (for explain_query tool results) */
+  explainData?: unknown;
 }
 
 export function buildAiAgentStepItems(plan: AiAgentPlan): AiAgentStepItem[] {

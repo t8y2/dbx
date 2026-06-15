@@ -870,6 +870,15 @@ function onAiRequestAutoExecuteSql(sql: string) {
   });
 }
 
+function onAiOpenExplainPlan(sql: string) {
+  const tabId = ensureQueryTab();
+  queryStore.updateSql(tabId, sql);
+  selectedSql.value = "";
+  nextTick(() => {
+    void tryExplain(sql);
+  });
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
@@ -1073,6 +1082,15 @@ onMounted(async () => {
   if (isDesktop) {
     document.addEventListener("contextmenu", handleContextMenu);
   }
+  // macOS: Ctrl+click fires both click and contextmenu.
+  // Intercept click in capture phase to prevent unwanted navigation.
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (e.ctrlKey) e.stopPropagation();
+    },
+    true,
+  );
   if (!isDesktop) {
     try {
       const res = await fetch("/api/auth/check");
@@ -1275,7 +1293,7 @@ onUnmounted(() => {
           <div v-if="showAiPanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: aiPanelWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startAiPanelResize" />
             <div class="h-full min-h-0 overflow-hidden">
-              <AiAssistant v-if="aiPanelReady" ref="aiAssistantRef" :tab="activeTab" :connection="activeConnection" @replace-sql="onAiReplaceSql" @execute-sql="onAiExecuteSql" @request-auto-execute-sql="onAiRequestAutoExecuteSql" @close="toggleAiPanel" />
+              <AiAssistant v-if="aiPanelReady" ref="aiAssistantRef" :tab="activeTab" :connection="activeConnection" @replace-sql="onAiReplaceSql" @execute-sql="onAiExecuteSql" @request-auto-execute-sql="onAiRequestAutoExecuteSql" @open-explain-plan="onAiOpenExplainPlan" @close="toggleAiPanel" />
             </div>
           </div>
 
@@ -1338,7 +1356,7 @@ onUnmounted(() => {
       </div>
       <Teleport to="body">
         <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg pointer-events-none">
+          <div v-if="toastVisible" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text">
             {{ toastMessage }}
           </div>
         </Transition>

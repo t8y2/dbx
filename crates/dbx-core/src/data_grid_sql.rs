@@ -272,7 +272,9 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
         .iter()
         .enumerate()
         .filter_map(|(index, column)| Some((column.as_deref()?, index)))
-        .filter(|(column, _)| !is_oracle_row_id(options.database_type, Some(column)))
+        .filter(|(column, _)| {
+            !is_grid_insert_omitted_column(options.database_type, column_info_for(column_info, column), Some(column))
+        })
         .collect();
     let insert_columns: Vec<(&str, usize)> = insertable_columns
         .iter()
@@ -411,6 +413,7 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
             !column.is_nullable
                 && column.column_default.is_none()
                 && !is_auto_generated_column(column)
+                && !is_non_identity_generated_column(Some(column))
                 && !is_oracle_row_id(options.database_type, Some(&column.name))
         })
         .map(|column| normalize_column_name(&column.name))
@@ -510,7 +513,11 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             .iter()
             .filter_map(|(column_index, value)| {
                 let column = save_columns.get(*column_index)?.as_deref()?;
-                if is_oracle_row_id(options.database_type, Some(column)) {
+                if is_grid_update_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                ) {
                     return None;
                 }
                 Some(format!(
@@ -557,7 +564,13 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             .iter()
             .enumerate()
             .filter_map(|(index, column)| Some((column.as_deref()?, row.get(index).unwrap_or(&Value::Null))))
-            .filter(|(column, _)| !is_oracle_row_id(options.database_type, Some(column)))
+            .filter(|(column, _)| {
+                !is_grid_insert_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                )
+            })
             .filter(|(_, value)| !value.is_null())
             .collect();
         if insert_pairs.is_empty() {
@@ -614,7 +627,13 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
             .iter()
             .enumerate()
             .filter_map(|(index, column)| Some((column.as_deref()?, row.get(index).unwrap_or(&Value::Null))))
-            .filter(|(column, _)| !is_oracle_row_id(options.database_type, Some(column)))
+            .filter(|(column, _)| {
+                !is_grid_insert_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                )
+            })
             .collect();
         let columns = insert_pairs
             .iter()
@@ -648,7 +667,11 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
             .iter()
             .filter_map(|change @ (column_index, _)| {
                 let column = save_columns.get(*column_index)?.as_deref()?;
-                if is_oracle_row_id(options.database_type, Some(column)) {
+                if is_grid_update_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                ) {
                     return None;
                 }
                 Some((change, column))
@@ -1111,6 +1134,39 @@ fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
         .any(|part| matches!(part, "auto_increment" | "autoincrement" | "identity"))
 }
 
+fn is_grid_insert_omitted_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    name: Option<&str>,
+) -> bool {
+    is_oracle_row_id(database_type, name)
+        || is_postgres_tsvector_column(database_type, column_info)
+        || is_non_identity_generated_column(column_info)
+}
+
+fn is_grid_update_omitted_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    name: Option<&str>,
+) -> bool {
+    is_oracle_row_id(database_type, name) || is_non_identity_generated_column(column_info)
+}
+
+fn is_postgres_tsvector_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_info.map(|column| is_postgres_tsvector_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_postgres_tsvector_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    normalized == "tsvector" || normalized.ends_with(".tsvector")
+}
+
+fn is_non_identity_generated_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    let extra = column_info.and_then(|column| column.extra.as_deref()).unwrap_or("").to_ascii_lowercase();
+    extra.contains("generated always as") && !extra.contains("identity")
+}
+
 fn is_null_write_to_not_null_column(
     database_type: Option<DatabaseType>,
     not_null_columns: &[String],
@@ -1398,6 +1454,32 @@ mod tests {
     }
 
     #[test]
+    fn builds_copy_insert_statement_omits_postgres_tsvector_columns() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            table_meta: Some(DataGridTableMeta {
+                schema: Some("public".to_string()),
+                table_name: "articles".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "integer", false, None),
+                    column("title", "text", false, None),
+                    column("search_vector", "tsvector", true, None),
+                ]),
+            }),
+            columns: vec!["id".to_string(), "title".to_string(), "search_vector".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
+            exclude_primary_keys: false,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"public\".\"articles\" (\"id\", \"title\") VALUES (1, 'Hello');")
+        );
+    }
+
+    #[test]
     fn builds_filter_conditions() {
         assert_eq!(
             build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
@@ -1498,6 +1580,34 @@ mod tests {
                 "UPDATE [game].[player states] SET [state] = N'ready', [updated at] = N'2026-05-04' WHERE [role id] = 42;",
                 "DELETE FROM [game].[player states] WHERE [role id] = 42;",
                 "INSERT INTO [game].[player states] ([role id], [state], [updated at]) VALUES (43, N'new', N'2026-05-05');",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_databend_save_statements() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Databend),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("name", "string", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![vec![json!(2), json!("Grace")]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `default`.`people` SET `name` = 'Linus' WHERE `id` = 1;",
+                "DELETE FROM `default`.`people` WHERE `id` = 1;",
+                "INSERT INTO `default`.`people` (`id`, `name`) VALUES (2, 'Grace');",
             ]
         );
     }

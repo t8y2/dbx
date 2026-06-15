@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use futures::future::join_all;
 use futures::FutureExt;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use crate::agent_events::{AgentEvent, ToolCall, ToolDefinition};
+use crate::agent_events::{AgentEvent, ToolCall, ToolDefinition, ToolResult};
 use crate::agent_tools;
 use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiStreamChunk};
 use crate::connection::AppState;
@@ -71,7 +72,7 @@ pub async fn run_agent_loop(
         )
         .await;
     }
-    let tools = if is_agent_mode { agent_tools::all_tools() } else { agent_tools::read_only_tools() };
+    let tools = if is_agent_mode { agent_tools::all_tools(agent_ctx.db_type) } else { agent_tools::read_only_tools() };
     let mut conversation_messages: Vec<AiMessage> = messages.to_vec();
     let mut final_text = String::new();
     let mut total_usage = TokenUsage::default();
@@ -179,32 +180,71 @@ pub async fn run_agent_loop(
         }
 
         // Execute each tool call
+        // Emit all ToolCallStart events first
         for tc in &collected_tool_calls {
             on_event(AgentEvent::ToolCallStart {
                 tool_call_id: tc.id.clone(),
                 tool_name: tc.name.clone(),
                 args: tc.arguments.clone(),
             });
+        }
 
-            let result = agent_tools::execute_tool(
-                tc,
-                &agent_ctx.state,
-                &agent_ctx.connection_id,
-                &agent_ctx.database,
-                &agent_ctx.db_type,
-            )
-            .await;
+        // Execute tool calls: parallel for read tools, sequential for execute_query
+        let state2 = Arc::clone(&agent_ctx.state);
+        let conn2 = agent_ctx.connection_id.clone();
+        let db2 = agent_ctx.database.clone();
+        let db_type = agent_ctx.db_type;
 
+        // Split by index into parallel and sequential groups using tool metadata
+        let tool_parallel_map: std::collections::HashMap<&str, bool> =
+            tools.iter().map(|t| (t.name, t.parallel_ok)).collect();
+        let (parallel_indices, sequential_indices): (Vec<usize>, Vec<usize>) = (0..collected_tool_calls.len())
+            .partition(|&i| *tool_parallel_map.get(collected_tool_calls[i].name.as_str()).unwrap_or(&false));
+
+        let make_tc =
+            |tc: &ToolCall| ToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: tc.arguments.clone() };
+
+        // Run parallel group
+        let parallel_futures: Vec<_> = parallel_indices
+            .iter()
+            .map(|&i| {
+                let tc = make_tc(&collected_tool_calls[i]);
+                let state = Arc::clone(&state2);
+                let conn = conn2.clone();
+                let db = db2.clone();
+                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type).await }
+            })
+            .collect();
+        let parallel_results = join_all(parallel_futures).await;
+
+        // Run sequential group one-by-one
+        let mut sequential_results = Vec::with_capacity(sequential_indices.len());
+        for &i in &sequential_indices {
+            let tc = make_tc(&collected_tool_calls[i]);
+            sequential_results.push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type).await);
+        }
+
+        // Merge results back into original order
+        let mut results: Vec<Option<ToolResult>> = vec![None; collected_tool_calls.len()];
+        for (pos, &i) in parallel_indices.iter().enumerate() {
+            results[i] = Some(parallel_results[pos].clone());
+        }
+        for (pos, &i) in sequential_indices.iter().enumerate() {
+            results[i] = Some(sequential_results[pos].clone());
+        }
+        let results: Vec<ToolResult> = results.into_iter().map(|r| r.unwrap()).collect();
+
+        // Process results in order, emitting ToolCallEnd events
+        for (tc, result) in collected_tool_calls.iter().zip(results) {
             on_event(AgentEvent::ToolCallEnd {
                 tool_call_id: tc.id.clone(),
                 tool_name: tc.name.clone(),
-                result: json!({ "content": result.content }),
+                result: match &result.explain_data {
+                    Some(ed) => json!({ "content": result.content, "explain_data": ed }),
+                    None => json!({ "content": result.content }),
+                },
                 is_error: result.is_error,
             });
-
-            // Add tool result to conversation for the next LLM call
-            // Uses "tool" role per OpenAI convention; provider-specific conversion
-            // happens in ai::stream_with_tools when building provider API requests.
             conversation_messages.push(AiMessage {
                 role: "tool".to_string(),
                 content: compact_tool_result_for_context(&tc.name, &result.content),
@@ -333,14 +373,14 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
 
     match tables_result {
         Ok(tables) if !tables.is_empty() => {
-            enriched.push_str("\n\n## Database Schema (for context 鈥?no tools available)\n");
+            enriched.push_str("\n\n## Database Schema (for context — no tools available)\n");
             enriched.push_str(&format!("Database: {}\n", agent_ctx.database));
             enriched.push_str("Tables:\n");
             for t in &tables {
                 enriched.push_str(&format!("  - {} ({})", t.name, t.table_type));
                 if let Some(ref comment) = t.comment {
                     if !comment.trim().is_empty() {
-                        enriched.push_str(&format!(" 鈥?{}", comment.trim()));
+                        enriched.push_str(&format!(" — {}", comment.trim()));
                     }
                 }
                 enriched.push('\n');

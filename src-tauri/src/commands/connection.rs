@@ -2,8 +2,9 @@ use std::sync::Arc;
 use tauri::State;
 
 pub use dbx_core::agent_connection::{
-    agent_connect_params, mongo_legacy_error_with_auth_hint, oracle_alternate_connect_config,
-    oracle_auth_fallback_profiles, oracle_error_with_driver_hint, should_retry_oracle_with_10g_driver,
+    agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config,
+    oracle_auth_fallback_profiles, oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
+    should_retry_oracle_with_10g_driver,
 };
 pub use dbx_core::connection::{
     connect_bare_metadata_pool, connect_mysql_metadata_pool, connection_url_for_endpoint, metadata_connection_config,
@@ -333,6 +334,17 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             #[cfg(not(feature = "duckdb-bundled"))]
             DatabaseType::DuckDb => Err("DuckDB support not compiled (enable duckdb-bundled feature)".to_string()),
             DatabaseType::MongoDb => {
+                if mongo_uses_legacy_driver(&config) {
+                    let am = &state.agent_manager;
+                    let mut client = am.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
+                    client
+                        .connect(mongo_legacy_connect_params(&config, &host, port))
+                        .await
+                        .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                    client.disconnect().await.ok();
+                    return Ok("Connection successful (via legacy driver)".to_string());
+                }
+
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
                         match db::mongo_driver::test_connection(&client, connect_timeout, config.effective_database())
@@ -344,13 +356,15 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     }
                     Err(e) => e,
                 };
-                if native_err.contains("wire version") {
+                if should_retry_mongo_with_legacy_driver(&native_err) {
                     let am = &state.agent_manager;
-                    let mut client = am.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
-                    client
-                        .connect(mongo_legacy_connect_params(&config, &host, port))
-                        .await
-                        .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                    let mut client = am.spawn(&config.db_type, Some("mongodb-legacy")).await?;
+                    client.connect(mongo_legacy_connect_params(&config, &host, port)).await.map_err(|err| {
+                        format!(
+                            "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
+                            mongo_legacy_error_with_auth_hint(&err)
+                        )
+                    })?;
                     client.disconnect().await.ok();
                     Ok("Connection successful (via legacy driver)".to_string())
                 } else {
@@ -542,29 +556,46 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         #[cfg(not(feature = "duckdb-bundled"))]
         DatabaseType::DuckDb => return Err("DuckDB support not compiled (enable duckdb-bundled feature)".to_string()),
         DatabaseType::MongoDb => {
-            let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
-                Ok(client) => {
-                    match db::mongo_driver::test_connection(&client, connect_timeout, db_config.effective_database())
-                        .await
-                    {
-                        Ok(()) => {
-                            state.configs.write().await.insert(id.clone(), config);
-                            state.connections.write().await.insert(id.clone(), PoolKind::MongoDb(client));
-                            return Ok(id);
-                        }
-                        Err(e) => e,
-                    }
-                }
-                Err(e) => e,
-            };
-            if native_err.contains("wire version") {
-                log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
-                let mut client =
-                    state.agent_manager.spawn(&db_config.db_type, db_config.driver_profile.as_deref()).await?;
-                client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await?;
+            if mongo_uses_legacy_driver(&db_config) {
+                let mut client = state.agent_manager.spawn(&db_config.db_type, Some("mongodb-legacy")).await?;
+                client
+                    .connect(mongo_legacy_connect_params(&db_config, &host, port))
+                    .await
+                    .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                 PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
             } else {
-                return Err(native_err);
+                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
+                    Ok(client) => {
+                        match db::mongo_driver::test_connection(
+                            &client,
+                            connect_timeout,
+                            db_config.effective_database(),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                state.configs.write().await.insert(id.clone(), config);
+                                state.connections.write().await.insert(id.clone(), PoolKind::MongoDb(client));
+                                return Ok(id);
+                            }
+                            Err(e) => e,
+                        }
+                    }
+                    Err(e) => e,
+                };
+                if should_retry_mongo_with_legacy_driver(&native_err) {
+                    log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
+                    let mut client = state.agent_manager.spawn(&db_config.db_type, Some("mongodb-legacy")).await?;
+                    client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await.map_err(|err| {
+                        format!(
+                            "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
+                            mongo_legacy_error_with_auth_hint(&err)
+                        )
+                    })?;
+                    PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                } else {
+                    return Err(native_err);
+                }
             }
         }
         DatabaseType::ClickHouse => {

@@ -23,6 +23,7 @@ import {
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongoShellCommand";
 import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
+import { nextRedisCommandDb } from "@/lib/redisCommandSession";
 import { supportsDatabaseFeature } from "@/lib/databaseCapabilities";
 import { editablePrimaryKeys } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
@@ -1157,20 +1158,22 @@ export const useQueryStore = defineStore("query", () => {
       // Redis command execution — split multi-line input into individual commands
       if (conn?.db_type === "redis") {
         await connStore.ensureConnected(tab.connectionId);
-        const redisDb = Number(tab.database) || 0;
+        let currentDb = Number(tab.database) || 0;
         const commands = sql
           .split("\n")
           .map((line) => line.trim())
           .filter((line) => line.length > 0);
         if (commands.length === 0) return;
-        console.info("[DBX][executeTabSql:redis:start]", { traceId, db: redisDb, commandCount: commands.length, sql });
+        console.info("[DBX][executeTabSql:redis:start]", { traceId, db: currentDb, commandCount: commands.length, sql });
 
         const allResults: QueryResult[] = [];
         const skipSafety = options?.skipRedisSafetyCheck;
         for (const command of commands) {
           try {
-            const result = await api.redisExecuteCommand(tab.connectionId, redisDb, command, skipSafety);
+            const result = await api.redisExecuteCommand(tab.connectionId, currentDb, command, skipSafety);
             allResults.push(markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command)));
+            // Track db switches from SELECT N so later commands in the same batch run on the right db.
+            currentDb = nextRedisCommandDb(currentDb, command, result.value);
           } catch (e: any) {
             allResults.push({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 });
           }
@@ -1198,6 +1201,11 @@ export const useQueryStore = defineStore("query", () => {
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
           captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          // Reflect db switches from SELECT N in the tab so the toolbar dropdown, tab title and
+          // sidebar stay in sync with the command's effective db.
+          if (current.database !== String(currentDb)) {
+            current.database = String(currentDb);
+          }
         }
         return;
       }

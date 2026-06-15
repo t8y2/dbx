@@ -163,7 +163,7 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, st
 
   const canvasStyle = getComputedStyle(canvas);
   const fontFamily = canvasStyle.fontFamily || `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
-  const fontSize = Number.parseFloat(canvasStyle.fontSize) || 12;
+  const fontSize = Number.parseFloat(canvasStyle.fontSize) || 13;
   const lineHeight = canvasStyle.lineHeight;
   const normalFont = canvasFont({
     family: fontFamily,

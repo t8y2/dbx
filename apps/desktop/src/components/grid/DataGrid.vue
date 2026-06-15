@@ -6790,7 +6790,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <RecycleScroller v-else-if="hasVisibleRows" ref="scrollerRef" class="data-grid-scroller flex-1 overflow-x-auto overscroll-none" :class="{ 'is-scrolling': isScrolling }" :items="displayItems" :item-size="26" :buffer="600" :skip-hover="true" key-field="id" @scroll="onScrollerScroll">
                 <template #default="{ item }">
                   <div
-                    class="flex text-xs border-b border-border"
+                    class="flex text-[13px] border-b border-border"
                     :class="{
                       'bg-destructive/5 opacity-70': item.isDeleted,
                       'bg-primary/5': item.isNew && !isRowActive(item.displayIndex),
@@ -7808,7 +7808,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .canvas-grid-surface {
   cursor: cell;
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   font-weight: 400;
   line-height: 1rem;
   outline: none;

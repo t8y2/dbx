@@ -279,6 +279,8 @@ export interface EditorSettings {
   compactTabTitle: boolean;
   appLayout: "separated" | "classic";
   pageSize: number;
+  infiniteScroll: boolean;
+  infiniteScrollMaxRows: number;
   redisScanPageSize: number;
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
@@ -375,6 +377,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   compactTabTitle: false,
   appLayout: "classic",
   pageSize: 100,
+  infiniteScroll: false,
+  infiniteScrollMaxRows: 5000,
   redisScanPageSize: 1000,
   mongoViewMode: "document",
   showColumnCommentsInHeader: false,
@@ -518,18 +522,16 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
           };
         });
       }
-      return [
-        ...(settings.customThemeColors
-          ? [
-              {
-                id: "migrated",
-                name: "Migrated",
-                colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...settings.customThemeColors },
-                ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
-              },
-            ]
-          : []),
-      ];
+      return settings.customThemeColors
+        ? [
+            {
+              id: "migrated",
+              name: "Migrated",
+              colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...settings.customThemeColors },
+              ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
+            },
+          ]
+        : [];
     })(),
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: settings.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
@@ -538,6 +540,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
+    infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
+    infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
     redisScanPageSize: settings.redisScanPageSize ?? DEFAULT_EDITOR_SETTINGS.redisScanPageSize,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
@@ -693,6 +697,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
+    if (partial.infiniteScroll !== undefined) editorSettings.value.infiniteScroll = partial.infiniteScroll;
+    if (partial.infiniteScrollMaxRows !== undefined)
+      editorSettings.value.infiniteScrollMaxRows = typeof partial.infiniteScrollMaxRows === "number" && partial.infiniteScrollMaxRows >= 1000 && partial.infiniteScrollMaxRows <= 50000 ? Math.round(partial.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
     if (partial.redisScanPageSize !== undefined) editorSettings.value.redisScanPageSize = partial.redisScanPageSize;
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;

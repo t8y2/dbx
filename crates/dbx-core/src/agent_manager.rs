@@ -751,6 +751,18 @@ impl AgentManager {
         crate::agent_runtime::call_daemon(self, db_type, driver_profile, method, params).await
     }
 
+    pub async fn call_daemon_with_timeout<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        method: &str,
+        params: serde_json::Value,
+        timeout_duration: Option<std::time::Duration>,
+    ) -> Result<T, String> {
+        crate::agent_runtime::call_daemon_with_timeout(self, db_type, driver_profile, method, params, timeout_duration)
+            .await
+    }
+
     pub async fn call_daemon_method<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         db_type: &DatabaseType,
@@ -759,6 +771,25 @@ impl AgentManager {
         params: serde_json::Value,
     ) -> Result<T, String> {
         crate::agent_runtime::call_daemon_method(self, db_type, driver_profile, method, params).await
+    }
+
+    pub async fn call_daemon_method_with_timeout<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        method: AgentMethod,
+        params: serde_json::Value,
+        timeout_duration: Option<std::time::Duration>,
+    ) -> Result<T, String> {
+        crate::agent_runtime::call_daemon_method_with_timeout(
+            self,
+            db_type,
+            driver_profile,
+            method,
+            params,
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn download_file(url: &str, dest: &Path) -> Result<(), String> {

@@ -1,3 +1,4 @@
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use serde_json::Value;
@@ -7,6 +8,24 @@ use std::time::Duration;
 
 use super::{http_client_builder, with_connection_timeout};
 use crate::db::mongo_driver::MongoDocumentResult;
+
+const ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 pub struct EsClient {
     http: HttpClient,
@@ -162,6 +181,14 @@ fn elasticsearch_base_url_fallbacks(base_url: &str) -> Vec<String> {
     }
 }
 
+fn elasticsearch_index_path(index: &str, endpoint: &str) -> String {
+    format!("/{}/{}", elasticsearch_path_segment(index), endpoint.trim_start_matches('/'))
+}
+
+fn elasticsearch_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET).to_string()
+}
+
 fn redact_elasticsearch_url(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return url.to_string();
@@ -210,7 +237,7 @@ pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
 }
 
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
-    let path = format!("/{index}/_mapping");
+    let path = elasticsearch_index_path(index, "_mapping");
     let resp = client.get(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -351,7 +378,7 @@ pub async fn find_documents(
 ) -> Result<MongoDocumentResult, String> {
     let body = build_find_documents_body(skip, limit, filter, sort)?;
 
-    let path = format!("/{}/_search", index);
+    let path = elasticsearch_index_path(index, "_search");
     let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -598,7 +625,7 @@ fn elasticsearch_sort_from_document_sort(sort: Option<&str>) -> Result<serde_jso
 pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> Result<String, String> {
     let doc = elasticsearch_document_body_from_json(doc_json)?;
 
-    let path = format!("/{}/_doc?refresh=true", index);
+    let path = elasticsearch_index_path(index, "_doc?refresh=true");
     let resp = client.post(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -613,7 +640,7 @@ pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> 
 pub async fn update_document(client: &EsClient, index: &str, id: &str, doc_json: &str) -> Result<u64, String> {
     let doc = elasticsearch_document_body_from_json(doc_json)?;
 
-    let path = format!("/{}/_doc/{}?refresh=true", index, id);
+    let path = format!("/{}/_doc/{}?refresh=true", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -633,7 +660,7 @@ fn elasticsearch_document_body_from_json(doc_json: &str) -> Result<serde_json::V
 }
 
 pub async fn delete_document(client: &EsClient, index: &str, id: &str) -> Result<u64, String> {
-    let path = format!("/{}/_doc/{}?refresh=true", index, id);
+    let path = format!("/{}/_doc/{}?refresh=true", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
     let resp = client.delete(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -749,7 +776,7 @@ async fn execute_search_query(
     start: std::time::Instant,
 ) -> Result<crate::types::QueryResult, String> {
     let report_index_total = query.from_plan_pagination;
-    let path = format!("/{}/_search", query.index);
+    let path = elasticsearch_index_path(&query.index, "_search");
     let resp =
         client.post(&path).json(&query.body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     let status = resp.status().as_u16();
@@ -981,7 +1008,7 @@ async fn execute_translated_select_star(
     start: std::time::Instant,
 ) -> Result<crate::types::QueryResult, String> {
     let report_index_total = !translated.user_limited;
-    let path = format!("/{}/_search", translated.index);
+    let path = elasticsearch_index_path(&translated.index, "_search");
     let resp = client
         .post(&path)
         .json(&translated.body)
@@ -1437,6 +1464,18 @@ mod tests {
             redact_elasticsearch_url("https://elastic:secret@localhost:9200"),
             "https://user:password@localhost:9200"
         );
+    }
+
+    #[test]
+    fn encodes_elasticsearch_index_path_segments() {
+        assert_eq!(super::elasticsearch_index_path("%kuzzle.users", "_search"), "/%25kuzzle.users/_search");
+        assert_eq!(super::elasticsearch_index_path("logs-*", "_search"), "/logs-*/_search");
+        assert_eq!(super::elasticsearch_index_path("logs/2026", "_mapping"), "/logs%2F2026/_mapping");
+    }
+
+    #[test]
+    fn encodes_elasticsearch_document_id_path_segment() {
+        assert_eq!(super::elasticsearch_path_segment("a%b/c"), "a%25b%2Fc");
     }
 
     #[test]

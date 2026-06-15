@@ -1100,11 +1100,14 @@ function deleteConnection() {
 async function confirmDelete() {
   const targets = connectionDeleteTargets();
   if (!targets.length) return;
+  const connectionIds = targets.map((target) => target.connectionId);
   try {
-    for (const target of targets) {
-      await connectionStore.disconnect(target.connectionId);
+    await connectionStore.removeConnections(connectionIds);
+    for (const connectionId of connectionIds) {
+      connectionStore.disconnect(connectionId).catch((error) => {
+        console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
+      });
     }
-    await connectionStore.removeConnections(targets.map((target) => target.connectionId));
     toast(targets.length > 1 ? t("connection.deletedSelected", { count: targets.length }) : t("connection.deleted"), 2000);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
@@ -1209,6 +1212,7 @@ const createDatabaseName = ref("");
 const createDatabaseCharset = ref("utf8mb4");
 const createDatabaseCollation = ref("utf8mb4_unicode_ci");
 const showDropDatabaseConfirm = ref(false);
+const dropDatabaseLoading = ref(false);
 const showFlushRedisDbConfirm = ref(false);
 const showCreateSchemaDialog = ref(false);
 const createSchemaName = ref("");
@@ -1882,6 +1886,7 @@ async function confirmCreateDatabase() {
 
 function dropDatabase() {
   void refreshDropDatabasePreviewSql();
+  dropDatabaseLoading.value = false;
   showDropDatabaseConfirm.value = true;
 }
 
@@ -1909,7 +1914,8 @@ async function confirmFlushRedisDb() {
 
 async function confirmDropDatabase() {
   const node = props.node;
-  if (!node.connectionId) return;
+  if (!node.connectionId || dropDatabaseLoading.value) return;
+  dropDatabaseLoading.value = true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql =
@@ -1921,8 +1927,11 @@ async function confirmDropDatabase() {
     await api.executeQuery(node.connectionId, "", sql);
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
+    showDropDatabaseConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    dropDatabaseLoading.value = false;
   }
 }
 
@@ -3649,7 +3658,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog v-model:open="showDropDatabaseConfirm" :title="t('contextMenu.confirmDropDatabaseTitle')" :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })" :sql="dropDatabasePreviewSql" :confirm-label="t('contextMenu.dropDatabase')" @confirm="confirmDropDatabase" />
+  <DangerConfirmDialog
+    v-model:open="showDropDatabaseConfirm"
+    :title="t('contextMenu.confirmDropDatabaseTitle')"
+    :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })"
+    :sql="dropDatabasePreviewSql"
+    :confirm-label="t('contextMenu.dropDatabase')"
+    :loading="dropDatabaseLoading"
+    :close-on-confirm="false"
+    @confirm="confirmDropDatabase"
+  />
 
   <DangerConfirmDialog v-model:open="showFlushRedisDbConfirm" :title="t('redis.flushDb')" :message="t('redis.flushDbMessage')" :details="t('redis.flushDbDetails', { db: node.database })" :confirm-label="t('redis.flushDbConfirm')" @confirm="confirmFlushRedisDb" />
 

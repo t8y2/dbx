@@ -1,4 +1,5 @@
 use serde::de::DeserializeOwned;
+use std::time::Duration;
 
 use crate::agent_manager::{AgentManager, DEFAULT_JRE_KEY};
 use crate::database_capabilities;
@@ -70,6 +71,39 @@ pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
     }
 }
 
+pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
+    manager: &AgentManager,
+    db_type: &DatabaseType,
+    driver_profile: Option<&str>,
+    method: &str,
+    params: serde_json::Value,
+    timeout_duration: Option<Duration>,
+) -> Result<T, String> {
+    let keys = runtime_agent_key_candidates(db_type, driver_profile)
+        .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
+    let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]).to_string();
+
+    let mut daemons = manager.daemons.lock().await;
+
+    if !daemons.contains_key(&key) {
+        let client = spawn_client_for_key(manager, &key).await?;
+        daemons.insert(key.clone(), client);
+    }
+
+    let client = daemons.get_mut(&key).unwrap();
+    match client.call_with_timeout::<T>(method, params.clone(), timeout_duration).await {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            log::warn!("[agent] daemon call failed, respawning: {err}");
+            daemons.remove(&key);
+            let mut new_client = spawn_client_for_key(manager, &key).await?;
+            let result = new_client.call_with_timeout::<T>(method, params, timeout_duration).await?;
+            daemons.insert(key, new_client);
+            Ok(result)
+        }
+    }
+}
+
 pub async fn call_daemon_method<T: DeserializeOwned + Send + 'static>(
     manager: &AgentManager,
     db_type: &DatabaseType,
@@ -78,6 +112,17 @@ pub async fn call_daemon_method<T: DeserializeOwned + Send + 'static>(
     params: serde_json::Value,
 ) -> Result<T, String> {
     call_daemon(manager, db_type, driver_profile, method.as_str(), params).await
+}
+
+pub async fn call_daemon_method_with_timeout<T: DeserializeOwned + Send + 'static>(
+    manager: &AgentManager,
+    db_type: &DatabaseType,
+    driver_profile: Option<&str>,
+    method: AgentMethod,
+    params: serde_json::Value,
+    timeout_duration: Option<Duration>,
+) -> Result<T, String> {
+    call_daemon_with_timeout(manager, db_type, driver_profile, method.as_str(), params, timeout_duration).await
 }
 
 fn runtime_agent_key_candidates(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<Vec<&'static str>> {

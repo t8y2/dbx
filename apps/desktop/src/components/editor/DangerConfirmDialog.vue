@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle } from "@lucide/vue";
+import { AlertTriangle, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -23,6 +23,8 @@ const props = withDefaults(
     confirmLabel?: string;
     showSuppressToggle?: boolean;
     suppressToggleLabel?: string;
+    loading?: boolean;
+    closeOnConfirm?: boolean;
   }>(),
   {
     sql: "",
@@ -32,6 +34,8 @@ const props = withDefaults(
     confirmLabel: "",
     showSuppressToggle: false,
     suppressToggleLabel: "",
+    loading: false,
+    closeOnConfirm: true,
   },
 );
 
@@ -41,15 +45,23 @@ const emit = defineEmits<{
 
 const code = computed(() => props.details || props.sql);
 const highlightedCode = computed(() => highlight(code.value));
+const dialogOpen = computed({
+  get: () => open.value,
+  set: (value) => {
+    if (props.loading && !value) return;
+    open.value = value;
+  },
+});
 
 function onConfirm() {
-  open.value = false;
+  if (props.loading) return;
+  if (props.closeOnConfirm) open.value = false;
   emit("confirm");
 }
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-[480px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2 text-destructive">
@@ -68,8 +80,11 @@ function onConfirm() {
       </div>
 
       <DialogFooter>
-        <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" @click="onConfirm">{{ confirmLabel || t("dangerDialog.confirm") }}</Button>
+        <Button variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="destructive" class="gap-1.5" :disabled="loading" @click="onConfirm">
+          <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
+          {{ confirmLabel || t("dangerDialog.confirm") }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

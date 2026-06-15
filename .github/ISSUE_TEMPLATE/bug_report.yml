@@ -30,7 +30,10 @@ body:
     id: logs
     attributes:
       label: 错误日志
-      description: 终端、DevTools 或应用内的错误信息。
+      description: |
+        **⚠️ 调试日志对定位和修复问题至关重要，请务必提供！**
+        请在 DBX 中操作：设置 → 外观 → 开启"启用调试日志" → 复现问题 → 点击"下载日志"，将日志文件粘贴到这里。
+        也可以提供终端、DevTools 的错误信息。
       render: shell
 
   - type: input

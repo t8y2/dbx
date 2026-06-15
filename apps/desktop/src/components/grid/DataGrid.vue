@@ -277,6 +277,8 @@ const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.s
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const infiniteScrollEnabled = computed(() => settingsStore.editorSettings.infiniteScroll);
+const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
 
 function headerColumnComment(column: string): string {
   if (!showColumnCommentsInHeader.value) return "";
@@ -1883,7 +1885,10 @@ function markGridScrolling() {
 function onScrollerScroll(e: Event) {
   syncHeaderScroll(e);
   const target = e.target;
-  recordScrollPosition(target instanceof HTMLElement ? { top: target.scrollTop, left: target.scrollLeft } : undefined);
+  if (target instanceof HTMLElement) {
+    recordScrollPosition({ top: target.scrollTop, left: target.scrollLeft });
+    checkInfiniteScroll(target);
+  }
   markGridScrolling();
 }
 
@@ -1931,6 +1936,11 @@ const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSi
 const currentPage = ref(1);
 const pageSizeOptions = computed(() => resultPageSizeMenuOptions(pageSize.value));
 const customPageSizeInput = ref(String(pageSize.value));
+const infiniteScrollLoading = ref(false);
+const isInfiniteScrollPaginating = ref(false);
+let lastInfiniteScrollPage = 0;
+let infiniteScrollCheckScheduled = false;
+let infiniteScrollAllLoaded = false;
 watch(pageSize, (value) => {
   customPageSizeInput.value = String(value);
 });
@@ -1941,14 +1951,41 @@ watch(
   },
 );
 watch(
+  () => infiniteScrollEnabled.value,
+  (enabled, prevEnabled) => {
+    // Switched between paginated and infinite scroll: reset to first page
+    if (enabled !== prevEnabled) {
+      resetInfiniteScrollState();
+      emit("paginate", 0, pageSize.value, currentWhereInput(), currentOrderBy());
+    }
+  },
+);
+watch(
   () => [props.pageOffset, props.pageLimit],
   ([offset, limit]) => {
     if (typeof offset !== "number" || typeof limit !== "number" || limit <= 0) return;
+    // Skip resetting pagination state during infinite scroll pagination
+    if (isInfiniteScrollPaginating.value) return;
     const normalizedLimit = normalizeResultPageSize(limit);
     pageSize.value = normalizedLimit;
     currentPage.value = Math.floor(offset / normalizedLimit) + 1;
   },
   { immediate: true },
+);
+// Clear infinite-scroll loading when the parent finishes loading new data
+watch(
+  () => props.loading,
+  (loading, prevLoading) => {
+    if (prevLoading && !loading && infiniteScrollLoading.value) {
+      infiniteScrollLoading.value = false;
+      isInfiniteScrollPaginating.value = false;
+      // Detect if the backend returned no new data for this page
+      const expectedRows = currentPage.value * pageSize.value;
+      if (props.result.rows.length < expectedRows) {
+        infiniteScrollAllLoaded = true;
+      }
+    }
+  },
 );
 const manualTotalRowCount = ref<number | undefined>(undefined);
 const manualTotalRowCountLoading = ref(false);
@@ -2042,6 +2079,8 @@ watch(
   () => [props.countSql ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", currentWhereInput() ?? "", props.database ?? "", props.connectionId ?? "", props.result],
   () => {
     manualTotalRowCount.value = undefined;
+    // Reset infinite-scroll allLoaded when query context changes
+    infiniteScrollAllLoaded = false;
   },
 );
 
@@ -2071,6 +2110,7 @@ watch(
 function firstPage() {
   if (currentPage.value <= 1) return;
   currentPage.value = 1;
+  lastInfiniteScrollPage = 0;
   resetGridVerticalScroll(true);
   emit("paginate", 0, pageSize.value, currentWhereInput(), currentOrderBy());
 }
@@ -2086,11 +2126,50 @@ function nextPage() {
   resetGridVerticalScroll(true);
   emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
 }
+
+function infiniteScrollNextPage() {
+  if (infiniteScrollLoading.value || props.loading) return;
+  const nextPageNum = currentPage.value + 1;
+  const cumulativeLimit = nextPageNum * pageSize.value;
+  if (cumulativeLimit > infiniteScrollMaxRows.value) return;
+  // Stop if we already know all data is loaded
+  if (infiniteScrollAllLoaded) return;
+  // Skip if we already have this many rows loaded (e.g. cached data)
+  if (props.result.rows.length >= cumulativeLimit) {
+    currentPage.value = nextPageNum;
+    return;
+  }
+  infiniteScrollLoading.value = true;
+  isInfiniteScrollPaginating.value = true;
+  currentPage.value = nextPageNum;
+  // Load cumulative data (all rows up to current page) to append instead of replace
+  emit("paginate", 0, cumulativeLimit, currentWhereInput(), currentOrderBy());
+}
+function checkInfiniteScroll(scroller: HTMLElement) {
+  if (!infiniteScrollEnabled.value || infiniteScrollLoading.value || props.loading) return;
+  if (infiniteScrollAllLoaded) return;
+  if (infiniteScrollCheckScheduled) return;
+  infiniteScrollCheckScheduled = true;
+  requestAnimationFrame(() => {
+    infiniteScrollCheckScheduled = false;
+    const { scrollTop, scrollHeight, clientHeight } = scroller;
+    const threshold = 100;
+    const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+    // Only trigger when near bottom AND page has changed since last trigger
+    if (distanceToBottom < threshold && currentPage.value !== lastInfiniteScrollPage) {
+      lastInfiniteScrollPage = currentPage.value;
+      infiniteScrollNextPage();
+    }
+  });
+}
+
 function changePageSize(size: number) {
   const normalizedSize = normalizeResultPageSize(size);
   pageSize.value = normalizedSize;
   settingsStore.updateEditorSettings({ pageSize: normalizedSize });
   currentPage.value = 1;
+  lastInfiniteScrollPage = 0;
+  infiniteScrollAllLoaded = false;
   resetGridVerticalScroll(true);
   emit("paginate", 0, normalizedSize, currentWhereInput(), currentOrderBy());
 }
@@ -2100,6 +2179,7 @@ function applyCustomPageSize() {
 }
 
 async function lastPage() {
+  if (infiniteScrollEnabled.value) return;
   if (hasKnownTotalRowCount.value) {
     const total = displayedTotalRowCount.value ?? 0;
     if (total <= 0) return;
@@ -2394,12 +2474,25 @@ function canDeleteRowItem(item: RowItem | undefined): boolean {
   return !!props.editable && !!item && !item.isDeleted && (item.isNew || canEditExistingRows.value);
 }
 
+function resetInfiniteScrollState() {
+  currentPage.value = 1;
+  lastInfiniteScrollPage = 0;
+  infiniteScrollAllLoaded = false;
+  isInfiniteScrollPaginating.value = false;
+  infiniteScrollLoading.value = false;
+  resetGridVerticalScroll(true);
+}
+
 async function onToolbarRefresh() {
   if (transactionActive.value) {
     discardChanges();
   }
+  // Reset infinite scroll state on refresh
+  if (infiniteScrollEnabled.value) {
+    resetInfiniteScrollState();
+  }
   preserveTransposeOnNextResult.value = showTranspose.value;
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
 }
 
 async function onToolbarCommit() {
@@ -2409,7 +2502,11 @@ async function onToolbarCommit() {
 function onToolbarRollback() {
   preserveTransposeOnNextResult.value = showTranspose.value;
   discardChanges();
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
+  // Reset infinite scroll state on rollback
+  if (infiniteScrollEnabled.value) {
+    resetInfiniteScrollState();
+  }
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
 }
 
 function addRow() {
@@ -3682,6 +3779,7 @@ function onCanvasScroll(event: Event) {
   recordScrollPosition({ top: scrollTop, left: scrollLeft });
   markGridScrolling();
   scheduleCanvasDraw();
+  checkInfiniteScroll(scroller);
 }
 
 function canvasWheelDeltaToPixels(delta: number, deltaMode: number, pageSize: number): number {
@@ -6819,7 +6917,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </div>
               </div>
 
-              <div v-else-if="useCanvasGridRows" ref="scrollerRef" class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none bg-background" :class="{ 'is-scrolling': isScrolling }" @scroll="onCanvasScroll" @wheel="onCanvasWheel">
+              <div v-else-if="useCanvasGridRows" ref="scrollerRef" class="data-grid-scroller canvas-grid-scroller flex-1 overflow-auto overscroll-none bg-background relative" :class="{ 'is-scrolling': isScrolling }" @scroll="onCanvasScroll" @wheel="onCanvasWheel">
                 <div class="relative" :style="{ width: `${totalWidth}px`, height: `${canvasContentHeight}px` }">
                   <canvas
                     ref="canvasRef"
@@ -6882,6 +6980,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </button>
                     </div>
                   </div>
+                </div>
+                <!-- Infinite scroll loading indicator for Canvas -->
+                <div v-if="infiniteScrollEnabled && infiniteScrollLoading" class="absolute bottom-0 left-0 right-0 flex items-center justify-center py-2 text-xs text-muted-foreground bg-background/80 backdrop-blur-sm z-10">
+                  <Loader2 class="w-3 h-3 animate-spin mr-1" />
+                  {{ t("grid.loadingMore") }}
                 </div>
               </div>
 
@@ -6997,6 +7100,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </div>
                 </template>
               </RecycleScroller>
+              <!-- Infinite scroll loading indicator for RecycleScroller -->
+              <div v-if="infiniteScrollEnabled && infiniteScrollLoading && !loading" class="flex items-center justify-center py-2 text-xs text-muted-foreground">
+                <Loader2 class="w-3 h-3 animate-spin mr-1" />
+                {{ t("grid.loadingMore") }}
+              </div>
               <div v-if="hasGridHorizontalOverflow" ref="gridHorizontalScrollbarTrackRef" class="data-grid-horizontal-scrollbar" :class="{ 'data-grid-horizontal-scrollbar--dragging': gridHorizontalScrollbarDragging }" @pointerdown="startGridHorizontalScrollbarDrag">
                 <div class="data-grid-horizontal-scrollbar__thumb" :style="gridHorizontalScrollbarThumbStyle" />
               </div>
@@ -7415,52 +7523,59 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
       <div class="flex min-w-0 items-center justify-end gap-1">
         <Loader2 v-if="loading" class="w-3 h-3 animate-spin text-muted-foreground" />
-        <LightDropdown
-          :model-value="String(pageSize)"
-          :items="pageSizeMenuItems"
-          :trigger-label="`${pageSize}${t('grid.rowsPerPageShort')}`"
-          trigger-class="inline-flex h-5 items-center justify-center rounded-md px-1.5 text-xs hover:bg-accent hover:text-accent-foreground"
-          content-class="w-36"
-          :highlight-selected="false"
-          check-position="none"
-          align="end"
-          @update:model-value="selectPageSizeMenuItem"
-        >
-          <div class="bg-border -mx-1 my-1 h-px" />
-          <div class="text-muted-foreground px-1.5 py-1 text-xs">{{ t("grid.customRowsPerPage") }}</div>
-          <div class="flex items-center gap-1 px-1.5 pb-1" @click.stop @keydown.stop>
-            <Input
-              v-model="customPageSizeInput"
-              type="number"
-              inputmode="numeric"
-              :min="MIN_RESULT_PAGE_SIZE"
-              :max="MAX_RESULT_PAGE_SIZE"
-              class="h-6 w-20 px-1.5 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-              @keydown.enter.prevent.stop="applyCustomPageSize"
-            />
-            <Tooltip>
-              <TooltipTrigger as-child>
-                <Button variant="outline" size="icon" class="h-6 w-6 shrink-0" :aria-label="t('grid.applyPageSize')" @click.stop="applyCustomPageSize">
-                  <Check class="h-3 w-3" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">{{ t("grid.applyPageSize") }}</TooltipContent>
-            </Tooltip>
-          </div>
-        </LightDropdown>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="currentPage <= 1" @click="firstPage">
-          <ChevronsLeft class="h-3 w-3" />
-        </Button>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="currentPage <= 1" @click="prevPage">
-          <ChevronLeft class="h-3 w-3" />
-        </Button>
-        <span>{{ currentPage }}</span>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canGoNextPage" @click="nextPage">
-          <ChevronRight class="h-3 w-3" />
-        </Button>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canJumpLastPage" @click="lastPage">
-          <ChevronsRight class="h-3 w-3" />
-        </Button>
+        <template v-if="infiniteScrollEnabled">
+          <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">
+            {{ t("grid.allLoaded") }}
+          </span>
+        </template>
+        <template v-if="!infiniteScrollEnabled">
+          <LightDropdown
+            :model-value="String(pageSize)"
+            :items="pageSizeMenuItems"
+            :trigger-label="`${pageSize}${t('grid.rowsPerPageShort')}`"
+            trigger-class="inline-flex h-5 items-center justify-center rounded-md px-1.5 text-xs hover:bg-accent hover:text-accent-foreground"
+            content-class="w-36"
+            :highlight-selected="false"
+            check-position="none"
+            align="end"
+            @update:model-value="selectPageSizeMenuItem"
+          >
+            <div class="bg-border -mx-1 my-1 h-px" />
+            <div class="text-muted-foreground px-1.5 py-1 text-xs">{{ t("grid.customRowsPerPage") }}</div>
+            <div class="flex items-center gap-1 px-1.5 pb-1" @click.stop @keydown.stop>
+              <Input
+                v-model="customPageSizeInput"
+                type="number"
+                inputmode="numeric"
+                :min="MIN_RESULT_PAGE_SIZE"
+                :max="MAX_RESULT_PAGE_SIZE"
+                class="h-6 w-20 px-1.5 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                @keydown.enter.prevent.stop="applyCustomPageSize"
+              />
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button variant="outline" size="icon" class="h-6 w-6 shrink-0" :aria-label="t('grid.applyPageSize')" @click.stop="applyCustomPageSize">
+                    <Check class="h-3 w-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{{ t("grid.applyPageSize") }}</TooltipContent>
+              </Tooltip>
+            </div>
+          </LightDropdown>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="currentPage <= 1" @click="firstPage">
+            <ChevronsLeft class="h-3 w-3" />
+          </Button>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="currentPage <= 1" @click="prevPage">
+            <ChevronLeft class="h-3 w-3" />
+          </Button>
+          <span>{{ currentPage }}</span>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canGoNextPage" @click="nextPage">
+            <ChevronRight class="h-3 w-3" />
+          </Button>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canJumpLastPage" @click="lastPage">
+            <ChevronsRight class="h-3 w-3" />
+          </Button>
+        </template>
         <LightDropdown
           model-value=""
           :items="exportMenuItems"

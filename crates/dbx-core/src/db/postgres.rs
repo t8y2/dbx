@@ -1970,6 +1970,21 @@ pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), Str
     Ok(())
 }
 
+pub async fn terminate_current_user_database_backends(pool: &Pool, database: &str) -> Result<u64, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    client
+        .execute(
+            "SELECT pg_terminate_backend(pid) \
+             FROM pg_stat_activity \
+             WHERE datname = $1 \
+               AND pid <> pg_backend_pid() \
+               AND usename = current_user",
+            &[&database],
+        )
+        .await
+        .map_err(pg_error_to_string)
+}
+
 fn clear_postgres_caches_after_ddl(pool: &Pool, client: Option<&deadpool_postgres::Client>, sql: &str) {
     if !invalidates_postgres_statement_cache(sql) {
         return;

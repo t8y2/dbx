@@ -7,8 +7,9 @@ pub use dbx_core::agent_connection::{
     should_retry_oracle_with_10g_driver,
 };
 pub use dbx_core::connection::{
-    connect_bare_metadata_pool, connect_mysql_metadata_pool, connection_url_for_endpoint, metadata_connection_config,
-    probe_connection_endpoint, redacted_connection_url_for_endpoint, AppState, MysqlMode, PoolKind,
+    agent_connect_timeout, connect_bare_metadata_pool, connect_mysql_metadata_pool, connection_url_for_endpoint,
+    metadata_connection_config, probe_connection_endpoint, redacted_connection_url_for_endpoint, AppState, MysqlMode,
+    PoolKind,
 };
 use dbx_core::database_capabilities;
 use dbx_core::db;
@@ -31,11 +32,12 @@ async fn test_agent_connection(
     let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""));
     let result = state
         .agent_manager
-        .call_daemon_method::<serde_json::Value>(
+        .call_daemon_method_with_timeout::<serde_json::Value>(
             &config.db_type,
             config.driver_profile.as_deref(),
             AgentMethod::TestConnection,
             connect_params.clone(),
+            Some(agent_connect_timeout(config)),
         )
         .await;
 
@@ -43,7 +45,7 @@ async fn test_agent_connection(
         if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
             state
                 .agent_manager
-                .call_daemon_method::<serde_json::Value>(
+                .call_daemon_method_with_timeout::<serde_json::Value>(
                     &alternate_config.db_type,
                     alternate_config.driver_profile.as_deref(),
                     AgentMethod::TestConnection,
@@ -53,6 +55,7 @@ async fn test_agent_connection(
                         port,
                         alternate_config.database.as_deref().unwrap_or(""),
                     ),
+                    Some(agent_connect_timeout(&alternate_config)),
                 )
                 .await
                 .map_err(|alternate_err| {
@@ -64,11 +67,12 @@ async fn test_agent_connection(
             for profile in oracle_auth_fallback_profiles(config, &err) {
                 match state
                     .agent_manager
-                    .call_daemon_method::<serde_json::Value>(
+                    .call_daemon_method_with_timeout::<serde_json::Value>(
                         &config.db_type,
                         Some(profile),
                         AgentMethod::TestConnection,
                         connect_params.clone(),
+                        Some(agent_connect_timeout(config)),
                     )
                     .await
                 {
@@ -101,12 +105,18 @@ async fn connect_agent_pool(
 ) -> Result<PoolKind, String> {
     let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""));
     let mut client = state.agent_manager.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
-    let connect_result = client.call_method::<serde_json::Value>(AgentMethod::Connect, connect_params.clone()).await;
+    let connect_result = client
+        .call_method_with_timeout::<serde_json::Value>(
+            AgentMethod::Connect,
+            connect_params.clone(),
+            Some(agent_connect_timeout(config)),
+        )
+        .await;
 
     if let Err(err) = connect_result {
         if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
             client
-                .call_method::<serde_json::Value>(
+                .call_method_with_timeout::<serde_json::Value>(
                     AgentMethod::Connect,
                     agent_connect_params(
                         &alternate_config,
@@ -114,6 +124,7 @@ async fn connect_agent_pool(
                         port,
                         alternate_config.effective_database().unwrap_or(""),
                     ),
+                    Some(agent_connect_timeout(&alternate_config)),
                 )
                 .await
                 .map_err(|alternate_err| {
@@ -126,7 +137,11 @@ async fn connect_agent_pool(
                 match state.agent_manager.spawn(&config.db_type, Some(profile)).await {
                     Ok(mut fallback_client) => {
                         match fallback_client
-                            .call_method::<serde_json::Value>(AgentMethod::Connect, connect_params.clone())
+                            .call_method_with_timeout::<serde_json::Value>(
+                                AgentMethod::Connect,
+                                connect_params.clone(),
+                                Some(agent_connect_timeout(config)),
+                            )
                             .await
                         {
                             Ok(_) => {

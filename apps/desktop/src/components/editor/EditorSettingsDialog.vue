@@ -106,6 +106,8 @@ const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
+const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
+const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
 const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
@@ -347,6 +349,8 @@ watch(
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
+      editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
+      editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
       editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
       editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
@@ -401,6 +405,8 @@ function hasChanges(): boolean {
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
+    editInfiniteScroll.value !== settingsStore.editorSettings.infiniteScroll ||
+    editInfiniteScrollMaxRows.value !== settingsStore.editorSettings.infiniteScrollMaxRows ||
     editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
     JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
@@ -436,6 +442,8 @@ async function persistSettings() {
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
+    infiniteScroll: editInfiniteScroll.value,
+    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
@@ -488,6 +496,8 @@ function resetDefaults() {
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
+  editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
+  editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
@@ -1800,6 +1810,36 @@ watch(
                     </p>
                   </div>
                   <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll">
+                      {{ t("settings.infiniteScroll") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
+                </div>
+                <div v-if="editInfiniteScroll" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll-max-rows">
+                      {{ t("settings.infiniteScrollMaxRows") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollMaxRowsDescription") }}
+                    </p>
+                  </div>
+                  <Input
+                    id="infinite-scroll-max-rows"
+                    v-model="editInfiniteScrollMaxRows"
+                    type="number"
+                    inputmode="numeric"
+                    :min="1000"
+                    :max="50000"
+                    class="h-7 w-24 px-2 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  />
                 </div>
               </div>
 

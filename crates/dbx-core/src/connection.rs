@@ -28,6 +28,8 @@ use crate::storage::Storage;
 
 pub const JDBC_PLUGIN_NOT_INSTALLED: &str =
     "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.";
+const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
+const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(feature = "duckdb-bundled")]
 mod duckdb_types {
@@ -570,8 +572,13 @@ impl AppState {
                     agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""));
                 let mut client =
                     self.agent_manager.spawn(&db_config.db_type, db_config.driver_profile.as_deref()).await?;
-                let connect_result =
-                    client.call_method::<serde_json::Value>(AgentMethod::Connect, connect_params.clone()).await;
+                let connect_result = client
+                    .call_method_with_timeout::<serde_json::Value>(
+                        AgentMethod::Connect,
+                        connect_params.clone(),
+                        Some(agent_connect_timeout(&db_config)),
+                    )
+                    .await;
                 if let Err(err) = connect_result {
                     let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
                     if !alternate_configs.is_empty() {
@@ -589,7 +596,7 @@ impl AppState {
                                 .next()
                                 .unwrap_or_else(|| "alternate".to_string());
                             match client
-                                .call_method::<serde_json::Value>(
+                                .call_method_with_timeout::<serde_json::Value>(
                                     AgentMethod::Connect,
                                     agent_connect_params(
                                         &alternate_config,
@@ -597,6 +604,7 @@ impl AppState {
                                         port,
                                         alternate_config.effective_database().unwrap_or(""),
                                     ),
+                                    Some(agent_connect_timeout(&alternate_config)),
                                 )
                                 .await
                             {
@@ -627,7 +635,11 @@ impl AppState {
                             match self.agent_manager.spawn(&db_config.db_type, Some(profile)).await {
                                 Ok(mut fallback_client) => {
                                     match fallback_client
-                                        .call_method::<serde_json::Value>(AgentMethod::Connect, connect_params.clone())
+                                        .call_method_with_timeout::<serde_json::Value>(
+                                            AgentMethod::Connect,
+                                            connect_params.clone(),
+                                            Some(agent_connect_timeout(&db_config)),
+                                        )
                                         .await
                                     {
                                         Ok(_) => {
@@ -1170,8 +1182,17 @@ pub fn redacted_connection_url_for_endpoint(config: &ConnectionConfig, host: &st
     }
 }
 
+pub fn agent_connect_timeout(config: &ConnectionConfig) -> std::time::Duration {
+    let min_timeout = if config.db_type == DatabaseType::Access {
+        ACCESS_AGENT_CONNECT_TIMEOUT_SECS
+    } else {
+        DEFAULT_AGENT_CONNECT_TIMEOUT_SECS
+    };
+    std::time::Duration::from_secs(config.effective_connect_timeout_secs().max(min_timeout))
+}
+
 fn external_driver_connect_timeout(config: &ConnectionConfig) -> std::time::Duration {
-    std::time::Duration::from_secs(config.effective_connect_timeout_secs().max(30))
+    agent_connect_timeout(config)
 }
 
 fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionConfig> {
@@ -1313,7 +1334,7 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        connection_url_for_endpoint, database_connection_config, metadata_connection_config,
+        agent_connect_timeout, connection_url_for_endpoint, database_connection_config, metadata_connection_config,
         mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe,
         validate_h2_database_path, AppState, PoolKind,
     };
@@ -1375,6 +1396,28 @@ mod tests {
             one_time: false,
             read_only: false,
         }
+    }
+
+    #[test]
+    fn access_agent_connect_timeout_has_longer_default_floor() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Access;
+        config.connect_timeout_secs = 5;
+        assert_eq!(agent_connect_timeout(&config).as_secs(), 30);
+
+        config.connect_timeout_secs = 45;
+        assert_eq!(agent_connect_timeout(&config).as_secs(), 45);
+    }
+
+    #[test]
+    fn non_access_agent_connect_timeout_uses_standard_floor() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Oracle;
+        config.connect_timeout_secs = 5;
+        assert_eq!(agent_connect_timeout(&config).as_secs(), 30);
+
+        config.connect_timeout_secs = 45;
+        assert_eq!(agent_connect_timeout(&config).as_secs(), 45);
     }
 
     #[test]

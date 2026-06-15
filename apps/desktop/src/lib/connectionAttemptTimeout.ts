@@ -2,7 +2,8 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export const CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS = 2_000;
 export const MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS = 30_000;
-export const AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS = 15;
+export const AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS = 30;
+export const ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS = 30;
 const DEFAULT_CONNECT_TIMEOUT_SECS = 5;
 
 const AGENT_DRIVER_TYPES = new Set<DatabaseType>([
@@ -46,7 +47,8 @@ function positiveSeconds(value: unknown, fallback: number): number {
 
 export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> & Partial<Pick<ConnectionConfig, "db_type">>): number {
   const baseTimeoutSecs = positiveSeconds(config.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS);
-  const timeouts = [AGENT_DRIVER_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS) : baseTimeoutSecs];
+  const agentMinTimeoutSecs = config.db_type === "access" ? ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS : AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS;
+  const timeouts = [AGENT_DRIVER_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, agentMinTimeoutSecs) : baseTimeoutSecs];
   for (const layer of config.transport_layers ?? []) {
     if (layer.type === "ssh") {
       timeouts.push(positiveSeconds(layer.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS));

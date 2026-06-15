@@ -251,7 +251,7 @@ body.dbx-table-reference-dragging * {
     overscroll-behavior: none;
   }
   body {
-    @apply font-sans bg-background text-foreground antialiased;
+    @apply font-sans bg-background text-foreground;
     text-rendering: geometricPrecision;
     font-synthesis: none;
   }

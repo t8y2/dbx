@@ -1148,12 +1148,10 @@ impl AppState {
             }
         }
         drop(conns);
-        for (_, pool) in removed {
-            close_pool_kind(pool).await;
-        }
         // Also drop the MQ admin adapter if this is an MQ connection.
         #[cfg(feature = "mq-admin")]
         self.mq_registry.drop_connection(connection_id).await;
+        removed
     }
 
     async fn uses_forwarded_transport(&self, connection_id: &str) -> bool {

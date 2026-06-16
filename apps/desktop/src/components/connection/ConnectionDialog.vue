@@ -1101,6 +1101,7 @@ const etcdEndpointsLines = computed({
 });
 const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isH2FileMode.value);
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
+const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const canChooseVisibleDatabases = computed(() => connectionCanChooseVisibleDatabases(form.value));
 const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases));
 const visibleDatabaseSummary = computed(() => {
@@ -2439,6 +2440,14 @@ function openExternalUrl(url: string) {
                       {{ t("connection.h2TcpMode") }}
                     </Button>
                   </div>
+                </div>
+
+                <div v-if="h2DriverMissing" class="grid grid-cols-4 items-center gap-4">
+                  <span />
+                  <p class="col-span-3 text-xs text-muted-foreground">
+                    {{ t("connection.driverInstallHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore')">{{ t("toolbar.driverManager") }}</a
+                    >{{ t("connection.driverInstallHintSuffix") }}
+                  </p>
                 </div>
 
                 <!-- JDBC: optional external plugin -->

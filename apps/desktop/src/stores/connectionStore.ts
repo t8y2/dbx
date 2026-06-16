@@ -2791,6 +2791,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
     listRedisCompletionKeys,
+    invalidateCompletionCache,
     exportConnectionsToFile,
     readImportFile,
     importConnectionsFromFile,

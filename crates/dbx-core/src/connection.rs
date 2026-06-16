@@ -1583,8 +1583,8 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        metadata_connection_config, mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe,
-        validate_h2_database_path, AppState, PoolKind,
+        metadata_connection_config, mysql_metadata_fallback_url, redacted_connection_url_for_endpoint,
+        uses_bare_mysql_pool, uses_tcp_probe, validate_h2_database_path, AppState, PoolKind,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,

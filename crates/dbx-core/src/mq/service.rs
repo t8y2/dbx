@@ -509,6 +509,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -525,6 +526,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: ":".to_string(),
             etcd_endpoints: String::new(),
+            gbase_server: String::new(),
             external_config: Some(serde_json::json!({
                 "systemKind": "pulsar",
                 "adminUrl": "http://127.0.0.1:8080",

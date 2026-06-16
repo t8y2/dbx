@@ -990,7 +990,16 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
   if (epoch !== completionEpoch) return null;
 
   const items = buildRedisCompletionItemsFromContext(completionContext, { keys });
-  return buildCompletionResult(items, completionContext.from, getRedisCompletionResultValidFor());
+  if (items.length === 0) return null;
+  // Use the built-in filter (the default) so typing narrows the list and moves
+  // the selection synchronously. `filter: false` + `validFor` are mutually
+  // exclusive (the latter is ignored), which would leave the menu frozen while
+  // typing — hence we build the result here instead of via buildCompletionResult.
+  return {
+    from: completionContext.from,
+    options: items.map((item) => completionOptionForItem(item)),
+    validFor: getRedisCompletionResultValidFor(),
+  };
 }
 
 async function provideSqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {

@@ -1466,7 +1466,7 @@
       "dbType": "mq",
       "label": "Message Queue",
       "runtimeMode": "native",
-      "mcpMode": "bridge",
+      "mcpMode": "unsupported",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,

@@ -479,6 +479,33 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openMqAdmin(connectionId: string, target?: { tenant?: string }) {
+    const existing = tabs.value.find((tab) => tab.mode === "mq" && tab.connectionId === connectionId);
+    if (existing) {
+      if (target?.tenant) existing.mqTenant = target.tenant;
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${conn?.name || "Message Queue"} Admin`,
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mq",
+      mqTenant: target?.tenant,
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
@@ -641,6 +668,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       explainExecutionId: undefined,
       mode: original.mode,
+      mqTenant: original.mqTenant,
       structureTableName: original.structureTableName,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
@@ -1948,6 +1976,7 @@ export const useQueryStore = defineStore("query", () => {
     renameTab,
     openObjectBrowser,
     openUserAdmin,
+    openMqAdmin,
     openTableStructure,
     linkSavedSql,
     openSavedSql,

@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ai::AiConfig;
+use crate::connection_secrets::{
+    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+};
 use crate::models::connection::{ConnectionConfig, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
 use crate::storage::{DesktopSettings, Storage};
@@ -23,6 +26,11 @@ const SECRET_KEYS: &[&str] = &[
     "proxy_password",
     "redis_sentinel_password",
     "connection_string",
+    MQ_AUTH_TOKEN_KEY,
+    MQ_AUTH_PASSWORD_KEY,
+    MQ_AUTH_API_KEY_VALUE_KEY,
+    MQ_AUTH_CLIENT_SECRET_KEY,
+    MQ_TOKEN_SIGNING_KEY,
 ];
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -362,9 +370,42 @@ async fn build_sensitive_payload(
         if let Some(connection_string) = &config.connection_string {
             push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
         }
+        push_mq_external_config_secrets(&mut connection_secrets, config);
     }
 
     Ok(SensitiveSyncPayload { connection_secrets, ai_config: storage.load_ai_config().await? })
+}
+
+fn push_mq_external_config_secrets(secrets: &mut Vec<ConnectionSecretSnapshot>, config: &ConnectionConfig) {
+    let Some(external_config) = config.external_config.as_ref() else {
+        return;
+    };
+    if let Some(auth) = external_config.get("auth").and_then(serde_json::Value::as_object) {
+        match auth.get("kind").and_then(serde_json::Value::as_str) {
+            Some("token") => push_json_secret(secrets, &config.id, MQ_AUTH_TOKEN_KEY, auth, "token"),
+            Some("basic") => push_json_secret(secrets, &config.id, MQ_AUTH_PASSWORD_KEY, auth, "password"),
+            Some("apiKey") | Some("api_key") | Some("apikey") => {
+                push_json_secret(secrets, &config.id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value")
+            }
+            Some("oauth2") => push_json_secret(secrets, &config.id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret"),
+            _ => {}
+        }
+    }
+    if let Some(signing) = external_config.get("tokenSigning").and_then(serde_json::Value::as_object) {
+        push_json_secret(secrets, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key");
+    }
+}
+
+fn push_json_secret(
+    secrets: &mut Vec<ConnectionSecretSnapshot>,
+    connection_id: &str,
+    key: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) {
+    if let Some(secret) = object.get(field).and_then(serde_json::Value::as_str) {
+        push_secret(secrets, connection_id, key, secret);
+    }
 }
 
 fn push_secret(secrets: &mut Vec<ConnectionSecretSnapshot>, connection_id: &str, key: &str, secret: &str) {

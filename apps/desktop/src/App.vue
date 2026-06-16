@@ -31,6 +31,7 @@ import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/api";
 import { connectionRedactedNameLabel } from "@/lib/connectionPresentation";
+import { quickConnectionOpenTarget } from "@/lib/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/newQueryContext";
 import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/objectSourceEditor";
@@ -729,11 +730,19 @@ async function openConnectionQuery(connectionId: string) {
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
   connectionStore.activeConnectionId = connectionId;
-  const tabId = queryStore.createTab(connectionId, resolveDefaultDatabase(connection, []));
+  const initialTarget = quickConnectionOpenTarget(connection);
+  if (initialTarget.kind === "mq-admin") {
+    queryStore.openMqAdmin(connectionId);
+    return;
+  }
+  const tabId = queryStore.createTab(connectionId, initialTarget.database);
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
-    queryStore.updateDatabase(tabId, resolveDefaultDatabase(connection, options));
+    const target = quickConnectionOpenTarget(connection, options);
+    if (target.kind === "query") {
+      queryStore.updateDatabase(tabId, target.database);
+    }
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {

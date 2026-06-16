@@ -2,7 +2,7 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
@@ -301,6 +301,10 @@ pub enum DatabaseType {
     #[serde(rename = "questdb")]
     Questdb,
     Jdbc,
+    /// Message queue admin connection (Pulsar / Kafka / RocketMQ). The specific
+    /// system is determined by `external_config.systemKind`.
+    #[serde(rename = "mq")]
+    MessageQueue,
 }
 
 #[derive(Deserialize)]
@@ -768,6 +772,7 @@ impl ConnectionConfig {
                 format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
+            DatabaseType::MessageQueue => self.message_queue_admin_url(),
         }
     }
 
@@ -968,7 +973,19 @@ impl ConnectionConfig {
             DatabaseType::Jdbc => {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
             }
+            DatabaseType::MessageQueue => self.message_queue_admin_url(),
         }
+    }
+
+    fn message_queue_admin_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("adminUrl").or_else(|| value.get("admin_url")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("mq://")
+            .to_string()
     }
 
     fn normalized_url_params(&self) -> String {

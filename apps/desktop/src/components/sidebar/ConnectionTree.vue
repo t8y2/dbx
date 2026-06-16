@@ -79,7 +79,7 @@ const isFiltering = computed(() => !!searchQuery.value.trim() || hasSearchScopeF
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "mongo-db"],
   schema: ["schema"],
   table: ["table", "mongo-collection", "elasticsearch-index"],
   view: ["view"],
@@ -334,6 +334,8 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadMongoDatabases(connId);
       } else if (config.db_type === "elasticsearch") {
         await store.loadElasticsearchIndices(connId);
+      } else if (config.db_type === "mq") {
+        await store.loadMqTenants(connId, loadOptions);
       } else {
         await store.loadDatabases(connId, loadOptions);
       }
@@ -342,6 +344,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
+  if (tab.mode === "mq") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node

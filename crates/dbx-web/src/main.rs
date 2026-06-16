@@ -32,6 +32,56 @@ fn web_body_limit_bytes() -> usize {
     mb.saturating_mul(1024 * 1024)
 }
 
+#[cfg(feature = "mq-admin")]
+fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
+    router
+        .route("/mq/test-connection", post(routes::mq::test_connection))
+        .route("/mq/tenants/list", post(routes::mq::list_tenants))
+        .route("/mq/tenants/get", post(routes::mq::get_tenant))
+        .route("/mq/tenants/create", post(routes::mq::create_tenant))
+        .route("/mq/tenants/update", post(routes::mq::update_tenant))
+        .route("/mq/tenants/delete", post(routes::mq::delete_tenant))
+        .route("/mq/namespaces/list", post(routes::mq::list_namespaces))
+        .route("/mq/namespaces/create", post(routes::mq::create_namespace))
+        .route("/mq/namespaces/delete", post(routes::mq::delete_namespace))
+        .route("/mq/namespaces/policies", post(routes::mq::get_namespace_policies))
+        .route("/mq/topics/list", post(routes::mq::list_topics))
+        .route("/mq/topics/create", post(routes::mq::create_topic))
+        .route("/mq/topics/delete", post(routes::mq::delete_topic))
+        .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
+        .route("/mq/topics/stats", post(routes::mq::get_topic_stats))
+        .route("/mq/topics/internal-stats", post(routes::mq::get_topic_internal_stats))
+        .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
+        .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
+        .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
+        .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
+        .route("/mq/subscriptions/reset-cursor", post(routes::mq::reset_cursor))
+        .route("/mq/subscriptions/clear-backlog", post(routes::mq::clear_backlog))
+        .route("/mq/subscriptions/peek-messages", post(routes::mq::peek_messages))
+        .route("/mq/subscriptions/expire-messages", post(routes::mq::expire_messages))
+        .route("/mq/producers/list", post(routes::mq::list_producers))
+        .route("/mq/consumers/list", post(routes::mq::list_consumers))
+        .route("/mq/topics/unload", post(routes::mq::unload_topic))
+        .route("/mq/policies/publish-rate", post(routes::mq::set_publish_rate))
+        .route("/mq/policies/dispatch-rate", post(routes::mq::set_dispatch_rate))
+        .route("/mq/policies/subscribe-rate", post(routes::mq::set_subscribe_rate))
+        .route("/mq/policies/backlog-quota", post(routes::mq::set_backlog_quota))
+        .route("/mq/policies/retention", post(routes::mq::set_retention))
+        .route("/mq/policies/effective", post(routes::mq::get_effective_policies))
+        .route("/mq/permissions/grant", post(routes::mq::grant_permission))
+        .route("/mq/permissions/revoke", post(routes::mq::revoke_permission))
+        .route("/mq/permissions/list", post(routes::mq::list_permissions))
+        .route("/mq/tokens/issue", post(routes::mq::issue_token))
+        .route("/mq/tokens/list", post(routes::mq::list_token_records))
+        .route("/mq/monitoring/backlog", post(routes::mq::get_backlog))
+        .route("/mq/raw", post(routes::mq::raw_request))
+}
+
+#[cfg(not(feature = "mq-admin"))]
+fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
+    router
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -341,7 +391,9 @@ async fn main() {
             "/app-settings/pinned-tree-node-ids",
             get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
         )
-        .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
+        .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config));
+
+    let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 

@@ -512,6 +512,86 @@ pub fn run() {
             commands::mongo_cmd::mongo_update_documents,
             commands::mongo_cmd::mongo_delete_document,
             commands::mongo_cmd::mongo_delete_documents,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_test_connection,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_tenants,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_tenant,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_create_tenant,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_update_tenant,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_tenant,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_namespaces,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_create_namespace,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_namespace,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_namespace_policies,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_topics,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_create_topic,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_topic,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_update_partitions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_topic_stats,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_topic_internal_stats,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_subscriptions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_create_subscription,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_subscription,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_skip_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_reset_cursor,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_clear_backlog,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_peek_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_expire_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_producers,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_consumers,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_unload_topic,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_set_publish_rate,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_set_dispatch_rate,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_set_subscribe_rate,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_set_backlog_quota,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_set_retention,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_effective_policies,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_grant_permission,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_revoke_permission,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_permissions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_issue_token,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_token_records,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_backlog,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_raw_request,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::clear_history,

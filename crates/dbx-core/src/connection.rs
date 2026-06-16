@@ -70,7 +70,14 @@ pub enum PoolKind {
     InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
     ExternalTabular(ExternalTabularHandle),
-    ExternalDriver { driver_id: String, config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
+    ExternalDriver {
+        driver_id: String,
+        config: Arc<ConnectionConfig>,
+        session: Arc<PluginDriverSession>,
+    },
+    /// Message queue admin connection (not a data query pool; serves as a
+    /// marker that this connection_id is a valid MQ admin connection).
+    MessageQueue,
 }
 
 pub struct AppState {
@@ -83,6 +90,8 @@ pub struct AppState {
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
+    #[cfg(feature = "mq-admin")]
+    pub mq_registry: crate::mq::MqAdminRegistry,
 }
 
 pub fn metadata_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
@@ -263,6 +272,8 @@ impl AppState {
                 agent_dir,
                 app_version,
             ),
+            #[cfg(feature = "mq-admin")]
+            mq_registry: crate::mq::MqAdminRegistry::new(),
         }
     }
 
@@ -743,6 +754,23 @@ impl AppState {
                 }
                 self.external_driver_pool("jdbc", &jdbc_config).await?
             }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::MessageQueue => {
+                // MQ admin connections don't hold a data query pool. We just test
+                // connectivity via the mq_registry and insert a marker so this
+                // connection_id is recognized as valid.
+                let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
+                let adapter = self.mq_registry.build_transient_config(mqc).await?;
+                adapter.test_connection().await?;
+                PoolKind::MessageQueue
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::MessageQueue => {
+                return Err(
+                    "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
+                        .to_string(),
+                );
+            }
         };
 
         self.insert_connection_pool(pool_key.clone(), pool, &db_config).await;
@@ -771,6 +799,21 @@ impl AppState {
         .await?;
 
         Ok(("127.0.0.1".to_string(), local_port))
+    }
+
+    #[cfg(feature = "mq-admin")]
+    pub async fn mq_admin_config_for_connection(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<crate::mq::config::MqAdminConfig, String> {
+        let mqc = crate::mq::config::MqAdminConfig::from_connection(config)?;
+        if !config.has_effective_transport_layers() {
+            return Ok(mqc);
+        }
+
+        let (host, port) = self.connection_host_port(connection_id, config).await?;
+        Ok(mqc.with_connect_override(&host, port))
     }
 
     async fn remove_stale_connection_pool(&self, pool_key: &str) -> bool {
@@ -1104,7 +1147,13 @@ impl AppState {
                 removed.push((key, pool));
             }
         }
-        removed
+        drop(conns);
+        for (_, pool) in removed {
+            close_pool_kind(pool).await;
+        }
+        // Also drop the MQ admin adapter if this is an MQ connection.
+        #[cfg(feature = "mq-admin")]
+        self.mq_registry.drop_connection(connection_id).await;
     }
 
     async fn uses_forwarded_transport(&self, connection_id: &str) -> bool {
@@ -1183,9 +1232,28 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
             .filter(|s| !s.is_empty())
             .and_then(parse_jdbc_host_port)
             .unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::MessageQueue {
+        parse_mq_admin_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else {
         (config.host.clone(), config.port)
     }
+}
+
+fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let value = config
+        .external_config
+        .as_ref()?
+        .get("adminUrl")
+        .or_else(|| config.external_config.as_ref()?.get("admin_url"))?
+        .as_str()?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let url = reqwest::Url::parse(value).ok()?;
+    let host = url.host_str()?.to_string();
+    let port = url.port_or_known_default()?;
+    Some((host, port))
 }
 
 fn normalize_client_session_id(client_session_id: Option<&str>) -> Option<String> {
@@ -1257,6 +1325,7 @@ pub async fn close_pool_kind(pool: PoolKind) {
         }
         PoolKind::ExternalTabular(_) => {}
         PoolKind::ExternalDriver { .. } => {}
+        PoolKind::MessageQueue => {}
     }
 }
 
@@ -1513,8 +1582,8 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_connect_timeout, connection_url_for_endpoint, database_connection_config, metadata_connection_config,
-        mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe,
+        agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
+        metadata_connection_config, mysql_metadata_fallback_url, redacted_connection_url_for_endpoint, uses_tcp_probe,
         validate_h2_database_path, AppState, PoolKind,
     };
     use crate::agent_connection::{
@@ -2417,6 +2486,56 @@ mod tests {
         assert_eq!(host, "127.0.0.1");
         assert_ne!(port, config.port);
         state.proxy_tunnels.stop_tunnel("proxied:transport:0").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mq_remote_endpoint_comes_from_admin_url_when_host_fields_are_empty() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = String::new();
+        config.port = 0;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "https://broker.internal:8443/pulsar-admin?tenant=public",
+            "auth": { "kind": "none" }
+        }));
+
+        assert_eq!(connection_remote_endpoint(&config), ("broker.internal".to_string(), 8443));
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn mq_admin_config_preserves_admin_url_and_uses_forwarded_connect_override() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-mq".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = String::new();
+        config.port = 0;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "https://broker.internal:8443/pulsar-admin?tenant=public",
+            "auth": { "kind": "none" }
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+        })];
+
+        let mqc = state.mq_admin_config_for_connection("proxied-mq", &config).await.unwrap();
+
+        assert_eq!(mqc.admin_url, "https://broker.internal:8443/pulsar-admin?tenant=public");
+        let connect_override = mqc.connect_override.expect("MQ transport should set a connect override");
+        assert_eq!(connect_override.host, "127.0.0.1");
+        assert_ne!(connect_override.port, 8443);
+        state.proxy_tunnels.stop_tunnel("proxied-mq:transport:0").await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

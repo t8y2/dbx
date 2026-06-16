@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::env;
 use std::path::Path;
 use std::process::Command;
@@ -267,6 +268,7 @@ fn default_user_shell() -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn shell_command_script(command: &str, args: &[&str]) -> String {
     let mut words = Vec::with_capacity(args.len() + 1);
     words.push(shell_quote(command));
@@ -274,6 +276,7 @@ fn shell_command_script(command: &str, args: &[&str]) -> String {
     format!("printf '%s\\n' {}; {}", shell_quote(SHELL_COMMAND_MARKER), words.join(" "))
 }
 
+#[cfg(not(windows))]
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -290,10 +293,13 @@ fn stdout_after_shell_marker(stdout: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bash_login_script, shell_command_script, shell_quote, stdout_after_shell_marker, SHELL_COMMAND_MARKER,
-    };
+    #[cfg(not(windows))]
+    use super::bash_login_script;
+    #[cfg(not(windows))]
+    use super::{shell_command_script, shell_quote};
+    use super::{stdout_after_shell_marker, SHELL_COMMAND_MARKER};
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_quote_handles_empty_and_single_quotes() {
         assert_eq!(shell_quote(""), "''");
@@ -301,6 +307,7 @@ mod tests {
         assert_eq!(shell_quote("can't"), "'can'\"'\"'t'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_command_script_marks_command_output_after_startup_noise() {
         let script = shell_command_script("npm", &["list", "-g", "@dbx-app/mcp-server", "--json"]);
@@ -309,6 +316,7 @@ mod tests {
         assert!(script.contains("'@dbx-app/mcp-server'"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn bash_login_script_sources_profile_and_rc_files() {
         let script = bash_login_script("node --version");

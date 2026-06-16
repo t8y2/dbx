@@ -1512,5 +1512,7 @@ export async function loadSidebarLayout(): Promise<SidebarLayout | null> {
 }
 
 export async function refreshConnections(): Promise<void> {
-  // Web mode doesn't maintain persistent connection pools 鈥?no-op
+  // Web mode doesn't maintain persistent connection pools - no-op
 }
+
+export * from "./mq-http";

@@ -731,6 +731,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
       await loadElasticsearchIndices(connectionId);
+    } else if (config.db_type === "mq") {
+      await loadMqTenants(connectionId, { force: true });
     } else {
       await loadDatabases(connectionId, { force: true });
     }
@@ -1006,6 +1008,36 @@ export const useConnectionStore = defineStore("connection", () => {
           ],
           node,
         ),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadMqTenants(connectionId: string, options?: LoadTreeOptions) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node, options)) return;
+
+      const tenants = await api.mqListTenants(connectionId);
+      const tenantNames = sortSidebarNames(tenants.map((tenant) => tenant.name).filter((name) => !!name.trim()));
+      setChildren(
+        node,
+        tenantNames.map((tenant) => ({
+          id: schemaCacheKey(connectionId, "mq-tenant", tenant),
+          label: tenant,
+          type: "mq-tenant" as const,
+          connectionId,
+          mqTenant: tenant,
+        })),
       );
       node.isExpanded = true;
     } catch (e) {
@@ -1588,6 +1620,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await loadElasticsearchIndices(node.connectionId);
+      } else if (config?.db_type === "mq") {
+        await loadMqTenants(node.connectionId, options);
       } else {
         await loadDatabases(node.connectionId, options);
       }
@@ -2697,6 +2731,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadDatabases,
     loadRedisDatabases,
     loadEtcdRoot,
+    loadMqTenants,
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadElasticsearchIndices,

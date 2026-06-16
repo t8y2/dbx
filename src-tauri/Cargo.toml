@@ -13,8 +13,9 @@ name = "dbx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["duckdb-bundled"]
+default = ["duckdb-bundled", "mq-admin"]
 duckdb-bundled = ["duckdb", "dbx-core/duckdb-bundled"]
+mq-admin = ["dbx-core/mq-admin"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }

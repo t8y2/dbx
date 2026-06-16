@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::State;
 
@@ -167,8 +168,10 @@ async fn connect_agent_pool(
 
 #[cfg(test)]
 mod tests {
-    use super::mongo_legacy_connect_params;
+    use super::{load_connection_configs, mongo_legacy_connect_params, save_connection_configs};
+    use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
+    use dbx_core::storage::Storage;
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -218,6 +221,29 @@ mod tests {
         }
     }
 
+    fn mq_config(id: &str, admin_url: &str) -> ConnectionConfig {
+        let mut config = mongodb_config();
+        config.id = id.to_string();
+        config.name = "Pulsar".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.driver_profile = None;
+        config.driver_label = None;
+        config.url_params = None;
+        config.host = String::new();
+        config.port = 0;
+        config.username = String::new();
+        config.password = String::new();
+        config.database = None;
+        config.connection_string = None;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": admin_url,
+            "auth": { "kind": "none" },
+            "pinnedVersion": "3.1"
+        }));
+        config
+    }
+
     #[test]
     fn mongo_legacy_connect_params_preserve_auth_options() {
         let config = mongodb_config();
@@ -231,21 +257,210 @@ mod tests {
             "mongodb://mongouser:secret@172.22.4.42:27017/RestCloud_V45PUB_Gateway?authSource=admin"
         );
     }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn save_connection_configs_updates_runtime_cache_and_drops_mq_adapter() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
+        state.configs.write().await.insert(initial.id.clone(), initial.clone());
+        state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
+        let first = state.mq_registry.get_or_build(&initial).await.unwrap();
+
+        let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
+        save_connection_configs(&state, &[updated.clone()]).await.unwrap();
+
+        let cached_admin_url = state
+            .configs
+            .read()
+            .await
+            .get("mq-conn")
+            .and_then(|config| config.external_config.as_ref())
+            .and_then(|external| external.get("adminUrl"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        assert_eq!(cached_admin_url.as_deref(), Some("http://127.0.0.1:8081"));
+
+        let second = state.mq_registry.get_or_build(&updated).await.unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+        assert!(!state.connections.read().await.contains_key(&initial.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn load_connection_configs_syncs_runtime_cache_and_drops_stale_pool() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
+        let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
+        state.storage.save_connections(&[updated.clone()]).await.unwrap();
+        state.configs.write().await.insert(initial.id.clone(), initial.clone());
+        state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
+
+        let loaded = load_connection_configs(&state).await.unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        let cached_admin_url = state
+            .configs
+            .read()
+            .await
+            .get("mq-conn")
+            .and_then(|config| config.external_config.as_ref())
+            .and_then(|external| external.get("adminUrl"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        assert_eq!(cached_admin_url.as_deref(), Some("http://127.0.0.1:8081"));
+        assert!(!state.connections.read().await.contains_key(&initial.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn save_connection_configs_removes_deleted_runtime_config_and_mq_adapter() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let kept = mongodb_config();
+        let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
+        {
+            let mut configs = state.configs.write().await;
+            configs.insert(kept.id.clone(), kept.clone());
+            configs.insert(removed.id.clone(), removed.clone());
+        }
+        let stale = state.mq_registry.get_or_build(&removed).await.unwrap();
+
+        save_connection_configs(&state, &[kept.clone()]).await.unwrap();
+
+        let configs = state.configs.read().await;
+        assert!(configs.contains_key(&kept.id));
+        assert!(!configs.contains_key("removed-mq"));
+        drop(configs);
+
+        let rebuilt = state.mq_registry.get_or_build(&removed).await.unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&stale, &rebuilt));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn save_connection_configs_removes_deleted_connection_pools() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let kept = mongodb_config();
+        let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
+        {
+            let mut configs = state.configs.write().await;
+            configs.insert(kept.id.clone(), kept.clone());
+            configs.insert(removed.id.clone(), removed.clone());
+        }
+        state.connections.write().await.insert(removed.id.clone(), PoolKind::MessageQueue);
+
+        save_connection_configs(&state, &[kept.clone()]).await.unwrap();
+
+        assert!(!state.connections.read().await.contains_key(&removed.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[tauri::command]
 pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<ConnectionConfig>) -> Result<(), String> {
     let configs: Vec<ConnectionConfig> = configs.into_iter().map(|config| config.canonicalized()).collect();
-    state.storage.save_connections(&configs).await
+    save_connection_configs(state.inner(), &configs).await
+}
+
+async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
+    state.storage.save_connections(configs).await?;
+    let sync = sync_connection_configs(state, configs).await;
+    remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
+    drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
+    Ok(())
+}
+
+struct ConnectionConfigSync {
+    mq_adapter_ids_to_drop: Vec<String>,
+    connection_pool_ids_to_drop: Vec<String>,
+}
+
+async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> ConnectionConfigSync {
+    let saved_ids: HashSet<&str> = configs.iter().map(|config| config.id.as_str()).collect();
+    let mut mq_adapter_ids_to_drop = HashSet::new();
+    let mut connection_pool_ids_to_drop = HashSet::new();
+    let mut runtime_configs = state.configs.write().await;
+    runtime_configs.retain(|id, existing| {
+        if saved_ids.contains(id.as_str()) || is_transient_runtime_config_id(id) {
+            true
+        } else {
+            connection_pool_ids_to_drop.insert(id.clone());
+            if existing.db_type == DatabaseType::MessageQueue {
+                mq_adapter_ids_to_drop.insert(id.clone());
+            }
+            false
+        }
+    });
+    for config in configs {
+        if config.db_type == DatabaseType::MessageQueue {
+            mq_adapter_ids_to_drop.insert(config.id.clone());
+        }
+        if let Some(previous) = runtime_configs.insert(config.id.clone(), config.clone()) {
+            if previous.db_type == DatabaseType::MessageQueue {
+                mq_adapter_ids_to_drop.insert(config.id.clone());
+            }
+            if &previous != config {
+                connection_pool_ids_to_drop.insert(config.id.clone());
+            }
+        }
+    }
+    ConnectionConfigSync {
+        mq_adapter_ids_to_drop: mq_adapter_ids_to_drop.into_iter().collect(),
+        connection_pool_ids_to_drop: connection_pool_ids_to_drop.into_iter().collect(),
+    }
+}
+
+fn is_transient_runtime_config_id(id: &str) -> bool {
+    id.starts_with("__test_") || id.starts_with("__visible_draft_")
+}
+
+#[cfg(feature = "mq-admin")]
+async fn drop_mq_adapters_for_connection_ids(state: &AppState, connection_ids: &[String]) {
+    for connection_id in connection_ids {
+        state.mq_registry.drop_connection(connection_id).await;
+    }
+}
+
+#[cfg(not(feature = "mq-admin"))]
+async fn drop_mq_adapters_for_connection_ids(_state: &AppState, _connection_ids: &[String]) {}
+
+async fn remove_connection_pools_for_connection_ids(state: &AppState, connection_ids: &[String]) {
+    for connection_id in connection_ids {
+        state.remove_connection_pools(connection_id).await;
+    }
 }
 
 #[tauri::command]
 pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionConfig>, String> {
-    state
-        .storage
-        .load_connections()
-        .await
-        .map(|configs| configs.into_iter().map(|config| config.canonicalized()).collect())
+    load_connection_configs(state.inner()).await
+}
+
+async fn load_connection_configs(state: &AppState) -> Result<Vec<ConnectionConfig>, String> {
+    let configs: Vec<ConnectionConfig> =
+        state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
+    let sync = sync_connection_configs(state, &configs).await;
+    remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
+    drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
+    Ok(configs)
 }
 
 #[tauri::command]
@@ -481,6 +696,18 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::MessageQueue => {
+                let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
+                let adapter = state.mq_registry.build_transient_config(mqc).await?;
+                adapter.test_connection().await?;
+                Ok("Connection successful".to_string())
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::MessageQueue => {
+                Err("Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
+                    .to_string())
+            }
             db_type if database_capabilities::is_agent_type(&db_type) => {
                 test_agent_connection(state.inner(), &config, &host, port).await
             }
@@ -707,6 +934,20 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
         }
+        #[cfg(feature = "mq-admin")]
+        DatabaseType::MessageQueue => {
+            let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
+            let adapter = state.mq_registry.build_transient_config(mqc).await?;
+            adapter.test_connection().await?;
+            PoolKind::MessageQueue
+        }
+        #[cfg(not(feature = "mq-admin"))]
+        DatabaseType::MessageQueue => {
+            return Err(
+                "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
+                    .to_string(),
+            );
+        }
         db_type if database_capabilities::is_agent_type(&db_type) => {
             connect_agent_pool(state.inner(), &db_config, &host, port).await?
         }
@@ -741,6 +982,7 @@ pub async fn connection_final_proxy_port(
 #[tauri::command]
 pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
     state.remove_connection_pools_detached(&connection_id).await;
+    drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     state.reset_connection_transport(&connection_id).await;
     if connection_id.starts_with("__visible_draft_") {
         state.configs.write().await.remove(&connection_id);

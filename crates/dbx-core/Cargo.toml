@@ -5,8 +5,9 @@ edition = "2021"
 license = "Apache-2.0"
 
 [features]
-default = ["duckdb-bundled"]
+default = ["duckdb-bundled", "mq-admin"]
 duckdb-bundled = ["duckdb/bundled"]
+mq-admin = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -44,6 +45,7 @@ portpicker = "0.1.1"
 csv = "1"
 calamine = "0.30.1"
 base64 = "0.22"
+jsonwebtoken = "9"
 aes-gcm = "0.10"
 argon2 = "0.5"
 sha2 = "0.10"

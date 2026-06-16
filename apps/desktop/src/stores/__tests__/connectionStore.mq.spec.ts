@@ -1,0 +1,113 @@
+import { createPinia, setActivePinia } from "pinia";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConnectionConfig, TreeNode } from "@/types/database";
+
+function installLocalStorage() {
+  const data = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn((key: string) => data.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => data.set(key, value)),
+    removeItem: vi.fn((key: string) => data.delete(key)),
+  });
+}
+
+function mqConnection(): ConnectionConfig {
+  return {
+    id: "mq-1",
+    name: "Apache Pulsar",
+    db_type: "mq",
+    host: "127.0.0.1",
+    port: 8080,
+    user: "",
+    password: "",
+    database: "",
+    readonly: false,
+    read_only: false,
+    ssl_mode: "disabled",
+    color: "#888",
+    external_config: {
+      systemKind: "pulsar",
+      adminUrl: "http://127.0.0.1:8080",
+      auth: { kind: "none" },
+    },
+  } as ConnectionConfig;
+}
+
+describe("connectionStore MQ sidebar tree", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+  });
+
+  it("loads Pulsar tenants under a message queue connection", async () => {
+    const mqListTenants = vi.fn().mockResolvedValue([
+      { name: "public", adminRoles: [], allowedClusters: [] },
+      { name: "tenant-a", adminRoles: [], allowedClusters: [] },
+    ]);
+
+    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      mqListTenants,
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mqConnection();
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    await store.refreshTreeNode(node);
+
+    expect(mqListTenants).toHaveBeenCalledWith(connection.id);
+    expect(node.children?.map((child) => ({ id: child.id, label: child.label, type: child.type, tenant: (child as TreeNode & { mqTenant?: string }).mqTenant }))).toEqual([
+      { id: "mq-1:mq-tenant:public", label: "public", type: "mq-tenant", tenant: "public" },
+      { id: "mq-1:mq-tenant:tenant-a", label: "tenant-a", type: "mq-tenant", tenant: "tenant-a" },
+    ]);
+    expect(node.isExpanded).toBe(true);
+  });
+
+  it("stores the selected tenant when opening an MQ admin tab", async () => {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    connectionStore.connections = [mqConnection()];
+
+    const firstTabId = queryStore.openMqAdmin("mq-1", { tenant: "public" });
+    expect(queryStore.tabs.find((tab) => tab.id === firstTabId)?.mqTenant).toBe("public");
+
+    const secondTabId = queryStore.openMqAdmin("mq-1", { tenant: "tenant-a" });
+    expect(secondTabId).toBe(firstTabId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstTabId)?.mqTenant).toBe("tenant-a");
+  });
+
+  it("preserves the selected tenant when duplicating an MQ admin tab", async () => {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    connectionStore.connections = [mqConnection()];
+
+    const tabId = queryStore.openMqAdmin("mq-1", { tenant: "public" });
+    queryStore.duplicateTab(tabId);
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(queryStore.tabs[1]?.mqTenant).toBe("public");
+  });
+});

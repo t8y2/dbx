@@ -20,6 +20,11 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "mq-tenant";
+      connectionId: string;
+      tenant: string;
+    }
+  | {
       type: "query-context";
       connectionId: string;
       database: string;
@@ -58,6 +63,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
 
   if (tab.mode === "etcd") {
     return { type: "etcd-root", connectionId: tab.connectionId };
+  }
+
+  if (tab.mode === "mq" && tab.mqTenant) {
+    return { type: "mq-tenant", connectionId: tab.connectionId, tenant: tab.mqTenant };
   }
 
   if (tab.savedSqlId) {
@@ -99,6 +108,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "etcd-root") {
     return node.type === "etcd-root" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "mq-tenant") {
+    return node.type === "mq-tenant" && node.connectionId === target.connectionId && (node.mqTenant || node.label) === target.tenant;
   }
 
   if (target.type === "saved-sql-file") {

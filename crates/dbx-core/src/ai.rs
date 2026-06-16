@@ -612,7 +612,7 @@ pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest)
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "temperature": request.temperature.unwrap_or(0.2),
-        "system": request.system_prompt,
+        "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
     });
 
@@ -800,6 +800,23 @@ async fn measure_first_stream_chunk(
 
 const TEST_PROMPT: &str = "Who are you?";
 
+/// Fallback system prompt for the Anthropic (Claude) API.
+///
+/// Anthropic rejects requests whose `system` field is an empty string with
+/// `system: text content blocks must be non-empty`. When the caller has no
+/// system prompt we send this minimal placeholder so the request stays valid.
+const CLAUDE_DEFAULT_SYSTEM: &str = "You are a helpful assistant.";
+
+/// Returns a non-empty system prompt for Claude requests, substituting a
+/// default when the provided prompt is empty or whitespace-only.
+fn claude_system_prompt(system_prompt: &str) -> &str {
+    if system_prompt.trim().is_empty() {
+        CLAUDE_DEFAULT_SYSTEM
+    } else {
+        system_prompt
+    }
+}
+
 pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
     validate_config(config)?;
 
@@ -817,7 +834,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 "model": &model,
                 "max_tokens": 16,
                 "temperature": 0.0,
-                "system": "",
+                "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
                 "stream": true,
             });
@@ -994,7 +1011,7 @@ async fn stream_claude(
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "temperature": request.temperature.unwrap_or(0.2),
-        "system": request.system_prompt,
+        "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
         "stream": true,
     });
@@ -1454,7 +1471,7 @@ async fn stream_claude_with_tools(
     let mut body = json!({
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(4096),
-        "system": request.system_prompt,
+        "system": claude_system_prompt(&request.system_prompt),
         "messages": messages,
         "tools": tool_json,
         "stream": true,
@@ -1979,10 +1996,10 @@ pub fn load_config(path: &Path) -> Result<Option<AiConfig>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ai_http_client, claude_headers, gemini_text, openai_response_text, openai_stream_text,
+        build_ai_http_client, claude_headers, claude_system_prompt, gemini_text, openai_response_text, openai_stream_text,
         parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens,
         responses_text, supports_temperature, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo,
-        AiProvider, AUTHORIZATION,
+        AiProvider, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM,
     };
 
     #[test]
@@ -2203,6 +2220,19 @@ mod tests {
         let bearer_headers = claude_headers(&config).unwrap();
         assert_eq!(bearer_headers.get(AUTHORIZATION).unwrap(), "Bearer secret");
         assert!(bearer_headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn claude_system_prompt_substitutes_default_when_empty() {
+        // Empty or whitespace-only prompts must fall back to a non-empty value,
+        // otherwise Anthropic rejects the request with
+        // "system: text content blocks must be non-empty".
+        assert_eq!(claude_system_prompt(""), CLAUDE_DEFAULT_SYSTEM);
+        assert_eq!(claude_system_prompt("   \n\t"), CLAUDE_DEFAULT_SYSTEM);
+        assert!(!CLAUDE_DEFAULT_SYSTEM.is_empty());
+
+        // Real prompts pass through unchanged.
+        assert_eq!(claude_system_prompt("Be concise."), "Be concise.");
     }
 
     #[test]

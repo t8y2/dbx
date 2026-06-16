@@ -981,6 +981,15 @@ where
     redis::cmd("FLUSHDB").query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
+/// Extract a string reference from a `RedisRawValue` if it is a BulkString or SimpleString.
+fn redis_raw_value_as_str(v: &RedisRawValue) -> Option<&str> {
+    match v {
+        RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).ok(),
+        RedisRawValue::SimpleString(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 pub async fn execute_command<C>(
     con: &mut C,
     command_text: &str,
@@ -1001,6 +1010,34 @@ where
         cmd.arg(arg);
     }
     let raw: RedisRawValue = cmd.query_async(con).await.map_err(|e| e.to_string())?;
+
+    // Special handling for INFO command in cluster mode.
+    // redis-rs ClusterConnection routes INFO to all primaries and
+    // aggregates the results as a Map(node_addr → full_info_text).
+    // We detect this pattern and format it as human-readable plain text
+    // instead of converting to a JSON array of {key, value} objects.
+    if command == "INFO" {
+        if let RedisRawValue::Map(entries) = &raw {
+            // Cluster-aggregated INFO has multi-line values starting with "# Server".
+            // This distinguishes it from a RESP3 standalone INFO map where values
+            // are single field values (e.g. "redis_version", "os").
+            let is_cluster_aggregation =
+                entries.iter().any(|(_, v)| redis_raw_value_as_str(v).is_some_and(|s| s.starts_with("# Server")));
+
+            if is_cluster_aggregation {
+                let mut parts: Vec<String> = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let addr = redis_raw_value_as_str(key);
+                    let info = redis_raw_value_as_str(value);
+                    if let (Some(addr), Some(info)) = (addr, info) {
+                        parts.push(format!("{addr}\n{info}"));
+                    }
+                }
+                let text = parts.join("\n\n");
+                return Ok(RedisCommandResult { command, safety, value: serde_json::Value::String(text) });
+            }
+        }
+    }
 
     Ok(RedisCommandResult { command, safety, value: redis_command_raw_to_json(raw) })
 }

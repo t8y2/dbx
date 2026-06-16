@@ -38,6 +38,7 @@ import { isSchemaAware, isSingleDatabase } from "@/lib/databaseFeatureSupport";
 import * as api from "@/lib/api";
 import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, shouldRunSqlSemanticDiagnostics, type SqlSemanticDiagnostic } from "@/lib/sqlSemanticDiagnostics";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redisSyntaxDiagnostics";
+import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject } from "@/lib/sqlCompletion";
 import type { DatabaseType, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
@@ -874,7 +875,7 @@ function unregisterTableReferenceDropListener() {
 let completionEpoch = 0;
 let completionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem;
+type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem;
 
 function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp) {
   if (items.length === 0) return null;
@@ -969,6 +970,29 @@ async function provideElasticsearchCompletions(currentState: import("@codemirror
   return buildCompletionResult(items, completionContext.from, getElasticsearchCompletionResultValidFor());
 }
 
+async function provideRedisCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
+  if (!props.connectionId) return null;
+  const epoch = ++completionEpoch;
+  const fullDoc = currentState.doc.toString();
+  if (!explicit && !shouldAutoOpenRedisCompletion(fullDoc, position)) return null;
+
+  const completionContext = getRedisCompletionContext(fullDoc, position);
+  // Key-name completion needs a reliable db index; props.database may briefly be "" on
+  // the New Query path before the active db resolves, and only key-argument commands warrant it.
+  let keys: string[] = [];
+  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.mainCommand)) {
+    try {
+      keys = await connectionStore.listRedisCompletionKeys(props.connectionId, props.database);
+    } catch {
+      keys = [];
+    }
+  }
+  if (epoch !== completionEpoch) return null;
+
+  const items = buildRedisCompletionItemsFromContext(completionContext, { keys });
+  return buildCompletionResult(items, completionContext.from, getRedisCompletionResultValidFor());
+}
+
 async function provideSqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
   if (imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
   if (!props.connectionId) return null;
@@ -977,6 +1001,9 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
     if (!isSqlLikeCompletionStatement(fullDoc, position)) {
       return provideElasticsearchCompletions(currentState, position, explicit);
     }
+  }
+  if (props.databaseType === "redis") {
+    return provideRedisCompletions(currentState, position, explicit);
   }
   const hasDatabase = props.database != null;
 

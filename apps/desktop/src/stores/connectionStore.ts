@@ -108,6 +108,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionForeignKeysCache = ref<Record<string, ForeignKeyInfo[]>>({});
   const completionDatabasesCache = ref<Record<string, string[]>>({});
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
+  const redisCompletionKeysCache = ref<Record<string, string[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
   const sidebarSearchQuery = ref("");
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
@@ -602,6 +603,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     for (const key of Object.keys(elasticsearchCompletionIndicesCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete elasticsearchCompletionIndicesCache.value[key];
+    }
+    for (const key of Object.keys(redisCompletionKeysCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete redisCompletionKeysCache.value[key];
     }
     for (const key of completionTableIndex.keys()) {
       if (key.startsWith(cachePrefix)) completionTableIndex.delete(key);
@@ -1936,6 +1940,27 @@ export const useConnectionStore = defineStore("connection", () => {
     return elasticsearchCompletionIndicesCache.value[cacheKey];
   }
 
+  // Upper bound on cached key names per db, to keep completion memory bounded
+  // (Redis can hold far more keys than we ever want resident for autocomplete).
+  const REDIS_COMPLETION_KEYS_MAX = 1000;
+
+  async function listRedisCompletionKeys(connectionId: string, database: string): Promise<string[]> {
+    if (!database) return [];
+    const cacheKey = `${connectionId}:${database}`;
+    const cached = redisCompletionKeysCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:redis-keys`, async () => {
+      await ensureConnected(connectionId);
+      const pageSize = settingsStore.editorSettings.redisScanPageSize;
+      // Bounded multi-round SCAN: trade coverage for latency/memory safety.
+      const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6);
+      const keys = result.keys.map((key) => key.key_display).slice(0, REDIS_COMPLETION_KEYS_MAX);
+      redisCompletionKeysCache.value[cacheKey] = keys;
+      evictOldestCacheEntries(redisCompletionKeysCache.value, COMPLETION_CACHE_MAX);
+      return keys;
+    });
+  }
+
   async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string): Promise<SqlCompletionTable[]> {
     const normalizedFilter = filter.trim().toLowerCase();
     const relaxedFilter = relaxedCompletionTableFilter(normalizedFilter);
@@ -2730,6 +2755,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionSchemas,
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
+    listRedisCompletionKeys,
     exportConnectionsToFile,
     readImportFile,
     importConnectionsFromFile,

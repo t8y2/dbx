@@ -842,8 +842,13 @@ fn is_timezone_suffix(value: &str) -> bool {
 }
 
 pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: &DatabaseType) -> String {
+    if _source_db == target_db {
+        return source_type.to_string();
+    }
     let t = source_type.to_lowercase();
-    let base = t.split('(').next().unwrap_or(&t).trim();
+    let mut base = t.split('(').next().unwrap_or(&t).trim();
+    // Extract basic type, `bigint unsigned` -> `bigint`
+    base = base.split(' ').next().unwrap_or(base).trim();
 
     if matches!(target_db, DatabaseType::Hive) {
         return match base {
@@ -2798,15 +2803,19 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
-        let ddl = generate_create_table_ddl(
-            &columns,
-            table,
-            &request.source_schema,
-            &request.target_schema,
-            target_db_type,
-            source_db_type,
-            table_comment.as_deref(),
-        );
+        let ddl = if is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type) {
+            query_mysql_create_table_ddl(state, source_pool_key, &request.source_schema, table).await?
+        } else {
+            generate_create_table_ddl(
+                &columns,
+                table,
+                &request.source_schema,
+                &request.target_schema,
+                target_db_type,
+                source_db_type,
+                table_comment.as_deref(),
+            )
+        };
         log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
         let table_exists = match execute_on_pool(state, target_pool_key, &ddl).await {
             Ok(_) => true,
@@ -2964,6 +2973,17 @@ where
     }
 
     Ok(total_transferred)
+}
+
+async fn query_mysql_create_table_ddl(
+    state: &AppState,
+    source_pool_key: &str,
+    source_schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE TABLE {}", qualified_table(table, source_schema, &DatabaseType::Mysql));
+    let rows = execute_on_pool(state, source_pool_key, &sql).await?.rows;
+    rows.first().and_then(|row| json_string_cell(row, 1)).ok_or_else(|| format!("Failed to get MySQL DDL: {sql}"))
 }
 
 pub async fn transfer_postgres_schema_dependencies<F>(
@@ -3978,6 +3998,31 @@ mod tests {
     #[test]
     fn map_column_type_preserves_mediumblob_for_mysql_target() {
         assert_eq!(map_column_type("mediumblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "MEDIUMBLOB");
+    }
+
+    #[test]
+    fn map_column_type_preserves_same_database_type() {
+        assert_eq!(map_column_type("int unsigned", &DatabaseType::Mysql, &DatabaseType::Mysql), "int unsigned");
+        assert_eq!(
+            map_column_type("int unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Mysql),
+            "int unsigned zerofill"
+        );
+        assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &DatabaseType::Mysql), "bigint unsigned");
+        assert_eq!(
+            map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Mysql),
+            "bigint unsigned zerofill"
+        );
+    }
+
+    #[test]
+    fn map_column_type_preserves_numeric_type_from_mysql_to_postgres() {
+        assert_eq!(map_column_type("int unsigned", &DatabaseType::Mysql, &DatabaseType::Postgres), "INTEGER");
+        assert_eq!(map_column_type("int unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres), "INTEGER");
+        assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &DatabaseType::Postgres), "BIGINT");
+        assert_eq!(
+            map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres),
+            "BIGINT"
+        );
     }
 
     #[test]

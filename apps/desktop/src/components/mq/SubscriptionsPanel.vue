@@ -466,7 +466,7 @@ watch(
             <div v-for="message in peekedMessages" :key="message.position" class="peek-message">
               <div class="peek-message-header">
                 <span>#{{ message.position }}</span>
-                <span v-if="messagformatError(e)Id">{{ messagformatError(e)Id }}</span>
+                <span v-if="message.messageId">{{ message.messageId }}</span>
                 <span v-if="message.key">key={{ message.key }}</span>
               </div>
               <div v-if="Object.keys(message.properties).length" class="peek-properties">

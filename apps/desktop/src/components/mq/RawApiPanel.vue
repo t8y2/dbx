@@ -159,7 +159,7 @@ function formatJsonBody() {
     bodyText.value = JSON.stringify(JSON.parse(text), null, 2);
     error.value = undefined;
   } catch (e: unknown) {
-    error.value = `JSON Body 格式错误: ${e?.message || String(e)}`;
+    error.value = `JSON Body 格式错误: ${formatError(e)}`;
   }
 }
 

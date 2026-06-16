@@ -344,7 +344,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
-  if (tab.mode === "mq") return;
+  if (config.db_type === "mq") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node

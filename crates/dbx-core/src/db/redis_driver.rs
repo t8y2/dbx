@@ -1014,6 +1014,7 @@ where
     // Special handling for INFO command in cluster mode.
     // redis-rs ClusterConnection routes INFO to all primaries and
     // aggregates the results as a Map(node_addr → full_info_text).
+
     // We detect this pattern and return it as an array of
     // [node_addr, info_text] pairs, which the frontend renders
     // as a two-column (index → node_addr, value → info_text) table.
@@ -1036,6 +1037,7 @@ where
                     })
                     .collect();
                 return Ok(RedisCommandResult { command, safety, value: serde_json::Value::Array(pairs) });
+
             }
         }
     }

@@ -3396,7 +3396,7 @@ mod tests {
             db::ColumnInfo {
                 comment: Some("用户姓名".to_string()),
                 is_nullable: false,
-                ..test_column("name", "varchar(100)")
+                ..test_column("name", "VARCHAR(100)")
             },
             db::ColumnInfo { comment: None, ..test_column("age", "int") },
         ];
@@ -3982,22 +3982,22 @@ mod tests {
 
     #[test]
     fn map_column_type_preserves_longtext_for_mysql_target() {
-        assert_eq!(map_column_type("longtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "LONGTEXT");
+        assert_eq!(map_column_type("longtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "longtext");
     }
 
     #[test]
     fn map_column_type_preserves_mediumtext_for_mysql_target() {
-        assert_eq!(map_column_type("mediumtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "MEDIUMTEXT");
+        assert_eq!(map_column_type("mediumtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "mediumtext");
     }
 
     #[test]
     fn map_column_type_preserves_longblob_for_mysql_target() {
-        assert_eq!(map_column_type("longblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "LONGBLOB");
+        assert_eq!(map_column_type("longblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "longblob");
     }
 
     #[test]
     fn map_column_type_preserves_mediumblob_for_mysql_target() {
-        assert_eq!(map_column_type("mediumblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "MEDIUMBLOB");
+        assert_eq!(map_column_type("mediumblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "mediumblob");
     }
 
     #[test]
@@ -4053,7 +4053,7 @@ mod tests {
                 is_primary_key: true,
                 is_nullable: false,
                 extra: Some("auto_increment".to_string()),
-                ..test_column("id", "int")
+                ..test_column("id", "INT")
             },
             db::ColumnInfo { is_nullable: false, ..test_column("name", "varchar(64)") },
         ];

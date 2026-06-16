@@ -46,7 +46,7 @@ function formatQueryToolResult(result: QueryResult, title?: string) {
 }
 
 export const DBX_CONNECTION_TYPE_DESCRIPTION =
-  "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, etcd, doris, starrocks, manticoresearch, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, questdb, gbase, h2, snowflake, trino, hive, db2, informix, influxdb, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access";
+  "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, etcd, doris, starrocks, manticoresearch, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, questdb, gbase, h2, snowflake, trino, hive, db2, informix, influxdb, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access, mq";
 const FILE_CAPABLE_CONNECTION_TYPES = new Set(["sqlite", "duckdb", "access", "h2"]);
 
 export function createDbxMcpServer(backend: Backend, options: { isWebMode?: boolean } = {}): McpServer {

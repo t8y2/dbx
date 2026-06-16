@@ -803,6 +803,7 @@
     close: "Close",
     cancel: "Cancel",
     save: "Save",
+    retry: "Retry",
     more: "More",
   },
   explain: {
@@ -1106,6 +1107,8 @@
     editView: "Edit View",
     viewSource: "View Source",
     viewDdl: "View DDL",
+    viewDdlLoading: "Loading DDL...",
+    ddlCopied: "DDL copied",
     dropObject: "Drop Object",
     dropView: "Drop View",
     dropColumn: "Drop Column",

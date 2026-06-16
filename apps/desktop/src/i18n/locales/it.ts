@@ -750,6 +750,7 @@
     loading: "Caricamento...",
     stopping: "Interruzione...",
     close: "Chiudi",
+    retry: "Riprova",
     more: "Altro",
   },
   explain: {
@@ -1048,6 +1049,8 @@
     editView: "Modifica Vista",
     viewSource: "Visualizza Origine",
     viewDdl: "Visualizza DDL",
+    viewDdlLoading: "Caricamento DDL...",
+    ddlCopied: "DDL copiato",
     dropObject: "Elimina Oggetto",
     dropView: "Elimina Vista",
     dropColumn: "Elimina Colonna",

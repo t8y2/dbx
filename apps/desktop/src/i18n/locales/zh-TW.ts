@@ -729,6 +729,7 @@
     loading: "載入中……",
     stopping: "正在停止……",
     close: "關閉",
+    retry: "重試",
     more: "更多",
   },
   explain: {
@@ -1027,6 +1028,8 @@
     editView: "編輯檢視",
     viewSource: "檢視原始碼",
     viewDdl: "檢視 DDL",
+    viewDdlLoading: "正在讀取 DDL...",
+    ddlCopied: "DDL 已複製",
     dropObject: "刪除物件",
     dropView: "刪除檢視",
     dropColumn: "刪除欄位",

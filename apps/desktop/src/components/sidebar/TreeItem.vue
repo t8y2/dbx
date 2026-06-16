@@ -92,8 +92,9 @@ import {
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
+import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
@@ -1193,6 +1194,12 @@ const showDuplicateDialog = ref(false);
 const duplicateTableName = ref("");
 const duplicateStructureSource = ref<DuplicateStructureSource | null>(null);
 
+const ddlTarget = ref<TreeNode | null>(null);
+const showDdlDialog = ref(false);
+const ddlDialect = computed(() => {
+  if (!ddlTarget.value?.connectionId) return "mysql";
+  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
+});
 const showCreateDatabaseDialog = ref(false);
 const createDatabaseName = ref("");
 const createDatabaseCharset = ref("utf8mb4");
@@ -3165,6 +3172,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openData, icon: TableProperties });
+    if (node.type === "table") {
+      items.push({
+        label: t("contextMenu.viewDdl"),
+        action: () => {
+          ddlTarget.value = node;
+          showDdlDialog.value = true;
+        },
+        icon: FileCode,
+      });
+    }
     if (node.type === "view") {
       items.push({ label: t("contextMenu.editView"), action: viewObjectSource, icon: Pencil });
       items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
@@ -3656,6 +3673,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
   </Dialog>
 
   <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
+
+  <DdlViewDialog v-if="ddlTarget" :connection-id="ddlTarget.connectionId!" :database="ddlTarget.database!" :schema="ddlTarget.schema" :table-name="ddlTarget.label" :dialect="ddlDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style>

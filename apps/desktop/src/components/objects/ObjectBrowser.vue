@@ -47,7 +47,7 @@ import * as api from "@/lib/api";
 import type { ConnectionConfig, ObjectInfo, ObjectSourceKind } from "@/types/database";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/databaseFeatureSupport";
-import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
 import { buildDropObjectSql, buildDuplicateTableStructureSql, buildEmptyTableSql, buildTruncateTableSql, type TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import { useToast } from "@/composables/useToast";
@@ -64,6 +64,7 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
+import DdlViewDialog from "./DdlViewDialog.vue";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -129,6 +130,8 @@ const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
+const ddlDialogTarget = ref<ObjectBrowserRow | null>(null);
+const showDdlDialog = ref(false);
 const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
@@ -149,11 +152,7 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
-const sourceDialect = computed<"mysql" | "postgres" | "sqlserver">(() => {
-  if (effectiveDatabaseType.value === "postgres" || effectiveDatabaseType.value === "gaussdb" || effectiveDatabaseType.value === "kwdb" || effectiveDatabaseType.value === "opengauss") return "postgres";
-  if (effectiveDatabaseType.value === "sqlserver") return "sqlserver";
-  return "mysql";
-});
+const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => {
   switch (effectiveDatabaseType.value) {
     case "mysql":
@@ -1108,6 +1107,14 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     { label: t("contextMenu.viewData"), action: () => openRow(item), icon: Table2 },
+    {
+      label: t("contextMenu.viewDdl"),
+      action: () => {
+        ddlDialogTarget.value = item;
+        showDdlDialog.value = true;
+      },
+      icon: FileCode,
+    },
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
@@ -1464,6 +1471,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style scoped>

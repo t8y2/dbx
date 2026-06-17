@@ -1067,6 +1067,24 @@ export const useConnectionStore = defineStore("connection", () => {
     node.label = redisDbLabel(db, node.loadedKeyCount, node.totalKeyCount);
   }
 
+  // Re-fetch the authoritative per-db key counts (INFO keyspace, lightweight) and update
+  // the sidebar db nodes' counts in place — WITHOUT rebuilding the tree, so already-loaded
+  // key trees under expanded db nodes are preserved. Used after a Redis write command so the
+  // `dbN (count)` labels reflect the new reality without a manual refresh.
+  async function refreshRedisDbKeyCounts(connectionId: string) {
+    const connNode = findNode(treeNodes.value, connectionId);
+    if (!connNode) return;
+    try {
+      await ensureConnected(connectionId);
+      const dbs = await api.redisListDatabases(connectionId);
+      for (const db of dbs) {
+        updateRedisDbKeyStats(connectionId, db.db, { total: db.keys });
+      }
+    } catch {
+      // Best-effort: a failed count refresh must not disrupt the result view.
+    }
+  }
+
   async function loadMongoDatabases(connectionId: string) {
     const node = findNode(treeNodes.value, connectionId);
     if (!node) return;
@@ -2759,6 +2777,7 @@ export const useConnectionStore = defineStore("connection", () => {
     initFromDisk,
     loadDatabases,
     loadRedisDatabases,
+    refreshRedisDbKeyCounts,
     loadEtcdRoot,
     loadMqTenants,
     updateRedisDbKeyStats,

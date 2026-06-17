@@ -1197,6 +1197,7 @@ export const useQueryStore = defineStore("query", () => {
 
         const allResults: QueryResult[] = [];
         const skipSafety = options?.skipRedisSafetyCheck;
+        let hadMutatingCommand = false;
         for (const command of commands) {
           try {
             const result = await api.redisExecuteCommand(tab.connectionId, currentDb, command, skipSafety);
@@ -1206,6 +1207,7 @@ export const useQueryStore = defineStore("query", () => {
             // Write commands (SET/DEL/...) mutate the key set — drop the cached key-name completion
             // for the db this command ran on so the next autocomplete fetch reflects the new keys.
             if (isRedisMutatingCommand(command)) {
+              hadMutatingCommand = true;
               connStore.invalidateCompletionCache(tab.connectionId, String(currentDb));
             }
           } catch (e: any) {
@@ -1240,6 +1242,12 @@ export const useQueryStore = defineStore("query", () => {
           if (current.database !== String(currentDb)) {
             current.database = String(currentDb);
           }
+        }
+        // Refresh the sidebar db key counts (INFO keyspace) when at least one command in
+        // this batch mutated the key set, so `dbN (count)` stays accurate without a manual
+        // refresh. Fire-and-forget: never block result display.
+        if (hadMutatingCommand) {
+          void connStore.refreshRedisDbKeyCounts(tab.connectionId);
         }
         return;
       }

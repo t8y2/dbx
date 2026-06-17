@@ -1356,7 +1356,7 @@ onUnmounted(() => {
       </div>
       <Teleport to="body">
         <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text">
+          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 w-max mx-auto z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text">
             {{ toastMessage }}
           </div>
         </Transition>
@@ -1415,11 +1415,12 @@ onUnmounted(() => {
 <style scoped>
 .toast-enter-active,
 .toast-leave-active {
-  transition: all 0.25s ease;
+  transition: 0.25s ease;
+  transition-property: transform, opacity;
 }
 .toast-enter-from,
 .toast-leave-to {
   opacity: 0;
-  transform: translate(-50%, 8px);
+  transform: translateY(100%) scale(0.95);
 }
 </style>

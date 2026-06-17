@@ -24,11 +24,6 @@ export interface CanvasEditingCell {
   col: number;
 }
 
-export interface CanvasSingleSelectedCell {
-  rowIndex: number;
-  visibleColIdx: number;
-}
-
 export interface CanvasSearchMatch {
   kind: "cell" | "column";
   displayRow: number;
@@ -52,12 +47,12 @@ export interface DrawCanvasDataGridOptions {
   hoverCell: CanvasHoverCell | null;
   isScrolling: boolean;
   editingCell: CanvasEditingCell | null;
-  singleSelectedCell: CanvasSingleSelectedCell | null;
   searchMatchKeys: ReadonlySet<string>;
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number) => string;
   isRowActive: (rowIndex: number) => boolean;
   isRowSelected: (rowId: number) => boolean;
+  isSelectingAll: boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
@@ -221,12 +216,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     hoverCell,
     isScrolling,
     editingCell,
-    singleSelectedCell,
     searchMatchKeys,
     currentSearchMatch,
     formatCell,
     isRowActive,
     isRowSelected,
+    isSelectingAll,
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover,
@@ -275,14 +270,15 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     if (!item) continue;
     const y = rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop;
     const rowIsActive = isRowActive(item.displayIndex);
+
     const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
-    ctx.fillStyle = rowBase;
+    ctx.fillStyle = rowIsActive && !item.isDeleted ? theme.cellSelectedSingle : rowBase;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
     let rowNumberFill = item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
-    if (rowIsActive && !item.isDeleted) rowNumberFill = theme.rowNumberActive;
-    if (isRowSelected(item.id) && item.status === "clean") rowNumberFill = theme.rowNumberSelected;
+    if ((rowIsActive || isRowSelected(item.id)) && !item.isDeleted) rowNumberFill = theme.cellSelectedSingle;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx < 0 && !isScrolling && item.status === "clean" && !rowIsActive && !isRowSelected(item.id)) {
@@ -303,12 +299,28 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
     ctx.font = normalFont;
 
-    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
     ctx.strokeStyle = theme.border;
     ctx.beginPath();
     ctx.moveTo(0, rowBorderY);
     ctx.lineTo(width, rowBorderY);
     ctx.stroke();
+    if ((isRowSelected(item.id) || isSelectingAll) && !item.isDeleted) {
+      const selectedLeftX = 0.5;
+      const selectedRightX = rowNumberWidth - 1.5;
+      const selectedTopY = Math.max(y + 0.5, 1);
+      ctx.strokeStyle = theme.cellSelectedSingleBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(selectedLeftX, selectedTopY);
+      ctx.lineTo(selectedRightX, selectedTopY);
+      ctx.moveTo(selectedLeftX, rowBorderY);
+      ctx.lineTo(selectedRightX, rowBorderY);
+      ctx.moveTo(selectedLeftX, selectedTopY);
+      ctx.lineTo(selectedLeftX, rowBorderY);
+      ctx.moveTo(selectedRightX, selectedTopY);
+      ctx.lineTo(selectedRightX, rowBorderY);
+      ctx.stroke();
+    }
 
     let x = rowNumberWidth + columnOffset - scrollLeft;
     for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x < width; visibleColIdx++) {
@@ -321,9 +333,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       if (x + colWidth >= rowNumberWidth) {
         const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
         const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
-        const isSingleSelectedCell = singleSelectedCell?.rowIndex === item.displayIndex && singleSelectedCell.visibleColIdx === visibleColIdx;
         const isDirtyCell = item.isDirtyCol[actualColIdx];
-        const selectedFillVisual = rowSelectionVisual || (selectedCell && (!isSingleSelectedCell || isDirtyCell) && (!rowIsActive || isDirtyCell));
+        const selectedFillVisual = rowSelectionVisual || selectedCell;
         const selectedBorderVisual = rowSelectionVisual || selectedCell;
         const isSearchMatch = paintSearchMatches && searchMatchKeys.has(`cell:${item.displayIndex}:${actualColIdx}`);
         const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
@@ -338,12 +349,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           ctx.fillStyle = theme.cellHover;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
-        if (selectedFillVisual) {
-          ctx.fillStyle = isDirtyCell ? theme.cellSelectedDirty : theme.cellSelected;
+        if ((rowIsActive || selectedCell) && !item.isDeleted && !isDirtyCell) {
+          ctx.fillStyle = theme.cellSelectedSingle;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
-        if (rowIsActive && !item.isDeleted && !isDirtyCell) {
-          ctx.fillStyle = theme.cellActive;
+        if (selectedFillVisual && isDirtyCell) {
+          ctx.fillStyle = theme.cellSelectedDirty;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
         if (isSearchMatch) {
@@ -396,7 +407,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           const selectedRightX = clippedX + cellPaintWidth - 1.5;
           const selectedTopY = Math.max(y + 0.5, 1);
           const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
-          ctx.strokeStyle = theme.cellSelectedBorder;
+          ctx.strokeStyle = selectedCell && !isDirtyCell ? theme.cellSelectedSingleBorder : theme.cellSelectedBorder;
           ctx.beginPath();
           ctx.moveTo(selectedLeftX, selectedTopY);
           ctx.lineTo(selectedRightX, selectedTopY);

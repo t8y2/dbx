@@ -462,6 +462,9 @@ pub async fn get_explain_info(
     sql: String,
     mode: Option<String>,
 ) -> Result<String, String> {
+    let database_for_pool = database.as_deref().filter(|database| !database.trim().is_empty());
+    state.get_or_create_pool(&connection_id, database_for_pool).await?;
+
     let client = {
         let connections = state.connections.read().await;
         let pool = connections.get(&connection_id).ok_or_else(|| "Connection not found".to_string())?;

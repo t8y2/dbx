@@ -482,6 +482,9 @@ pub async fn get_explain_info(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GetExplainInfoRequest>,
 ) -> Result<Json<String>, AppError> {
+    let database_for_pool = req.database.as_deref().filter(|database| !database.trim().is_empty());
+    state.app.get_or_create_pool(&req.connection_id, database_for_pool).await.map_err(AppError)?;
+
     let client = {
         let connections = state.app.connections.read().await;
         let pool = connections.get(&req.connection_id).ok_or_else(|| AppError("Connection not found".to_string()))?;

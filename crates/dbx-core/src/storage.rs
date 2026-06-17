@@ -2084,6 +2084,7 @@ mod tests {
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             })
             .await
             .unwrap();
@@ -2098,7 +2099,8 @@ mod tests {
                 saved_sql_sync_dir: None,
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
-                agent_store_dir: Some("/tmp/dbx-agents".to_string())
+                agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             }
         );
     }

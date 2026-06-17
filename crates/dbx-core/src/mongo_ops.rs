@@ -12,7 +12,12 @@ fn sort_names(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
+async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
+    state.get_or_create_pool(connection_id, None).await.map(|_| ())
+}
+
 pub async fn mongo_list_databases_core(state: &AppState, connection_id: &str) -> Result<Vec<String>, String> {
+    ensure_document_pool(state, connection_id).await?;
     let fallback_database = configured_mongo_database(state, connection_id).await;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
@@ -59,6 +64,7 @@ pub async fn mongo_list_collections_core(
     connection_id: &str,
     database: &str,
 ) -> Result<Vec<String>, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::list_collections(client, database).await.map(sort_names),
@@ -82,6 +88,7 @@ pub async fn document_find_documents_core(
     filter: Option<&str>,
     sort: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -131,6 +138,7 @@ pub async fn mongo_aggregate_documents_core(
     pipeline_json: &str,
     max_rows: Option<usize>,
 ) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -148,6 +156,7 @@ pub async fn mongo_insert_document_core(
     collection: &str,
     doc_json: &str,
 ) -> Result<String, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_document(client, database, collection, doc_json).await,
@@ -178,6 +187,7 @@ pub async fn mongo_insert_documents_core(
     collection: &str,
     docs_json: &str,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_documents(client, database, collection, docs_json).await,
@@ -194,6 +204,7 @@ pub async fn mongo_update_document_core(
     id: &str,
     doc_json: &str,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::update_document(client, database, collection, id, doc_json).await,
@@ -227,6 +238,7 @@ pub async fn mongo_update_documents_core(
     update_json: &str,
     many: bool,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -244,6 +256,7 @@ pub async fn mongo_delete_document_core(
     collection: &str,
     id: &str,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::delete_document(client, database, collection, id).await,
@@ -270,6 +283,7 @@ pub async fn mongo_delete_documents_core(
     filter_json: &str,
     many: bool,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {

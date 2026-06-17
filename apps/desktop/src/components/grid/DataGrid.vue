@@ -136,6 +136,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { nextDataGridSortState, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
+import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGridConditionHistory";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 
@@ -152,6 +153,11 @@ interface PreparedCopyValue {
   loading: boolean;
   ready: boolean;
 }
+
+type ConditionSuggestion = {
+  value: string;
+  kind: "column" | "history";
+};
 
 const props = defineProps<{
   result: QueryResult;
@@ -383,14 +389,14 @@ const searchInputRef = ref<HTMLInputElement>();
 const measureRef = ref<HTMLSpanElement>();
 const suggestionLeft = ref(0);
 
-const whereSuggestions = ref<string[]>([]);
+const whereSuggestions = ref<ConditionSuggestion[]>([]);
 const whereSuggestionIndex = ref(-1);
 const whereFilterInputRef = ref<HTMLInputElement>();
 const whereMeasureRef = ref<HTMLSpanElement>();
 const whereSuggestionLeft = ref(0);
 const whereSuggestionPosition = ref({ left: 0, top: 0 });
 
-const orderBySuggestions = ref<string[]>([]);
+const orderBySuggestions = ref<ConditionSuggestion[]>([]);
 const orderBySuggestionIndex = ref(-1);
 const orderByInputRef = ref<HTMLInputElement>();
 const orderByMeasureRef = ref<HTMLSpanElement>();
@@ -401,6 +407,12 @@ const orderByInput = ref(props.initialOrderByInput ?? "");
 const hasOrderByInput = computed(() => orderByInput.value.trim().length > 0);
 const whereFilterInput = ref(props.initialWhereInput ?? "");
 const hasWhereFilterInput = computed(() => whereFilterInput.value.trim().length > 0);
+const conditionHistoryScope = computed(() => ({
+  connectionId: props.connectionId,
+  database: props.database,
+  schema: props.tableMeta?.schema ?? props.schema,
+  tableName: props.tableMeta?.tableName,
+}));
 const searchSplitContainerRef = ref<HTMLDivElement>();
 const searchSplitWhereWidth = ref<number | null>(null);
 const isResizingSearchSplit = ref(false);
@@ -1200,11 +1212,18 @@ function acceptWhereSuggestion() {
   const idx = whereSuggestionIndex.value;
   if (idx < 0 || idx >= whereSuggestions.value.length) return;
   const sug = whereSuggestions.value[idx];
+  if (sug.kind === "history") {
+    whereFilterInput.value = sug.value;
+    whereSuggestions.value = [];
+    whereSuggestionIndex.value = -1;
+    whereFilterInputRef.value?.focus();
+    return;
+  }
   const lastWordMatch = whereFilterInput.value.match(/([^\s,()><=!&|]+)$/);
   if (lastWordMatch) {
     const lastWord = lastWordMatch[1];
     const prefix = whereFilterInput.value.slice(0, -lastWord.length);
-    whereFilterInput.value = prefix + sug;
+    whereFilterInput.value = prefix + sug.value;
   }
   whereSuggestions.value = [];
   whereSuggestionIndex.value = -1;
@@ -1221,20 +1240,39 @@ function navigateWhereSuggestion(delta: number) {
   whereSuggestionIndex.value = Math.min(Math.max(whereSuggestionIndex.value + delta, 0), whereSuggestions.value.length - 1);
 }
 
+function showWhereHistorySuggestions() {
+  const history = loadDataGridConditionHistory("where", conditionHistoryScope.value, whereFilterInput.value);
+  whereSuggestions.value = history.map((value) => ({ value, kind: "history" }));
+  whereSuggestionIndex.value = whereSuggestions.value.length ? 0 : -1;
+  if (whereSuggestions.value.length) updateWhereSuggestionPosition();
+}
+
+function deleteWhereHistorySuggestion(value: string) {
+  const history = forgetDataGridConditionHistory("where", conditionHistoryScope.value, value);
+  const query = whereFilterInput.value;
+  const filtered = query.trim() ? loadDataGridConditionHistory("where", conditionHistoryScope.value, query) : history;
+  whereSuggestions.value = filtered.map((item) => ({ value: item, kind: "history" }));
+  whereSuggestionIndex.value = whereSuggestions.value.length ? Math.min(whereSuggestionIndex.value, whereSuggestions.value.length - 1) : -1;
+}
+
 watch(whereFilterInput, (val) => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
   whereSuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
-  if (trimmed.length === 0) return;
+  if (trimmed.length === 0) {
+    showWhereHistorySuggestions();
+    return;
+  }
   const lastToken = trimmed.split(/[\s,()><=!&|]+/).pop() || "";
   if (lastToken.length > 0) {
     const tl = lastToken.toLowerCase();
     whereSuggestions.value = props.tableMeta.columns
       .map((c) => c.name)
       .filter((n) => n.toLowerCase().startsWith(tl) && n.toLowerCase() !== tl)
-      .slice(0, 8);
+      .slice(0, 8)
+      .map((value) => ({ value, kind: "column" }));
     whereSuggestionIndex.value = 0;
     updateWhereSuggestionPosition();
   }
@@ -1322,11 +1360,18 @@ function acceptOrderBySuggestion() {
   const idx = orderBySuggestionIndex.value;
   if (idx < 0 || idx >= orderBySuggestions.value.length) return;
   const sug = orderBySuggestions.value[idx];
+  if (sug.kind === "history") {
+    orderByInput.value = sug.value;
+    orderBySuggestions.value = [];
+    orderBySuggestionIndex.value = -1;
+    orderByInputRef.value?.focus();
+    return;
+  }
   const lastWordMatch = orderByInput.value.match(/([^\s,()]+)$/);
   if (lastWordMatch) {
     const lastWord = lastWordMatch[1];
     const prefix = orderByInput.value.slice(0, -lastWord.length);
-    orderByInput.value = prefix + sug;
+    orderByInput.value = prefix + sug.value;
   }
   orderBySuggestions.value = [];
   orderBySuggestionIndex.value = -1;
@@ -1343,19 +1388,38 @@ function navigateOrderBySuggestion(delta: number) {
   orderBySuggestionIndex.value = Math.min(Math.max(orderBySuggestionIndex.value + delta, 0), orderBySuggestions.value.length - 1);
 }
 
+function showOrderByHistorySuggestions() {
+  const history = loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByInput.value);
+  orderBySuggestions.value = history.map((value) => ({ value, kind: "history" }));
+  orderBySuggestionIndex.value = orderBySuggestions.value.length ? 0 : -1;
+  if (orderBySuggestions.value.length) updateOrderBySuggestionPosition();
+}
+
+function deleteOrderByHistorySuggestion(value: string) {
+  const history = forgetDataGridConditionHistory("orderBy", conditionHistoryScope.value, value);
+  const query = orderByInput.value;
+  const filtered = query.trim() ? loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, query) : history;
+  orderBySuggestions.value = filtered.map((item) => ({ value: item, kind: "history" }));
+  orderBySuggestionIndex.value = orderBySuggestions.value.length ? Math.min(orderBySuggestionIndex.value, orderBySuggestions.value.length - 1) : -1;
+}
+
 watch(orderByInput, (val) => {
   emit("update:orderByInput", val);
   orderBySuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
-  if (trimmed.length === 0) return;
+  if (trimmed.length === 0) {
+    showOrderByHistorySuggestions();
+    return;
+  }
   const lastToken = trimmed.split(/[\s,()]+/).pop() || "";
   if (lastToken.length > 0 && !["asc", "desc"].includes(lastToken.toLowerCase())) {
     const tl = lastToken.toLowerCase();
     orderBySuggestions.value = props.tableMeta.columns
       .map((c) => c.name)
       .filter((n) => n.toLowerCase().startsWith(tl) && n.toLowerCase() !== tl)
-      .slice(0, 8);
+      .slice(0, 8)
+      .map((value) => ({ value, kind: "column" }));
     orderBySuggestionIndex.value = 0;
     updateOrderBySuggestionPosition();
   }
@@ -3437,6 +3501,7 @@ async function applyOrderBySearch() {
   if (!props.onExecuteSql) return;
   const orderByClause = orderByInput.value.trim() || undefined;
   emit("update:orderByInput", orderByInput.value);
+  if (orderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByClause);
   isApplyingWhere.value = true;
   saveError.value = "";
   currentPage.value = 1;
@@ -3467,10 +3532,12 @@ async function applyOrderBySearch() {
 
 async function applyWhereFilter() {
   if (!props.onExecuteSql) return;
+  const whereInput = currentWhereInput();
+  if (whereInput) rememberDataGridConditionHistory("where", conditionHistoryScope.value, whereInput);
   isApplyingWhere.value = true;
   saveError.value = "";
   currentPage.value = 1;
-  emit("update:whereInput", currentWhereInput() ?? "");
+  emit("update:whereInput", whereInput ?? "");
   try {
     const tableMeta = await waitForTableMeta();
     if (!tableMeta) return;
@@ -3482,7 +3549,7 @@ async function applyWhereFilter() {
       primaryKeys: tableMeta.primaryKeys,
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
-      whereInput: currentWhereInput(),
+      whereInput,
       includeRowId: usesSyntheticRowIdKey(props.databaseType, tableMeta.primaryKeys),
     });
     await props.onExecuteSql(sql);
@@ -6253,17 +6320,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
                     placeholder=""
                     @keydown="onWhereFilterKeydown"
+                    @focus="showWhereHistorySuggestions"
                     @click="updateWhereSuggestionPosition"
                     @blur="dismissWhereSuggestions"
                   />
+                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showWhereHistorySuggestions">
+                    <ChevronDown class="w-3 h-3" />
+                  </button>
                   <span ref="whereMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- WHERE suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="whereSuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
                       <div
                         v-for="(sug, idx) in whereSuggestions"
-                        :key="sug"
-                        class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
+                        :key="`${sug.kind}:${sug.value}`"
+                        class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
                         :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
                         @mousedown.prevent="
                           whereSuggestionIndex = idx;
@@ -6272,7 +6343,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @mouseenter="whereSuggestionIndex = idx"
                       >
                         <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
-                        <span>{{ sug }}</span>
+                        <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
+                        <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteWhereHistorySuggestion(sug.value)">
+                          <X class="h-3 w-3" />
+                        </button>
                       </div>
                     </div>
                   </Teleport>
@@ -6307,17 +6381,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
                     placeholder=""
                     @keydown="onOrderByKeydown"
+                    @focus="showOrderByHistorySuggestions"
                     @click="updateOrderBySuggestionPosition"
                     @blur="dismissOrderBySuggestions"
                   />
+                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showOrderByHistorySuggestions">
+                    <ChevronDown class="w-3 h-3" />
+                  </button>
                   <span ref="orderByMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- ORDER BY suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="orderBySuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
                       <div
                         v-for="(sug, idx) in orderBySuggestions"
-                        :key="sug"
-                        class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
+                        :key="`${sug.kind}:${sug.value}`"
+                        class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
                         :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
                         @mousedown.prevent="
                           orderBySuggestionIndex = idx;
@@ -6326,7 +6404,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @mouseenter="orderBySuggestionIndex = idx"
                       >
                         <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
-                        <span>{{ sug }}</span>
+                        <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
+                        <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteOrderByHistorySuggestion(sug.value)">
+                          <X class="h-3 w-3" />
+                        </button>
                       </div>
                     </div>
                   </Teleport>

@@ -447,6 +447,9 @@ async function runRedisCommand(command: string) {
     // reflects keys added/removed/renamed by SET/DEL/RENAME/...
     if (isRedisMutatingCommand(command)) {
       connectionStore.invalidateCompletionCache(props.connectionId, String(executedDb));
+      // Refresh the sidebar db key counts (INFO keyspace) so `dbN (count)` stays accurate
+      // after the write. Fire-and-forget so the terminal stays responsive.
+      void connectionStore.refreshRedisDbKeyCounts(props.connectionId);
     }
     // Persist to history
     persistRedisHistory(command, true, result.value);

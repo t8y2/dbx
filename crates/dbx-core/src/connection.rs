@@ -823,6 +823,17 @@ impl AppState {
                 return false;
             };
             match pool {
+                PoolKind::Mysql(pool, _) => {
+                    let pool = pool.clone();
+                    drop(connections);
+                    match db::mysql::get_conn_with_health_check(&pool).await {
+                        Ok(_) => false,
+                        Err(err) => {
+                            log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::SqlServer(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -842,6 +853,27 @@ impl AppState {
                         true
                     }
                 },
+                PoolKind::MongoDb(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let (connect_timeout, database) = {
+                        let configs = self.configs.read().await;
+                        let config = config_for_pool_key(pool_key, &configs);
+                        (
+                            config
+                                .map(|config| Duration::from_secs(config.effective_connect_timeout_secs().max(1)))
+                                .unwrap_or_else(|| Duration::from_secs(1)),
+                            config.and_then(|config| config.effective_database().map(str::to_string)),
+                        )
+                    };
+                    match db::mongo_driver::test_connection(&client, connect_timeout, database.as_deref()).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("MongoDB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 _ => false,
             }
         };

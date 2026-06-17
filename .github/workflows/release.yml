@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  CNB_REPOSITORY: "66666/dbx"
+  CNB_REPOSITORY: "dbxio.com/dbx"
   CNB_USERNAME: "cnb"
   CNB_REGISTRY: "docker.cnb.cool"
 

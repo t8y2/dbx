@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  CNB_REPOSITORY: "66666/dbx"
+  CNB_REPOSITORY: "dbxio.com/dbx"
   CNB_REGISTRY: "docker.cnb.cool"
 
 jobs:

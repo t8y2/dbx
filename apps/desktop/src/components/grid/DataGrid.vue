@@ -6916,6 +6916,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :class="[
                         rowNumberStatusClass(item),
                         {
+                          'row-selected': isSelectingAll,
                           'row-selected text-primary font-semibold !bg-gray-300 dark:!bg-gray-800': isRowSelected(item.id) && item.status !== 'new' && item.status !== 'edited' && item.status !== 'deleted',
                         },
                       ]"

@@ -1625,6 +1625,28 @@ function resetVisibleDatabaseDraftState() {
   visibleDatabaseShowSystem.value = false;
 }
 
+/** Silently load database names so the summary count shows a real total. */
+async function preloadVisibleDatabaseNames() {
+  if (!ensureConnectionHostResolvedFromUrl()) return;
+  if (visibleDatabaseNames.value.length > 0) return;
+  isLoadingVisibleDatabases.value = true;
+  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  const draftConfig = {
+    ...connectionConfigForSubmit(draftId),
+    id: draftId,
+    one_time: true,
+  };
+  try {
+    await api.connectDb(draftConfig);
+    visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
+  } catch {
+    // silently fail
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+    isLoadingVisibleDatabases.value = false;
+  }
+}
+
 async function openVisibleDatabasesPicker() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (!canChooseVisibleDatabases.value || isLoadingVisibleDatabases.value) return;
@@ -1806,6 +1828,12 @@ watch(
       void loadJdbcDrivers();
       void loadAgentDrivers();
     }
+    // Preload database names so the summary count is accurate right away.
+    void nextTick(() => {
+      if (canChooseVisibleDatabases.value && hasVisibleDatabaseFilter.value) {
+        void preloadVisibleDatabaseNames();
+      }
+    });
   },
   { immediate: true },
 );

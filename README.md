@@ -186,6 +186,12 @@ scoop bucket add dbx https://github.com/t8y2/scoop-bucket
 scoop install dbx
 ```
 
+**WinGet (Windows):**
+
+```
+winget install t8y2.dbx
+```
+
 ## Self-Hosted (Docker)
 
 DBX provides a web version that can be deployed via Docker.

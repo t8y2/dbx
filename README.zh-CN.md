@@ -186,6 +186,12 @@ scoop bucket add dbx https://github.com/t8y2/scoop-bucket
 scoop install dbx
 ```
 
+**WinGet (Windows):**
+
+```
+winget install t8y2.dbx
+```
+
 ## 自托管 (Docker)
 
 DBX 提供 Web 版本，可通过 Docker 部署。

@@ -2683,6 +2683,7 @@ const selection = useDataGridSelection({
 });
 
 const {
+  isSelectingAll,
   selectedRange,
   selectedCells,
   selectedCellCount,
@@ -3863,12 +3864,6 @@ const canvasEditingCellIsNumeric = computed(() => {
   return typeof displayItemAt(cell.rowIndex)?.data[cell.actualColIdx] === "number";
 });
 
-const canvasSingleSelectedCell = computed(() => {
-  const range = selectedRange.value;
-  if (!range || range.startRow !== range.endRow || range.startCol !== range.endCol) return null;
-  return { rowIndex: range.startRow, visibleColIdx: range.startCol };
-});
-
 function canvasEffectiveViewportWidth(): number {
   return canvasViewportWidth.value || canvasScrollerElement()?.clientWidth || 0;
 }
@@ -3950,7 +3945,6 @@ function drawCanvasGrid() {
     hoverCell: canvasHoverCell.value,
     isScrolling: isScrolling.value,
     editingCell: editingCell.value,
-    singleSelectedCell: canvasSingleSelectedCell.value,
     searchMatchKeys: searchMatchSet.value,
     currentSearchMatch: currentSearchMatch.value,
     formatCell: formatCellCached,
@@ -6164,7 +6158,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         v-for="(sug, idx) in whereSuggestions"
                         :key="sug"
                         class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                        :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
+                        :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
                         @mousedown.prevent="
                           whereSuggestionIndex = idx;
                           acceptWhereSuggestion();
@@ -6218,7 +6212,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         v-for="(sug, idx) in orderBySuggestions"
                         :key="sug"
                         class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                        :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
+                        :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
                         @mousedown.prevent="
                           orderBySuggestionIndex = idx;
                           acceptOrderBySuggestion();
@@ -6338,7 +6332,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     v-for="(sug, idx) in searchSuggestions"
                     :key="sug"
                     class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                    :class="idx === suggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
+                    :class="idx === suggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
                     @mousedown.prevent="
                       suggestionIndex = idx;
                       acceptSuggestion();
@@ -6439,7 +6433,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                         'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
-                        'hover:bg-accent/50':
+                        'hover:bg-gray-200 dark:hover:bg-gray-800':
                           !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                       }"
                       :style="{ width: `${getTransposeRecordWidth(cell.recordIndex)}px` }"
@@ -6499,15 +6493,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </div>
             <template v-else>
               <!-- Sticky header -->
-              <div ref="headerRef" class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 border-y border-border overflow-hidden">
-                <div class="flex text-xs font-semibold text-foreground" :style="{ width: 'var(--header-total-w)' }">
-                  <div class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none cursor-pointer hover:bg-accent/60 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted" :style="{ width: 'var(--row-num-w)' }" @click="selectAllCells">#</div>
+              <div ref="headerRef" class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 w-(--header-total-w) border-y border-border overflow-hidden">
+                <div class="flex text-xs font-semibold text-foreground">
+                  <div
+                    class="shrink-0 px-2 py-1.5 border-r w-(--row-num-w) border-border text-center text-muted-foreground select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted"
+                    :class="{ '!bg-gray-300 dark:!bg-gray-900 outline outline-primary -outline-offset-1': isSelectingAll }"
+                    @click="selectAllCells"
+                  >
+                    #
+                  </div>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
                   <LightTooltip v-for="col in renderedGridColumns" :key="`${col.name}-${col.actualColIdx}`" :text="col.name" side="bottom" :side-offset="4">
                     <div
-                      class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-accent/60 select-none relative overflow-hidden"
+                      class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-gray-200 dark:hover:bg-gray-800 select-none relative overflow-hidden"
                       :class="{
-                        'bg-primary/15 ring-1 ring-inset ring-primary/40': highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
+                        '!bg-gray-300 dark:!bg-gray-900 outline outline-primary -outline-offset-1': highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
                         'bg-amber-500/20 ring-1 ring-inset ring-amber-500/40': currentSearchMatch?.kind === 'column' && currentSearchMatch.col === col.actualColIdx,
                       }"
                       :style="renderedColumnStyle(col.visibleColIdx)"
@@ -6530,7 +6530,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <button
                           v-if="headerColumnSortable(col.actualColIdx)"
                           type="button"
-                          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                           :class="sortCol === col.name && sortColIndex === col.actualColIdx ? 'text-primary opacity-100' : 'opacity-80'"
                           :title="t('grid.sort')"
                           @click.stop="toggleSort(col.name, col.actualColIdx)"
@@ -6543,7 +6543,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <DropdownMenuTrigger as-child>
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx) ? 'text-primary opacity-90' : 'opacity-80'"
                               :title="t('grid.columnActions')"
                               @click.stop
@@ -6569,7 +6569,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <PopoverTrigger v-else as-child>
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="columnHasFormatter(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
                               :disabled="!formatterKeyForColumn(col.name)"
                               :title="t('grid.columnFormatter')"
@@ -6713,7 +6713,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <PopoverTrigger v-else as-child>
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="localFilterActive(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
                               :title="t('grid.localFilter')"
                               @click.stop
@@ -6802,7 +6802,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </template>
                   </LightTooltip>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.afterWidth}px` }" />
-                  <div v-if="gridScrollbarGutter > 0" class="shrink-0 border-l border-border" :style="{ width: 'var(--grid-scrollbar-gutter)' }" />
+                  <div v-if="gridScrollbarGutter > 0" class="shrink-0 border-l border-border w-(--grid-scrollbar-gutter)" />
                 </div>
               </div>
 
@@ -6900,25 +6900,23 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               >
                 <template #default="{ item }">
                   <div
-                    class="flex text-[13px] border-b border-border"
+                    class="flex text-xs border-b border-border h-6.5 w-(--total-w)"
                     :class="{
                       'bg-destructive/5 opacity-70': item.isDeleted,
                       'bg-primary/5': item.isNew && !isRowActive(item.displayIndex),
                       'bg-muted/30': !item.isNew && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
                       'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
                     }"
-                    :style="{ height: '26px', width: 'var(--total-w)' }"
                     :data-row-index="item.displayIndex"
                   >
                     <div
-                      class="data-grid-row-number shrink-0 px-2 py-1 border-r border-border text-center select-none cursor-default hover:bg-accent/50 sticky left-0 z-10 bg-[rgb(255_255_255)] dark:bg-[rgb(35_37_42)]"
+                      class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-10 bg-background"
                       :class="[
                         rowNumberStatusClass(item),
                         {
-                          'text-primary font-semibold !bg-primary/25': isRowSelected(item.id) && item.status !== 'new' && item.status !== 'edited' && item.status !== 'deleted',
+                          'row-selected text-primary font-semibold !bg-gray-300 dark:!bg-gray-800': isRowSelected(item.id) && item.status !== 'new' && item.status !== 'edited' && item.status !== 'deleted',
                         },
                       ]"
-                      :style="{ width: 'var(--row-num-w)' }"
                       @click="handleRowClick(item.displayIndex, item.id, $event)"
                       @dblclick.stop="toggleTranspose(item.displayIndex)"
                       @contextmenu="onRowContext(item.id, item.displayIndex)"
@@ -6941,7 +6939,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                         'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                         'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
-                        'cursor-text hover:bg-accent/50': !isScrolling && canEditCellItem(item, col.actualColIdx),
+                        'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx),
                         'line-through': item.isDeleted,
                       }"
                       @mousedown="handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event)"
@@ -7032,8 +7030,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <button
                 v-for="tab in tableInfoTabs"
                 :key="tab.id"
-                class="pt-0.5 h-9 min-w-0 px-1.5 text-[11px] text-muted-foreground border-b-2 border-transparent hover:bg-muted/50 hover:text-foreground"
-                :class="{ 'border-primary! text-foreground! bg-muted/40': activeTableInfoTab === tab.id }"
+                class="h-9 min-w-0 px-1.5 text-[11px] text-muted-foreground border-b-2 border-transparent hover:bg-gray-200 dark:hover:bg-gray-800/50 hover:text-foreground"
+                :class="{ 'border-primary text-foreground bg-muted/40': activeTableInfoTab === tab.id }"
                 :title="tab.label"
                 @click="selectTableInfoTab(tab.id)"
               >
@@ -7069,7 +7067,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <tr
                     v-for="(column, index) in filteredColumns"
                     :key="column.name"
-                    class="border-b cursor-pointer hover:bg-muted/30"
+                    class="border-b cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800/30"
                     role="button"
                     tabindex="0"
                     :title="column.name"
@@ -7781,6 +7779,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 </template>
 
 <style scoped>
+@reference "../../styles/globals.css";
+
 [data-grid-root] {
   --data-grid-row-muted-bg: rgb(248 248 248);
   --data-grid-row-new-bg: rgb(243 243 243);
@@ -7994,12 +7994,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   transition: none;
 }
 
-.cell-selected {
-  background-color: var(--data-grid-cell-selected-bg);
-  outline: 1px solid var(--data-grid-cell-selected-border);
-  outline-offset: -1px;
-}
-
 .row-cell-selected {
   background-color: var(--data-grid-cell-selected-bg);
   outline: 1px solid var(--data-grid-cell-selected-border);
@@ -8040,16 +8034,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   background-color: var(--data-grid-row-number-deleted-bg);
 }
 
-.active-row > div:not(.cell-dirty) {
-  background-color: var(--data-grid-cell-active-bg);
-}
-
+.cell-selected,
+.active-row > div:not(.cell-dirty),
 .active-row > .data-grid-row-number:not(.cell-dirty) {
-  background-color: var(--data-grid-row-number-active-bg);
+  @apply text-foreground bg-gray-300 dark:bg-gray-900;
 }
 
-.data-grid-row-number.\!bg-primary\/25 {
-  background-color: var(--data-grid-row-number-selected-bg) !important;
+.cell-selected,
+.active-row .row-selected.data-grid-row-number {
+  @apply outline outline-primary -outline-offset-1;
 }
 
 .ddl-code :deep(.ddl-kw) {

@@ -30,6 +30,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   const selectionFocus = ref<CellPosition | null>(null);
   const isSelectingCells = ref(false);
 
+  const isSelectingAll = ref(false);
   const selectedRowIds = ref<Set<number>>(new Set());
   const selectedColumnIndexes = ref<Set<number>>(new Set());
   const lastClickedRowIndex = ref<number | null>(null);
@@ -62,9 +63,11 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectionFocus.value = null;
     selectedColumnIndexes.value = new Set();
     isSelectingCells.value = false;
+    isSelectingAll.value = false;
   }
 
   function clearRowSelection() {
+    isSelectingAll.value = false;
     selectedRowIds.value = new Set();
     lastClickedRowIndex.value = null;
   }
@@ -132,6 +135,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     lastClickedColumnIndex.value = null;
     selectionAnchor.value = { rowIndex: range.startRow, colIndex: range.startCol };
     selectionFocus.value = { rowIndex: range.endRow, colIndex: range.endCol };
+    isSelectingAll.value = true;
     focusGridWithoutScrolling();
   }
 
@@ -252,6 +256,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectedCells,
     selectedCellCount,
     hasCellSelection,
+    isSelectingAll,
     clearCellSelection,
     selectSingleCell,
     selectRow,

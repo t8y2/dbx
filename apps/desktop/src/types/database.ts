@@ -52,7 +52,8 @@ export type DatabaseType =
   | "etcd"
   | "iris"
   | "influxdb"
-  | "jdbc";
+  | "jdbc"
+  | "mq";
 
 export interface SqlSnippet {
   id: string;
@@ -80,6 +81,7 @@ export interface ConnectionConfig {
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
   idle_timeout_secs?: number;
+  keepalive_interval_secs?: number;
   ssl?: boolean;
   ca_cert_path?: string;
   client_cert_path?: string;
@@ -99,6 +101,8 @@ export interface ConnectionConfig {
   redis_key_separator?: string;
   etcd_endpoints?: string;
   gbase_server?: string;
+  informix_server?: string;
+  external_config?: unknown;
   one_time?: boolean;
   read_only?: boolean;
 }
@@ -118,6 +122,7 @@ export interface SshTunnelConfig {
   connect_timeout_secs?: number;
   expose_lan?: boolean;
   use_ssh_agent?: boolean;
+  ssh_agent_sock_path?: string;
 }
 
 export interface ProxyTunnelConfig {
@@ -210,7 +215,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -223,7 +228,7 @@ export interface ObjectInfo {
   parent_name?: string | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -389,6 +394,7 @@ export type TreeNodeType =
   | "schema"
   | "table"
   | "view"
+  | "materialized_view"
   | "procedure"
   | "function"
   | "sequence"
@@ -400,6 +406,7 @@ export type TreeNodeType =
   | "group-triggers"
   | "group-tables"
   | "group-views"
+  | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
   | "group-sequences"
@@ -416,6 +423,7 @@ export type TreeNodeType =
   | "fkey"
   | "trigger"
   | "redis-db"
+  | "mq-tenant"
   | "etcd-root"
   | "mongo-db"
   | "mongo-collection"
@@ -444,6 +452,7 @@ export interface TreeNode {
   pinned?: boolean;
   connectionId?: string;
   database?: string;
+  mqTenant?: string;
   schema?: string;
   tableName?: string;
   comment?: string | null;
@@ -460,6 +469,8 @@ export interface TreeNode {
     pageSize: number;
   };
 }
+
+export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
 
 export interface QueryTab {
   id: string;
@@ -512,7 +523,8 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  mode: "data" | "query" | "redis" | "mongo" | "etcd" | "objects" | "structure" | "users";
+  mode: "data" | "query" | "redis" | "mongo" | "etcd" | "mq" | "objects" | "structure" | "users";
+  mqTenant?: string;
   structureTableName?: string;
   objectBrowser?: {
     schema?: string;
@@ -530,6 +542,7 @@ export interface QueryTab {
     columns: ColumnInfo[];
     primaryKeys: string[];
   };
+  tableInfoTab?: TableInfoTab;
   queryAnalysis?: {
     schema?: string;
     schemaQuoted?: boolean;

@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/utils";
 import { ref, computed, watch } from "vue";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SidebarLayout, TreeNode } from "@/types/database";
-import { applyPinnedTreeNodeState, orderPinnedFirst } from "@/lib/pinnedItems";
+import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/pinnedItems";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -51,7 +51,11 @@ import { useSettingsStore } from "@/stores/settingsStore";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
-const SIDEBAR_OBJECT_GROUP_PAGE_SIZE = 500;
+function sidebarObjectGroupPageSize(): number {
+  const settingsStore = useSettingsStore();
+  const size = settingsStore.desktopSettings.sidebar_table_page_size;
+  return typeof size === "number" && size > 0 ? size : 500;
+}
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 // Temporary storage for DataGrip import payload (used to read Keychain passwords after import)
@@ -108,7 +112,9 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionForeignKeysCache = ref<Record<string, ForeignKeyInfo[]>>({});
   const completionDatabasesCache = ref<Record<string, string[]>>({});
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
+  const redisCompletionKeysCache = ref<Record<string, string[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
+  const sidebarSearchQuery = ref("");
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
   const completionObjectIndex = new Map<string, { touched: number; objects: SqlCompletionObject[] }>();
   const completionColumnIndex = new Map<string, { touched: number; columns: SqlCompletionColumn[] }>();
@@ -304,6 +310,7 @@ export const useConnectionStore = defineStore("connection", () => {
       connect_timeout_secs: config.connect_timeout_secs || 5,
       query_timeout_secs: config.query_timeout_secs ?? 30,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
+      keepalive_interval_secs: config.keepalive_interval_secs ?? 0,
     };
   }
 
@@ -455,9 +462,12 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!options.node.connectionId || !options.node.database) {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
-    const fetchLimit = options.pageSize + 1;
-    const tables = await api.listTables(options.node.connectionId, options.node.database, options.querySchema, undefined, fetchLimit, options.offset);
-    const hasMore = tables.length > options.pageSize;
+    const searchFilter = sidebarSearchQuery.value || undefined;
+    // When searching, fetch all matching tables (no pagination) — backend filter
+    // already narrows the result set, so client-side filtering is not needed.
+    const fetchLimit = searchFilter ? undefined : options.pageSize + 1;
+    const tables = await api.listTables(options.node.connectionId, options.node.database, options.querySchema, searchFilter, fetchLimit, searchFilter ? undefined : options.offset, options.objectTypes);
+    const hasMore = searchFilter ? false : tables.length > options.pageSize;
     const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
     const objects = mergeTableInfosIntoObjects([], pageTables, options.effectiveSchema);
     const visibleObjectCount = objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))).length;
@@ -556,18 +566,8 @@ export const useConnectionStore = defineStore("connection", () => {
     pinnedTreeNodeIds.value = next;
     persistPinnedTreeNodeIds();
 
-    const node = findNode(treeNodes.value, id);
-    if (node) node.pinned = next.has(id);
-
-    const isConnectionOrGroup = !!findNode(treeNodes.value, id);
-    if (isConnectionOrGroup) {
-      rebuildTreeNodes();
-    } else {
-      const parent = findParentNode(treeNodes.value, id);
-      if (parent?.children) {
-        parent.children = orderPinnedFirst(parent.children, (child) => !!child.pinned);
-      }
-    }
+    const scope = updatePinnedTreeNodeInPlace(treeNodes.value, id, next.has(id));
+    if (scope === "root") rebuildTreeNodes();
   }
 
   async function addConnection(config: ConnectionConfig) {
@@ -607,6 +607,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     for (const key of Object.keys(elasticsearchCompletionIndicesCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete elasticsearchCompletionIndicesCache.value[key];
+    }
+    for (const key of Object.keys(redisCompletionKeysCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete redisCompletionKeysCache.value[key];
     }
     for (const key of completionTableIndex.keys()) {
       if (key.startsWith(cachePrefix)) completionTableIndex.delete(key);
@@ -736,6 +739,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
       await loadElasticsearchIndices(connectionId);
+    } else if (config.db_type === "mq") {
+      await loadMqTenants(connectionId, { force: true });
     } else {
       await loadDatabases(connectionId, { force: true });
     }
@@ -1021,6 +1026,36 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function loadMqTenants(connectionId: string, options?: LoadTreeOptions) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node, options)) return;
+
+      const tenants = await api.mqListTenants(connectionId);
+      const tenantNames = sortSidebarNames(tenants.map((tenant) => tenant.name).filter((name) => !!name.trim()));
+      setChildren(
+        node,
+        tenantNames.map((tenant) => ({
+          id: schemaCacheKey(connectionId, "mq-tenant", tenant),
+          label: tenant,
+          type: "mq-tenant" as const,
+          connectionId,
+          mqTenant: tenant,
+        })),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
   function updateRedisDbKeyStats(connectionId: string, db: number, stats: { loaded?: number; total?: number; totalDelta?: number }) {
     const node = findNode(treeNodes.value, `${connectionId}:db${db}`);
     if (!node || node.type !== "redis-db") return;
@@ -1030,6 +1065,24 @@ export const useConnectionStore = defineStore("connection", () => {
       node.totalKeyCount = Math.max(0, node.totalKeyCount + stats.totalDelta);
     }
     node.label = redisDbLabel(db, node.loadedKeyCount, node.totalKeyCount);
+  }
+
+  // Re-fetch the authoritative per-db key counts (INFO keyspace, lightweight) and update
+  // the sidebar db nodes' counts in place — WITHOUT rebuilding the tree, so already-loaded
+  // key trees under expanded db nodes are preserved. Used after a Redis write command so the
+  // `dbN (count)` labels reflect the new reality without a manual refresh.
+  async function refreshRedisDbKeyCounts(connectionId: string) {
+    const connNode = findNode(treeNodes.value, connectionId);
+    if (!connNode) return;
+    try {
+      await ensureConnected(connectionId);
+      const dbs = await api.redisListDatabases(connectionId);
+      for (const db of dbs) {
+        updateRedisDbKeyStats(connectionId, db.db, { total: db.keys });
+      }
+    } catch {
+      // Best-effort: a failed count refresh must not disrupt the result view.
+    }
   }
 
   async function loadMongoDatabases(connectionId: string) {
@@ -1272,7 +1325,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const querySchema = connectionObjectTreeQuerySchema(config, node.database, node.schema);
       const effectiveSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
       const cacheKey = objectGroupCacheKey(node);
-      if (!options?.force) {
+      if (!options?.force && !sidebarSearchQuery.value) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
           if (cached.isStale) refreshStaleTreeNode(node);
@@ -1280,7 +1333,7 @@ export const useConnectionStore = defineStore("connection", () => {
         }
       }
 
-      const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW");
+      const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW");
       let children: TreeNode[];
       if (wantsOnlyTablesOrViews) {
         const page = await loadPagedTableGroupChildren({
@@ -1290,9 +1343,9 @@ export const useConnectionStore = defineStore("connection", () => {
           effectiveSchema,
           objectTypes,
           offset: 0,
-          pageSize: SIDEBAR_OBJECT_GROUP_PAGE_SIZE,
+          pageSize: sidebarObjectGroupPageSize(),
         });
-        children = page.hasMore ? [...page.children, buildLoadMoreNode(node, page.nextOffset, SIDEBAR_OBJECT_GROUP_PAGE_SIZE)] : page.children;
+        children = page.hasMore && !sidebarSearchQuery.value ? [...page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize())] : page.children;
         node.objectCount = page.objectCount;
       } else {
         const objects = await api.listObjects(node.connectionId, node.database, querySchema, objectTypes);
@@ -1306,7 +1359,9 @@ export const useConnectionStore = defineStore("connection", () => {
         node.objectCount = children.length;
       }
       setChildren(node, children);
-      await savePersistedTreeChildren(cacheKey, children);
+      if (!sidebarSearchQuery.value) {
+        await savePersistedTreeChildren(cacheKey, children);
+      }
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(node.connectionId, e);
@@ -1326,7 +1381,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const objectTypes = objectTypesForGroupNode(parent.type);
       const parentNodeId = objectGroupRefreshParentId(parent);
       if (!objectTypes || !parentNodeId) return;
-      if (!objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW")) return;
+      if (!objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW")) return;
 
       const config = getConfig(parent.connectionId);
       const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
@@ -1591,6 +1646,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await loadElasticsearchIndices(node.connectionId);
+      } else if (config?.db_type === "mq") {
+        await loadMqTenants(node.connectionId, options);
       } else {
         await loadDatabases(node.connectionId, options);
       }
@@ -1608,7 +1665,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await loadTables(node.connectionId, node.database, node.schema, options);
-    } else if ((node.type === "table" || node.type === "view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+    } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
@@ -1618,7 +1675,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
-    } else if (node.type === "group-tables" || node.type === "group-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages") {
+    } else if (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages") {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
@@ -1939,6 +1996,27 @@ export const useConnectionStore = defineStore("connection", () => {
     return elasticsearchCompletionIndicesCache.value[cacheKey];
   }
 
+  // Upper bound on cached key names per db, to keep completion memory bounded
+  // (Redis can hold far more keys than we ever want resident for autocomplete).
+  const REDIS_COMPLETION_KEYS_MAX = 1000;
+
+  async function listRedisCompletionKeys(connectionId: string, database: string): Promise<string[]> {
+    if (!database) return [];
+    const cacheKey = `${connectionId}:${database}`;
+    const cached = redisCompletionKeysCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:redis-keys`, async () => {
+      await ensureConnected(connectionId);
+      const pageSize = settingsStore.editorSettings.redisScanPageSize;
+      // Bounded multi-round SCAN: trade coverage for latency/memory safety.
+      const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6);
+      const keys = result.keys.map((key) => key.key_display).slice(0, REDIS_COMPLETION_KEYS_MAX);
+      redisCompletionKeysCache.value[cacheKey] = keys;
+      evictOldestCacheEntries(redisCompletionKeysCache.value, COMPLETION_CACHE_MAX);
+      return keys;
+    });
+  }
+
   async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string): Promise<SqlCompletionTable[]> {
     const normalizedFilter = filter.trim().toLowerCase();
     const relaxedFilter = relaxedCompletionTableFilter(normalizedFilter);
@@ -1965,7 +2043,7 @@ export const useConnectionStore = defineStore("connection", () => {
                   return tables.map((table) => ({
                     name: table.name,
                     schema: s,
-                    type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+                    type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
                   })) as SqlCompletionTable[];
                 } catch {
                   return [] as SqlCompletionTable[];
@@ -1987,7 +2065,7 @@ export const useConnectionStore = defineStore("connection", () => {
                     return tables.map((table) => ({
                       name: table.name,
                       schema: s,
-                      type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+                      type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
                     })) as SqlCompletionTable[];
                   } catch {
                     return [] as SqlCompletionTable[];
@@ -2014,7 +2092,7 @@ export const useConnectionStore = defineStore("connection", () => {
               return tables.map((table) => ({
                 name: table.name,
                 schema,
-                type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+                type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
               }));
             } catch {
               return [];
@@ -2033,7 +2111,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       completionTablesCache.value[cacheKey] = tables.map((table) => ({
         name: table.name,
-        type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+        type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
       }));
       completionTablesCache.value[cacheKey] = limit ? completionTablesCache.value[cacheKey].slice(0, limit) : completionTablesCache.value[cacheKey];
       indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey]);
@@ -2699,7 +2777,9 @@ export const useConnectionStore = defineStore("connection", () => {
     initFromDisk,
     loadDatabases,
     loadRedisDatabases,
+    refreshRedisDbKeyCounts,
     loadEtcdRoot,
+    loadMqTenants,
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadElasticsearchIndices,
@@ -2733,6 +2813,8 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionSchemas,
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
+    listRedisCompletionKeys,
+    invalidateCompletionCache,
     exportConnectionsToFile,
     readImportFile,
     importConnectionsFromFile,
@@ -2748,6 +2830,7 @@ export const useConnectionStore = defineStore("connection", () => {
     fieldLineageSource,
     databaseSearchSource,
     databaseExportSource,
+    sidebarSearchQuery,
     createConnectionGroup(name: string, parentGroupId?: string | null) {
       const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
       updateLayoutAndRebuild(result.layout);

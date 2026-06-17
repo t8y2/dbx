@@ -46,6 +46,6 @@ export function createInstallOptions(lang: InstallLang, version: string): Instal
   return downloadArtifacts.map((artifact) => ({
     id: artifact.id,
     label: artifact.labels[lang],
-    href: `${DOWNLOAD_BASE_URL}/DBX_${version}_${artifact.suffix}`,
+    href: `${DOWNLOAD_BASE_URL}/DBX_${version}_${artifact.suffix}?v=${version}`,
   }));
 }

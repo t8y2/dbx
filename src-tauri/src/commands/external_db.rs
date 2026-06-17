@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const DB_EXTENSIONS: &[&str] = &["db", "sqlite", "sqlite3", "duckdb"];
+const DB_EXTENSIONS: &[&str] = &["db", "db3", "sqlite", "sqlite3", "duckdb"];
 
 #[derive(Default)]
 pub struct ExternalDbOpenState {
@@ -77,11 +77,11 @@ mod tests {
     #[test]
     fn filters_db_file_args_case_insensitively() {
         let paths = db_file_paths_from_args(
-            ["/tmp/a.db", "--flag", "/tmp/b.SQLITE", "/tmp/c.sqlite3", "/tmp/d.duckdb", "/tmp/e.txt"],
+            ["/tmp/a.db", "--flag", "/tmp/b.SQLITE", "/tmp/c.sqlite3", "/tmp/d.duckdb", "/tmp/e.db3", "/tmp/f.txt"],
             Path::new("/work"),
         );
 
-        assert_eq!(paths, vec!["/tmp/a.db", "/tmp/b.SQLITE", "/tmp/c.sqlite3", "/tmp/d.duckdb"]);
+        assert_eq!(paths, vec!["/tmp/a.db", "/tmp/b.SQLITE", "/tmp/c.sqlite3", "/tmp/d.duckdb", "/tmp/e.db3"]);
     }
 
     #[test]
@@ -103,6 +103,7 @@ mod tests {
     #[test]
     fn is_db_file_path_recognizes_extensions() {
         assert!(is_db_file_path(Path::new("test.db")));
+        assert!(is_db_file_path(Path::new("test.db3")));
         assert!(is_db_file_path(Path::new("test.sqlite")));
         assert!(is_db_file_path(Path::new("test.sqlite3")));
         assert!(is_db_file_path(Path::new("test.duckdb")));

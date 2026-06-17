@@ -916,7 +916,16 @@ pub fn redis_command_raw_to_json(value: RedisRawValue) -> serde_json::Value {
             "kind": format!("{kind:?}"),
             "data": redis_command_raw_to_json(RedisRawValue::Array(data)),
         }),
-        RedisRawValue::BulkString(bytes) => serde_json::Value::String(redis_bytes_to_display(&bytes)),
+        RedisRawValue::BulkString(bytes) => {
+            let text = redis_bytes_to_display(&bytes);
+            let trimmed = text.trim();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    return super::json_value_for_js(json);
+                }
+            }
+            serde_json::Value::String(text)
+        }
         RedisRawValue::SimpleString(value) => serde_json::Value::String(value),
         RedisRawValue::Okay => serde_json::Value::String("OK".to_string()),
         RedisRawValue::Int(value) => super::safe_i64_to_json(value),
@@ -972,6 +981,15 @@ where
     redis::cmd("FLUSHDB").query_async::<()>(con).await.map_err(|e| e.to_string())
 }
 
+/// Extract a string reference from a `RedisRawValue` if it is a BulkString or SimpleString.
+fn redis_raw_value_as_str(v: &RedisRawValue) -> Option<&str> {
+    match v {
+        RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).ok(),
+        RedisRawValue::SimpleString(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 pub async fn execute_command<C>(
     con: &mut C,
     command_text: &str,
@@ -992,6 +1010,36 @@ where
         cmd.arg(arg);
     }
     let raw: RedisRawValue = cmd.query_async(con).await.map_err(|e| e.to_string())?;
+
+    // Special handling for INFO command in cluster mode.
+    // redis-rs ClusterConnection routes INFO to all primaries and
+    // aggregates the results as a Map(node_addr → full_info_text).
+
+    // We detect this pattern and return it as an array of
+    // [node_addr, info_text] pairs, which the frontend renders
+    // as a two-column (index → node_addr, value → info_text) table.
+    if command == "INFO" {
+        if let RedisRawValue::Map(entries) = &raw {
+            // Cluster-aggregated INFO has multi-line values starting with "# "
+            // (e.g. "# Server", "# Memory", "# Clients").
+            // This distinguishes it from a RESP3 standalone INFO map where values
+            // are single field values (e.g. "redis_version", "os") or nested maps.
+            let is_cluster_aggregation =
+                entries.iter().any(|(_, v)| redis_raw_value_as_str(v).is_some_and(|s| s.starts_with("# ")));
+
+            if is_cluster_aggregation {
+                let pairs: Vec<serde_json::Value> = entries
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        let addr = redis_raw_value_as_str(key)?;
+                        let info = redis_raw_value_as_str(value)?;
+                        Some(serde_json::json!([addr, info]))
+                    })
+                    .collect();
+                return Ok(RedisCommandResult { command, safety, value: serde_json::Value::Array(pairs) });
+            }
+        }
+    }
 
     Ok(RedisCommandResult { command, safety, value: redis_command_raw_to_json(raw) })
 }
@@ -2001,6 +2049,25 @@ mod tests {
     }
 
     #[test]
+    fn converts_bulkstring_json_with_unsafe_int64_for_js() {
+        let raw = RedisRawValue::BulkString(br#"{"uid":2321205972557213697,"name":"test"}"#.to_vec());
+
+        assert_eq!(redis_command_raw_to_json(raw), serde_json::json!({"uid": "2321205972557213697", "name": "test"}));
+    }
+
+    #[test]
+    fn keeps_plain_bulkstring_as_is() {
+        let raw = RedisRawValue::BulkString(b"hello world".to_vec());
+        assert_eq!(redis_command_raw_to_json(raw), serde_json::json!("hello world"));
+    }
+
+    #[test]
+    fn keeps_string_like_number_as_string() {
+        let raw = RedisRawValue::BulkString(b"42".to_vec());
+        assert_eq!(redis_command_raw_to_json(raw), serde_json::json!("42"));
+    }
+
+    #[test]
     fn recognizes_redis_json_module_key_types() {
         assert!(is_redis_json_type("ReJSON-RL"));
         assert!(is_redis_json_type("json"));
@@ -2068,6 +2135,7 @@ mod tests {
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -2085,6 +2153,7 @@ mod tests {
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

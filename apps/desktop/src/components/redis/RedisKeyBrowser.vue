@@ -23,8 +23,9 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
+import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
-import { formatRedisCommandResult, formatRedisStringValue } from "@/lib/redisValuePresentation";
+import { formatRedisConsoleValue, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
@@ -433,12 +434,22 @@ async function runRedisCommand(command: string) {
     appendCommandHistory({
       prompt,
       command,
-      output: formatRedisCommandResult(result.value),
+      output: formatRedisConsoleValue(result.value),
       error: false,
     });
+    // The db this command ran on — capture before nextRedisCommandDb() advances it.
+    const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);
     if (result.safety === "confirm") {
       await loadKeys();
+    }
+    // Drop the cached key-name completion for this db so the editor's autocomplete
+    // reflects keys added/removed/renamed by SET/DEL/RENAME/...
+    if (isRedisMutatingCommand(command)) {
+      connectionStore.invalidateCompletionCache(props.connectionId, String(executedDb));
+      // Refresh the sidebar db key counts (INFO keyspace) so `dbN (count)` stays accurate
+      // after the write. Fire-and-forget so the terminal stays responsive.
+      void connectionStore.refreshRedisDbKeyCounts(props.connectionId);
     }
     // Persist to history
     persistRedisHistory(command, true, result.value);
@@ -816,38 +827,13 @@ function resumeRedisBrowserBackgroundWork() {
   registerRedisDbFlushedListener();
 }
 
-async function loadPersistedRedisHistory() {
-  try {
-    const entries = await api.loadRedisHistory(200, 0);
-    if (entries.length === 0) return;
-    // Merge persisted entries into in-memory commandHistory (newest first, reversed for display order)
-    const persisted: RedisCommandHistoryEntry[] = entries.reverse().map((entry) => ({
-      id: ++commandHistoryId,
-      prompt: `db${entry.database}>`,
-      command: entry.sql,
-      output: entry.details_json ? formatRedisCommandResult(JSON.parse(entry.details_json)) : entry.error || "",
-      error: !entry.success,
-    }));
-    commandHistory.value = [...persisted, ...commandHistory.value];
-    scrollCommandTerminalToEnd();
-  } catch {
-    // Silently ignore load errors — history is best-effort
-  }
-}
-
-async function clearPersistedRedisHistory() {
-  try {
-    await api.clearRedisHistory();
-    toast(t("redis.historyCleared"));
-  } catch {
-    // Silently ignore
-  }
+async function clearInMemoryHistory() {
+  commandHistory.value = [];
 }
 
 onMounted(() => {
   resumeRedisBrowserBackgroundWork();
   void loadKeys();
-  void loadPersistedRedisHistory();
 });
 
 onActivated(resumeRedisBrowserBackgroundWork);
@@ -976,7 +962,7 @@ defineExpose({ focusSearch });
                   {{ t("redis.pubsub") }}
                 </TabsTrigger>
               </TabsList>
-              <Button v-if="activeSidePanel === 'command'" variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearPersistedRedisHistory">
+              <Button v-if="activeSidePanel === 'command'" variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearInMemoryHistory">
                 <History class="size-3.5" />
               </Button>
             </div>

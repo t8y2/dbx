@@ -609,7 +609,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
         serde_json::Value::Number(n) => match db_type {
             DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
                 if column_type.is_some_and(is_mysql_bit_type) {
-                    format!("b'{}'", n.to_string())
+                    format!("b'{}'", n)
                 } else {
                     n.to_string()
                 }
@@ -842,8 +842,13 @@ fn is_timezone_suffix(value: &str) -> bool {
 }
 
 pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: &DatabaseType) -> String {
+    if _source_db == target_db {
+        return source_type.to_string();
+    }
     let t = source_type.to_lowercase();
-    let base = t.split('(').next().unwrap_or(&t).trim();
+    let mut base = t.split('(').next().unwrap_or(&t).trim();
+    // Extract basic type, `bigint unsigned` -> `bigint`
+    base = base.split(' ').next().unwrap_or(base).trim();
 
     if matches!(target_db, DatabaseType::Hive) {
         return match base {
@@ -2453,6 +2458,101 @@ pub async fn clear_cancelled(transfer_id: &str) {
     CANCELLED.write().await.remove(transfer_id);
 }
 
+/// Sort table names by foreign key dependency.
+///
+/// When `parents_first` is true (data transfer / SQL export), referenced (parent)
+/// tables come before referencing (child) tables so inserts don't violate FK
+/// constraints.
+///
+/// When `parents_first` is false (batch drop), referencing (child) tables come
+/// first so they are dropped before the tables they reference.
+///
+/// Uses Kahn's algorithm for topological sort; tables involved in cycles keep
+/// their original relative order after all cycle-free tables.
+pub async fn sort_tables_by_fk_dependency(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    tables: &[String],
+    parents_first: bool,
+) -> Result<Vec<String>, String> {
+    if tables.len() <= 1 {
+        return Ok(tables.to_vec());
+    }
+
+    let table_set: HashSet<&str> = tables.iter().map(|t| t.as_str()).collect();
+
+    // Gather FK relationships for every table.
+    let mut dependency_map: HashMap<String, Vec<String>> = HashMap::new();
+    for table in tables {
+        let fks = crate::schema::list_foreign_keys_core(state, connection_id, database, schema, table).await?;
+        let deps: Vec<String> = fks
+            .iter()
+            .map(|fk| fk.ref_table.clone())
+            .filter(|ref_table| table_set.contains(ref_table.as_str()))
+            .collect();
+        dependency_map.insert(table.clone(), deps);
+    }
+
+    // Build in-degree and dependents graph.
+    // parents_first=true:  edge ref_table → table     (parent before child)
+    // parents_first=false: edge table → ref_table      (child before parent)
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for table in tables {
+        in_degree.entry(table.as_str()).or_insert(0);
+    }
+    for table in tables {
+        if let Some(deps) = dependency_map.get(table) {
+            for ref_table in deps {
+                if parents_first {
+                    // FK-bearing table depends on ref_table — parent comes first.
+                    *in_degree.entry(table.as_str()).or_insert(0) += 1;
+                    dependents.entry(ref_table.as_str()).or_default().push(table.as_str());
+                } else {
+                    // ref_table depends on FK-bearing table — child comes first.
+                    *in_degree.entry(ref_table.as_str()).or_insert(0) += 1;
+                    dependents.entry(table.as_str()).or_default().push(ref_table.as_str());
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm.
+    let mut queue: std::collections::VecDeque<&str> =
+        in_degree.iter().filter(|(_, &deg)| deg == 0).map(|(&table, _)| table).collect();
+
+    let mut sorted: Vec<String> = Vec::new();
+    while let Some(table) = queue.pop_front() {
+        sorted.push(table.to_string());
+        if let Some(deps) = dependents.get(table) {
+            for &dependent in deps {
+                let deg = in_degree.get_mut(dependent).unwrap();
+                *deg -= 1;
+                if *deg == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+    }
+
+    // Append any tables left behind by cycles in their original order.
+    if sorted.len() < tables.len() {
+        let sorted_set: HashSet<&str> = sorted.iter().map(|s| s.as_str()).collect();
+        let mut remaining: Vec<String> = Vec::new();
+        for table in tables {
+            if !sorted_set.contains(table.as_str()) {
+                remaining.push(table.clone());
+            }
+        }
+        sorted.extend(remaining);
+    }
+
+    Ok(sorted)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transfer_mongodb_table<F>(
     state: &AppState,
@@ -2741,6 +2841,7 @@ where
         Some(table),
         Some(1),
         None,
+        None,
     )
     .await
     .unwrap_or_default()
@@ -2755,6 +2856,7 @@ where
         &request.target_schema,
         Some(table),
         Some(1),
+        None,
         None,
     )
     .await
@@ -2798,15 +2900,19 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
-        let ddl = generate_create_table_ddl(
-            &columns,
-            table,
-            &request.source_schema,
-            &request.target_schema,
-            target_db_type,
-            source_db_type,
-            table_comment.as_deref(),
-        );
+        let ddl = if is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type) {
+            query_mysql_create_table_ddl(state, source_pool_key, &request.source_schema, table).await?
+        } else {
+            generate_create_table_ddl(
+                &columns,
+                table,
+                &request.source_schema,
+                &request.target_schema,
+                target_db_type,
+                source_db_type,
+                table_comment.as_deref(),
+            )
+        };
         log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
         let table_exists = match execute_on_pool(state, target_pool_key, &ddl).await {
             Ok(_) => true,
@@ -2964,6 +3070,17 @@ where
     }
 
     Ok(total_transferred)
+}
+
+async fn query_mysql_create_table_ddl(
+    state: &AppState,
+    source_pool_key: &str,
+    source_schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE TABLE {}", qualified_table(table, source_schema, &DatabaseType::Mysql));
+    let rows = execute_on_pool(state, source_pool_key, &sql).await?.rows;
+    rows.first().and_then(|row| json_string_cell(row, 1)).ok_or_else(|| format!("Failed to get MySQL DDL: {sql}"))
 }
 
 pub async fn transfer_postgres_schema_dependencies<F>(
@@ -3328,6 +3445,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -3345,6 +3463,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -3375,7 +3494,7 @@ mod tests {
             db::ColumnInfo {
                 comment: Some("用户姓名".to_string()),
                 is_nullable: false,
-                ..test_column("name", "varchar(100)")
+                ..test_column("name", "VARCHAR(100)")
             },
             db::ColumnInfo { comment: None, ..test_column("age", "int") },
         ];
@@ -3961,22 +4080,47 @@ mod tests {
 
     #[test]
     fn map_column_type_preserves_longtext_for_mysql_target() {
-        assert_eq!(map_column_type("longtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "LONGTEXT");
+        assert_eq!(map_column_type("longtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "longtext");
     }
 
     #[test]
     fn map_column_type_preserves_mediumtext_for_mysql_target() {
-        assert_eq!(map_column_type("mediumtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "MEDIUMTEXT");
+        assert_eq!(map_column_type("mediumtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "mediumtext");
     }
 
     #[test]
     fn map_column_type_preserves_longblob_for_mysql_target() {
-        assert_eq!(map_column_type("longblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "LONGBLOB");
+        assert_eq!(map_column_type("longblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "longblob");
     }
 
     #[test]
     fn map_column_type_preserves_mediumblob_for_mysql_target() {
-        assert_eq!(map_column_type("mediumblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "MEDIUMBLOB");
+        assert_eq!(map_column_type("mediumblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "mediumblob");
+    }
+
+    #[test]
+    fn map_column_type_preserves_same_database_type() {
+        assert_eq!(map_column_type("int unsigned", &DatabaseType::Mysql, &DatabaseType::Mysql), "int unsigned");
+        assert_eq!(
+            map_column_type("int unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Mysql),
+            "int unsigned zerofill"
+        );
+        assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &DatabaseType::Mysql), "bigint unsigned");
+        assert_eq!(
+            map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Mysql),
+            "bigint unsigned zerofill"
+        );
+    }
+
+    #[test]
+    fn map_column_type_preserves_numeric_type_from_mysql_to_postgres() {
+        assert_eq!(map_column_type("int unsigned", &DatabaseType::Mysql, &DatabaseType::Postgres), "INTEGER");
+        assert_eq!(map_column_type("int unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres), "INTEGER");
+        assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &DatabaseType::Postgres), "BIGINT");
+        assert_eq!(
+            map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres),
+            "BIGINT"
+        );
     }
 
     #[test]
@@ -4007,7 +4151,7 @@ mod tests {
                 is_primary_key: true,
                 is_nullable: false,
                 extra: Some("auto_increment".to_string()),
-                ..test_column("id", "int")
+                ..test_column("id", "INT")
             },
             db::ColumnInfo { is_nullable: false, ..test_column("name", "varchar(64)") },
         ];

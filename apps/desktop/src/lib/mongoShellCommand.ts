@@ -367,7 +367,7 @@ function convertSingleQuotedStrings(source: string): string {
   return quote === "'" ? source : result + source.slice(copiedUntil);
 }
 
-function quoteUnquotedObjectKeys(source: string): string {
+export function quoteUnquotedObjectKeys(source: string): string {
   let result = "";
   let quote: string | null = null;
   let escaped = false;

@@ -51,12 +51,12 @@
   </p>
 
   <p>
-    <a href="docs/screenshot-light.png"><img src="https://cdn.jsdelivr.net/gh/t8y2/dbx@main/docs/screenshot-light.png" width="395" /></a>
-    <a href="docs/screenshot-dark.png"><img src="https://cdn.jsdelivr.net/gh/t8y2/dbx@main/docs/screenshot-dark.png" width="395" /></a>
+    <a href="https://dl.dbxio.com/assets/screenshot-light.png"><img src="https://dl.dbxio.com/assets/screenshot-light.png" width="395" /></a>
+    <a href="https://dl.dbxio.com/assets/screenshot-dark.png"><img src="https://dl.dbxio.com/assets/screenshot-dark.png" width="395" /></a>
   </p>
   <p>
-    <a href="docs/screenshot-er.png"><img src="https://cdn.jsdelivr.net/gh/t8y2/dbx@main/docs/screenshot-er.png" width="395" /></a>
-    <a href="docs/screenshot-grid.png"><img src="https://cdn.jsdelivr.net/gh/t8y2/dbx@main/docs/screenshot-grid.png" width="395" /></a>
+    <a href="https://dl.dbxio.com/assets/screenshot-er.png"><img src="https://dl.dbxio.com/assets/screenshot-er.png" width="395" /></a>
+    <a href="https://dl.dbxio.com/assets/screenshot-grid.png"><img src="https://dl.dbxio.com/assets/screenshot-grid.png" width="395" /></a>
   </p>
 </div>
 
@@ -184,6 +184,12 @@ brew install --cask dbx
 ```bash
 scoop bucket add dbx https://github.com/t8y2/scoop-bucket
 scoop install dbx
+```
+
+**WinGet (Windows):**
+
+```
+winget install t8y2.dbx
 ```
 
 ## 自托管 (Docker)

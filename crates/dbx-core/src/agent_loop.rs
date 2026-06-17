@@ -47,6 +47,7 @@ fn provider_supports_function_calling(config: &AiConfig) -> bool {
 ///
 /// If the provider does not support function calling (e.g., Ollama), automatically
 /// degrades to a text-only completion with schema context injected into the system prompt.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     config: &AiConfig,
     system_prompt: &str,
@@ -300,7 +301,7 @@ async fn stream_with_tools(
         return Err("Agent loop cancelled".to_string());
     }
 
-    ai::stream_with_tools(config, request, session_id, &tools, cancelled, on_chunk).await
+    ai::stream_with_tools(config, request, session_id, tools, cancelled, on_chunk).await
 }
 
 fn is_context_length_error(error: &str) -> bool {
@@ -324,6 +325,7 @@ fn is_context_length_error(error: &str) -> bool {
 ///
 /// Injects database schema context into the system prompt so the LLM can still
 /// give informed answers, then performs a single non-streaming completion.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_loop_text_only(
     config: &AiConfig,
     system_prompt: &str,
@@ -367,6 +369,7 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
         "",
         None,
         Some(50), // smaller limit for prompt injection
+        None,
         None,
     )
     .await;
@@ -453,16 +456,12 @@ fn context_window_for_model(model: &str) -> u32 {
     if m.contains("gpt-4.1") {
         return 1_000_000;
     }
-    if m.contains("claude") {
-        200_000
-    } else if m.contains("o1") || m.starts_with("o3") || m.starts_with("o4") {
+    if m.contains("claude") || m.contains("o1") || m.starts_with("o3") || m.starts_with("o4") {
         200_000
     } else if m.contains("gpt-4") {
         128_000
     } else if m.contains("gemini") {
         1_000_000
-    } else if m.contains("deepseek") || m.contains("qwen") {
-        128_000
     } else {
         128_000
     }

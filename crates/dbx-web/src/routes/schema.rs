@@ -17,6 +17,7 @@ pub struct SchemaQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub object_type: Option<dbx_core::db::ObjectSourceKind>,
+    pub object_types: Option<String>,
 }
 
 pub async fn list_databases(
@@ -42,6 +43,9 @@ pub async fn list_tables(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
+    let object_types = q.object_types.as_ref().map(|value| {
+        value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).collect::<Vec<_>>()
+    });
     let result = dbx_core::schema::list_tables_core(
         &state.app,
         &q.connection_id,
@@ -50,6 +54,7 @@ pub async fn list_tables(
         q.filter.as_deref(),
         q.limit,
         q.offset,
+        object_types.as_deref(),
     )
     .await
     .map_err(AppError)?;
@@ -153,9 +158,10 @@ pub async fn get_ddl(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
-    let result = dbx_core::schema::get_table_ddl_core(&state.app, &q.connection_id, database, schema, table)
-        .await
-        .map_err(AppError)?;
+    let result =
+        dbx_core::schema::get_table_ddl_core(&state.app, &q.connection_id, database, schema, table, q.object_type)
+            .await
+            .map_err(AppError)?;
     Ok(Json(result))
 }
 

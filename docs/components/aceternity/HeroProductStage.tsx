@@ -5,24 +5,24 @@ import { useEffect, useState } from "react";
 
 const productSlides = [
   {
-    src: "/screenshot-dark.png",
-    alt: "DBX data grid and AI assistant screenshot",
-    label: "Data grid",
+    src: "/screenshot-light.png",
+    alt: "DBX main window light theme",
+    label: "Light",
   },
   {
-    src: "/screenshot-connections.jpg",
-    alt: "DBX connection management screenshot",
-    label: "Connections",
+    src: "/screenshot-dark.png",
+    alt: "DBX main window dark theme",
+    label: "Dark",
+  },
+  {
+    src: "/screenshot-er.png",
+    alt: "DBX ER diagram",
+    label: "ER Diagram",
   },
   {
     src: "/screenshot-grid.png",
-    alt: "DBX table data grid screenshot",
-    label: "Tables",
-  },
-  {
-    src: "/screenshot-ai.jpg",
-    alt: "DBX AI assistant screenshot",
-    label: "AI",
+    alt: "DBX data grid",
+    label: "Data Grid",
   },
 ];
 

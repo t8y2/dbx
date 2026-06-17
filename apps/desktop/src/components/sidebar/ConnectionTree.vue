@@ -46,17 +46,40 @@ watch(
 
     searchTimer = window.setTimeout(() => {
       deferredSearchQuery.value = normalized;
-    }, 120);
+    }, 300);
   },
   { flush: "sync" },
 );
+
+watch(deferredSearchQuery, (newQuery) => {
+  store.sidebarSearchQuery = newQuery;
+  const tasks: Promise<void>[] = [];
+  for (const root of store.treeNodes) {
+    findExpandedTableParents(root, tasks);
+  }
+  Promise.all(tasks).catch(() => {});
+});
+
+function findExpandedTableParents(node: TreeNode, tasks: Promise<void>[]) {
+  if (node.isExpanded && node.connectionId && (node.type === "database" || node.type === "schema")) {
+    const groupTypes = new Set(["group-tables", "group-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
+    if (node.children?.some((child) => groupTypes.has(child.type))) {
+      tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+    }
+  }
+  if (node.children) {
+    for (const child of node.children) {
+      findExpandedTableParents(child, tasks);
+    }
+  }
+}
 
 const isSearching = computed(() => !!deferredSearchQuery.value);
 const isFiltering = computed(() => !!searchQuery.value.trim() || hasSearchScopeFilter.value);
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "mongo-db"],
   schema: ["schema"],
   table: ["table", "mongo-collection", "elasticsearch-index"],
   view: ["view"],
@@ -311,6 +334,8 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadMongoDatabases(connId);
       } else if (config.db_type === "elasticsearch") {
         await store.loadElasticsearchIndices(connId);
+      } else if (config.db_type === "mq") {
+        await store.loadMqTenants(connId, loadOptions);
       } else {
         await store.loadDatabases(connId, loadOptions);
       }
@@ -319,6 +344,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
+  if (config.db_type === "mq") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node
@@ -371,7 +397,7 @@ async function ensureTableObjectGroupsLoaded(target: Extract<ActiveTabSidebarTar
 function findTableObjectGroupNodes(nodes: TreeNode[], target: Extract<ActiveTabSidebarTarget, { type: "table" }>): TreeNode[] {
   const matches: TreeNode[] = [];
   for (const node of nodes) {
-    if ((node.type === "group-tables" || node.type === "group-views") && node.connectionId === target.connectionId && sameTreeName(node.database, target.database) && (!target.schema || sameTreeName(node.schema, target.schema))) {
+    if ((node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameTreeName(node.database, target.database) && (!target.schema || sameTreeName(node.schema, target.schema))) {
       matches.push(node);
     }
     if (node.children) {

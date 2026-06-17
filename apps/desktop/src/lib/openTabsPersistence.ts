@@ -32,6 +32,7 @@ export interface SavedOpenTab {
   whereInput?: string;
   pinned?: boolean;
   mode?: QueryTab["mode"];
+  mqTenant?: string;
   structureTableName?: string;
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
@@ -69,6 +70,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
     pinned: tab.pinned,
     mode: tab.mode,
+    ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,

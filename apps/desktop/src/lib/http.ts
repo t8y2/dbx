@@ -408,8 +408,8 @@ export async function listSchemas(connectionId: string, database: string): Promi
   return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database })}`);
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number): Promise<TableInfo[]> {
-  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset })}`);
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[]): Promise<TableInfo[]> {
+  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(",") })}`);
 }
 
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
@@ -447,8 +447,8 @@ export async function listTriggers(connectionId: string, database: string, schem
   return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table })}`);
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType })}`);
 }
 
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
@@ -653,6 +653,10 @@ export async function buildExecutableObjectSourceStatements(input: BuildEditable
 
 export async function buildExecutableObjectSourceSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return post("/api/query/build-executable-object-source-sql", { input });
+}
+
+export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return post("/api/query/build-editable-object-source", { input });
 }
 
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
@@ -1050,6 +1054,18 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
 
 export async function cancelTransfer(transferId: string): Promise<void> {
   return post("/api/transfer/cancel", { transferId });
+}
+
+export interface SortTablesByFkOptions {
+  connectionId: string;
+  database: string;
+  schema: string;
+  tables: string[];
+  parentsFirst: boolean;
+}
+
+export async function sortTablesByFkDependency(options: SortTablesByFkOptions): Promise<string[]> {
+  return post("/api/transfer/sort-tables-by-fk", options);
 }
 
 // ---------------------------------------------------------------------------
@@ -1512,5 +1528,7 @@ export async function loadSidebarLayout(): Promise<SidebarLayout | null> {
 }
 
 export async function refreshConnections(): Promise<void> {
-  // Web mode doesn't maintain persistent connection pools 鈥?no-op
+  // Web mode doesn't maintain persistent connection pools - no-op
 }
+
+export * from "./mq-http";

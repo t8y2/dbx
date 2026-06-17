@@ -65,7 +65,7 @@ fn builds_mysql_column_and_index_changes() {
     let mut renamed = column("display_name");
     renamed.data_type = "varchar(120)".to_string();
     renamed.is_nullable = false;
-    renamed.default_value = "'guest'".to_string();
+    renamed.default_value = "guest".to_string();
     renamed.comment = "Shown name".to_string();
     renamed.original = Some(ColumnInfo {
         name: "name".to_string(),
@@ -122,7 +122,7 @@ fn builds_informix_column_and_index_changes() {
     let mut renamed = column("display_name");
     renamed.data_type = "varchar(120)".to_string();
     renamed.is_nullable = false;
-    renamed.default_value = "'guest'".to_string();
+    renamed.default_value = "guest".to_string();
     renamed.original = Some(ColumnInfo {
         name: "name".to_string(),
         data_type: "varchar(80)".to_string(),
@@ -887,7 +887,7 @@ fn builds_h2_schema_qualified_existing_column_statements() {
     name.id = "name".to_string();
     name.data_type = "VARCHAR(120)".to_string();
     name.is_nullable = false;
-    name.default_value = "'guest'".to_string();
+    name.default_value = "guest".to_string();
     name.comment = "Display name".to_string();
     name.original = Some(ColumnInfo {
         name: "NAME".to_string(),
@@ -1495,4 +1495,141 @@ fn builds_mysql_trigger_changes() {
             "CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders` FOR EACH ROW\nBEGIN\n  SET NEW.updated_at = NOW();\nEND;",
         ]
     );
+}
+
+#[test]
+fn mysql_varchar_default_is_quoted() {
+    let mut col = column("name");
+    col.data_type = "varchar(255)".to_string();
+    col.default_value = "hello".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("DEFAULT 'hello'"));
+    assert!(!result.statements[0].contains("DEFAULT hello "));
+}
+
+#[test]
+fn mysql_char_default_is_quoted() {
+    let mut col = column("code");
+    col.data_type = "char(10)".to_string();
+    col.default_value = "abc".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "items".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("DEFAULT 'abc'"));
+}
+
+#[test]
+fn mysql_text_default_is_quoted() {
+    let mut col = column("description");
+    col.data_type = "text".to_string();
+    col.default_value = "default value".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "products".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("DEFAULT 'default value'"));
+}
+
+#[test]
+fn mysql_enum_default_is_quoted() {
+    let mut col = column("status");
+    col.data_type = "enum('active','inactive')".to_string();
+    col.default_value = "active".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("DEFAULT 'active'"));
+}
+
+#[test]
+fn mysql_int_default_is_not_quoted() {
+    let mut col = column("score");
+    col.data_type = "int".to_string();
+    col.default_value = "100".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "games".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("DEFAULT 100"));
+    assert!(!result.statements[0].contains("DEFAULT '100'"));
+}
+
+#[test]
+fn postgres_varchar_default_is_quoted() {
+    let mut col = column("label");
+    col.data_type = "varchar(100)".to_string();
+    col.default_value = "test label".to_string();
+    col.original = Some(ColumnInfo {
+        name: "label".to_string(),
+        data_type: "varchar(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some(String::new()),
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: None,
+        table_name: "items".to_string(),
+        column: col,
+    });
+
+    assert!(result.statements.iter().any(|s| s.contains("SET DEFAULT 'test label'")));
 }

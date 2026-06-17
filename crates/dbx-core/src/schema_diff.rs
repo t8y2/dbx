@@ -1029,6 +1029,7 @@ fn table_comment_sql(table_name: &str, comment: &str, db_type: DatabaseType, sch
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate_schema_sync_sql(
     diffs: &[TableDiff],
     function_diffs: &[FunctionDiff],
@@ -1185,8 +1186,10 @@ pub fn generate_schema_sync_sql(
 
         if let Some(foreign_keys) = &diff.foreign_keys {
             for fk in foreign_keys {
-                if (fk.diff_type == "added" || fk.diff_type == "modified") && fk.source.is_some() {
-                    lines.push(add_foreign_key_sql(&diff.name, fk.source.as_ref().unwrap(), db_type, schema));
+                if fk.diff_type == "added" || fk.diff_type == "modified" {
+                    if let Some(source) = &fk.source {
+                        lines.push(add_foreign_key_sql(&diff.name, source, db_type, schema));
+                    }
                 }
             }
         }

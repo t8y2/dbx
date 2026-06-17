@@ -36,6 +36,7 @@ const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
+const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
@@ -53,8 +54,9 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/chartData";
+import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import { useTabScroll } from "@/composables/useTabScroll";
-import type { QueryTab, ConnectionConfig } from "@/types/database";
+import type { QueryTab, ConnectionConfig, TableInfoTab } from "@/types/database";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 
 type DataGridHandle = {
@@ -74,7 +76,7 @@ type DataGridHandle = {
   canToggleAllNullColumns: boolean;
   toggleAllNullColumns: () => void;
   showDdl: boolean;
-  toggleDdl: () => void;
+  toggleDdl: (tab?: TableInfoTab) => void;
   multiRowTranspose: boolean;
   setMultiRowTranspose: (value: boolean) => void;
   exportCsv: () => Promise<void>;
@@ -100,7 +102,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:activeOutputView": [value: "result" | "summary" | "explain" | "chart"];
   fixWithAi: [errorMessage: string];
-  execute: [sqlOverride?: string];
+  execute: [sqlOverride?: SqlExecutionOverride];
   saveSql: [];
   cancel: [];
   explain: [];
@@ -115,6 +117,7 @@ const emit = defineEmits<{
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string];
   executeSql: [sql: string];
   clickTable: [tableName: string];
+  viewTableData: [tableName: string];
   openObjectTable: [target: { tableName: string; schema?: string }];
   objectSchemaChange: [schema: string | undefined];
   structureEditorSaved: [commentChanged: boolean];
@@ -427,6 +430,10 @@ function onHandleClickTable(tableName: string) {
   emit("clickTable", tableName);
 }
 
+function onHandleViewTableData(tableName: string) {
+  emit("viewTableData", tableName);
+}
+
 function onHandleCloseColumnPanel() {
   showColumnInfo.value = false;
   columnInfoColumns.value = [];
@@ -516,9 +523,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               @viewport-change="emit('editorViewportChange', activeTab.id, $event)"
               @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
               @format-error="emit('formatError')"
-              @execute="emit('execute')"
+              @execute="emit('execute', $event)"
               @save="emit('saveSql')"
               @click-table="onHandleClickTable"
+              @view-table-data="onHandleViewTableData"
               @click-column="onHandleClickColumn"
               @close-column-panel="onHandleCloseColumnPanel"
             />
@@ -712,6 +720,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 :database="activeTab.database"
                 :schema="activeTab.schema"
                 :table-meta="activeTab.tableMeta"
+                :table-info-tab="activeTab.tableInfoTab"
                 :page-offset="activeTab.resultPageOffset"
                 :page-limit="activeTab.resultPageLimit"
                 :count-sql="activeTab.resultCountSql"
@@ -900,6 +909,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
           :connection-id="activeTab.connectionId"
           :database="activeTab.database"
           :table-meta="activeDataTabTableMeta"
+          :table-info-tab="activeTab.tableInfoTab"
           :page-offset="activeTab.resultPageOffset"
           :page-limit="activeTab.resultPageLimit"
           :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
@@ -945,6 +955,12 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
         <DocumentBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'mq'">
+      <div class="flex-1 min-h-0">
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :read-only="activeConnection?.read_only ?? false" />
       </div>
     </template>
 

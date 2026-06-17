@@ -280,7 +280,7 @@ pub fn resolve_model_list_endpoint(config: &AiConfig) -> Result<String, String> 
         .unwrap_or(ep)
         .trim_end_matches('/');
 
-    let base = ensure_openai_version_prefix(&base);
+    let base = ensure_openai_version_prefix(base);
 
     Ok(format!("{base}/models"))
 }
@@ -358,7 +358,12 @@ pub fn openai_stream_text(event: &serde_json::Value) -> Option<String> {
 pub fn openai_stream_reasoning(event: &serde_json::Value) -> Option<&str> {
     event["choices"]
         .get(0)
-        .and_then(|choice| choice["delta"]["reasoning_content"].as_str())
+        .and_then(|choice| {
+            choice["delta"]["reasoning_content"]
+                .as_str()
+                .or_else(|| choice["delta"]["reasoning"].as_str())
+                .or_else(|| choice["delta"]["thinking"].as_str())
+        })
         .filter(|text| !text.is_empty())
 }
 
@@ -612,7 +617,7 @@ pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest)
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "temperature": request.temperature.unwrap_or(0.2),
-        "system": request.system_prompt,
+        "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
     });
 
@@ -800,6 +805,23 @@ async fn measure_first_stream_chunk(
 
 const TEST_PROMPT: &str = "Who are you?";
 
+/// Fallback system prompt for the Anthropic (Claude) API.
+///
+/// Anthropic rejects requests whose `system` field is an empty string with
+/// `system: text content blocks must be non-empty`. When the caller has no
+/// system prompt we send this minimal placeholder so the request stays valid.
+const CLAUDE_DEFAULT_SYSTEM: &str = "You are a helpful assistant.";
+
+/// Returns a non-empty system prompt for Claude requests, substituting a
+/// default when the provided prompt is empty or whitespace-only.
+fn claude_system_prompt(system_prompt: &str) -> &str {
+    if system_prompt.trim().is_empty() {
+        CLAUDE_DEFAULT_SYSTEM
+    } else {
+        system_prompt
+    }
+}
+
 pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
     validate_config(config)?;
 
@@ -817,7 +839,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 "model": &model,
                 "max_tokens": 16,
                 "temperature": 0.0,
-                "system": "",
+                "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
                 "stream": true,
             });
@@ -994,7 +1016,7 @@ async fn stream_claude(
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "temperature": request.temperature.unwrap_or(0.2),
-        "system": request.system_prompt,
+        "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
         "stream": true,
     });
@@ -1351,6 +1373,12 @@ pub struct StreamingToolCallAccumulator {
     ordered_indices: Vec<u32>,
 }
 
+impl Default for StreamingToolCallAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamingToolCallAccumulator {
     pub fn new() -> Self {
         Self { calls: std::collections::HashMap::new(), ordered_indices: Vec::new() }
@@ -1417,7 +1445,7 @@ async fn stream_claude_with_tools(
             if !pending_tool_results.is_empty() {
                 messages.push(json!({
                     "role": "user",
-                    "content": pending_tool_results.drain(..).collect::<Vec<_>>()
+                    "content": std::mem::take(&mut pending_tool_results)
                 }));
             }
             if m.role == "assistant" && !m.tool_calls.is_empty() {
@@ -1439,7 +1467,7 @@ async fn stream_claude_with_tools(
     if !pending_tool_results.is_empty() {
         messages.push(json!({
             "role": "user",
-            "content": pending_tool_results.drain(..).collect::<Vec<_>>()
+            "content": std::mem::take(&mut pending_tool_results)
         }));
     }
 
@@ -1448,7 +1476,7 @@ async fn stream_claude_with_tools(
     let mut body = json!({
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(4096),
-        "system": request.system_prompt,
+        "system": claude_system_prompt(&request.system_prompt),
         "messages": messages,
         "tools": tool_json,
         "stream": true,
@@ -1739,7 +1767,7 @@ async fn stream_gemini_with_tools(
                 .tool_call_id
                 .as_deref()
                 .and_then(|s| s.strip_prefix("gemini-tc-"))
-                .and_then(|s| s.rsplitn(2, '-').nth(1))
+                .and_then(|s| s.rsplit_once('-').map(|x| x.0))
                 .unwrap_or("unknown");
             pending_function_responses.push(json!({
                 "functionResponse": {
@@ -1752,7 +1780,7 @@ async fn stream_gemini_with_tools(
             if !pending_function_responses.is_empty() {
                 contents.push(json!({
                     "role": "user",
-                    "parts": pending_function_responses.drain(..).collect::<Vec<_>>()
+                    "parts": std::mem::take(&mut pending_function_responses)
                 }));
             }
             if m.role == "assistant" && !m.tool_calls.is_empty() {
@@ -1774,7 +1802,7 @@ async fn stream_gemini_with_tools(
     if !pending_function_responses.is_empty() {
         contents.push(json!({
             "role": "user",
-            "parts": pending_function_responses.drain(..).collect::<Vec<_>>()
+            "parts": std::mem::take(&mut pending_function_responses)
         }));
     }
 
@@ -1973,10 +2001,11 @@ pub fn load_config(path: &Path) -> Result<Option<AiConfig>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ai_http_client, claude_headers, gemini_text, openai_response_text, openai_stream_text,
-        parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens,
-        responses_text, supports_temperature, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo,
-        AiProvider, AUTHORIZATION,
+        build_ai_http_client, claude_headers, claude_system_prompt, gemini_text, openai_response_text,
+        openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
+        resolve_model_list_endpoint, responses_max_output_tokens, responses_text, supports_temperature,
+        validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM,
     };
 
     #[test]
@@ -2008,6 +2037,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
+            context_window: None,
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -2027,6 +2057,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: "127.0.0.1:7890".to_string(),
             enable_thinking: true,
+            context_window: None,
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2044,6 +2075,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
+            context_window: None,
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2061,6 +2093,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
 
         assert_eq!(
@@ -2078,6 +2111,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -2096,6 +2130,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -2109,6 +2144,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -2126,6 +2162,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -2178,6 +2215,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -2188,6 +2226,19 @@ mod tests {
         let bearer_headers = claude_headers(&config).unwrap();
         assert_eq!(bearer_headers.get(AUTHORIZATION).unwrap(), "Bearer secret");
         assert!(bearer_headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn claude_system_prompt_substitutes_default_when_empty() {
+        // Empty or whitespace-only prompts must fall back to a non-empty value,
+        // otherwise Anthropic rejects the request with
+        // "system: text content blocks must be non-empty".
+        assert_eq!(claude_system_prompt(""), CLAUDE_DEFAULT_SYSTEM);
+        assert_eq!(claude_system_prompt("   \n\t"), CLAUDE_DEFAULT_SYSTEM);
+        assert!(!CLAUDE_DEFAULT_SYSTEM.is_empty());
+
+        // Real prompts pass through unchanged.
+        assert_eq!(claude_system_prompt("Be concise."), "Be concise.");
     }
 
     #[test]
@@ -2233,6 +2284,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            context_window: None,
         };
 
         assert!(!supports_temperature(&config));
@@ -2291,6 +2343,22 @@ mod tests {
             }))
             .as_deref(),
             Some("SELECT 2;")
+        );
+    }
+
+    #[test]
+    fn parses_ollama_openai_reasoning_stream_chunks() {
+        assert_eq!(
+            openai_stream_reasoning(&serde_json::json!({
+                "choices": [{ "delta": { "reasoning": "thinking..." } }]
+            })),
+            Some("thinking...")
+        );
+        assert_eq!(
+            openai_stream_reasoning(&serde_json::json!({
+                "choices": [{ "delta": { "thinking": "planning..." } }]
+            })),
+            Some("planning...")
         );
     }
 

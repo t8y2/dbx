@@ -44,10 +44,11 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/api";
-import type { ConnectionConfig, ObjectInfo, ObjectSourceKind } from "@/types/database";
+import type { ConnectionConfig, ForeignKeyInfo, ObjectInfo, ObjectSourceKind } from "@/types/database";
+import { sortTablesByFkDependency, type TableWithFk } from "@/lib/tableDependencySort";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/databaseFeatureSupport";
-import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
 import { buildDropObjectSql, buildDuplicateTableStructureSql, buildEmptyTableSql, buildTruncateTableSql, type TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import { useToast } from "@/composables/useToast";
@@ -64,6 +65,7 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
+import DdlViewDialog from "./DdlViewDialog.vue";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -129,6 +131,8 @@ const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
+const ddlDialogTarget = ref<ObjectBrowserRow | null>(null);
+const showDdlDialog = ref(false);
 const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
@@ -149,11 +153,7 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
-const sourceDialect = computed<"mysql" | "postgres" | "sqlserver">(() => {
-  if (effectiveDatabaseType.value === "postgres" || effectiveDatabaseType.value === "gaussdb" || effectiveDatabaseType.value === "kwdb" || effectiveDatabaseType.value === "opengauss") return "postgres";
-  if (effectiveDatabaseType.value === "sqlserver") return "sqlserver";
-  return "mysql";
-});
+const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => {
   switch (effectiveDatabaseType.value) {
     case "mysql":
@@ -354,8 +354,15 @@ async function openSource(row: ObjectBrowserRow) {
   sourceLoading.value = true;
   try {
     const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind);
-    sourceContent.value = result.source;
-    sourceDraft.value = result.source;
+    const editable = await api.buildEditableObjectSource({
+      databaseType: effectiveDatabaseType.value,
+      objectType: row.type as ObjectSourceKind,
+      schema: row.schema || selectedSchema.value || props.database,
+      name: row.name,
+      source: result.source,
+    });
+    sourceContent.value = editable;
+    sourceDraft.value = editable;
     sourceEditing.value = row.type !== "SEQUENCE";
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
@@ -657,9 +664,27 @@ function openBatchDatabaseExport() {
   };
 }
 
+async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
+  const rows = [...selectedTableRows.value];
+  if (rows.length <= 1) return rows;
+
+  const fkResults = await Promise.all(rows.map((row) => api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name).catch(() => [] as ForeignKeyInfo[])));
+
+  const tablesWithFk: TableWithFk[] = rows.map((row, i) => ({
+    name: row.name,
+    schema: row.schema || selectedSchema.value,
+    foreignKeys: fkResults[i] ?? [],
+  }));
+
+  const sorted = sortTablesByFkDependency(tablesWithFk);
+  const nameToRow = new Map(rows.map((r) => [r.name, r]));
+  return sorted.map((t) => nameToRow.get(t.name)!).filter(Boolean);
+}
+
 async function refreshBatchDropPreviewSql() {
   const statements: string[] = [];
-  for (const row of selectedTableRows.value) {
+  const sortedRows = await fetchSortedTableRowsForDrop();
+  for (const row of sortedRows) {
     const sql = await buildDropObjectSql({
       databaseType: effectiveDatabaseType.value,
       objectType: "TABLE",
@@ -679,7 +704,7 @@ function requestBatchDropTables() {
 }
 
 async function confirmBatchDropTables() {
-  const targets = [...selectedTableRows.value];
+  const targets = await fetchSortedTableRowsForDrop();
   if (targets.length === 0) return;
   try {
     for (const row of targets) {
@@ -703,7 +728,7 @@ async function confirmBatchDropTables() {
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name);
+    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, row.type === "VIEW" ? "VIEW" : undefined);
     await saveFileContent(ddl + "\n", `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
@@ -1108,6 +1133,14 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     { label: t("contextMenu.viewData"), action: () => openRow(item), icon: Table2 },
+    {
+      label: t("contextMenu.viewDdl"),
+      action: () => {
+        ddlDialogTarget.value = item;
+        showDdlDialog.value = true;
+      },
+      icon: FileCode,
+    },
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
@@ -1464,6 +1497,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style scoped>

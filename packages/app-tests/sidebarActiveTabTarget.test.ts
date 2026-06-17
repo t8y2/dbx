@@ -59,6 +59,33 @@ test("mongo tabs target the matching visible collection node", () => {
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(collection)])?.id, "events-node");
 });
 
+test("MQ tabs with a selected tenant target the matching tenant node", () => {
+  const tab: QueryTab = {
+    id: "tab-1",
+    title: "Apache Pulsar Admin",
+    connectionId: "conn-1",
+    database: "",
+    sql: "",
+    isExecuting: false,
+    mode: "mq",
+    mqTenant: "public",
+  };
+  const tenant: TreeNode = {
+    id: "tenant-node",
+    label: "public",
+    type: "mq-tenant",
+    connectionId: "conn-1",
+    mqTenant: "public",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "mq-tenant",
+    connectionId: "conn-1",
+    tenant: "public",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(tenant)])?.id, "tenant-node");
+});
+
 test("saved SQL tabs target the matching visible saved SQL file node", () => {
   const tab: QueryTab = {
     id: "tab-1",

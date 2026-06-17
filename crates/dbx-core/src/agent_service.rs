@@ -413,7 +413,7 @@ pub async fn reinstall_agent_jre(
         &progress,
         "jre",
         &platform_jre.url,
-        &github_url_to_r2_path(&platform_jre.url, "jre"),
+        &r2_path_with_cache_buster(&github_url_to_r2_path(&platform_jre.url, "jre"), &jre_info.version),
         &jre_archive,
         platform_jre.size,
         Some(CacheIdentity::Jre { key: jre_key, version: &jre_info.version }),
@@ -519,7 +519,7 @@ async fn install_agent_driver_from_registry(
             progress,
             "jre",
             &platform_jre.url,
-            &github_url_to_r2_path(&platform_jre.url, "jre"),
+            &r2_path_with_cache_buster(&github_url_to_r2_path(&platform_jre.url, "jre"), &jre_info.version),
             &jre_archive,
             platform_jre.size,
             Some(CacheIdentity::Jre { key: jre_key, version: &jre_info.version }),
@@ -557,7 +557,7 @@ async fn install_agent_driver_from_registry(
         progress,
         "driver",
         &artifact.url,
-        &github_url_to_r2_path(&artifact.url, "driver"),
+        &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
         &target_path,
         artifact.size,
         Some(CacheIdentity::Driver { db_type, version: &driver.version }),
@@ -772,6 +772,11 @@ fn cache_file_token(value: &str) -> String {
     } else {
         token
     }
+}
+
+fn r2_path_with_cache_buster(r2_path: &str, version: &str) -> String {
+    let separator = if r2_path.contains('?') { '&' } else { '?' };
+    format!("{r2_path}{separator}v={}", cache_file_token(version))
 }
 
 pub fn github_url_to_r2_path(github_url: &str, category: &str) -> String {
@@ -1039,6 +1044,27 @@ pub fn import_agent_jar(am: &AgentManager, db_type: &str, jar_path: &Path) -> Re
 }
 
 // ──────────── Tests ────────────
+
+#[cfg(test)]
+mod agent_download_url_tests {
+    use super::*;
+
+    #[test]
+    fn r2_cache_buster_uses_version_query() {
+        assert_eq!(
+            r2_path_with_cache_buster("agents/jre/dbx-jre-21-macos-x64.tar.gz", "21.0.11+7"),
+            "agents/jre/dbx-jre-21-macos-x64.tar.gz?v=21.0.11-7"
+        );
+    }
+
+    #[test]
+    fn r2_cache_buster_preserves_existing_query() {
+        assert_eq!(
+            r2_path_with_cache_buster("agents/drivers/dbx-agent-h2.jar?mirror=r2", "0.5.33"),
+            "agents/drivers/dbx-agent-h2.jar?mirror=r2&v=0.5.33"
+        );
+    }
+}
 
 #[cfg(test)]
 mod jre_dir_remove_tests {

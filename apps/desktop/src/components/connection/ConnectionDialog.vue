@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, DatabaseType, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -25,6 +26,7 @@ import type { ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connectionPresentation";
 import { h2ConnectionModeForConfig, h2FileJdbcUrl, h2FilePathFromJdbcUrl, type H2ConnectionMode } from "@/lib/h2Connection";
 import { isLocalFileTypeDb } from "@/lib/connectionFile";
+import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
@@ -37,6 +39,7 @@ type DbCategory = { key: string; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 type DbPickerView = "icon" | "list";
 type ConfigTab = "connection" | "advanced" | "tls" | "transport";
+type MqTokenSigningMode = "none" | "hs256" | "rs256";
 type JdbcDriverSelectItem = {
   id: string;
   label: string;
@@ -112,6 +115,7 @@ const defaultForm = (): ConnectionForm => ({
   connect_timeout_secs: 5,
   query_timeout_secs: 30,
   idle_timeout_secs: 60,
+  keepalive_interval_secs: 0,
   ssl: false,
   ca_cert_path: "",
   client_cert_path: "",
@@ -131,6 +135,8 @@ const defaultForm = (): ConnectionForm => ({
   redis_key_separator: ":",
   etcd_endpoints: "",
   gbase_server: "",
+  informix_server: "",
+  external_config: undefined,
   read_only: false,
   visible_databases: undefined,
 });
@@ -149,6 +155,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     connect_timeout_secs: 5,
     expose_lan: false,
     use_ssh_agent: false,
+    ssh_agent_sock_path: "",
   };
 }
 
@@ -166,6 +173,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     connect_timeout_secs: Number(hop.connect_timeout_secs) || 5,
     expose_lan: !!hop.expose_lan,
     use_ssh_agent: !!hop.use_ssh_agent,
+    ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
   };
 }
 
@@ -242,6 +250,7 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
         connect_timeout_secs: config.ssh_connect_timeout_secs || 5,
         expose_lan: config.ssh_expose_lan || false,
         use_ssh_agent: false,
+        ssh_agent_sock_path: "",
       }),
     ];
   }
@@ -249,6 +258,17 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const keepaliveEnabled = computed({
+  get: () => Number(form.value.keepalive_interval_secs) > 0,
+  set: (enabled: boolean) => {
+    if (enabled) {
+      const current = Number(form.value.keepalive_interval_secs);
+      form.value.keepalive_interval_secs = Number.isFinite(current) && current > 0 ? current : 30;
+    } else {
+      form.value.keepalive_interval_secs = 0;
+    }
+  },
+});
 const selectedTransportLayerId = ref<string | null>(null);
 const draggedTransportLayerId = ref<string | null>(null);
 const selectedType = ref("mysql");
@@ -267,6 +287,24 @@ const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>("icon");
 const dbSearchQuery = ref("");
 const configTab = ref<ConfigTab>("connection");
+type MqAuthKind = MqAuth["kind"];
+const mqAdminUrl = ref("http://127.0.0.1:8080");
+const mqSystemKind = ref<MqSystemKind>("pulsar");
+const mqAuthKind = ref<MqAuthKind>("none");
+const mqToken = ref("");
+const mqBasicUsername = ref("");
+const mqBasicPassword = ref("");
+const mqApiKeyHeader = ref("Authorization");
+const mqApiKeyValue = ref("");
+const mqOauthIssuerUrl = ref("");
+const mqOauthClientId = ref("");
+const mqOauthClientSecret = ref("");
+const mqOauthAudience = ref("");
+const mqOauthScope = ref("");
+const mqTlsSkipVerify = ref(false);
+const mqPinnedVersion = ref(pinnedVersionToSelection(undefined));
+const mqTokenSigningMode = ref<MqTokenSigningMode>("none");
+const mqTokenSigningKey = ref("");
 
 const colorOptions = [
   { value: "", class: "bg-transparent border-dashed", labelKey: "connection.colorNone" },
@@ -464,6 +502,7 @@ const driverProfiles: Record<
   xugu: { type: "xugu", port: 5138, user: "", label: "虚谷 XuguDB", icon: "xugu" },
   iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb" },
   etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
+  mq: { type: "mq", port: 8080, user: "", label: "Apache Pulsar", icon: "pulsar", host: "127.0.0.1" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
   influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
   custom_mysql: {
@@ -497,6 +536,104 @@ function profileForConfig(config: ConnectionConfig) {
 
 function selectedProfile() {
   return driverProfiles[selectedType.value] ?? driverProfiles.mysql;
+}
+
+function resetMqFields(config?: Partial<MqAdminConfig>) {
+  mqSystemKind.value = "pulsar";
+  mqAdminUrl.value = config?.adminUrl?.trim() || "http://127.0.0.1:8080";
+  mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
+  mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
+  const auth = (config?.auth || { kind: "none" }) as MqAuth;
+  mqAuthKind.value = auth.kind || "none";
+  mqToken.value = auth.token || "";
+  mqBasicUsername.value = auth.username || "";
+  mqBasicPassword.value = auth.password || "";
+  mqApiKeyHeader.value = auth.header || "Authorization";
+  mqApiKeyValue.value = auth.value || "";
+  mqOauthIssuerUrl.value = auth.issuerUrl || "";
+  mqOauthClientId.value = auth.clientId || "";
+  mqOauthClientSecret.value = auth.clientSecret || "";
+  mqOauthAudience.value = auth.audience || "";
+  mqOauthScope.value = auth.scope || "";
+  const tokenSigning = config?.tokenSigning;
+  mqTokenSigningMode.value = tokenSigning?.algorithm === "hs256" || tokenSigning?.algorithm === "rs256" ? tokenSigning.algorithm : "none";
+  mqTokenSigningKey.value = tokenSigning?.key || "";
+}
+
+function hydrateMqFields(value: unknown) {
+  if (!value || typeof value !== "object") {
+    resetMqFields();
+    return;
+  }
+  resetMqFields(value as Partial<MqAdminConfig>);
+}
+
+function requireMqField(value: string, message: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(message);
+  return trimmed;
+}
+
+function buildMqAuth(): MqAuth {
+  switch (mqAuthKind.value) {
+    case "token":
+      return { kind: "token", token: requireMqField(mqToken.value, "Token auth requires a token") };
+    case "basic":
+      return {
+        kind: "basic",
+        username: requireMqField(mqBasicUsername.value, "Basic auth requires a username"),
+        password: mqBasicPassword.value,
+      };
+    case "apiKey":
+      return {
+        kind: "apiKey",
+        header: requireMqField(mqApiKeyHeader.value, "API key auth requires a header"),
+        value: requireMqField(mqApiKeyValue.value, "API key auth requires a value"),
+      };
+    case "oauth2":
+      return {
+        kind: "oauth2",
+        issuerUrl: requireMqField(mqOauthIssuerUrl.value, "OAuth2 auth requires an issuer URL"),
+        clientId: requireMqField(mqOauthClientId.value, "OAuth2 auth requires a client ID"),
+        clientSecret: requireMqField(mqOauthClientSecret.value, "OAuth2 auth requires a client secret"),
+        audience: mqOauthAudience.value.trim() || undefined,
+        scope: mqOauthScope.value.trim() || undefined,
+      };
+    default:
+      return { kind: "none" };
+  }
+}
+
+function buildMqTokenSigning() {
+  if (mqTokenSigningMode.value === "none") return undefined;
+  return {
+    algorithm: mqTokenSigningMode.value,
+    key: requireMqField(mqTokenSigningKey.value, "Broker token signing key is required"),
+  };
+}
+
+function buildMqAdminConfig(): MqAdminConfig {
+  return {
+    systemKind: "pulsar",
+    adminUrl: requireMqField(mqAdminUrl.value, "MQ Admin URL is required"),
+    auth: buildMqAuth(),
+    tlsSkipVerify: mqTlsSkipVerify.value || undefined,
+    pinnedVersion: selectionToPinnedVersion(mqPinnedVersion.value),
+    tokenSigning: buildMqTokenSigning(),
+  };
+}
+
+function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(adminUrl);
+  } catch {
+    throw new Error("MQ Admin URL is invalid");
+  }
+  const port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 8080);
+  config.host = parsed.hostname;
+  config.port = port;
+  config.ssl = parsed.protocol === "https:";
 }
 
 function isCustomCompatibleProfile() {
@@ -534,6 +671,11 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.jdbc_driver_class = "";
       form.value.jdbc_driver_paths = [];
       jdbcDriverPathsInput.value = "";
+    }
+    if (profile.type === "mq") {
+      resetMqFields();
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
     }
   }
 }
@@ -579,6 +721,7 @@ watch(
         connect_timeout_secs: config.connect_timeout_secs || 5,
         query_timeout_secs: config.query_timeout_secs ?? 30,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
+        keepalive_interval_secs: config.keepalive_interval_secs ?? 0,
         ssl: config.ssl || false,
         ca_cert_path: config.ca_cert_path || "",
         client_cert_path: config.client_cert_path || "",
@@ -597,9 +740,15 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         redis_key_separator: config.redis_key_separator ?? ":",
         etcd_endpoints: config.etcd_endpoints || "",
+        informix_server: config.informix_server || "",
         read_only: config.read_only || false,
         visible_databases: config.visible_databases,
       };
+      if (config.db_type === "mq") {
+        hydrateMqFields(config.external_config);
+      } else {
+        resetMqFields();
+      }
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
@@ -621,6 +770,7 @@ watch(
       selectedTransportLayerId.value = null;
       selectedType.value = "mysql";
       customDriverName.value = "";
+      resetMqFields();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dialogStep.value = "select";
@@ -754,6 +904,7 @@ const iconTypeMap: Record<string, string> = {
   xugu: "xugu",
   iotdb: "iotdb",
   etcd: "etcd",
+  mq: "mq",
   dm: "dm",
   h2: "h2",
   snowflake: "snowflake",
@@ -831,6 +982,7 @@ const dbOptions: DbOption[] = [
   { value: "xugu", label: "虚谷 XuguDB" },
   { value: "iotdb", label: "Apache IoTDB" },
   { value: "etcd", label: "etcd" },
+  { value: "mq", label: "Apache Pulsar" },
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
   { value: "jdbc", label: "JDBC" },
@@ -954,6 +1106,7 @@ const etcdEndpointsLines = computed({
 });
 const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isH2FileMode.value);
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
+const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const canChooseVisibleDatabases = computed(() => connectionCanChooseVisibleDatabases(form.value));
 const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases));
 const visibleDatabaseSummary = computed(() => {
@@ -983,6 +1136,7 @@ const testResultMessage = computed(() => {
   return testResult.value.ok ? t("connection.testSuccess") : testResult.value.message;
 });
 const hasRequiredConnectionTarget = computed(() => {
+  if (form.value.db_type === "mq") return !!mqAdminUrl.value.trim();
   if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
   return !!(form.value.host || (mongoUseUrl.value && form.value.connection_string) || (form.value.db_type === "jdbc" && form.value.connection_string) || connectionUrlInput.value.trim());
 });
@@ -1101,11 +1255,32 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   config.query_timeout_secs = Number.isFinite(queryTimeout) && queryTimeout >= 0 ? queryTimeout : 30;
   const idleTimeout = Number(config.idle_timeout_secs);
   config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
+  const keepaliveInterval = Number(config.keepalive_interval_secs);
+  config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 0;
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
   }
+  if (config.db_type === "informix" && config.informix_server) {
+    // Strip INFORMIXSERVER from url_params to avoid duplicate when dedicated field is used
+    config.url_params = (config.url_params || "")
+      .replace(/(?:^|[;])\s*INFORMIXSERVER\s*=[^;]*/gi, "")
+      .replace(/^[;]|[;]$/g, "")
+      .trim();
+  }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
+  if (config.db_type === "mq") {
+    const mqConfig = buildMqAdminConfig();
+    config.external_config = mqConfig;
+    applyMqAdminUrl(config, mqConfig.adminUrl);
+    config.username = "";
+    config.password = "";
+    config.database = undefined;
+    config.connection_string = undefined;
+    config.url_params = "";
+  } else {
+    config.external_config = undefined;
+  }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
     config.connection_string = undefined;
   } else if (config.db_type === "mongodb") {
@@ -1462,6 +1637,28 @@ function resetVisibleDatabaseDraftState() {
   visibleDatabaseShowSystem.value = false;
 }
 
+/** Silently load database names so the summary count shows a real total. */
+async function preloadVisibleDatabaseNames() {
+  if (!ensureConnectionHostResolvedFromUrl()) return;
+  if (visibleDatabaseNames.value.length > 0) return;
+  isLoadingVisibleDatabases.value = true;
+  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  const draftConfig = {
+    ...connectionConfigForSubmit(draftId),
+    id: draftId,
+    one_time: true,
+  };
+  try {
+    await api.connectDb(draftConfig);
+    visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
+  } catch {
+    // silently fail
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+    isLoadingVisibleDatabases.value = false;
+  }
+}
+
 async function openVisibleDatabasesPicker() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (!canChooseVisibleDatabases.value || isLoadingVisibleDatabases.value) return;
@@ -1560,6 +1757,7 @@ function resetForm() {
   selectedType.value = "mysql";
   customDriverName.value = "";
   mongoUseUrl.value = false;
+  resetMqFields();
   oceanbaseSubMode.value = "mysql";
   jdbcDriverPathsInput.value = "";
   selectedJdbcDriverPath.value = "";
@@ -1642,6 +1840,12 @@ watch(
       void loadJdbcDrivers();
       void loadAgentDrivers();
     }
+    // Preload database names so the summary count is accurate right away.
+    void nextTick(() => {
+      if (canChooseVisibleDatabases.value && hasVisibleDatabaseFilter.value) {
+        void preloadVisibleDatabaseNames();
+      }
+    });
   },
   { immediate: true },
 );
@@ -1933,7 +2137,7 @@ async function browseDbFilePath() {
           ? [{ name: "Microsoft Access", extensions: ["accdb", "mdb"] }]
           : form.value.db_type === "h2"
             ? [{ name: "H2", extensions: ["db"] }]
-            : [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }];
+            : [{ name: "SQLite", extensions: ["db", "db3", "sqlite", "sqlite3"] }];
     const selected = await open({
       title: "Select Database File",
       multiple: false,
@@ -1982,6 +2186,24 @@ async function createDuckDbFilePath() {
   if (!selected) return;
 
   const path = ensureDuckDbFileExtension(selected);
+  form.value.host = path;
+}
+
+function ensureSqliteFileExtension(path: string): string {
+  return /\.(db|db3|sqlite|sqlite3)$/i.test(path) ? path : `${path}.db`;
+}
+
+async function createSqliteFilePath() {
+  if (!isTauriRuntime()) return;
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const selected = await save({
+    title: t("connection.createSqliteFile"),
+    defaultPath: "database.db",
+    filters: [{ name: "SQLite", extensions: ["db", "db3", "sqlite", "sqlite3"] }],
+  });
+  if (!selected) return;
+
+  const path = ensureSqliteFileExtension(selected);
   form.value.host = path;
 }
 
@@ -2260,6 +2482,14 @@ function openExternalUrl(url: string) {
                   </div>
                 </div>
 
+                <div v-if="h2DriverMissing" class="grid grid-cols-4 items-center gap-4">
+                  <span />
+                  <p class="col-span-3 text-xs text-muted-foreground">
+                    {{ t("connection.driverInstallHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore')">{{ t("toolbar.driverManager") }}</a
+                    >{{ t("connection.driverInstallHintSuffix") }}
+                  </p>
+                </div>
+
                 <!-- JDBC: optional external plugin -->
                 <template v-if="form.db_type === 'jdbc'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -2356,6 +2586,14 @@ function openExternalUrl(url: string) {
                           </TooltipTrigger>
                           <TooltipContent>{{ t("connection.createDuckDbFile") }}</TooltipContent>
                         </Tooltip>
+                        <Tooltip v-if="isDesktop && form.db_type === 'sqlite'">
+                          <TooltipTrigger as-child>
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="createSqliteFilePath">
+                              <FilePlus2 class="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>{{ t("connection.createSqliteFile") }}</TooltipContent>
+                        </Tooltip>
                       </div>
                       <p v-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
                         {{ t("connection.memoryDatabasePathHint") }}
@@ -2396,6 +2634,124 @@ function openExternalUrl(url: string) {
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                   </template>
+                </template>
+
+                <!-- Message Queue: admin URL and auth -->
+                <template v-else-if="form.db_type === 'mq'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">Admin URL</Label>
+                    <Input v-model="mqAdminUrl" class="col-span-3" placeholder="http://127.0.0.1:8080" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">System</Label>
+                    <div class="col-span-3 h-9 rounded-md border border-input bg-muted px-3 py-2 text-sm text-muted-foreground">Apache Pulsar</div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">Auth</Label>
+                    <div class="col-span-3 flex flex-wrap gap-2">
+                      <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">None</Button>
+                      <Button size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">Token</Button>
+                      <Button size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">Basic</Button>
+                      <Button size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">API Key</Button>
+                      <Button size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">OAuth2</Button>
+                    </div>
+                  </div>
+                  <template v-if="mqAuthKind === 'token'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Token</Label>
+                      <Input v-model="mqToken" type="password" class="col-span-3" />
+                    </div>
+                  </template>
+                  <template v-else-if="mqAuthKind === 'basic'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">{{ t("connection.user") }}</Label>
+                      <Input v-model="mqBasicUsername" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">{{ t("connection.password") }}</Label>
+                      <Input v-model="mqBasicPassword" type="password" class="col-span-3" />
+                    </div>
+                  </template>
+                  <template v-else-if="mqAuthKind === 'apiKey'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Header</Label>
+                      <Input v-model="mqApiKeyHeader" class="col-span-3" placeholder="Authorization" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Value</Label>
+                      <Input v-model="mqApiKeyValue" type="password" class="col-span-3" />
+                    </div>
+                  </template>
+                  <template v-else-if="mqAuthKind === 'oauth2'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Issuer URL</Label>
+                      <Input v-model="mqOauthIssuerUrl" class="col-span-3" placeholder="https://issuer.example.com/oauth/token" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Client ID</Label>
+                      <Input v-model="mqOauthClientId" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Client Secret</Label>
+                      <Input v-model="mqOauthClientSecret" type="password" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Audience</Label>
+                      <Input v-model="mqOauthAudience" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right">Scope</Label>
+                      <Input v-model="mqOauthScope" class="col-span-3" />
+                    </div>
+                  </template>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">TLS</Label>
+                    <label class="col-span-3 inline-flex items-center gap-2">
+                      <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
+                      <span class="text-xs text-muted-foreground">Skip certificate verification</span>
+                    </label>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">Pinned Version</Label>
+                    <Select v-model="mqPinnedVersion">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="option in MQ_PINNED_VERSION_OPTIONS" :key="option.value" :value="option.value">
+                          <div class="grid gap-0.5 text-left">
+                            <span>{{ option.label }}</span>
+                            <span class="text-xs text-muted-foreground">{{ option.description }}</span>
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">Broker Token 签发</Label>
+                    <Select v-model="mqTokenSigningMode">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">不配置</SelectItem>
+                        <SelectItem value="hs256">HS256 SECRET</SelectItem>
+                        <SelectItem value="rs256">RS256 PRIVATE</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div v-if="mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
+                    <Label class="pt-2 text-right">签发密钥</Label>
+                    <textarea
+                      v-model="mqTokenSigningKey"
+                      class="col-span-3 min-h-24 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      :placeholder="mqTokenSigningMode === 'hs256' ? 'Broker SECRET' : '-----BEGIN PRIVATE KEY-----'"
+                    />
+                  </div>
+                  <div v-if="mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">按 Broker 的 jwt.broker.token.mode 选择：SECRET 使用 HS256，PRIVATE 使用 RS256。密钥会走连接 secret 存储。</p>
+                  </div>
                 </template>
 
                 <!-- Redis: host, port, user, password, ssl -->
@@ -2629,6 +2985,11 @@ function openExternalUrl(url: string) {
                     <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
                   </div>
 
+                  <div v-if="form.db_type === 'informix'" class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">{{ t("connection.informixServer") }}</Label>
+                    <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
+                  </div>
+
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
@@ -2699,7 +3060,7 @@ function openExternalUrl(url: string) {
                               : form.db_type === 'bigquery'
                                 ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
                                 : form.db_type === 'informix'
-                                  ? 'INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
+                                  ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
                                   : 'sslmode=disable'
                       "
                     />
@@ -2978,6 +3339,13 @@ function openExternalUrl(url: string) {
                   <Input v-model.number="form.idle_timeout_secs" type="number" min="0" max="600" step="1" class="col-span-3" />
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
+                  <Label class="text-right text-xs">{{ t("connection.keepaliveInterval") }}</Label>
+                  <div class="col-span-3 flex items-center gap-2">
+                    <Switch v-model="keepaliveEnabled" />
+                    <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
+                  </div>
+                </div>
+                <div class="grid grid-cols-4 items-center gap-4">
                   <Label class="text-right text-xs">{{ t("connection.readOnly") }}</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
@@ -3111,6 +3479,10 @@ function openExternalUrl(url: string) {
                         <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
                         <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
                       </label>
+                    </div>
+                    <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right text-xs">{{ t("connection.sshAgentSockPath") }}</Label>
+                      <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />

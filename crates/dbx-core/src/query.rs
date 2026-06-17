@@ -3,7 +3,12 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Nai
 #[cfg(feature = "duckdb-bundled")]
 use duckdb::types::{TimeUnit, Value, ValueRef};
 use mysql_async::prelude::Queryable;
+use sqlparser::ast::{visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement};
+use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
+use sqlparser::parser::Parser;
+use std::collections::HashSet;
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::time::Duration;
 #[cfg(feature = "duckdb-bundled")]
 use tokio::task::JoinHandle;
@@ -96,9 +101,94 @@ async fn connection_database_type_for_pool_key(state: &AppState, pool_key: &str)
 }
 
 fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&str>) -> Option<&str> {
-    match db_type {
-        Some(DatabaseType::Iris) => None,
-        _ => schema,
+    if matches!(db_type, Some(DatabaseType::Iris)) {
+        None
+    } else {
+        schema
+    }
+}
+
+fn sql_for_execution_context(db_type: Option<DatabaseType>, sql: &str, schema: Option<&str>) -> String {
+    if matches!(db_type, Some(DatabaseType::Iris)) {
+        if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
+            return qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string());
+        }
+    }
+    sql.to_string()
+}
+
+fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
+    let dialect = GenericDialect {};
+    let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    for statement in &mut statements {
+        if !iris_statement_uses_schema_search_path(statement) {
+            continue;
+        }
+        let cte_names = iris_statement_cte_names(statement);
+        let _ = visit_relations_mut(statement, |name| {
+            if qualify_iris_relation_name(name, schema, &cte_names) {
+                changed = true;
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    }
+
+    changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+}
+
+fn iris_statement_uses_schema_search_path(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Query(_)
+            | Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Truncate(_)
+    )
+}
+
+fn qualify_iris_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
+    let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
+        return false;
+    };
+    if cte_names.contains(&table.value.to_ascii_uppercase()) {
+        return false;
+    }
+
+    let table = table.clone();
+    name.0 = vec![ObjectNamePart::Identifier(Ident::with_quote('"', schema)), ObjectNamePart::Identifier(table)];
+    true
+}
+
+fn iris_statement_cte_names(statement: &Statement) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_iris_statement_cte_names(statement, &mut names);
+    names
+}
+
+fn collect_iris_statement_cte_names(statement: &Statement, names: &mut HashSet<String>) {
+    match statement {
+        Statement::Query(query) => collect_iris_query_cte_names(query, names),
+        Statement::Insert(insert) => {
+            if let Some(source) = &insert.source {
+                collect_iris_query_cte_names(source, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_iris_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<String>) {
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            names.insert(cte.alias.name.value.to_ascii_uppercase());
+            collect_iris_query_cte_names(&cte.query, names);
+        }
     }
 }
 
@@ -551,7 +641,7 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 
 pub fn is_connection_error(err: &str) -> bool {
     let lower = err.to_lowercase();
-    if is_dbx_query_timeout_error(&lower) {
+    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) {
         return false;
     }
     lower.contains("connection")
@@ -566,12 +656,31 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("not connected")
         || lower.contains("end-of-file")
         || lower.contains("idle")
+        || lower.contains("agent stdin not available")
+        || lower.contains("agent stdout not available")
+        || lower.contains("failed to write to agent stdin")
+        || lower.contains("failed to flush agent stdin")
         || lower.contains("communicating with the server")
         || is_os_connection_error(&lower)
 }
 
 fn is_dbx_query_timeout_error(lower: &str) -> bool {
     lower.starts_with("query timed out after ")
+}
+
+fn is_agent_rpc_timeout_error(lower: &str) -> bool {
+    lower.starts_with("agent rpc call timed out ")
+}
+
+fn should_discard_agent_pool_after_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    is_dbx_query_timeout_error(&lower)
+        || is_agent_rpc_timeout_error(&lower)
+        || lower.contains("agent stdin not available")
+        || lower.contains("agent stdout not available")
+        || lower.contains("failed to write to agent stdin")
+        || lower.contains("failed to flush agent stdin")
+        || lower.contains("agent rpc task failed")
 }
 
 fn is_os_connection_error(lower: &str) -> bool {
@@ -815,6 +924,7 @@ pub async fn do_execute(
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
+        PoolKind::MessageQueue => Err("Use Message Queue-specific commands".to_string()),
         PoolKind::InfluxDb(client) => {
             let client = client.clone();
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
@@ -826,13 +936,13 @@ pub async fn do_execute(
         }
         PoolKind::Agent(client) => {
             let client = client.clone();
-            let sql = sql.to_string();
+            let sql = sql_for_execution_context(pool_db_type, sql, schema);
             let database = database.map(|s| s.to_string());
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
             let rpc_timeout = query_timeout;
             drop(connections);
-            wait_for_query_opt(cancel_token, query_timeout, async move {
+            let result = wait_for_query_opt(cancel_token, query_timeout, async move {
                 let mut client = client.lock().await;
                 if let Some(session_id) = options.result_session_id.as_deref() {
                     let params = agent_fetch_query_page_params(session_id, options.page_size.unwrap_or(MAX_ROWS));
@@ -846,7 +956,11 @@ pub async fn do_execute(
                 }
             })
             .await
-            .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)))
+            .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)));
+            if matches!(result.as_ref(), Err(err) if should_discard_agent_pool_after_error(err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::ExternalTabular(ext_pool) => {
@@ -963,6 +1077,11 @@ pub async fn execute_sql_statement_with_options(
         return Ok(empty_query_result(0));
     }
 
+    if let Some(target_database) = postgres_drop_database_target(db_type, sql) {
+        return execute_postgres_drop_database(state, connection_id, &target_database, sql, cancel_token, options)
+            .await;
+    }
+
     // When a query tab has a client session, keep even database-less execution
     // on that tab-scoped pool so connection-level state (for example MySQL @vars)
     // survives across runs.
@@ -992,6 +1111,76 @@ pub async fn execute_sql_statement_with_options(
         }
         _ => result,
     }
+}
+
+async fn execute_postgres_drop_database(
+    state: &AppState,
+    connection_id: &str,
+    target_database: &str,
+    sql: &str,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<db::QueryResult, String> {
+    state.close_database_pool(connection_id, Some(target_database)).await?;
+
+    let admin_database = postgres_drop_database_admin_database(target_database);
+    let pool_key = state
+        .get_or_create_pool_for_session(connection_id, Some(admin_database), options.client_session_id.as_deref())
+        .await?;
+
+    if is_canceled(&cancel_token) {
+        return Err(canceled_error());
+    }
+
+    check_read_only_for_connection(state, &pool_key, sql).await?;
+    let pool = {
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => pool.clone(),
+            Some(_) => return Err("DROP DATABASE reconnect did not create a PostgreSQL connection".to_string()),
+            None => return Err("Connection not found".to_string()),
+        }
+    };
+
+    let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let max_rows = options.max_rows;
+    wait_for_query_opt(cancel_token, query_timeout, async {
+        db::postgres::terminate_current_user_database_backends(&pool, target_database).await?;
+        db::postgres::execute_query_with_max_rows(&pool, sql, max_rows).await
+    })
+    .await
+}
+
+fn postgres_drop_database_target(db_type: Option<DatabaseType>, sql: &str) -> Option<String> {
+    if db_type != Some(DatabaseType::Postgres) {
+        return None;
+    }
+    parse_drop_database_target(sql)
+}
+
+fn postgres_drop_database_admin_database(target_database: &str) -> &'static str {
+    if target_database.eq_ignore_ascii_case("postgres") {
+        "template1"
+    } else {
+        "postgres"
+    }
+}
+
+fn parse_drop_database_target(sql: &str) -> Option<String> {
+    let dialect = PostgreSqlDialect {};
+    let statements = Parser::parse_sql(&dialect, sql).ok()?;
+    let [Statement::Drop { object_type, names, .. }] = statements.as_slice() else {
+        return None;
+    };
+    if *object_type != ObjectType::Database || names.len() != 1 {
+        return None;
+    }
+
+    let parts = &names[0].0;
+    if parts.len() != 1 {
+        return None;
+    }
+    parts[0].as_ident().map(|ident| ident.value.clone())
 }
 
 pub async fn close_query_session(
@@ -1397,6 +1586,7 @@ pub async fn execute_statements_in_transaction(
             | PoolKind::Turso(_)
             | PoolKind::SqlServer(_)
             | PoolKind::Agent(_) => TxPath::Explicit,
+            PoolKind::MessageQueue => TxPath::None,
             #[cfg(feature = "duckdb-bundled")]
             PoolKind::DuckDb(_)
             | PoolKind::Redis(_)
@@ -1577,9 +1767,17 @@ async fn exec_tx_explicit_inner(
     let conns = state.connections.read().await;
     if let Some(crate::connection::PoolKind::Agent(client)) = conns.get(pool_key) {
         let db_type = connection_database_type_for_pool_key(state, pool_key).await;
-        let schema = schema_for_execution_context(db_type, schema);
+        let execution_schema = schema_for_execution_context(db_type, schema);
+        let rewritten_statements;
+        let statements = if matches!(db_type, Some(DatabaseType::Iris)) {
+            rewritten_statements =
+                statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+            rewritten_statements.as_slice()
+        } else {
+            statements
+        };
         let mut client = client.lock().await;
-        let result: db::QueryResult = client.execute_transaction(database, statements, schema).await?;
+        let result: db::QueryResult = client.execute_transaction(database, statements, execution_schema).await?;
         return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result });
     }
     drop(conns);
@@ -1980,6 +2178,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -1997,6 +2196,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -2056,6 +2256,93 @@ mod tests {
     }
 
     #[test]
+    fn iris_execution_context_qualifies_unqualified_dml_tables() {
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Iris), "SELECT * FROM TABLES", Some("INFORMATION_SCHEMA")),
+            "SELECT * FROM \"INFORMATION_SCHEMA\".TABLES"
+        );
+        let qualified_join = sql_for_execution_context(
+            Some(DatabaseType::Iris),
+            "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id",
+            Some("Sales"),
+        );
+        assert!(qualified_join.contains("FROM \"Sales\".orders"));
+        assert!(qualified_join.contains("JOIN \"Sales\".customers"));
+        assert!(qualified_join.contains("c.id = o.customer_id"));
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Iris), "SELECT * FROM INFORMATION_SCHEMA.TABLES", Some("APP")),
+            "SELECT * FROM INFORMATION_SCHEMA.TABLES"
+        );
+    }
+
+    #[test]
+    fn iris_execution_context_qualifies_nested_dml_tables_but_not_ctes() {
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Iris),
+                "WITH recent AS (SELECT * FROM events) SELECT * FROM recent WHERE EXISTS (SELECT 1 FROM audits)",
+                Some("APP")
+            ),
+            "WITH recent AS (SELECT * FROM \"APP\".events) SELECT * FROM recent WHERE EXISTS (SELECT 1 FROM \"APP\".audits)"
+        );
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Iris),
+                "INSERT INTO events SELECT * FROM staging_events",
+                Some("APP")
+            ),
+            "INSERT INTO \"APP\".events SELECT * FROM \"APP\".staging_events"
+        );
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Iris),
+                "UPDATE events SET status = 'done' WHERE id IN (SELECT event_id FROM audit_events)",
+                Some("APP")
+            ),
+            "UPDATE \"APP\".events SET status = 'done' WHERE id IN (SELECT event_id FROM \"APP\".audit_events)"
+        );
+    }
+
+    #[test]
+    fn iris_execution_context_leaves_ddl_and_unparseable_sql_unchanged() {
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Iris), "CREATE TABLE events (id INT)", Some("APP")),
+            "CREATE TABLE events (id INT)"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Iris), "SELECT %ID FROM", Some("APP")),
+            "SELECT %ID FROM"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Postgres), "SELECT * FROM events", Some("APP")),
+            "SELECT * FROM events"
+        );
+    }
+
+    #[test]
+    fn parses_postgres_drop_database_target() {
+        assert_eq!(parse_drop_database_target("DROP DATABASE vaultwarden;"), Some("vaultwarden".to_string()));
+        assert_eq!(parse_drop_database_target("drop database if exists \"app db\";"), Some("app db".to_string()));
+        assert_eq!(
+            parse_drop_database_target("/*x*/ DROP DATABASE \"app\"\"db\" -- trailing\n;"),
+            Some("app\"db".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_non_single_drop_database_statements() {
+        assert_eq!(parse_drop_database_target("DROP TABLE vaultwarden;"), None);
+        assert_eq!(parse_drop_database_target("DROP DATABASE vaultwarden; SELECT 1;"), None);
+        assert_eq!(parse_drop_database_target("DROP DATABASE 123bad;"), None);
+    }
+
+    #[test]
+    fn chooses_safe_postgres_drop_database_admin_database() {
+        assert_eq!(postgres_drop_database_admin_database("vaultwarden"), "postgres");
+        assert_eq!(postgres_drop_database_admin_database("postgres"), "template1");
+    }
+
+    #[test]
     fn agent_execute_query_params_default_to_safety_row_limit() {
         let params = agent_execute_query_params("SELECT * FROM events", None, None, QueryExecutionOptions::default());
 
@@ -2103,6 +2390,21 @@ mod tests {
         let params = agent_close_query_session_params("session-1");
 
         assert_eq!(params["sessionId"], "session-1");
+    }
+
+    #[test]
+    fn agent_timeout_discards_pool_but_does_not_retry_same_query() {
+        assert!(should_discard_agent_pool_after_error("Query timed out after 30 seconds"));
+        assert!(should_discard_agent_pool_after_error("Agent RPC call timed out (30s)"));
+        assert!(!is_connection_error("Agent RPC call timed out (30s)"));
+    }
+
+    #[test]
+    fn unavailable_agent_pipes_are_reconnectable_errors() {
+        assert!(should_discard_agent_pool_after_error("Agent stdin not available"));
+        assert!(should_discard_agent_pool_after_error("Agent stdout not available"));
+        assert!(is_connection_error("Agent stdin not available"));
+        assert!(is_connection_error("Agent stdout not available"));
     }
 
     #[test]

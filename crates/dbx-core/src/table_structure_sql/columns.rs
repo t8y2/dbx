@@ -194,9 +194,7 @@ pub(super) fn build_add_column_sql(
     table_name: &str,
 ) -> Vec<String> {
     let definition = column_definition(dialect, column);
-    let mut statements = if dialect == StructureDialect::Oracle {
-        vec![format!("ALTER TABLE {table} ADD ({definition});")]
-    } else if dialect == StructureDialect::Informix {
+    let mut statements = if dialect == StructureDialect::Oracle || dialect == StructureDialect::Informix {
         vec![format!("ALTER TABLE {table} ADD ({definition});")]
     } else {
         let add_keyword = if dialect == StructureDialect::SqlServer { "ADD" } else { "ADD COLUMN" };

@@ -23,8 +23,8 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
   }
   if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return objectType === "TABLE";
   if (databaseType === "mysql" || databaseType === "goldendb") return objectType === "TABLE" || objectType === "VIEW";
-  if (postgresLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW";
-  if (oracleLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW";
+  if (postgresLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
+  if (oracleLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
   return false;
 }
 

@@ -260,13 +260,16 @@ fn normalized_sqlserver_select_statement(sql: &str) -> Option<String> {
         return None;
     }
 
+    // Strip trailing ORDER BY so the statement can be used as a derived table
+    // subquery. SQL Server requires TOP / OFFSET / FOR XML alongside ORDER BY
+    // in subqueries, none of which are version-safe across 2008–2022.
     let mut statement = trimmed.to_string();
-    if let Some(order_by) = find_top_level_trailing_order_by(&statement) {
-        if !has_top_level_select_top(&statement)
-            && !has_top_level_offset_after(&statement, order_by)
-            && !has_top_level_for_xml(&statement)
-        {
-            statement.push_str(" OFFSET 0 ROWS");
+    let tokens = top_level_sqlserver_tokens(&statement);
+    for index in (0..tokens.len().saturating_sub(1)).rev() {
+        if tokens[index].text == "ORDER" && tokens.get(index + 1).is_some_and(|token| token.text == "BY") {
+            statement.truncate(tokens[index].start);
+            statement = statement.trim_end().to_string();
+            break;
         }
     }
     Some(statement)
@@ -387,39 +390,6 @@ fn has_top_level_select_into(sql: &str) -> bool {
         .map(|(index, _)| index)
         .unwrap_or(tokens.len());
     tokens[select_index + 1..from_index].iter().any(|token| token.text == "INTO")
-}
-
-fn has_top_level_select_top(sql: &str) -> bool {
-    let tokens = top_level_sqlserver_tokens(sql);
-    let Some(select_index) = tokens.iter().position(|token| token.text == "SELECT") else {
-        return false;
-    };
-    let from_index = tokens
-        .iter()
-        .enumerate()
-        .find(|(index, token)| *index > select_index && token.text == "FROM")
-        .map(|(index, _)| index)
-        .unwrap_or(tokens.len());
-    tokens[select_index + 1..from_index].iter().any(|token| token.text == "TOP")
-}
-
-fn has_top_level_for_xml(sql: &str) -> bool {
-    let tokens = top_level_sqlserver_tokens(sql);
-    tokens.windows(2).any(|tokens| tokens[0].text == "FOR" && tokens[1].text == "XML")
-}
-
-fn has_top_level_offset_after(sql: &str, start: usize) -> bool {
-    top_level_sqlserver_tokens(sql).into_iter().any(|token| token.start > start && token.text == "OFFSET")
-}
-
-fn find_top_level_trailing_order_by(sql: &str) -> Option<usize> {
-    let tokens = top_level_sqlserver_tokens(sql);
-    for index in (0..tokens.len().saturating_sub(1)).rev() {
-        if tokens[index].text == "ORDER" && tokens.get(index + 1).is_some_and(|token| token.text == "BY") {
-            return Some(tokens[index].start);
-        }
-    }
-    None
 }
 
 fn skip_sqlserver_quoted(sql: &str, pos: usize, quote: char) -> usize {
@@ -635,28 +605,39 @@ pub async fn list_tables(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<TableInfo>, String> {
-    let fetch_clause = limit
-        .map(|value| format!(" OFFSET {} ROWS FETCH NEXT {} ROWS ONLY", offset.unwrap_or(0), value.min(1000)))
-        .unwrap_or_else(|| {
-            offset.filter(|value| *value > 0).map(|value| format!(" OFFSET {value} ROWS")).unwrap_or_default()
-        });
     let filter_clause = filter
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!(" AND o.name LIKE '%{}%' ESCAPE '\\' ", escape_like_literal(value.trim())))
         .unwrap_or_default();
     let schema_escaped = schema.replace('\'', "''");
-    let sql = format!(
-        "SELECT o.name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END, \
-         ep.value AS TABLE_COMMENT \
-         FROM sys.objects o \
+    let base_columns = "o.name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END, ep.value AS TABLE_COMMENT";
+    let base_from = "FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
-         WHERE s.name = '{schema_escaped}' \
-           AND o.type IN ('U','V') \
-           AND o.is_ms_shipped = 0 \
-           {filter_clause}\
-         ORDER BY o.name{fetch_clause}"
-    );
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
+           WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
+    let base_where =
+        format!("WHERE s.name = '{schema_escaped}' AND o.type IN ('U','V') AND o.is_ms_shipped = 0 {filter_clause}");
+    let order_by = "ORDER BY o.name";
+
+    // Use SELECT TOP for broad SQL Server version compatibility.
+    // OFFSET / FETCH NEXT is only available in SQL Server 2012+.
+    let sql = match (limit, offset) {
+        (Some(limit), Some(offset)) if offset > 0 => {
+            let end = offset + limit.min(1000);
+            format!(
+                "SELECT * FROM (\
+                 SELECT {base_columns}, ROW_NUMBER() OVER ({order_by}) AS __dbx_rn \
+                 {base_from} {base_where}\
+                 ) AS __dbx_page WHERE __dbx_rn > {offset} AND __dbx_rn <= {end} ORDER BY __dbx_rn"
+            )
+        }
+        (Some(limit), _) => {
+            format!("SELECT TOP ({}) {base_columns} {base_from} {base_where} {order_by}", limit.min(1000))
+        }
+        _ => {
+            format!("SELECT {base_columns} {base_from} {base_where} {order_by}")
+        }
+    };
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows
@@ -1337,7 +1318,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rewritten.contains("ORDER BY landId DESC OFFSET 0 ROWS"));
+        // ORDER BY is stripped from the inner query so it can be used as a
+        // derived table subquery across all SQL Server versions (2008–2022).
+        assert!(!rewritten.contains("ORDER BY"));
+        assert!(rewritten.contains("FROM dbo.tLandPolygon"));
+        assert!(rewritten.contains(".STAsText()"));
     }
 
     #[test]

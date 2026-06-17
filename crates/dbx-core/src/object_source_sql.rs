@@ -150,6 +150,23 @@ pub fn build_executable_object_source_sql(input: EditableObjectSourceSqlInput) -
     Ok(build_executable_object_source_statements(input)?.join("\n"))
 }
 
+/// Convert a raw database object source into a form suitable for the source editor.
+///
+/// This is the *editable* presentation shown to the user when they open a view,
+/// procedure, or function for editing. For SQL Server the raw `CREATE VIEW` /
+/// `CREATE PROCEDURE` is rewritten to `CREATE OR ALTER` so the user doesn't see
+/// a mismatched CREATE statement for an already-existing object. Callers that
+/// only need the first statement should use this instead of calling
+/// `build_executable_object_source_statements` and discarding rename-cleanup
+/// statements.
+pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> String {
+    let source = input.source.clone();
+    match build_executable_object_source_statements(input) {
+        Ok(statements) => statements.into_iter().next().unwrap_or_default(),
+        Err(_) => ensure_semicolon(source.trim()),
+    }
+}
+
 pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let source = input.source.trim();
     if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(source) {
@@ -566,6 +583,30 @@ mod tests {
                 "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;",
             ]
         );
+    }
+
+    #[test]
+    fn sqlserver_view_source_opened_for_editing_shows_create_or_alter() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbo".to_string()),
+            name: "v_active_users".to_string(),
+            source: "CREATE VIEW dbo.v_active_users AS SELECT id, name FROM users WHERE active = 1;".to_string(),
+        });
+        assert_eq!(sql, "CREATE OR ALTER VIEW dbo.v_active_users AS SELECT id, name FROM users WHERE active = 1;");
+    }
+
+    #[test]
+    fn sqlserver_procedure_source_opened_for_editing_shows_create_or_alter() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("dbo".to_string()),
+            name: "usp_demo".to_string(),
+            source: "CREATE PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
+        });
+        assert_eq!(sql, "CREATE OR ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
     }
 
     #[test]

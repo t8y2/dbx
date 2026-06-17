@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type SidebarObjectKind = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface DatabaseObjectCapabilities {
   sidebarObjects: SidebarObjectKind[];
@@ -13,8 +13,9 @@ const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
 const TABLE_VIEW_PROCEDURE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE"];
 const TABLE_FUNCTION_OBJECTS: SidebarObjectKind[] = ["TABLE", "FUNCTION"];
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
-const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
-const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
+const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
+const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
+const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
 
 const TABLE_ONLY_TYPES = new Set<DatabaseType>(["influxdb"]);
 const TABLE_FUNCTION_TYPES = new Set<DatabaseType>(["manticoresearch"]);
@@ -23,6 +24,7 @@ const TABLE_VIEW_ONLY_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso"
 
 const ORACLE_PACKAGE_TYPES = new Set<DatabaseType>(["oracle", "oceanbase-oracle"]);
 const POSTGRES_SEQUENCE_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kwdb", "opengauss"]);
+const POSTGRES_LIKE_TYPES = new Set<DatabaseType>(["kingbase", "highgo", "vastbase", "redshift"]);
 
 export function databaseObjectCapabilities(dbType?: DatabaseType): DatabaseObjectCapabilities {
   const sidebarObjects = sidebarObjectKindsForDatabase(dbType);
@@ -41,6 +43,7 @@ export function sidebarObjectKindsForDatabase(dbType?: DatabaseType): SidebarObj
   if (TABLE_VIEW_PROCEDURE_TYPES.has(dbType)) return [...TABLE_VIEW_PROCEDURE_OBJECTS];
   if (TABLE_VIEW_ONLY_TYPES.has(dbType)) return [...TABLE_VIEW_OBJECTS];
   if (POSTGRES_SEQUENCE_TYPES.has(dbType)) return [...POSTGRES_OBJECTS];
+  if (POSTGRES_LIKE_TYPES.has(dbType)) return [...POSTGRES_LIKE_OBJECTS];
   return [...ROUTINE_OBJECTS];
 }
 
@@ -48,6 +51,7 @@ export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   const value = type.toUpperCase();
   if (value.includes("PACKAGE BODY") || value.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (value.includes("PACKAGE")) return "PACKAGE";
+  if (value.includes("MATERIALIZED") && value.includes("VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
   if (value.includes("SEQ")) return "SEQUENCE";
   if (value.includes("PROC")) return "PROCEDURE";

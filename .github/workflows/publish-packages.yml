@@ -247,6 +247,7 @@ jobs:
           jq --arg tag "$TAG" '
             (.platforms[]?.url?) |= (
               sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
+              + "?v=" + $tag
             )
           ' "$LATEST_JSON" > "$LATEST_JSON.tmp"
           mv "$LATEST_JSON.tmp" "$LATEST_JSON"
@@ -265,10 +266,38 @@ jobs:
         run: |
           aws s3 sync ./assets "s3://${{ secrets.R2_BUCKET_NAME }}/releases/latest/" \
             --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" \
+            --cache-control "no-cache" \
             --delete
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+      - name: Purge Cloudflare cache
+        run: |
+          set -euo pipefail
+          zone_id="${CLOUDFLARE_ZONE_ID:-}"
+          if [ -z "$zone_id" ]; then
+            zone_id="$(curl -fsSL \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/zones?name=dbxio.com" \
+              | jq -r '.result[0].id // empty')"
+          fi
+
+          if [ -z "$zone_id" ]; then
+            echo "::error::Cloudflare zone dbxio.com not found. Set CLOUDFLARE_ZONE_ID or grant Zone:Read to CLOUDFLARE_API_TOKEN."
+            exit 1
+          fi
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}' \
+            "https://api.cloudflare.com/client/v4/zones/${zone_id}/purge_cache" \
+            | jq -e '.success == true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
 
   promote-release:
     name: Promote to Release

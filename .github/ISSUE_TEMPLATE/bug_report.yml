@@ -30,7 +30,10 @@ body:
     id: logs
     attributes:
       label: 错误日志
-      description: 终端、DevTools 或应用内的错误信息。
+      description: |
+        **⚠️ 调试日志对定位和修复问题至关重要，请务必提供！**
+        请在 DBX 中操作：设置 → 外观 → 开启"启用调试日志" → 复现问题 → 点击"下载日志"，将日志文件粘贴到这里。
+        也可以提供终端、DevTools 的错误信息。
       render: shell
 
   - type: input
@@ -51,6 +54,19 @@ body:
         - Windows
         - Linux
         - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 优先级（是否紧急）
+      description: 紧急 = 希望下个版本优先修。维护者可根据实际情况调整。
+      options:
+        - "🔴 P0 紧急 · 下个版本必须修"
+        - "🟠 P1 重要 · 尽快处理"
+        - "🟡 P2 普通 · 按排期处理"
+        - "🟢 P3 低优 · 有空再修"
     validations:
       required: true
 

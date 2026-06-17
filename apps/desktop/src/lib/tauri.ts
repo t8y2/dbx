@@ -486,8 +486,8 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return invoke("delete_schema_cache_prefix", { prefix });
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number): Promise<TableInfo[]> {
-  return invoke("list_tables", { connectionId, database, schema, filter, limit, offset });
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[]): Promise<TableInfo[]> {
+  return invoke("list_tables", { connectionId, database, schema, filter, limit, offset, objectTypes });
 }
 
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
@@ -681,6 +681,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
   return invoke("build_executable_object_source_sql", { input });
 }
 
+export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return invoke("build_editable_object_source", { input });
+}
+
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return invoke("build_routine_rename_object_source_statements", { input });
 }
@@ -783,8 +787,8 @@ export async function listTriggers(connectionId: string, database: string, schem
   return invoke("list_triggers", { connectionId, database, schema, table });
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string): Promise<string> {
-  return invoke("get_table_ddl", { connectionId, database, schema, table });
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind): Promise<string> {
+  return invoke("get_table_ddl", { connectionId, database, schema, table, objectType });
 }
 
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
@@ -1475,6 +1479,24 @@ export async function cancelTransfer(transferId: string): Promise<void> {
   return invoke("cancel_transfer", { transferId });
 }
 
+export interface SortTablesByFkOptions {
+  connectionId: string;
+  database: string;
+  schema: string;
+  tables: string[];
+  parentsFirst: boolean;
+}
+
+export async function sortTablesByFkDependency(options: SortTablesByFkOptions): Promise<string[]> {
+  return invoke("sort_tables_by_fk_dependency", {
+    connectionId: options.connectionId,
+    database: options.database,
+    schema: options.schema,
+    tables: options.tables,
+    parentsFirst: options.parentsFirst,
+  });
+}
+
 // --- Table File Import ---
 export type TableImportMode = "append" | "truncate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
@@ -1721,3 +1743,5 @@ export async function exportQueryResultMarkdown(filePath: string, columns: strin
     },
   });
 }
+
+export * from "./mq-tauri";

@@ -59,13 +59,16 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        false,
         StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
     );
     private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
     private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
+    private static final JdbcDriverQuirks TAOS_QUIRKS = DEFAULT_QUIRKS.withPreferExecuteQueryForResultSetSql(true);
     private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(
         true,
         true,
+        false,
         false,
         false,
         false,
@@ -77,11 +80,13 @@ public final class DbxJdbcPlugin {
         true,
         false,
         false,
+        false,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(
         false,
         true,
+        false,
         false,
         false,
         false,
@@ -97,7 +102,9 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:yasdb:", YASHAN_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:iris:", IRIS_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:oracle:", ORACLE_QUIRKS),
-        new JdbcDriverQuirkRule("jdbc:dm:", ORACLE_QUIRKS)
+        new JdbcDriverQuirkRule("jdbc:dm:", ORACLE_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:taos:", TAOS_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:taos-ws:", TAOS_QUIRKS)
     );
     private static String registeredDriverKey = "";
     private static String sharedConnectionKey = "";
@@ -109,6 +116,7 @@ public final class DbxJdbcPlugin {
         boolean caseInsensitiveSchemaMetadata,
         boolean useCatalogFallbackSql,
         boolean ignoreCatalogForSchemaMetadata,
+        boolean preferExecuteQueryForResultSetSql,
         StatementMaxRowsMode statementMaxRowsMode
     ) {
         JdbcDriverQuirks withUseCatalogFallbackSql(boolean value) {
@@ -118,6 +126,7 @@ public final class DbxJdbcPlugin {
                 caseInsensitiveSchemaMetadata,
                 value,
                 ignoreCatalogForSchemaMetadata,
+                preferExecuteQueryForResultSetSql,
                 statementMaxRowsMode
             );
         }
@@ -128,6 +137,19 @@ public final class DbxJdbcPlugin {
                 useOracleMetadata,
                 caseInsensitiveSchemaMetadata,
                 useCatalogFallbackSql,
+                value,
+                preferExecuteQueryForResultSetSql,
+                statementMaxRowsMode
+            );
+        }
+
+        JdbcDriverQuirks withPreferExecuteQueryForResultSetSql(boolean value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                useCatalogFallbackSql,
+                ignoreCatalogForSchemaMetadata,
                 value,
                 statementMaxRowsMode
             );
@@ -348,14 +370,15 @@ public final class DbxJdbcPlugin {
         JdbcDriverQuirks quirks = driverQuirks(connection);
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            boolean hasResultSet = statement.execute(trimStatementSql(sql));
+            String trimmedSql = trimStatementSql(sql);
+            ExecutedStatement executed = executeStatementForResult(statement, trimmedSql, quirks);
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
             ArrayNode rows = MAPPER.createArrayNode();
             boolean truncated = false;
 
-            if (hasResultSet) {
-                try (ResultSet rs = statement.getResultSet()) {
+            try (ResultSet rs = executed.resultSet()) {
+                if (rs != null) {
                     ResultSetMetaData meta = rs.getMetaData();
                     int columnCount = meta.getColumnCount();
                     for (int i = 1; i <= columnCount; i++) {
@@ -378,11 +401,79 @@ public final class DbxJdbcPlugin {
 
             result.set("columns", columns);
             result.set("rows", rows);
-            result.put("affected_rows", hasResultSet ? 0 : Math.max(statement.getUpdateCount(), 0));
+            result.put("affected_rows", columns.isEmpty() ? Math.max(executed.updateCount(), 0) : 0);
             result.put("execution_time_ms", (System.nanoTime() - start) / 1_000_000);
             result.put("truncated", truncated);
             return result;
         }
+    }
+
+    private record ExecutedStatement(ResultSet resultSet, int updateCount) {
+    }
+
+    private static ExecutedStatement executeStatementForResult(
+        Statement statement,
+        String sql,
+        JdbcDriverQuirks quirks
+    ) throws SQLException {
+        if (quirks.preferExecuteQueryForResultSetSql() && looksLikeResultSetSql(sql)) {
+            return new ExecutedStatement(statement.executeQuery(sql), -1);
+        }
+        boolean hasResultSet = statement.execute(sql);
+        int updateCount = hasResultSet ? -1 : statement.getUpdateCount();
+        ResultSet rs = hasResultSet ? statement.getResultSet() : null;
+        if (rs == null && shouldRetryWithExecuteQuery(sql, hasResultSet, updateCount)) {
+            rs = statement.executeQuery(sql);
+        }
+        return new ExecutedStatement(rs, updateCount);
+    }
+
+    private static boolean shouldRetryWithExecuteQuery(String sql, boolean hasResultSet, int updateCount) {
+        if (hasResultSet) {
+            return true;
+        }
+        return updateCount < 0 && looksLikeResultSetSql(sql);
+    }
+
+    static boolean looksLikeResultSetSql(String sql) {
+        String keyword = firstSqlKeyword(sql);
+        return switch (keyword) {
+            case "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "VALUES", "TABLE", "PRAGMA" -> true;
+            default -> false;
+        };
+    }
+
+    private static String firstSqlKeyword(String sql) {
+        String text = stripLeadingSqlComments(sql).trim();
+        int end = 0;
+        while (end < text.length() && Character.isLetter(text.charAt(end))) {
+            end++;
+        }
+        return text.substring(0, end).toUpperCase(Locale.ROOT);
+    }
+
+    private static String stripLeadingSqlComments(String sql) {
+        String text = sql.trim();
+        boolean changed;
+        do {
+            changed = false;
+            if (text.startsWith("--")) {
+                int lineEnd = text.indexOf('\n');
+                if (lineEnd < 0) {
+                    return "";
+                }
+                text = text.substring(lineEnd + 1).trim();
+                changed = true;
+            } else if (text.startsWith("/*")) {
+                int commentEnd = text.indexOf("*/", 2);
+                if (commentEnd < 0) {
+                    return "";
+                }
+                text = text.substring(commentEnd + 2).trim();
+                changed = true;
+            }
+        } while (changed);
+        return text;
     }
 
     /**

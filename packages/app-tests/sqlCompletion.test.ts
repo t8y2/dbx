@@ -41,6 +41,18 @@ const columnsByTable = new Map<string, SqlCompletionColumn[]>([
   ],
 ]);
 
+const mysqlCrossDatabaseColumnsByTable = new Map<string, SqlCompletionColumn[]>([
+  [
+    "other_db.orders",
+    [
+      { name: "id", table: "orders", dataType: "bigint" },
+      { name: "number", table: "orders", dataType: "varchar" },
+      { name: "status", table: "orders", dataType: "varchar" },
+    ],
+  ],
+  ["current_db.orders", [{ name: "local_status", table: "orders", dataType: "varchar" }]],
+]);
+
 const completionObjects: SqlCompletionObject[] = [
   { name: "refresh_user_stats", schema: "app", type: "procedure" },
   { name: "format_user_name", schema: "app", type: "function" },
@@ -485,6 +497,86 @@ test("keeps schema-qualified FROM object input in table suggestion mode", () => 
   assert.deepEqual(
     tableItems.map((item) => item.label),
     ["users", "user_profiles"],
+  );
+});
+
+test("keeps database-qualified FROM input in table suggestion mode", () => {
+  const sql = "select * from other_db.or";
+  const context = getSqlCompletionContext(sql, sql.length);
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+
+  assert.equal(context.qualifier, "other_db");
+  assert.deepEqual(context.qualifierParts, ["other_db"]);
+  assert.equal(context.prefix, "or");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveColumnSuggestions, false);
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type, item.detail]),
+    [["orders", "table", "other_db.orders"]],
+  );
+});
+
+test("tracks qualifier parts for database-qualified column completion", () => {
+  const sql = "select * from other_db.orders where other_db.orders.st";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.equal(context.qualifier, "other_db.orders");
+  assert.deepEqual(context.qualifierParts, ["other_db", "orders"]);
+  assert.equal(context.prefix, "st");
+  assert.equal(context.exclusiveColumnSuggestions, true);
+});
+
+test("suggests columns after database-qualified table qualifier", () => {
+  const sql = "select * from other_db.orders where other_db.orders.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type, item.detail]),
+    [
+      ["id", "column", "orders  [bigint]"],
+      ["number", "column", "orders  [varchar]"],
+      ["status", "column", "orders  [varchar]"],
+    ],
+  );
+});
+
+test("scopes database-qualified table column suggestions to the matching database", () => {
+  const sql = "select * from other_db.orders where other_db.orders.st";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type, item.detail]),
+    [["status", "column", "orders  [varchar]"]],
+  );
+});
+
+test("keeps aliases working for database-qualified tables", () => {
+  const sql = "select * from other_db.orders o where o.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type]),
+    [
+      ["id", "column"],
+      ["number", "column"],
+      ["status", "column"],
+    ],
   );
 });
 

@@ -69,3 +69,10 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   const type = effectiveDatabaseTypeForConnection(connection);
   return isSchemaAware(type) ? database : undefined;
 }
+
+/** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */
+export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" | "postgres" | "sqlserver" {
+  if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
+  if (dbType === "sqlserver") return "sqlserver";
+  return "mysql";
+}

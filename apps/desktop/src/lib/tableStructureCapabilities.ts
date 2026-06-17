@@ -76,6 +76,7 @@ const gbaseCapabilities = capabilities({
   addColumn: true,
   dropColumn: true,
   renameColumn: true,
+  reorderColumn: true,
 });
 
 const postgresCapabilities = capabilities({

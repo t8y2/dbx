@@ -26,6 +26,19 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 优先级（是否紧急）
+      description: 紧急 = 希望下个版本优先做。维护者可根据实际情况调整。
+      options:
+        - "🔴 P0 紧急 · 下个版本必须做"
+        - "🟠 P1 重要 · 尽快处理"
+        - "🟡 P2 普通 · 按排期处理"
+        - "🟢 P3 低优 · 有空再做"
+    validations:
+      required: true
+
   - type: textarea
     id: extra
     attributes:

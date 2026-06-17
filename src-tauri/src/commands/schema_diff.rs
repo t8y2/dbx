@@ -6,6 +6,7 @@ pub fn prepare_schema_diff(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn generate_schema_sync_sql(
     diffs: Vec<dbx_core::schema_diff::TableDiff>,
     function_diffs: Option<Vec<dbx_core::schema_diff::FunctionDiff>>,

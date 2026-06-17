@@ -1,5 +1,6 @@
 import type { ComposerTranslation } from "vue-i18n";
 import type { DatabaseType } from "@/types/database";
+import { quoteUnquotedObjectKeys } from "@/lib/mongoShellCommand";
 
 export type DocumentStoreKind = "mongodb" | "elasticsearch";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "less-than" | "is-null" | "is-not-null";
@@ -118,10 +119,28 @@ export function combineDocumentFilterConditions(conditions: Record<string, unkno
   return result;
 }
 
+const MAX_SAFE_BIGINT = 9007199254740991n;
+
+function parseJsonPreservingLargeIntegers(json: string): unknown {
+  const safe = json.replace(/([\[:,\s]\s*?)(-?\d+)(\s*[,\]\}])/g, (_match, before, num, after) => {
+    try {
+      const n = BigInt(num);
+      if (n > MAX_SAFE_BIGINT || n < -MAX_SAFE_BIGINT) {
+        return `${before}"${num}"${after}`;
+      }
+    } catch {
+      /* not a valid integer */
+    }
+    return _match;
+  });
+  return JSON.parse(safe);
+}
+
 export function parseDocumentFilterInput(input: string): Record<string, unknown> {
   const trimmed = input.trim();
   if (!trimmed) return {};
-  const parsed = JSON.parse(trimmed);
+  const safe = quoteUnquotedObjectKeys(trimmed);
+  const parsed = parseJsonPreservingLargeIntegers(safe);
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 }
 
@@ -135,7 +154,7 @@ function parseDocumentFilterValue(raw: string): unknown {
   const trimmed = raw.trim();
   if (!trimmed) return "";
   try {
-    return JSON.parse(trimmed);
+    return parseJsonPreservingLargeIntegers(trimmed);
   } catch {
     return trimmed;
   }

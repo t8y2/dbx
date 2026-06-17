@@ -181,7 +181,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         db_type: DatabaseType::InfluxDb,
         key: "influxdb",
         label: "InfluxDB",
-        store_visible: true,
+        store_visible: false,
         profiles: &[],
     },
     AgentCatalogEntry {

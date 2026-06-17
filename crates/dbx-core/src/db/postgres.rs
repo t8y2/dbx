@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime};
-use deadpool_postgres::{ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
@@ -84,309 +84,6 @@ impl<'a> FromSql<'a> for PgRawBytes {
     fn accepts(_: &Type) -> bool {
         true
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WkbDimensions {
-    has_z: bool,
-    has_m: bool,
-}
-
-impl WkbDimensions {
-    fn suffix(self) -> &'static str {
-        match (self.has_z, self.has_m) {
-            (false, false) => "",
-            (true, false) => " Z",
-            (false, true) => " M",
-            (true, true) => " ZM",
-        }
-    }
-
-    fn coordinate_len(self) -> usize {
-        2 + usize::from(self.has_z) + usize::from(self.has_m)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum WkbGeometry {
-    Point { dims: WkbDimensions, coords: Option<Vec<f64>> },
-    LineString { dims: WkbDimensions, points: Vec<Vec<f64>> },
-    Polygon { dims: WkbDimensions, rings: Vec<Vec<Vec<f64>>> },
-    MultiPoint { dims: WkbDimensions, points: Vec<Option<Vec<f64>>> },
-    MultiLineString { dims: WkbDimensions, lines: Vec<Vec<Vec<f64>>> },
-    MultiPolygon { dims: WkbDimensions, polygons: Vec<Vec<Vec<Vec<f64>>>> },
-    GeometryCollection { dims: WkbDimensions, geometries: Vec<WkbGeometry> },
-}
-
-impl WkbGeometry {
-    fn to_wkt(&self) -> String {
-        match self {
-            Self::Point { dims, coords } => match coords {
-                Some(coords) => format!("POINT{}({})", dims.suffix(), format_wkb_coordinate(coords)),
-                None => format!("POINT{} EMPTY", dims.suffix()),
-            },
-            Self::LineString { dims, points } => {
-                if points.is_empty() {
-                    format!("LINESTRING{} EMPTY", dims.suffix())
-                } else {
-                    format!("LINESTRING{}({})", dims.suffix(), format_wkb_coordinate_sequence(points))
-                }
-            }
-            Self::Polygon { dims, rings } => {
-                if rings.is_empty() {
-                    format!("POLYGON{} EMPTY", dims.suffix())
-                } else {
-                    format!(
-                        "POLYGON{}({})",
-                        dims.suffix(),
-                        rings
-                            .iter()
-                            .map(|ring| format!("({})", format_wkb_coordinate_sequence(ring)))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    )
-                }
-            }
-            Self::MultiPoint { dims, points } => {
-                if points.is_empty() {
-                    format!("MULTIPOINT{} EMPTY", dims.suffix())
-                } else {
-                    format!(
-                        "MULTIPOINT{}({})",
-                        dims.suffix(),
-                        points
-                            .iter()
-                            .map(|point| match point {
-                                Some(coords) => format!("({})", format_wkb_coordinate(coords)),
-                                None => "EMPTY".to_string(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    )
-                }
-            }
-            Self::MultiLineString { dims, lines } => {
-                if lines.is_empty() {
-                    format!("MULTILINESTRING{} EMPTY", dims.suffix())
-                } else {
-                    format!(
-                        "MULTILINESTRING{}({})",
-                        dims.suffix(),
-                        lines
-                            .iter()
-                            .map(|line| format!("({})", format_wkb_coordinate_sequence(line)))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    )
-                }
-            }
-            Self::MultiPolygon { dims, polygons } => {
-                if polygons.is_empty() {
-                    format!("MULTIPOLYGON{} EMPTY", dims.suffix())
-                } else {
-                    format!(
-                        "MULTIPOLYGON{}({})",
-                        dims.suffix(),
-                        polygons
-                            .iter()
-                            .map(|polygon| {
-                                format!(
-                                    "({})",
-                                    polygon
-                                        .iter()
-                                        .map(|ring| format!("({})", format_wkb_coordinate_sequence(ring)))
-                                        .collect::<Vec<_>>()
-                                        .join(",")
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    )
-                }
-            }
-            Self::GeometryCollection { dims, geometries } => {
-                if geometries.is_empty() {
-                    format!("GEOMETRYCOLLECTION{} EMPTY", dims.suffix())
-                } else {
-                    format!(
-                        "GEOMETRYCOLLECTION{}({})",
-                        dims.suffix(),
-                        geometries.iter().map(WkbGeometry::to_wkt).collect::<Vec<_>>().join(",")
-                    )
-                }
-            }
-        }
-    }
-}
-
-fn format_wkb_coordinate(coords: &[f64]) -> String {
-    coords.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(" ")
-}
-
-fn format_wkb_coordinate_sequence(points: &[Vec<f64>]) -> String {
-    points.iter().map(|point| format_wkb_coordinate(point)).collect::<Vec<_>>().join(",")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WkbEndian {
-    Big,
-    Little,
-}
-
-struct WkbReader<'a> {
-    raw: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> WkbReader<'a> {
-    fn new(raw: &'a [u8]) -> Self {
-        Self { raw, pos: 0 }
-    }
-
-    fn read_u8(&mut self) -> Option<u8> {
-        let value = *self.raw.get(self.pos)?;
-        self.pos += 1;
-        Some(value)
-    }
-
-    fn read_array<const N: usize>(&mut self) -> Option<[u8; N]> {
-        let end = self.pos.checked_add(N)?;
-        let bytes: [u8; N] = self.raw.get(self.pos..end)?.try_into().ok()?;
-        self.pos = end;
-        Some(bytes)
-    }
-
-    fn read_u32(&mut self, endian: WkbEndian) -> Option<u32> {
-        let bytes = self.read_array::<4>()?;
-        Some(match endian {
-            WkbEndian::Big => u32::from_be_bytes(bytes),
-            WkbEndian::Little => u32::from_le_bytes(bytes),
-        })
-    }
-
-    fn read_f64(&mut self, endian: WkbEndian) -> Option<f64> {
-        let bytes = self.read_array::<8>()?;
-        Some(match endian {
-            WkbEndian::Big => f64::from_be_bytes(bytes),
-            WkbEndian::Little => f64::from_le_bytes(bytes),
-        })
-    }
-}
-
-fn parse_wkb_dimensions(type_word: u32) -> (u32, WkbDimensions, bool) {
-    let mut base_type = type_word & 0x1FFF_FFFF;
-    let mut dims = WkbDimensions { has_z: (type_word & 0x8000_0000) != 0, has_m: (type_word & 0x4000_0000) != 0 };
-    let has_srid = (type_word & 0x2000_0000) != 0;
-
-    if base_type >= 3000 {
-        dims.has_z = true;
-        dims.has_m = true;
-        base_type -= 3000;
-    } else if base_type >= 2000 {
-        dims.has_m = true;
-        base_type -= 2000;
-    } else if base_type >= 1000 {
-        dims.has_z = true;
-        base_type -= 1000;
-    }
-
-    (base_type, dims, has_srid)
-}
-
-fn read_wkb_point_coords(reader: &mut WkbReader<'_>, dims: WkbDimensions, allow_empty_point: bool) -> Option<Vec<f64>> {
-    let endian = match reader.read_u8()? {
-        0 => WkbEndian::Big,
-        1 => WkbEndian::Little,
-        _ => return None,
-    };
-    let type_word = reader.read_u32(endian)?;
-    let (base_type, parsed_dims, has_srid) = parse_wkb_dimensions(type_word);
-    if base_type != 1 || parsed_dims != dims {
-        return None;
-    }
-    if has_srid {
-        reader.read_u32(endian)?;
-    }
-    let coords = (0..parsed_dims.coordinate_len()).map(|_| reader.read_f64(endian)).collect::<Option<Vec<_>>>()?;
-    if allow_empty_point && coords.iter().all(|value| value.is_nan()) {
-        return None;
-    }
-    Some(coords)
-}
-
-fn parse_wkb_points(reader: &mut WkbReader<'_>, endian: WkbEndian, dims: WkbDimensions) -> Option<Vec<Vec<f64>>> {
-    let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-    (0..count)
-        .map(|_| (0..dims.coordinate_len()).map(|_| reader.read_f64(endian)).collect::<Option<Vec<_>>>())
-        .collect::<Option<Vec<_>>>()
-}
-
-fn parse_wkb_geometry(reader: &mut WkbReader<'_>) -> Option<WkbGeometry> {
-    let endian = match reader.read_u8()? {
-        0 => WkbEndian::Big,
-        1 => WkbEndian::Little,
-        _ => return None,
-    };
-    let type_word = reader.read_u32(endian)?;
-    let (base_type, dims, has_srid) = parse_wkb_dimensions(type_word);
-    if has_srid {
-        reader.read_u32(endian)?;
-    }
-
-    match base_type {
-        1 => {
-            let coords = (0..dims.coordinate_len()).map(|_| reader.read_f64(endian)).collect::<Option<Vec<_>>>()?;
-            let coords = if coords.iter().all(|value| value.is_nan()) { None } else { Some(coords) };
-            Some(WkbGeometry::Point { dims, coords })
-        }
-        2 => Some(WkbGeometry::LineString { dims, points: parse_wkb_points(reader, endian, dims)? }),
-        3 => {
-            let ring_count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let rings = (0..ring_count).map(|_| parse_wkb_points(reader, endian, dims)).collect::<Option<Vec<_>>>()?;
-            Some(WkbGeometry::Polygon { dims, rings })
-        }
-        4 => {
-            let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let points =
-                (0..count).map(|_| Some(read_wkb_point_coords(reader, dims, true))).collect::<Option<Vec<_>>>()?;
-            Some(WkbGeometry::MultiPoint { dims, points })
-        }
-        5 => {
-            let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let lines = (0..count)
-                .map(|_| match parse_wkb_geometry(reader)? {
-                    WkbGeometry::LineString { points, .. } => Some(points),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(WkbGeometry::MultiLineString { dims, lines })
-        }
-        6 => {
-            let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let polygons = (0..count)
-                .map(|_| match parse_wkb_geometry(reader)? {
-                    WkbGeometry::Polygon { rings, .. } => Some(rings),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(WkbGeometry::MultiPolygon { dims, polygons })
-        }
-        7 => {
-            let count = usize::try_from(reader.read_u32(endian)?).ok()?;
-            let geometries = (0..count).map(|_| parse_wkb_geometry(reader)).collect::<Option<Vec<_>>>()?;
-            Some(WkbGeometry::GeometryCollection { dims, geometries })
-        }
-        _ => None,
-    }
-}
-
-fn ewkb_to_wkt(raw: &[u8]) -> Option<String> {
-    let mut reader = WkbReader::new(raw);
-    let geometry = parse_wkb_geometry(&mut reader)?;
-    if reader.pos != raw.len() {
-        return None;
-    }
-    Some(geometry.to_wkt())
 }
 
 /// Decode pgvector binary format into a Vec<f32>.
@@ -575,7 +272,7 @@ fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value
 
     if upper == "GEOMETRY" || upper == "GEOGRAPHY" {
         if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
-            return ewkb_to_wkt(&raw)
+            return super::wkb::wkb_to_wkt(&raw)
                 .map(serde_json::Value::String)
                 .unwrap_or_else(|| super::binary_value_to_json(&raw));
         }
@@ -677,6 +374,43 @@ fn escape_tsvector_lexeme(value: &str) -> String {
 
 fn pg_error_to_string(err: tokio_postgres::Error) -> String {
     err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
+}
+
+fn pg_db_error_to_string(err: &tokio_postgres::error::DbError) -> String {
+    format!("{err} (SQLSTATE {})", err.code().code())
+}
+
+fn pg_error_from_sources(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut current = Some(err);
+    while let Some(source) = current {
+        if let Some(pg_error) = source.downcast_ref::<tokio_postgres::Error>() {
+            if let Some(db_error) = pg_error.as_db_error() {
+                return Some(pg_db_error_to_string(db_error));
+            }
+        }
+        if let Some(db_error) = source.downcast_ref::<tokio_postgres::error::DbError>() {
+            return Some(pg_db_error_to_string(db_error));
+        }
+        current = source.source();
+    }
+    None
+}
+
+fn error_with_sources_to_string(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut messages = vec![err.to_string()];
+    let mut current = err.source();
+    while let Some(source) = current {
+        let message = source.to_string();
+        if !messages.iter().any(|existing| existing == &message) {
+            messages.push(message);
+        }
+        current = source.source();
+    }
+    messages.join(": ")
+}
+
+fn pg_pool_error_to_string(err: PoolError) -> String {
+    pg_error_from_sources(&err).unwrap_or_else(|| error_with_sources_to_string(&err))
 }
 
 fn should_retry_postgres_text_query(err: &tokio_postgres::Error) -> bool {
@@ -845,7 +579,8 @@ pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, Stri
 
         // Verify connectivity and set timezone. Only set timezone if the user
         // hasn't already specified one via connection parameters (e.g. options=-c timezone=...)
-        let client = pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {e}"))?;
+        let client =
+            pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
         if !pg_url_has_timezone_setting(url) {
             client
                 .execute(&format!("SET timezone = '{}'", tz.replace('\'', "''")), &[])
@@ -1250,6 +985,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
          WHEN 'm' THEN 'VIEW' \
+         WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
        obj_description(c.oid) AS object_comment, \
@@ -1261,7 +997,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        ) AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
@@ -1270,7 +1006,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
      LEFT JOIN LATERAL pg_stat_file( \
        CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
      ) stat ON true \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
      UNION ALL \
      SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
@@ -1291,6 +1027,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
          WHEN 'm' THEN 'VIEW' \
+         WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
        obj_description(c.oid) AS object_comment, \
@@ -1298,13 +1035,13 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        NULL::text AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
-       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 ELSE 0 END AS sort_order \
+       CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
      UNION ALL \
      SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
@@ -1970,6 +1707,21 @@ pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), Str
     Ok(())
 }
 
+pub async fn terminate_current_user_database_backends(pool: &Pool, database: &str) -> Result<u64, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    client
+        .execute(
+            "SELECT pg_terminate_backend(pid) \
+             FROM pg_stat_activity \
+             WHERE datname = $1 \
+               AND pid <> pg_backend_pid() \
+               AND usename = current_user",
+            &[&database],
+        )
+        .await
+        .map_err(pg_error_to_string)
+}
+
 fn clear_postgres_caches_after_ddl(pool: &Pool, client: Option<&deadpool_postgres::Client>, sql: &str) {
     if !invalidates_postgres_statement_cache(sql) {
         return;
@@ -2081,7 +1833,7 @@ mod tests {
     #[test]
     fn ewkb_point_with_srid_formats_as_wkt() {
         let raw = decode_hex("0101000020E6100000C520B07268195D404E62105839F44340");
-        assert_eq!(ewkb_to_wkt(&raw), Some("POINT(116.397 39.908)".to_string()));
+        assert_eq!(super::super::wkb::wkb_to_wkt(&raw), Some("POINT(116.397 39.908)".to_string()));
     }
 
     #[test]
@@ -2090,7 +1842,7 @@ mod tests {
             "0106000020E610000002000000010300000001000000050000000000000000005D4000000000000044400000000000405D4000000000000044400000000000405D4000000000008044400000000000005D4000000000008044400000000000005D400000000000004440010300000001000000050000000000000000805D4000000000008043400000000000C05D4000000000008043400000000000C05D4000000000000044400000000000805D4000000000000044400000000000805D400000000000804340",
         );
         assert_eq!(
-            ewkb_to_wkt(&raw),
+            super::super::wkb::wkb_to_wkt(&raw),
             Some(
                 "MULTIPOLYGON(((116 40,117 40,117 41,116 41,116 40)),((118 39,119 39,119 40,118 40,118 39)))"
                     .to_string()
@@ -2103,7 +1855,10 @@ mod tests {
         let raw = decode_hex(
             "0107000020E61000000200000001010000000000000000005D4000000000000044400102000000020000000000000000405D4000000000008044400000000000805D400000000000004540",
         );
-        assert_eq!(ewkb_to_wkt(&raw), Some("GEOMETRYCOLLECTION(POINT(116 40),LINESTRING(117 41,118 42))".to_string()));
+        assert_eq!(
+            super::super::wkb::wkb_to_wkt(&raw),
+            Some("GEOMETRYCOLLECTION(POINT(116 40),LINESTRING(117 41,118 42))".to_string())
+        );
     }
 
     #[test]
@@ -2145,7 +1900,7 @@ mod tests {
         let escaped = pg_quote_ident(malicious);
         // Double quotes should be doubled, not breaking out
         assert_eq!(escaped, r#""public""; DROP TABLE users; --""#);
-        assert!(escaped.matches('"').count() % 2 == 0, "quote count should be even");
+        assert!(escaped.matches('"').count().is_multiple_of(2), "quote count should be even");
     }
 
     // --- query_result_row_limit ---
@@ -2464,14 +2219,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_batch_whitespace_only_is_filtered() {
-        let statements = vec!["  ".to_string(), "\t\n".to_string(), "".to_string()];
+        let statements = ["  ".to_string(), "\t\n".to_string(), "".to_string()];
         let combined = statements.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";\n");
         assert!(combined.is_empty());
     }
 
     #[test]
     fn execute_batch_joins_with_semicolons() {
-        let statements = vec!["SELECT 1".to_string(), "SELECT 2".to_string()];
+        let statements = ["SELECT 1".to_string(), "SELECT 2".to_string()];
         let combined = statements.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";\n");
         assert_eq!(combined, "SELECT 1;\nSELECT 2");
     }

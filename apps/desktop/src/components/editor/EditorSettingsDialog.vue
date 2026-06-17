@@ -101,11 +101,14 @@ const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
+const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? 500);
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
+const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
+const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
 const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
@@ -344,9 +347,12 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? 500;
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
+      editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
+      editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
       editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
       editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
@@ -398,9 +404,12 @@ function hasChanges(): boolean {
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
+    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? 500) ||
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
+    editInfiniteScroll.value !== settingsStore.editorSettings.infiniteScroll ||
+    editInfiniteScrollMaxRows.value !== settingsStore.editorSettings.infiniteScrollMaxRows ||
     editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
     JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
@@ -436,6 +445,8 @@ async function persistSettings() {
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
+    infiniteScroll: editInfiniteScroll.value,
+    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
@@ -456,6 +467,7 @@ async function persistSettings() {
     show_tray_icon: editShowTrayIcon.value,
     icon_theme: editIconTheme.value,
     debug_logging_enabled: editDebugLoggingEnabled.value,
+    sidebar_table_page_size: editSidebarTablePageSize.value,
   });
   if (sidebarObjectDisplayChanged) {
     await connectionStore.refreshAllTree();
@@ -485,9 +497,12 @@ function resetDefaults() {
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  editSidebarTablePageSize.value = 500;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
+  editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
+  editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
@@ -982,6 +997,7 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? 500;
       webdavPassword.value = "";
       await refreshWebDavPasswordStatus();
       syncAiEditState();
@@ -1801,6 +1817,36 @@ watch(
                   </div>
                   <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
                 </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll">
+                      {{ t("settings.infiniteScroll") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
+                </div>
+                <div v-if="editInfiniteScroll" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll-max-rows">
+                      {{ t("settings.infiniteScrollMaxRows") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollMaxRowsDescription") }}
+                    </p>
+                  </div>
+                  <Input
+                    id="infinite-scroll-max-rows"
+                    v-model="editInfiniteScrollMaxRows"
+                    type="number"
+                    inputmode="numeric"
+                    :min="1000"
+                    :max="50000"
+                    class="h-7 w-24 px-2 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  />
+                </div>
               </div>
 
               <Separator />
@@ -2004,6 +2050,29 @@ watch(
                 <p class="text-xs text-muted-foreground">
                   {{ t("settings.sidebarHiddenTablePrefixesDescription") }}
                 </p>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-table-page-size">{{ t("settings.sidebarTablePageSize") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.sidebarTablePageSizeDescription") }}
+                  </p>
+                </div>
+                <Input
+                  id="sidebar-table-page-size"
+                  type="number"
+                  class="w-24 text-right"
+                  :min="100"
+                  :max="10000"
+                  :step="100"
+                  :model-value="editSidebarTablePageSize"
+                  @update:model-value="
+                    (value: string | number) => {
+                      const n = typeof value === 'string' ? parseInt(value) : value;
+                      if (!isNaN(n)) editSidebarTablePageSize = n;
+                    }
+                  "
+                />
               </div>
             </section>
 

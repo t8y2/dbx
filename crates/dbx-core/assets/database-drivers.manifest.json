@@ -1463,6 +1463,35 @@
       }
     },
     {
+      "dbType": "mq",
+      "label": "Message Queue",
+      "runtimeMode": "native",
+      "mcpMode": "unsupported",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8080,
+      "supportLevel": "connect",
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": false,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "iotdb",
       "label": "Apache IoTDB",
       "runtimeMode": "agent",

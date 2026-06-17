@@ -23,7 +23,7 @@ import {
   quoteMySqlIdentifier,
   quoteMySqlString,
   quotePostgresIdentifier,
-  supportsDatabaseUserAdmin,
+
   usersFromMySqlGranteeResult,
   usersFromMySqlUserResult,
   usersFromPostgresRolesResult,
@@ -38,15 +38,6 @@ function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
     execution_time_ms: 1,
   };
 }
-
-test("detects supported user administration dialects", () => {
-  assert.equal(supportsDatabaseUserAdmin("mysql"), true);
-  assert.equal(supportsDatabaseUserAdmin("goldendb"), true);
-  assert.equal(supportsDatabaseUserAdmin("postgres"), true);
-  assert.equal(supportsDatabaseUserAdmin("opengauss"), true);
-  assert.equal(supportsDatabaseUserAdmin("sqlserver"), false);
-  assert.equal(supportsDatabaseUserAdmin(undefined), false);
-});
 
 test("quotes MySQL account parts and identifiers", () => {
   assert.equal(quoteMySqlString("app'user\\"), "'app''user\\\\'");

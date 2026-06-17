@@ -10,9 +10,12 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.Date;
+import java.sql.Driver;
 import java.sql.DriverManager;
+import java.sql.DriverPropertyInfo;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -134,6 +137,75 @@ final class DbxJdbcPluginTest {
         assertFalse(response.has("error"), response.toString());
         assertEquals(1, response.path("result").path("rows").size());
         assertEquals(true, response.path("result").path("truncated").asBoolean());
+    }
+
+    @Test
+    void executeQueryFallsBackWhenExecutedStatementReturnsNullResultSet() throws Exception {
+        Driver driver = new BrokenResultSetDriver("jdbc:dbx-null-execute-rs:", true, -1);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-null-execute-rs:demo",
+                    "connect_timeout_secs": 30
+                  },
+                  "sql": "SELECT v FROM meters"
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("VALUE", response.path("result").path("columns").path(0).asText());
+            assertEquals("row-value", response.path("result").path("rows").path(0).path(0).asText());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void executeQueryFallsBackForQuerySqlWithoutUpdateCount() throws Exception {
+        Driver driver = new BrokenResultSetDriver("jdbc:dbx-no-result-flag:", false, -1);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-no-result-flag:demo",
+                    "connect_timeout_secs": 30
+                  },
+                  "sql": "-- generated preview\\nSHOW TABLES"
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("row-value", response.path("result").path("rows").path(0).path(0).asText());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void taosQuerySqlUsesExecuteQueryDirectly() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new BrokenResultSetDriver("jdbc:taos:", true, -1, calls);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:taos://dbx-fake:6030/power",
+                    "connect_timeout_secs": 30
+                  },
+                  "sql": "SELECT v FROM meters"
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("row-value", response.path("result").path("rows").path(0).path(0).asText());
+            assertEquals(List.of("executeQuery"), calls);
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
     }
 
     @Test
@@ -269,6 +341,11 @@ final class DbxJdbcPluginTest {
               "jdbc_driver_class": "org.apache.kyuubi.jdbc.KyuubiHiveDriver"
             }
             """);
+        JsonNode taos = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:TAOS://127.0.0.1:6030/power"
+            }
+            """);
 
         assertEquals(true, DbxJdbcPlugin.driverQuirks(yashan).skipExecutionContext());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(yashan).useOracleMetadata());
@@ -290,6 +367,7 @@ final class DbxJdbcPluginTest {
         assertEquals(true, DbxJdbcPlugin.driverQuirks(mysql).useCatalogFallbackSql());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(taos).preferExecuteQueryForResultSetSql());
     }
 
     @Test
@@ -664,6 +742,141 @@ final class DbxJdbcPluginTest {
                 }
             }
         );
+    }
+
+    private static final class BrokenResultSetDriver implements Driver {
+        private final String urlPrefix;
+        private final boolean executeReturnsResultSet;
+        private final int updateCount;
+        private final List<String> calls;
+
+        private BrokenResultSetDriver(String urlPrefix, boolean executeReturnsResultSet, int updateCount) {
+            this(urlPrefix, executeReturnsResultSet, updateCount, new ArrayList<>());
+        }
+
+        private BrokenResultSetDriver(String urlPrefix, boolean executeReturnsResultSet, int updateCount, List<String> calls) {
+            this.urlPrefix = urlPrefix;
+            this.executeReturnsResultSet = executeReturnsResultSet;
+            this.updateCount = updateCount;
+            this.calls = calls;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) throws SQLException {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            return brokenResultSetConnection(executeReturnsResultSet, updateCount, calls);
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection brokenResultSetConnection(boolean executeReturnsResultSet, int updateCount, List<String> calls) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "createStatement" -> brokenResultSetStatement(executeReturnsResultSet, updateCount, calls);
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement brokenResultSetStatement(boolean executeReturnsResultSet, int updateCount, List<String> calls) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> {
+                if ("execute".equals(method.getName()) || "executeQuery".equals(method.getName())) {
+                    calls.add(method.getName());
+                }
+                return switch (method.getName()) {
+                    case "execute" -> executeReturnsResultSet;
+                    case "getResultSet" -> null;
+                    case "getUpdateCount" -> updateCount;
+                    case "executeQuery" -> singleRowResultSet();
+                    case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                };
+            }
+        );
+    }
+
+    private static ResultSet singleRowResultSet() {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index == 0;
+                        case "getMetaData" -> singleColumnMeta();
+                        case "getObject", "getString" -> "row-value";
+                        case "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
+    }
+
+    private static ResultSetMetaData singleColumnMeta() {
+        return (ResultSetMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSetMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getColumnCount" -> 1;
+                case "getColumnLabel", "getColumnName" -> "VALUE";
+                case "getColumnType" -> Types.VARCHAR;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Object defaultValue(Class<?> returnType) {
+        if (returnType == boolean.class) return false;
+        if (returnType == byte.class) return (byte) 0;
+        if (returnType == short.class) return (short) 0;
+        if (returnType == int.class) return 0;
+        if (returnType == long.class) return 0L;
+        if (returnType == float.class) return 0f;
+        if (returnType == double.class) return 0d;
+        if (returnType == char.class) return '\0';
+        return null;
     }
 
     private static JsonNode request(String method, String params) throws Exception {

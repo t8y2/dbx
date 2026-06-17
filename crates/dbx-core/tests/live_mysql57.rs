@@ -17,3 +17,19 @@ async fn live_mysql57_text_protocol_select_succeeds() {
     assert_eq!(result.columns, vec!["id", "label"]);
     assert_eq!(result.rows, vec![vec![serde_json::json!("1"), serde_json::json!("mysql57")]]);
 }
+
+#[tokio::test]
+#[ignore = "requires a remote MySQL-compatible endpoint with a limited result-set query"]
+async fn live_mysql_compatible_limited_text_protocol_query_succeeds() {
+    let url = std::env::var("DBX_LIVE_MYSQL_COMPAT_URL").expect("DBX_LIVE_MYSQL_COMPAT_URL");
+    let sql = std::env::var("DBX_LIVE_MYSQL_COMPAT_SQL").expect("DBX_LIVE_MYSQL_COMPAT_SQL");
+
+    let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(10)).await.unwrap();
+    let result = dbx_core::db::mysql::execute_query_with_max_rows(&pool, &sql, false, Some(100), Default::default())
+        .await
+        .unwrap();
+
+    assert!(!result.columns.is_empty());
+    assert!(!result.rows.is_empty());
+    assert!(result.rows.len() <= 100);
+}

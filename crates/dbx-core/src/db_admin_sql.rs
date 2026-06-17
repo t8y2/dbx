@@ -8,6 +8,7 @@ use crate::sql_dialect::{is_schema_aware, qualified_table_name, quote_table_iden
 pub enum DatabaseObjectType {
     Table,
     View,
+    MaterializedView,
     Procedure,
     Function,
 }
@@ -325,7 +326,10 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
         return matches!(object_type, DatabaseObjectType::Table | DatabaseObjectType::View);
     }
     if is_postgres_like_rename(database_type) || is_oracle_like_rename(database_type) {
-        return matches!(object_type, DatabaseObjectType::Table | DatabaseObjectType::View);
+        return matches!(
+            object_type,
+            DatabaseObjectType::Table | DatabaseObjectType::View | DatabaseObjectType::MaterializedView
+        );
     }
     false
 }
@@ -462,6 +466,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
     match object_type {
         DatabaseObjectType::Table => "TABLE",
         DatabaseObjectType::View => "VIEW",
+        DatabaseObjectType::MaterializedView => "MATERIALIZED VIEW",
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
     }

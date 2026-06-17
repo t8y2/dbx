@@ -97,6 +97,18 @@ test("serializes table tabs with reload context", () => {
   );
 });
 
+test("serializes MQ tabs with selected tenant context", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      mode: "mq",
+      database: "",
+      mqTenant: "public",
+    }),
+  ]);
+
+  assert.equal(saved[0]?.mqTenant, "public");
+});
+
 test("serializes evicted result cache handles", () => {
   const saved = serializeOpenTabs([
     queryTab({
@@ -300,6 +312,20 @@ test("restores data and structure tabs with table state", () => {
   assert.equal(restored.tabs[0]?.whereInput, "id > 10");
   assert.equal(restored.tabs[0]?.orderByInput, "id DESC");
   assert.equal(restored.tabs[1]?.structureTableName, "users");
+});
+
+test("restores MQ tabs with selected tenant context", () => {
+  const raw = JSON.stringify([
+    queryTab({
+      mode: "mq",
+      database: "",
+      mqTenant: "public",
+    }),
+  ]);
+
+  const restored = restoreOpenTabsState(raw, "tab-1");
+
+  assert.equal(restored.tabs[0]?.mqTenant, "public");
 });
 
 test("query-only restore keeps legacy query tabs without a mode", () => {

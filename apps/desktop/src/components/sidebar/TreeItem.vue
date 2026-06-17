@@ -92,8 +92,9 @@ import {
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
+import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
@@ -200,6 +201,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Table, colorClass: "text-green-500" };
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
+    case "materialized_view":
+      return { icon: Eye, colorClass: "text-indigo-500" };
     case "column":
       if ((node.meta as ColumnInfo).is_primary_key) {
         return { icon: Columns3, colorClass: "text-orange-400" };
@@ -226,6 +229,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Zap, colorClass: "text-orange-300" };
     case "redis-db":
       return { icon: Database, colorClass: "text-red-400" };
+    case "mq-tenant":
+      return { icon: FolderOpen, colorClass: "text-sky-400" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
     case "mongo-db":
@@ -248,6 +253,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Table, colorClass: "text-green-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
+    case "group-materialized-views":
+      return { icon: Eye, colorClass: "text-indigo-500" };
     case "group-procedures":
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
@@ -265,8 +272,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
-const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "schema", "table", "view", "redis-db", "mongo-db", "mongo-collection", "elasticsearch-index"]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
+const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "schema", "table", "view", "materialized_view", "redis-db", "mongo-db", "mongo-collection", "elasticsearch-index"]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -281,7 +288,7 @@ function displayLabel(node: TreeNode): string {
 }
 
 function visibleLabel(node: TreeNode): string {
-  if (node.type === "table" || node.type === "view" || node.type === "mongo-collection" || node.type === "elasticsearch-index") {
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "elasticsearch-index") {
     return sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes);
   }
   return displayLabel(node);
@@ -325,7 +332,7 @@ async function toggle() {
     return;
   }
 
-  const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
+  const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
     emit("node-toggled", node, wasExpanded);
@@ -349,12 +356,16 @@ async function toggle() {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await connectionStore.loadElasticsearchIndices(node.connectionId);
+      } else if (config?.db_type === "mq") {
+        await connectionStore.loadMqTenants(node.connectionId);
       } else {
         await connectionStore.loadDatabases(node.connectionId);
       }
     } else if (node.type === "redis-db" && node.connectionId && node.database) {
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:db${node.database}`;
       queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
+    } else if (node.type === "mq-tenant" && node.connectionId) {
+      queryStore.openMqAdmin(node.connectionId, { tenant: node.mqTenant || node.label });
     } else if (node.type === "etcd-root" && node.connectionId) {
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd");
@@ -381,7 +392,7 @@ async function toggle() {
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema);
-    } else if ((node.type === "table" || node.type === "view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+    } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
@@ -684,7 +695,7 @@ async function openUserAdmin() {
 
 async function openData() {
   const node = props.node;
-  if (!(node.type === "table" || node.type === "view") || !hasNodeDatabaseContext(node)) return;
+  if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
   const config = connectionStore.getConfig(node.connectionId);
   const traceId = uuid().slice(0, 8);
   const startedAt = performance.now();
@@ -729,7 +740,7 @@ async function openData() {
   queryStore.setTableMeta(tabId, {
     schema: tableSchema,
     tableName: node.label,
-    tableType: node.type === "view" ? "VIEW" : "TABLE",
+    tableType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
     columns: [],
     primaryKeys: [],
   });
@@ -760,7 +771,7 @@ async function openData() {
       });
       columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
       if (!isActive()) return;
-      primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : "TABLE");
+      primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE");
       console.info("[DBX][openData:get-columns:done]", {
         traceId,
         columnCount: columns.length,
@@ -770,7 +781,7 @@ async function openData() {
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         tableName: node.label,
-        tableType: node.type === "view" ? "VIEW" : "TABLE",
+        tableType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
         columns,
         primaryKeys,
       });
@@ -821,7 +832,7 @@ async function newQuery() {
     if (hasTreeNodeDatabaseContext(node)) {
       const tabId = queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
       // For table/view nodes, generate SELECT * FROM table_name SQL
-      if (node.type === "table" || node.type === "view") {
+      if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
         const config = connectionStore.getConfig(node.connectionId);
         const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
         const tableSchema = node.schema || node.database;
@@ -1100,11 +1111,14 @@ function deleteConnection() {
 async function confirmDelete() {
   const targets = connectionDeleteTargets();
   if (!targets.length) return;
+  const connectionIds = targets.map((target) => target.connectionId);
   try {
-    for (const target of targets) {
-      await connectionStore.disconnect(target.connectionId);
+    await connectionStore.removeConnections(connectionIds);
+    for (const connectionId of connectionIds) {
+      connectionStore.disconnect(connectionId).catch((error) => {
+        console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
+      });
     }
-    await connectionStore.removeConnections(targets.map((target) => target.connectionId));
     toast(targets.length > 1 ? t("connection.deletedSelected", { count: targets.length }) : t("connection.deleted"), 2000);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
@@ -1204,11 +1218,18 @@ const showDuplicateDialog = ref(false);
 const duplicateTableName = ref("");
 const duplicateStructureSource = ref<DuplicateStructureSource | null>(null);
 
+const ddlTarget = ref<TreeNode | null>(null);
+const showDdlDialog = ref(false);
+const ddlDialect = computed(() => {
+  if (!ddlTarget.value?.connectionId) return "mysql";
+  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
+});
 const showCreateDatabaseDialog = ref(false);
 const createDatabaseName = ref("");
 const createDatabaseCharset = ref("utf8mb4");
 const createDatabaseCollation = ref("utf8mb4_unicode_ci");
 const showDropDatabaseConfirm = ref(false);
+const dropDatabaseLoading = ref(false);
 const showFlushRedisDbConfirm = ref(false);
 const showCreateSchemaDialog = ref(false);
 const createSchemaName = ref("");
@@ -1223,10 +1244,10 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 }
 
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
-  if (node.type !== "view" && node.type !== "procedure" && node.type !== "function") return null;
+  if (node.type !== "view" && node.type !== "materialized_view" && node.type !== "procedure" && node.type !== "function") return null;
   return {
     databaseType: tableStructureDatabaseTypeForNode(node),
-    objectType: node.type === "view" ? "VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
+    objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
     schema: node.schema,
     name: node.label,
   };
@@ -1281,6 +1302,7 @@ function canDropTableChildObjectNode(node: TreeNode): boolean {
 
 function dropObjectMenuLabel(): string {
   if (props.node.type === "view") return t("contextMenu.dropView");
+  if (props.node.type === "materialized_view") return t("contextMenu.dropView");
   if (props.node.type === "procedure") return t("contextMenu.dropProcedure");
   if (props.node.type === "function") return t("contextMenu.dropFunction");
   return t("contextMenu.dropObject");
@@ -1288,6 +1310,7 @@ function dropObjectMenuLabel(): string {
 
 function dropObjectConfirmTitle(): string {
   if (props.node.type === "view") return t("contextMenu.confirmDropViewTitle");
+  if (props.node.type === "materialized_view") return t("contextMenu.confirmDropViewTitle");
   if (props.node.type === "procedure") return t("contextMenu.confirmDropProcedureTitle");
   if (props.node.type === "function") return t("contextMenu.confirmDropFunctionTitle");
   return t("contextMenu.confirmDropObjectTitle");
@@ -1295,6 +1318,7 @@ function dropObjectConfirmTitle(): string {
 
 function dropObjectConfirmMessage(): string {
   if (props.node.type === "view") return t("contextMenu.confirmDropViewMessage", { name: props.node.label });
+  if (props.node.type === "materialized_view") return t("contextMenu.confirmDropViewMessage", { name: props.node.label });
   if (props.node.type === "procedure") return t("contextMenu.confirmDropProcedureMessage", { name: props.node.label });
   if (props.node.type === "function") return t("contextMenu.confirmDropFunctionMessage", { name: props.node.label });
   return t("contextMenu.confirmDropObjectMessage", { name: props.node.label });
@@ -1365,13 +1389,14 @@ function viewObjectSource() {
 
 function viewObjectDdl() {
   const node = props.node;
-  if (node.type !== "view" || !node.connectionId || !node.database) return;
+  if ((node.type !== "view" && node.type !== "materialized_view") || !node.connectionId || !node.database) return;
   const schema = node.schema || node.database;
+  const objectType = node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "VIEW";
   connectionStore
     .ensureConnected(node.connectionId)
     .then(() => {
       connectionStore.activeConnectionId = node.connectionId!;
-      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, "VIEW");
+      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType);
     })
     .then(async (result) => {
       const connection = connectionStore.getConfig(node.connectionId!);
@@ -1423,7 +1448,7 @@ function requestDropTableChildObject() {
 
 function canDropTreeNode(node: TreeNode): boolean {
   if (node.type === "table") return !!node.connectionId && !!node.database;
-  if (node.type === "view" || node.type === "procedure" || node.type === "function") {
+  if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function") {
     return !!node.connectionId && !!node.database && !!dropObjectSqlOptionsForNode(node);
   }
   return canDropTableChildObjectNode(node);
@@ -1512,6 +1537,7 @@ function requestDropSelectedNode(): boolean {
 function nodeRenameObjectType(): RenameableObjectType | null {
   if (props.node.type === "table") return "TABLE";
   if (props.node.type === "view") return "VIEW";
+  if (props.node.type === "materialized_view") return "MATERIALIZED_VIEW";
   if (props.node.type === "procedure") return "PROCEDURE";
   if (props.node.type === "function") return "FUNCTION";
   return null;
@@ -1611,9 +1637,9 @@ async function confirmDropObject() {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = dropObjectPreviewSql.value || (await buildDropObjectSql(options));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
-    const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
+    const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
-    if (node.type === "view") {
+    if (node.type === "view" || node.type === "materialized_view") {
       connectionStore.removeTreeNode(node.id);
     } else {
       await refreshTableList(node);
@@ -1882,6 +1908,7 @@ async function confirmCreateDatabase() {
 
 function dropDatabase() {
   void refreshDropDatabasePreviewSql();
+  dropDatabaseLoading.value = false;
   showDropDatabaseConfirm.value = true;
 }
 
@@ -1909,7 +1936,8 @@ async function confirmFlushRedisDb() {
 
 async function confirmDropDatabase() {
   const node = props.node;
-  if (!node.connectionId) return;
+  if (!node.connectionId || dropDatabaseLoading.value) return;
+  dropDatabaseLoading.value = true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql =
@@ -1921,8 +1949,11 @@ async function confirmDropDatabase() {
     await api.executeQuery(node.connectionId, "", sql);
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
+    showDropDatabaseConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    dropDatabaseLoading.value = false;
   }
 }
 
@@ -2065,7 +2096,7 @@ async function exportStructure() {
     const parts: string[] = [];
     for (const target of targets) {
       await connectionStore.ensureConnected(target.connectionId);
-      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label);
+      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, target.type === "view" ? "VIEW" : undefined);
       parts.push(ddl.trim());
     }
     structurePreviewSql.value = `${parts.filter(Boolean).join("\n\n")}\n`;
@@ -2512,8 +2543,8 @@ function openDatabaseExport() {
   connectionStore.databaseExportSource = {
     connectionId: node.connectionId,
     database: node.database,
-    schema: node.type === "schema" || node.type === "table" || node.type === "view" ? node.schema : undefined,
-    tableName: node.type === "table" || node.type === "view" ? node.label : undefined,
+    schema: node.type === "schema" || node.type === "table" || node.type === "view" || node.type === "materialized_view" ? node.schema : undefined,
+    tableName: node.type === "table" || node.type === "view" || node.type === "materialized_view" ? node.label : undefined,
   };
 }
 
@@ -2595,7 +2626,7 @@ const nodeIconClass = computed(() => {
 const canConfigureVisibleDatabases = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;
   const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
-  return dbType !== "elasticsearch" && dbType !== "etcd";
+  return dbType !== "elasticsearch" && dbType !== "etcd" && dbType !== "mq";
 });
 const canCopyFinalProxyPort = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;
@@ -2764,7 +2795,11 @@ const showDropInside = computed(() => dragState.active && dragState.targetId ===
 const isDragging = computed(() => dragState.active && dragState.draggedId === props.node.id);
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
-const canDragTableReference = computed(() => !props.dragDisabled && (props.node.type === "table" || props.node.type === "view") && !!props.node.connectionId && props.node.database != null);
+const canDragTableReference = computed(() => {
+  if (props.dragDisabled || !props.node.connectionId || props.node.database == null) return false;
+  if (props.node.type === "table" || props.node.type === "view" || props.node.type === "materialized_view") return true;
+  return props.node.type === "column" && !!props.node.tableName;
+});
 
 let pendingTableReferenceDrag: {
   payload: QueryEditorTableReferencePayload;
@@ -2776,6 +2811,18 @@ let suppressNextTableReferenceClick = false;
 
 function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
   if (!canDragTableReference.value) return null;
+  if (props.node.type === "column") {
+    const columnName = columnNameForDrag(props.node);
+    if (!props.node.tableName || !columnName) return null;
+    return createTableReferencePayload({
+      connectionId: props.node.connectionId,
+      database: props.node.database,
+      schema: props.node.schema,
+      tableName: props.node.tableName,
+      columnName,
+      databaseType: currentDatabaseType(),
+    });
+  }
   const payload = createTableReferencePayload({
     connectionId: props.node.connectionId,
     database: props.node.database,
@@ -2784,6 +2831,12 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
     databaseType: currentDatabaseType(),
   });
   return payload;
+}
+
+function columnNameForDrag(node: TreeNode): string {
+  const column = node.meta as Partial<ColumnInfo> | undefined;
+  if (typeof column?.name === "string" && column.name) return column.name;
+  return node.label.replace(/\s+\([^()]*\)$/, "");
 }
 
 function startTableReferenceDrag(payload: QueryEditorTableReferencePayload) {
@@ -3171,12 +3224,22 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
-  // 6. Table / View
-  if (node.type === "table" || node.type === "view") {
+  // 6. Table / View / Materialized View
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openData, icon: TableProperties });
-    if (node.type === "view") {
+    if (node.type === "table") {
+      items.push({
+        label: t("contextMenu.viewDdl"),
+        action: () => {
+          ddlTarget.value = node;
+          showDdlDialog.value = true;
+        },
+        icon: FileCode,
+      });
+    }
+    if (node.type === "view" || node.type === "materialized_view") {
       items.push({ label: t("contextMenu.editView"), action: viewObjectSource, icon: Pencil });
       items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
       items.push({ label: t("contextMenu.viewDdl"), action: viewObjectDdl, icon: FileCode });
@@ -3192,7 +3255,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         shortcut: shortcutRename,
       });
     }
-    if (node.type === "view") {
+    if (node.type === "view" || node.type === "materialized_view") {
       items.push({
         label: deleteMenuLabel(t("contextMenu.dropView")),
         action: deleteMenuAction(requestDropObject),
@@ -3427,7 +3490,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
           />
           <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
           <span
-            v-if="(node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') && node.objectCount != null"
+            v-if="
+              (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
+              node.objectCount != null
+            "
             class="text-muted-foreground text-[10px] shrink-0"
             >{{ node.objectCount }}</span
           >
@@ -3649,7 +3715,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog v-model:open="showDropDatabaseConfirm" :title="t('contextMenu.confirmDropDatabaseTitle')" :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })" :sql="dropDatabasePreviewSql" :confirm-label="t('contextMenu.dropDatabase')" @confirm="confirmDropDatabase" />
+  <DangerConfirmDialog
+    v-model:open="showDropDatabaseConfirm"
+    :title="t('contextMenu.confirmDropDatabaseTitle')"
+    :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })"
+    :sql="dropDatabasePreviewSql"
+    :confirm-label="t('contextMenu.dropDatabase')"
+    :loading="dropDatabaseLoading"
+    :close-on-confirm="false"
+    @confirm="confirmDropDatabase"
+  />
 
   <DangerConfirmDialog v-model:open="showFlushRedisDbConfirm" :title="t('redis.flushDb')" :message="t('redis.flushDbMessage')" :details="t('redis.flushDbDetails', { db: node.database })" :confirm-label="t('redis.flushDbConfirm')" @confirm="confirmFlushRedisDb" />
 
@@ -3667,6 +3742,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
   </Dialog>
 
   <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
+
+  <DdlViewDialog v-if="ddlTarget" :connection-id="ddlTarget.connectionId!" :database="ddlTarget.database!" :schema="ddlTarget.schema" :table-name="ddlTarget.label" :dialect="ddlDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style>

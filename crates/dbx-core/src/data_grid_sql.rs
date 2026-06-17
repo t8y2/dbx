@@ -765,19 +765,23 @@ pub fn format_grid_sql_literal(
     if value.is_null() {
         return "NULL".to_string();
     }
-    if is_mysql_bit_literal_column(database_type, column_info) {
-        if let Some(value) = value.as_bool() {
+    // Boolean values on BIT columns always use numeric 0/1.
+    // This covers MySQL, SQL Server, and any other database where BIT
+    // is a numeric/boolean type rather than a bit-string type like
+    // PostgreSQL's bit(n).
+    if let Some(value) = value.as_bool() {
+        if is_bit_literal_column(column_info) {
             return if value { "1" } else { "0" }.to_string();
         }
+        return if value { "TRUE" } else { "FALSE" }.to_string();
+    }
+    if is_mysql_bit_literal_column(database_type, column_info) {
         if let Some(number) = value.as_number() {
             return number.to_string();
         }
         if let Some(text) = value.as_str().and_then(format_mysql_bit_literal_text) {
             return text;
         }
-    }
-    if let Some(value) = value.as_bool() {
-        return if value { "TRUE" } else { "FALSE" }.to_string();
     }
     if let Some(number) = value.as_number() {
         return number.to_string();
@@ -796,6 +800,13 @@ pub fn format_grid_sql_literal(
     }
     if text.is_empty() {
         return if database_type == Some(DatabaseType::SqlServer) { "N''" } else { "''" }.to_string();
+    }
+    // MySQL geometry columns: wrap WKT text with ST_GeomFromText()
+    if is_mysql_geometry_literal_database(database_type)
+        && column_info.map(|column| is_geometry_column_type(&column.data_type)).unwrap_or(false)
+    {
+        let escaped = text.replace('\\', "\\\\").replace('\'', "''");
+        return format!("ST_GeomFromText('{}')", escaped);
     }
     let literal_text = if database_type == Some(DatabaseType::Tdengine) {
         format_tdengine_timestamp_literal_text(&text)
@@ -819,9 +830,42 @@ fn is_mysql_bit_literal_column(database_type: Option<DatabaseType>, column_info:
         && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
 }
 
+fn is_bit_literal_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
+}
+
 fn is_bit_column_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
     lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == "bit")
+}
+
+fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::Goldendb
+                | DatabaseType::Sundb
+        )
+    )
+}
+
+fn is_geometry_column_type(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or(&lower).trim();
+    matches!(
+        base,
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
 }
 
 fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {

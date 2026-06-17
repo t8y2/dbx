@@ -5,6 +5,7 @@ import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import type { TableInfoTab } from "@/types/database";
 
 export type NavigationTarget = {
   connectionId: string;
@@ -15,7 +16,7 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
-async function openTableTarget(target: NavigationTarget) {
+async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab } = {}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
@@ -30,12 +31,15 @@ async function openTableTarget(target: NavigationTarget) {
       if (existing) {
         existing.title = tabTitle;
         existing.schema = target.schema;
+        existing.tableInfoTab = options.tableInfoTab;
         queryStore.activeTabId = existing.id;
         return existing.id;
       }
     }
     return queryStore.createTab(target.connectionId, target.database, tabTitle, "data", target.schema);
   })();
+  const targetTab = queryStore.tabs.find((tab) => tab.id === tabId);
+  if (targetTab) targetTab.tableInfoTab = options.tableInfoTab;
   queryStore.setExecuting(tabId, true);
 
   try {

@@ -89,6 +89,7 @@ pub async fn redis_scan_keys_batch_core(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn redis_scan_values_core(
     state: &AppState,
     connection_id: &str,

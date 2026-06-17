@@ -346,15 +346,20 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
 
   if (event.type !== "tool_call_start" && event.type !== "tool_call_end") return undefined;
 
+  const isExecuteQuery = event.tool_name === "execute_query";
+  const labelKey = event.type === "tool_call_start" ? "ai.agentSteps.callingTool" : isExecuteQuery ? (event.is_error ? "ai.agentSteps.executeBlocked" : "ai.agentSteps.executeSafe") : event.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone";
+  const tone = (event.type === "tool_call_start" ? "active" : event.is_error ? "danger" : "success") as AiAgentStepTone;
+
   return {
     key: `${event.tool_call_id || ""}-${event.type}`,
-    labelKey: event.type === "tool_call_start" ? "ai.agentSteps.callingTool" : event.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone",
-    tone: (event.type === "tool_call_start" ? "active" : event.is_error ? "danger" : "success") as AiAgentStepTone,
+    labelKey,
+    tone,
     titleKey: undefined,
     titleParams: { tool: event.tool_name || "" },
     toolName: event.tool_name,
     toolArgs: event.type === "tool_call_start" ? (event.args as Record<string, unknown>) : undefined,
     toolResult: event.type === "tool_call_end" && !event.is_error ? extractToolResultContent(event.result) : undefined,
+    explainData: event.type === "tool_call_end" ? extractExplainData(event.result) : undefined,
     isError: event.type === "tool_call_end" ? event.is_error : undefined,
   };
 }

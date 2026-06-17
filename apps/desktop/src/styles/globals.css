@@ -276,6 +276,15 @@ body.dbx-table-reference-dragging * {
   font-family: var(--dbx-editor-font-family, var(--font-mono, monospace));
 }
 
+:root {
+  --dbx-data-grid-font-family: "Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+.dbx-data-grid-font-family {
+  font-family: var(--dbx-data-grid-font-family);
+  font-size: 12.5px;
+}
+
 /* Splitpanes */
 .splitpanes--horizontal .splitpanes__pane {
   transition: none !important;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
+import { buildDraftVisibleDatabasesConnectionId, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -38,15 +38,6 @@ function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
 
 test("draft visible database connection ids are namespaced", () => {
   assert.equal(buildDraftVisibleDatabasesConnectionId("abc"), "__visible_draft_abc");
-});
-
-test("visible databases can be chosen for catalog-like connections only", () => {
-  assert.equal(connectionCanChooseVisibleDatabases({ db_type: "mysql" }), true);
-  assert.equal(connectionCanChooseVisibleDatabases({ db_type: "redis" }), true);
-  assert.equal(connectionCanChooseVisibleDatabases({ db_type: "mongodb" }), true);
-  assert.equal(connectionCanChooseVisibleDatabases({ db_type: "oracle" }), true);
-  assert.equal(connectionCanChooseVisibleDatabases({ db_type: "elasticsearch" }), false);
-  assert.equal(connectionCanChooseVisibleDatabases({ db_type: "etcd" }), false);
 });
 
 test("initial selection uses configured visible databases when available", () => {

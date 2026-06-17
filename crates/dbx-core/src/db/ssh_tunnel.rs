@@ -56,6 +56,7 @@ fn ssh_client_config() -> Config {
     Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), preferred, ..Default::default() }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_authenticate(
     ssh_host: &str,
     ssh_port: u16,
@@ -64,6 +65,7 @@ async fn connect_and_authenticate(
     ssh_key_path: &str,
     ssh_key_passphrase: &str,
     use_ssh_agent: bool,
+    ssh_agent_sock_path: &str,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
     let config = Arc::new(ssh_client_config());
@@ -107,7 +109,7 @@ async fn connect_and_authenticate(
             return Err("SSH password authentication failed".to_string());
         }
     } else if use_ssh_agent {
-        match try_authenticate_with_agent(&mut session, ssh_user, &connect_timeout).await {
+        match try_authenticate_with_agent(&mut session, ssh_user, ssh_agent_sock_path, &connect_timeout).await {
             Ok(()) => {}
             Err(agent_err) => return Err(agent_err),
         }
@@ -123,13 +125,26 @@ async fn connect_and_authenticate(
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
+    ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    let mut agent = match AgentClient::connect_env().await {
-        Ok(a) => a,
-        Err(e) => {
-            return Err(format!("No SSH password or key provided, and ssh-agent is unavailable: {e}"));
+    let mut agent = if ssh_agent_sock_path.is_empty() {
+        match AgentClient::connect_env().await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(format!("No SSH password or key provided, and ssh-agent is unavailable: {e}"));
+            }
+        }
+    } else {
+        match AgentClient::connect_uds(ssh_agent_sock_path).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(format!(
+                    "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
+                    ssh_agent_sock_path
+                ));
+            }
         }
     };
 
@@ -429,6 +444,7 @@ async fn tunnel_reconnect_loop(
     ssh_key_path: String,
     ssh_key_passphrase: String,
     use_ssh_agent: bool,
+    ssh_agent_sock_path: String,
     connect_timeout_secs: u64,
     listener: TcpListener,
     remote_host: String,
@@ -463,6 +479,7 @@ async fn tunnel_reconnect_loop(
                 &ssh_key_path,
                 &ssh_key_passphrase,
                 use_ssh_agent,
+                &ssh_agent_sock_path,
                 connect_timeout_secs,
             )
             .await
@@ -532,6 +549,7 @@ impl TunnelManager {
         ssh_key_path: &str,
         ssh_key_passphrase: &str,
         use_ssh_agent: bool,
+        ssh_agent_sock_path: &str,
         connect_timeout_secs: u64,
         remote_host: &str,
         remote_port: u16,
@@ -554,6 +572,7 @@ impl TunnelManager {
             ssh_key_path,
             ssh_key_passphrase,
             use_ssh_agent,
+            ssh_agent_sock_path,
             connect_timeout_secs,
             remote_host,
             remote_port,
@@ -623,6 +642,7 @@ impl TunnelManager {
                 &hop.key_path,
                 &hop.key_passphrase,
                 hop.use_ssh_agent,
+                &hop.ssh_agent_sock_path,
                 effective_hop_timeout(hop),
                 &target_host,
                 target_port,
@@ -670,6 +690,7 @@ async fn spawn_tunnel(
     ssh_key_path: &str,
     ssh_key_passphrase: &str,
     use_ssh_agent: bool,
+    ssh_agent_sock_path: &str,
     connect_timeout_secs: u64,
     remote_host: &str,
     remote_port: u16,
@@ -690,6 +711,7 @@ async fn spawn_tunnel(
         ssh_key_path,
         ssh_key_passphrase,
         use_ssh_agent,
+        ssh_agent_sock_path,
         connect_timeout_secs,
     )
     .await?;
@@ -703,6 +725,7 @@ async fn spawn_tunnel(
         ssh_key_path.to_string(),
         ssh_key_passphrase.to_string(),
         use_ssh_agent,
+        ssh_agent_sock_path.to_string(),
         connect_timeout_secs,
         listener,
         remote_host.to_string(),

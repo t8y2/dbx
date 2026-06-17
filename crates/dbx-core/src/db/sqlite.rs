@@ -46,6 +46,13 @@ pub async fn connect_path_create_if_missing(path: &str) -> Result<SqliteHandle, 
     connect_path_with_options(path, true, Vec::new()).await
 }
 
+pub async fn connect_path_create_if_missing_with_extensions(
+    path: &str,
+    extensions: Vec<SqliteExtensionSpec>,
+) -> Result<SqliteHandle, String> {
+    connect_path_with_options(path, true, extensions).await
+}
+
 async fn connect_path_with_options(
     path: &str,
     create_if_missing: bool,

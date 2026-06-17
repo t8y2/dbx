@@ -398,33 +398,139 @@ pub fn find_statement_at_cursor_with_options(sql: &str, cursor_pos: usize, optio
 
     for (idx, statement) in statements.iter().enumerate() {
         if cursor > statement.start && cursor < statement.end {
-            return statement.text.clone();
+            return statement_text_at_cursor(sql, statement, cursor, options);
         }
 
         if cursor == statement.start {
             if cursor_has_sql_after_cursor_on_line(sql, cursor) {
-                return statement.text.clone();
+                return statement_text_at_cursor(sql, statement, cursor, options);
             }
             if let Some(prev) = idx.checked_sub(1).and_then(|prev_idx| statements.get(prev_idx)) {
-                return prev.text.clone();
+                return statement_text_at_cursor(sql, prev, cursor, options);
             }
-            return statement.text.clone();
+            return statement_text_at_cursor(sql, statement, cursor, options);
         }
 
         if cursor < statement.start {
             if let Some(prev) = idx.checked_sub(1).and_then(|prev_idx| statements.get(prev_idx)) {
-                return prev.text.clone();
+                return statement_text_at_cursor(sql, prev, cursor, options);
             }
-            return statement.text.clone();
+            return statement_text_at_cursor(sql, statement, cursor, options);
         }
     }
 
-    statements.last().map(|statement| statement.text.clone()).unwrap_or_else(|| sql.trim().to_string())
+    statements
+        .last()
+        .map(|statement| statement_text_at_cursor(sql, statement, cursor, options))
+        .unwrap_or_else(|| sql.trim().to_string())
 }
 
 fn cursor_has_sql_after_cursor_on_line(sql: &str, cursor: usize) -> bool {
     let line_end = sql[cursor..].find('\n').map_or(sql.len(), |offset| cursor + offset);
     sql[cursor..line_end].chars().any(|ch| !ch.is_whitespace())
+}
+
+fn statement_text_at_cursor(
+    sql: &str,
+    statement: &SqlStatementRange,
+    cursor: usize,
+    options: SqlParsingOptions,
+) -> String {
+    let soft_ranges = split_statement_range_at_blank_lines(sql, statement, options);
+    find_statement_text_in_ranges(sql, &soft_ranges, cursor).unwrap_or_else(|| statement.text.clone())
+}
+
+fn find_statement_text_in_ranges(sql: &str, ranges: &[SqlStatementRange], cursor: usize) -> Option<String> {
+    for (idx, range) in ranges.iter().enumerate() {
+        if cursor > range.start && cursor < range.end {
+            return Some(range.text.clone());
+        }
+
+        if cursor == range.start {
+            if cursor_has_sql_after_cursor_on_line(sql, cursor) {
+                return Some(range.text.clone());
+            }
+            if let Some(prev) = idx.checked_sub(1).and_then(|prev_idx| ranges.get(prev_idx)) {
+                return Some(prev.text.clone());
+            }
+            return Some(range.text.clone());
+        }
+
+        if cursor < range.start {
+            if let Some(prev) = idx.checked_sub(1).and_then(|prev_idx| ranges.get(prev_idx)) {
+                return Some(prev.text.clone());
+            }
+            return Some(range.text.clone());
+        }
+    }
+
+    ranges.last().map(|range| range.text.clone())
+}
+
+fn split_statement_range_at_blank_lines(
+    sql: &str,
+    statement: &SqlStatementRange,
+    options: SqlParsingOptions,
+) -> Vec<SqlStatementRange> {
+    if options.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&statement.text) {
+        return vec![statement.clone()];
+    }
+
+    let mut ranges = Vec::new();
+    let mut scanner = SqlScanner::default();
+    let mut current_start = statement.start;
+    let mut line_start = statement.start;
+    let mut line_has_non_whitespace = false;
+    let mut blank_line_run = 0usize;
+
+    for (relative_idx, ch) in sql[statement.start..statement.end].char_indices() {
+        let idx = statement.start + relative_idx;
+        if ch == '\n' {
+            if !line_has_non_whitespace && !scanner.is_masked() {
+                blank_line_run += 1;
+            } else {
+                blank_line_run = 0;
+            }
+            scanner.step(sql, idx, ch);
+            line_start = idx + ch.len_utf8();
+            line_has_non_whitespace = false;
+            continue;
+        }
+
+        if !line_has_non_whitespace && !ch.is_whitespace() {
+            if blank_line_run >= 2
+                && !scanner.is_masked()
+                && has_executable_sql_with_options(&sql[current_start..line_start], options)
+                && starts_with_soft_statement_keyword(&sql[line_start..statement.end], options)
+            {
+                push_statement_range(&mut ranges, sql, current_start, line_start, options);
+                current_start = line_start;
+            }
+            blank_line_run = 0;
+            line_has_non_whitespace = true;
+        }
+
+        scanner.step(sql, idx, ch);
+    }
+
+    push_statement_range(&mut ranges, sql, current_start, statement.end, options);
+    if ranges.is_empty() {
+        vec![statement.clone()]
+    } else {
+        ranges
+    }
+}
+
+fn starts_with_soft_statement_keyword(sql: &str, options: SqlParsingOptions) -> bool {
+    starts_with_executable_sql_keyword_with_options(
+        sql,
+        &[
+            "CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE", "GRANT", "REVOKE",
+            "COMMENT", "EXPLAIN", "SHOW", "DESCRIBE", "USE", "SET", "CALL", "EXEC", "EXECUTE", "BEGIN", "COMMIT",
+            "ROLLBACK", "DECLARE", "ANALYZE", "VACUUM", "PRAGMA", "REFRESH", "COPY",
+        ],
+        options,
+    )
 }
 
 #[allow(dead_code)]
@@ -2216,6 +2322,22 @@ SELECT 1;";
         let cursor = sql[..sql.find("SELECT 2").unwrap()].encode_utf16().count();
 
         assert_eq!(super::find_statement_at_cursor(sql, cursor), "SELECT 2");
+    }
+
+    #[test]
+    fn finds_statement_at_cursor_after_double_blank_line_without_semicolon() {
+        let sql = "SELECT * FROM old_table\n\n\nCREATE VIEW v AS SELECT 1";
+        let cursor = sql[..sql.find("CREATE VIEW").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor(sql, cursor), "CREATE VIEW v AS SELECT 1");
+    }
+
+    #[test]
+    fn keeps_create_view_statement_together_across_double_blank_line() {
+        let sql = "CREATE VIEW v AS\n\n\nSELECT 1";
+        let cursor = sql[..sql.find("SELECT 1").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor(sql, cursor), "CREATE VIEW v AS\n\n\nSELECT 1");
     }
 
     #[test]

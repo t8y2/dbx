@@ -6,16 +6,17 @@ export type TreeNodeRowDoubleClickAction = "open-data" | "open-object-browser" |
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
-const dataNodeTypes = new Set<TreeNodeType>(["table", "view"]);
-const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mongo-collection", "elasticsearch-index", "user-admin"]);
+const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
+const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "mongo-collection", "elasticsearch-index", "user-admin"]);
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
-const sourceNodeTypes = new Set<TreeNodeType>(["procedure", "function", "sequence", "package", "package-body"]);
+const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "sequence", "package", "package-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-partitions"]);
-const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
+const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";
+  if (type === "materialized_view") return "MATERIALIZED_VIEW";
   if (type === "procedure") return "PROCEDURE";
   if (type === "function") return "FUNCTION";
   if (type === "sequence") return "SEQUENCE";

@@ -9,6 +9,8 @@ pub mod history;
 pub mod jdbc;
 pub mod layout;
 pub mod mongo;
+#[cfg(feature = "mq-admin")]
+pub mod mq;
 pub mod plugins;
 pub mod query;
 pub mod redis;

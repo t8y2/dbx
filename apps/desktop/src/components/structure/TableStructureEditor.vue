@@ -483,6 +483,9 @@ function canMoveColumn(index: number, direction: -1 | 1): boolean {
   const targetIndex = index + direction;
   if (targetIndex < 0 || targetIndex >= columns.value.length) return false;
   if (columns.value[index]?.markedForDrop || columns.value[targetIndex]?.markedForDrop) return false;
+  // Draft columns can always swap order among themselves —
+  // ADD COLUMN statement order determines their final physical placement.
+  if (!columns.value[index]?.original && !columns.value[targetIndex]?.original) return true;
   return canShowColumnMoveControls.value;
 }
 
@@ -1191,7 +1194,7 @@ watch(activeTab, (tab) => {
                   </td>
                   <td :class="structureLastCellClass">
                     <div class="flex items-center gap-1">
-                      <template v-if="canShowColumnMoveControls">
+                      <template v-if="canShowColumnMoveControls || !column.original">
                         <Button variant="ghost" size="icon" :class="structureIconButtonClass" :disabled="!canMoveColumn(index, -1)" :title="t('structureEditor.moveColumnUp')" :aria-label="t('structureEditor.moveColumnUp')" @click="moveColumn(index, -1)">
                           <ChevronUp :class="structureIconClass" />
                         </Button>

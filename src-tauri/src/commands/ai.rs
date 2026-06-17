@@ -52,6 +52,7 @@ pub async fn ai_cancel_stream(session_id: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ai_agent_stream(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,

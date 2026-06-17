@@ -7,7 +7,7 @@ import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/api";
 import type { ConnectionConfig } from "@/types/database";
 
-const DB_EXTENSIONS = [".db", ".sqlite", ".sqlite3", ".duckdb"];
+const DB_EXTENSIONS = [".db", ".db3", ".sqlite", ".sqlite3", ".duckdb"];
 
 function getDbType(path: string): "sqlite" | "duckdb" | null {
   const lower = path.toLowerCase();

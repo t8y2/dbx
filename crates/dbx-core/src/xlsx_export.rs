@@ -11,20 +11,21 @@ pub struct XlsxWorksheetData {
 }
 
 fn escape_xml(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| {
-            let code = *ch as u32;
-            code == 9 || code == 10 || code == 13 || code >= 32
-        })
-        .flat_map(|ch| match ch {
-            '&' => "&amp;".chars().collect::<Vec<_>>(),
-            '<' => "&lt;".chars().collect::<Vec<_>>(),
-            '>' => "&gt;".chars().collect::<Vec<_>>(),
-            '"' => "&quot;".chars().collect::<Vec<_>>(),
-            _ => vec![ch],
-        })
-        .collect()
+    let mut result = String::with_capacity(value.len());
+    for ch in value.chars() {
+        let code = ch as u32;
+        if code != 9 && code != 10 && code != 13 && code < 32 {
+            continue;
+        }
+        match ch {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
 fn column_name(index: usize) -> String {
@@ -32,8 +33,12 @@ fn column_name(index: usize) -> String {
     let mut n = index + 1;
     while n > 0 {
         let rem = (n - 1) % 26;
-        out.insert(0, (b'A' + rem as u8) as char);
+        out.push((b'A' + rem as u8) as char);
         n = (n - 1) / 26;
+    }
+    // Safety: all pushed chars are ASCII, so reversing by bytes is correct
+    unsafe {
+        out.as_mut_vec().reverse();
     }
     out
 }
@@ -67,13 +72,7 @@ fn normalize_sheet_name(input: Option<&str>) -> String {
 fn value_text(value: Option<&Value>) -> String {
     match value {
         Some(Value::Null) | None => String::new(),
-        Some(Value::Bool(v)) => {
-            if *v {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            }
-        }
+        Some(Value::Bool(v)) => v.to_string(),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
@@ -85,10 +84,8 @@ fn estimate_column_widths(columns: &[String], rows: &[Vec<Value>]) -> Vec<usize>
         .iter()
         .enumerate()
         .map(|(col_index, column)| {
-            let values = rows.iter().take(100).map(|row| value_text(row.get(col_index)));
-            let max_len = std::iter::once(column.clone())
-                .chain(values)
-                .map(|v| v.chars().count().min(60))
+            let max_len = std::iter::once(column.chars().count().min(60))
+                .chain(rows.iter().take(100).map(|row| value_text(row.get(col_index)).chars().count().min(60)))
                 .fold(8usize, usize::max);
             (max_len + 2).clamp(10, 60)
         })

@@ -145,12 +145,18 @@ pub async fn kv_delete_core(state: &AppState, connection_id: &str, key: &str) ->
     call_agent_kv(state, connection_id, AgentKvMethod::Delete, kv_delete_params(key)).await
 }
 
+async fn ensure_agent_kv_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
+    state.get_or_create_pool(connection_id, None).await.map(|_| ())
+}
+
 async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
     state: &AppState,
     connection_id: &str,
     method: AgentKvMethod,
     params: serde_json::Value,
 ) -> Result<T, String> {
+    ensure_agent_kv_pool(state, connection_id).await?;
+
     let connections = state.connections.read().await;
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
     match pool {

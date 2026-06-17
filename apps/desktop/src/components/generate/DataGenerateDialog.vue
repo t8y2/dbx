@@ -4,8 +4,9 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/api";
 import type { TableGenerateConfig } from "@/lib/dataGenerate";
-import { findGeneratorKey, generateTableData } from "@/lib/dataGenerate";
+import { findGeneratorKey, generateTableData, defaultGeneratorParams } from "@/lib/dataGenerate";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import GeneratorParamsPanel from "./params/GeneratorParamsPanel.vue";
 import type { ColumnInfo, TableInfo } from "@/types/database";
@@ -111,14 +112,29 @@ async function loadSchemas() {
               schema: targetSchema,
               database: db,
               rowCount: 1000,
-              columns: cols.map((c: ColumnInfo) => ({
-                columnName: c.name,
-                dataType: c.data_type,
-                rowCount: 1000,
-                generatorKey: findGeneratorKey(c.name, c.data_type),
-                generatorParams: {},
-                isAutoIncrement: c.extra === "auto_increment" || (c.column_default?.includes("nextval") ?? false),
-              })),
+              columns: cols.map((c: ColumnInfo) => {
+                const isAI = c.extra === "auto_increment" || (c.column_default?.includes("nextval") ?? false);
+                const gKey = findGeneratorKey(c.name, c.data_type, isAI);
+                return {
+                  columnName: c.name,
+                  dataType: c.data_type,
+                  rowCount: 1000,
+                  generatorKey: gKey,
+                  generatorParams: defaultGeneratorParams(
+                    c.name,
+                    {
+                      dataType: c.data_type,
+                      isAutoIncrement: isAI,
+                      columnDefault: c.column_default,
+                      numericPrecision: c.numeric_precision,
+                      numericScale: c.numeric_scale,
+                      characterMaximumLength: c.character_maximum_length,
+                    },
+                    gKey,
+                  ),
+                  isAutoIncrement: isAI,
+                };
+              }),
             };
             checkedTables[key] = true;
             for (const c of cols) {
@@ -188,14 +204,29 @@ async function loadColumns(schema: string, table: string) {
     schema,
     database: props.prefillDatabase,
     rowCount: 1000,
-    columns: cols.map((c: ColumnInfo) => ({
-      columnName: c.name,
-      dataType: c.data_type,
-      rowCount: 1000,
-      generatorKey: findGeneratorKey(c.name, c.data_type),
-      generatorParams: {},
-      isAutoIncrement: c.extra === "auto_increment" || (c.column_default?.includes("nextval") ?? false),
-    })),
+    columns: cols.map((c: ColumnInfo) => {
+      const isAI = c.extra === "auto_increment" || (c.column_default?.includes("nextval") ?? false);
+      const gKey = findGeneratorKey(c.name, c.data_type, isAI);
+      return {
+        columnName: c.name,
+        dataType: c.data_type,
+        rowCount: 1000,
+        generatorKey: gKey,
+        generatorParams: defaultGeneratorParams(
+          c.name,
+          {
+            dataType: c.data_type,
+            isAutoIncrement: isAI,
+            columnDefault: c.column_default,
+            numericPrecision: c.numeric_precision,
+            numericScale: c.numeric_scale,
+            characterMaximumLength: c.character_maximum_length,
+          },
+          gKey,
+        ),
+        isAutoIncrement: isAI,
+      };
+    }),
   };
   configs[key] = cfg;
   for (const c of cols) {
@@ -523,6 +554,154 @@ watch(open, (val) => {
     void loadSchemas();
   }
 });
+
+interface GenerateProfileJson {
+  version: 1;
+  connectionId?: string;
+  database?: string;
+  savedAt: string;
+  configs: Record<string, TableGenerateConfig>;
+  checkedTables: Record<string, boolean>;
+  checkedColumns: Record<string, boolean>;
+  expandedTables: Record<string, boolean>;
+  expandedSchemas: Record<string, boolean>;
+  tableOrder: string[];
+}
+
+const fileInputRef = ref<HTMLInputElement | null>(null);
+
+function buildProfilePayload(): GenerateProfileJson {
+  return {
+    version: 1,
+    connectionId: props.prefillConnectionId,
+    database: props.prefillDatabase,
+    savedAt: new Date().toISOString(),
+    configs: JSON.parse(JSON.stringify(configs)),
+    checkedTables: { ...checkedTables },
+    checkedColumns: { ...checkedColumns },
+    expandedTables: { ...expandedTables },
+    expandedSchemas: { ...expandedSchemas },
+    tableOrder: [...tableOrder.value],
+  };
+}
+
+function defaultProfileFilename(): string {
+  const payload = buildProfilePayload();
+  const tableNames = Object.keys(payload.configs);
+  const firstTableName = tableNames[0]?.split(".").pop() || "profile";
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  return tableNames.length === 1 ? `${firstTableName}-${timestamp}.json` : `data-generate-${timestamp}.json`;
+}
+
+function downloadJsonFallback(data: GenerateProfileJson, filename: string) {
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function saveProfile() {
+  const payload = buildProfilePayload();
+  const json = JSON.stringify(payload, null, 2);
+  const defaultPath = defaultProfileFilename();
+
+  if (isTauriRuntime()) {
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      const path = await save({
+        defaultPath,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (path) {
+        await writeTextFile(path, json);
+      }
+    } catch (e: any) {
+      console.warn("profile save error (tauri):", e?.message ?? e);
+    }
+  } else {
+    downloadJsonFallback(payload, defaultPath);
+  }
+}
+
+function applyProfileData(data: Partial<GenerateProfileJson> & { configs?: Record<string, TableGenerateConfig> }) {
+  if (!data.configs || typeof data.configs !== "object") {
+    throw new Error("Invalid profile file: missing configs");
+  }
+  Object.keys(configs).forEach((k) => delete configs[k]);
+  Object.keys(checkedTables).forEach((k) => delete checkedTables[k]);
+  Object.keys(checkedColumns).forEach((k) => delete checkedColumns[k]);
+  Object.keys(expandedTables).forEach((k) => delete expandedTables[k]);
+
+  for (const [key, cfg] of Object.entries(data.configs)) {
+    if (cfg && cfg.tableName) configs[key] = cfg;
+  }
+  if (data.checkedTables && typeof data.checkedTables === "object") {
+    for (const [k, v] of Object.entries(data.checkedTables)) {
+      checkedTables[k] = !!v;
+    }
+  }
+  if (data.checkedColumns && typeof data.checkedColumns === "object") {
+    for (const [k, v] of Object.entries(data.checkedColumns)) {
+      checkedColumns[k] = !!v;
+    }
+  }
+  if (data.expandedTables && typeof data.expandedTables === "object") {
+    for (const [k, v] of Object.entries(data.expandedTables)) {
+      expandedTables[k] = !!v;
+    }
+  }
+  if (data.expandedSchemas && typeof data.expandedSchemas === "object") {
+    for (const [k, v] of Object.entries(data.expandedSchemas)) {
+      expandedSchemas[k] = !!v;
+    }
+  }
+  if (Array.isArray(data.tableOrder)) {
+    tableOrder.value = [...data.tableOrder];
+  }
+}
+
+async function triggerLoadProfile() {
+  if (isTauriRuntime()) {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path) return;
+      const text = await readTextFile(path as string);
+      const data = JSON.parse(text);
+      applyProfileData(data);
+    } catch (e: any) {
+      console.warn("profile load error (tauri):", e?.message ?? e);
+    }
+  } else {
+    fileInputRef.value?.click();
+  }
+}
+
+async function onFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    applyProfileData(data);
+  } catch (e: any) {
+    console.warn("profile load error:", e?.message ?? e);
+  } finally {
+    input.value = "";
+  }
+}
 </script>
 
 <template>
@@ -653,7 +832,7 @@ watch(open, (val) => {
           <div />
         </div>
 
-        <div class="rounded-md border">
+        <div class="rounded-md border w-full overflow-hidden">
           <div v-if="generatedResults.length === 0" class="flex h-[420px] items-center justify-center text-xs text-muted-foreground">{{ t("dataGenerate.noData") }}</div>
           <template v-else>
             <div class="flex items-center justify-between px-3 py-2 border-b bg-muted/10">
@@ -724,11 +903,11 @@ watch(open, (val) => {
       <DialogFooter class="flex items-center justify-between border-t pt-3 sm:justify-between">
         <div class="flex items-center gap-2">
           <template v-if="currentStep === 'config'">
-            <Button variant="outline" size="sm" class="h-7 text-xs">
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="saveProfile">
               <Save class="mr-1 h-3 w-3" />
               {{ t("dataGenerate.saveProfile") }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 text-xs">
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="triggerLoadProfile">
               <Upload class="mr-1 h-3 w-3" />
               {{ t("dataGenerate.loadProfile") }}
             </Button>
@@ -768,6 +947,7 @@ watch(open, (val) => {
           </template>
         </div>
       </DialogFooter>
+      <input ref="fileInputRef" type="file" accept="application/json,.json" class="hidden" @change="onFileSelected" />
     </DialogScrollContent>
 
     <Dialog v-model:open="optionsDialogOpen">

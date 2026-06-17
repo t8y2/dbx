@@ -219,6 +219,10 @@ article figure.shiki pre code {
   line-height: 1.58;
 }
 
+article figure.shiki button:hover {
+  color: #e5e5e5;
+}
+
 article :not(pre) > code {
   border: 1px solid var(--dbx-line);
   border-radius: 6px;

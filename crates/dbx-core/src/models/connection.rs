@@ -2,7 +2,7 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
@@ -32,6 +32,8 @@ pub struct ConnectionConfig {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_keepalive_interval_secs")]
+    pub keepalive_interval_secs: u64,
     #[serde(default)]
     pub ssl: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -66,6 +68,10 @@ pub struct ConnectionConfig {
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub gbase_server: String,
+    /// Informix server name (INFORMIXSERVER). When empty, the agent
+    /// derives it from the hostname.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub informix_server: String,
     /// Typed configuration for external tabular sources.
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
@@ -142,6 +148,11 @@ pub struct SshTunnelConfig {
     pub expose_lan: bool,
     #[serde(default)]
     pub use_ssh_agent: bool,
+    /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
+    /// When set and `use_ssh_agent` is true, this path is used instead of
+    /// the `SSH_AUTH_SOCK` environment variable.
+    #[serde(default)]
+    pub ssh_agent_sock_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +203,10 @@ pub fn default_query_timeout_secs() -> u64 {
 
 pub fn default_idle_timeout_secs() -> u64 {
     60
+}
+
+pub fn default_keepalive_interval_secs() -> u64 {
+    0
 }
 
 fn default_proxy_port() -> u16 {
@@ -295,6 +310,10 @@ pub enum DatabaseType {
     #[serde(rename = "questdb")]
     Questdb,
     Jdbc,
+    /// Message queue admin connection (Pulsar / Kafka / RocketMQ). The specific
+    /// system is determined by `external_config.systemKind`.
+    #[serde(rename = "mq")]
+    MessageQueue,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +346,8 @@ struct ConnectionConfigData {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_keepalive_interval_secs")]
+    pub keepalive_interval_secs: u64,
     #[serde(default)]
     pub ssl: bool,
     #[serde(default)]
@@ -362,6 +383,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub gbase_server: String,
     #[serde(default)]
+    pub informix_server: String,
+    #[serde(default)]
     pub external_config: Option<serde_json::Value>,
     #[serde(default)]
     pub jdbc_driver_class: Option<String>,
@@ -394,6 +417,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
+            keepalive_interval_secs: data.keepalive_interval_secs,
             ssl: data.ssl,
             ca_cert_path: data.ca_cert_path,
             client_cert_path: data.client_cert_path,
@@ -411,6 +435,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_key_separator: data.redis_key_separator,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
+            informix_server: data.informix_server,
             external_config: data.external_config,
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
@@ -759,6 +784,7 @@ impl ConnectionConfig {
                 format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
+            DatabaseType::MessageQueue => self.message_queue_admin_url(),
         }
     }
 
@@ -959,7 +985,19 @@ impl ConnectionConfig {
             DatabaseType::Jdbc => {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
             }
+            DatabaseType::MessageQueue => self.message_queue_admin_url(),
         }
+    }
+
+    fn message_queue_admin_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("adminUrl").or_else(|| value.get("admin_url")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("mq://")
+            .to_string()
     }
 
     fn normalized_url_params(&self) -> String {
@@ -971,9 +1009,15 @@ impl ConnectionConfig {
             DatabaseType::Mysql => {
                 normalize_mysql_url_params(value, self.mysql_uses_tls(), self.ca_cert_path.trim().is_empty())
             }
-            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch | DatabaseType::Databend => {
-                normalize_bare_mysql_url_params(value)
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
+                let params = normalize_bare_mysql_url_params(value);
+                if params.is_empty() {
+                    "enable_cleartext_plugin=true".to_string()
+                } else {
+                    format!("{params}&enable_cleartext_plugin=true")
+                }
             }
+            DatabaseType::Databend => normalize_bare_mysql_url_params(value),
             DatabaseType::Postgres | DatabaseType::Redshift => normalize_postgres_url_params(value, self.ssl),
             DatabaseType::MongoDb => normalize_mongo_url_params(value, self.ssl),
             _ => value.trim_start_matches('?').to_string(),
@@ -1413,6 +1457,7 @@ mod tests {
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: super::default_idle_timeout_secs(),
+            keepalive_interval_secs: super::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
@@ -1430,6 +1475,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

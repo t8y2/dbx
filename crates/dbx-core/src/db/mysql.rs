@@ -284,7 +284,12 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
             return row_get::<Vec<u8>, _>(row, idx)
                 .map(|bytes| {
                     if matches!(column.column_type(), ColumnType::MYSQL_TYPE_GEOMETRY) {
-                        mysql_blob_preview(&bytes, "GEOMETRY")
+                        // MySQL prefixes geometry WKB with a 4-byte SRID.
+                        // Strip it before passing to the WKB parser.
+                        let wkb = if bytes.len() >= 4 { &bytes[4..] } else { &bytes };
+                        super::wkb::wkb_to_wkt(wkb)
+                            .map(serde_json::Value::String)
+                            .unwrap_or_else(|| super::binary_value_to_json(&bytes))
                     } else {
                         mysql_bytes_to_json(bytes, column)
                     }
@@ -987,7 +992,9 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
             (!name.is_empty()).then_some(TableInfo {
                 name,
                 table_type: get_str_by_name(row, "TABLE_TYPE"),
-                comment: get_opt_str(row, "TABLE_COMMENT").filter(|s| !s.is_empty()),
+                comment: get_opt_str(row, "TABLE_COMMENT")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
                 parent_schema: None,
                 parent_name: None,
             })
@@ -1024,7 +1031,9 @@ async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<Hash
             (
                 get_str_by_name(row, "Name"),
                 TableStatusMeta {
-                    comment: get_opt_metadata_string(row, "Comment").filter(|s| !s.is_empty()),
+                    comment: get_opt_metadata_string(row, "Comment")
+                        .map(|s| fix_potential_double_encoding(&s))
+                        .filter(|s| !s.is_empty()),
                     created_at: get_opt_metadata_string(row, "Create_time"),
                     updated_at: get_opt_metadata_string(row, "Update_time"),
                 },
@@ -1147,7 +1156,9 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         name: get_str_by_name(row, "object_name"),
         object_type: get_str_by_name(row, "object_type"),
         schema: Some(database.to_string()),
-        comment: get_opt_str(row, "object_comment").filter(|s| !s.is_empty()),
+        comment: get_opt_str(row, "object_comment")
+            .map(|s| fix_potential_double_encoding(&s))
+            .filter(|s| !s.is_empty()),
         created_at: get_opt_str(row, "created_at"),
         updated_at: get_opt_str(row, "updated_at"),
         parent_schema: get_opt_str(row, "parent_schema"),
@@ -1429,6 +1440,115 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
+fn should_collect_text_result_set(sql: &str, row_limit: usize, max_rows: Option<usize>) -> bool {
+    max_rows.is_some_and(|_| mysql_top_level_limit(sql).is_some_and(|limit| limit <= row_limit))
+}
+
+fn mysql_top_level_limit(sql: &str) -> Option<usize> {
+    let sql = sql.trim().trim_end_matches(';');
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        i = skip_sql_whitespace_and_comments(bytes, i);
+        if i >= bytes.len() {
+            break;
+        }
+
+        let ch = bytes[i];
+        if matches!(ch, b'\'' | b'"' | b'`') {
+            i = skip_mysql_quoted(sql, i, ch);
+            continue;
+        }
+        if ch == b'(' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if ch == b')' {
+            depth = depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        if depth == 0 && mysql_keyword_at(sql, i, "LIMIT") {
+            return parse_mysql_limit_value(sql, i + "LIMIT".len());
+        }
+        // Move to next byte, but ensure we stay on a UTF-8 boundary
+        i += 1;
+        while i < bytes.len() && !sql.is_char_boundary(i) {
+            i += 1;
+        }
+    }
+
+    None
+}
+
+fn parse_mysql_limit_value(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut i = skip_sql_whitespace_and_comments(bytes, start);
+    let first = parse_usize_token(sql, &mut i)?;
+    i = skip_sql_whitespace_and_comments(bytes, i);
+
+    if i < bytes.len() && bytes[i] == b',' {
+        i = skip_sql_whitespace_and_comments(bytes, i + 1);
+        return parse_usize_token(sql, &mut i);
+    }
+
+    Some(first)
+}
+
+fn parse_usize_token(sql: &str, i: &mut usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let start = *i;
+    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    if *i == start {
+        return None;
+    }
+    // Ensure the slice is valid UTF-8 before parsing
+    std::str::from_utf8(&bytes[start..*i]).ok()?.parse().ok()
+}
+
+fn mysql_keyword_at(sql: &str, i: usize, keyword: &str) -> bool {
+    let end = i + keyword.len();
+    if end > sql.len() {
+        return false;
+    }
+    // Ensure indices are on UTF-8 boundaries before slicing
+    if !sql.is_char_boundary(i) || !sql.is_char_boundary(end) {
+        return false;
+    }
+    sql[i..end].eq_ignore_ascii_case(keyword)
+        && (i == 0 || !is_mysql_identifier_byte(sql.as_bytes()[i - 1]))
+        && (end == sql.len() || !is_mysql_identifier_byte(sql.as_bytes()[end]))
+}
+
+fn is_mysql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn skip_mysql_quoted(sql: &str, start: usize, quote: u8) -> usize {
+    let bytes = sql.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == quote {
+            if i + 1 < bytes.len() && bytes[i + 1] == quote {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        if quote == b'\'' && bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// Get a connection from the pool with a health check. If the connection is dead
 /// (e.g. after app was backgrounded), it tries again with a fresh connection.
 pub async fn get_conn_with_health_check(pool: &MySqlPool) -> Result<mysql_async::Conn, String> {
@@ -1446,12 +1566,35 @@ async fn execute_result_set_with_text_protocol_on_conn(
     conn: &mut mysql_async::Conn,
     sql: &str,
     row_limit: usize,
+    max_rows: Option<usize>,
     start: Instant,
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> =
         result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+
+    if should_collect_text_result_set(sql, row_limit, max_rows) {
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        let truncated = rows.len() > row_limit;
+        let result_rows = rows
+            .iter()
+            .take(row_limit)
+            .map(|row| (0..row.len()).map(|i| mysql_value_to_json(row, i)).collect())
+            .collect();
+
+        return Ok(QueryResult {
+            columns,
+            column_types,
+            column_sortables: vec![],
+            rows: result_rows,
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated,
+            session_id: None,
+            has_more: false,
+        });
+    }
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1559,12 +1702,12 @@ pub async fn execute_query_on_conn_with_max_rows(
 
     if is_result_set_query(sql, dialect) {
         if bare || prefers_text_protocol_query(sql, dialect) {
-            execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, start).await
+            execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, max_rows, start).await
         } else {
             match execute_result_set_with_prepared_protocol_on_conn(conn, sql, row_limit, start).await {
                 Ok(result) => Ok(result),
                 Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
-                    execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, start).await
+                    execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, max_rows, start).await
                 }
                 Err(err) => Err(err),
             }
@@ -2034,6 +2177,21 @@ mod tests {
         assert!(prefers_text_protocol_query("WITH recent AS (SELECT 1 AS id) SELECT id FROM recent", dialect));
         assert!(prefers_text_protocol_query("SHOW TABLES", dialect));
         assert!(!prefers_text_protocol_query("UPDATE users SET name = 'Ada' WHERE id = 1", dialect));
+    }
+
+    #[test]
+    fn mysql_text_result_sets_use_buffered_collection_for_bounded_page_queries() {
+        assert!(should_collect_text_result_set("SELECT * FROM users LIMIT 100;", 100, Some(100)));
+        assert!(should_collect_text_result_set("SELECT * FROM users ORDER BY id LIMIT 25 OFFSET 50;", 100, Some(100)));
+        assert!(should_collect_text_result_set("SELECT * FROM users LIMIT 20, 50;", 100, Some(100)));
+    }
+
+    #[test]
+    fn mysql_text_result_sets_keep_streaming_when_unbounded_or_too_large() {
+        assert!(!should_collect_text_result_set("SELECT * FROM users", 100, Some(100)));
+        assert!(!should_collect_text_result_set("SELECT * FROM users LIMIT 1000000", 100, Some(100)));
+        assert!(!should_collect_text_result_set("SELECT * FROM users LIMIT 100", 100, None));
+        assert!(!should_collect_text_result_set("SELECT * FROM (SELECT * FROM audit LIMIT 100) t", 100, Some(100)));
     }
 
     #[test]

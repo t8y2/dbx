@@ -6,7 +6,7 @@ export type ObjectBrowserRow = {
   id: string;
   name: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -23,6 +23,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   const value = type.toUpperCase();
   if (value.includes("PACKAGE BODY") || value.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (value.includes("PACKAGE")) return "PACKAGE";
+  if (value.includes("MATERIALIZED") && value.includes("VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
   if (value.includes("SEQ")) return "SEQUENCE";
   if (value.includes("PROC")) return "PROCEDURE";

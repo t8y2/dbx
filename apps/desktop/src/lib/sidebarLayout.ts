@@ -118,6 +118,7 @@ export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: Con
         id: group.id,
         label: group.name,
         type: "connection-group",
+        pinned: pinnedIds.has(group.id),
         isExpanded: !group.collapsed,
         children: orderPinnedFirst(build(entryChildren(entry))),
       });

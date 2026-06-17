@@ -114,16 +114,109 @@ pub(super) fn is_temporal_expression(value: &str) -> bool {
     trimmed.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
+pub(super) fn is_string_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    match dialect {
+        StructureDialect::Mysql => matches!(
+            normalized.as_str(),
+            "char"
+                | "varchar"
+                | "tinytext"
+                | "text"
+                | "mediumtext"
+                | "longtext"
+                | "binary"
+                | "varbinary"
+                | "tinyblob"
+                | "blob"
+                | "mediumblob"
+                | "longblob"
+                | "enum"
+                | "set"
+                | "json"
+                | "nvarchar"
+                | "nchar"
+                | "long"
+        ),
+        StructureDialect::Postgres => matches!(
+            normalized.as_str(),
+            "char"
+                | "character"
+                | "varchar"
+                | "character varying"
+                | "text"
+                | "bpchar"
+                | "name"
+                | "json"
+                | "jsonb"
+                | "xml"
+                | "bytea"
+                | "uuid"
+        ),
+        StructureDialect::SqlServer => matches!(
+            normalized.as_str(),
+            "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "xml" | "uniqueidentifier" | "sysname"
+        ),
+        StructureDialect::Oracle => matches!(
+            normalized.as_str(),
+            "char" | "nchar" | "varchar2" | "nvarchar2" | "clob" | "nclob" | "long" | "raw" | "long raw" | "bfile"
+        ),
+        StructureDialect::H2 => matches!(
+            normalized.as_str(),
+            "char"
+                | "character"
+                | "varchar"
+                | "character varying"
+                | "text"
+                | "clob"
+                | "binary"
+                | "varbinary"
+                | "blob"
+                | "uuid"
+                | "json"
+        ),
+        StructureDialect::ClickHouse => matches!(normalized.as_str(), "string" | "fixedstring" | "uuid" | "json"),
+        StructureDialect::Sqlite => {
+            matches!(normalized.as_str(), "text" | "varchar" | "char" | "character" | "clob" | "nvarchar" | "nchar")
+        }
+        StructureDialect::Informix => matches!(
+            normalized.as_str(),
+            "char"
+                | "character"
+                | "varchar"
+                | "character varying"
+                | "nvarchar"
+                | "nchar"
+                | "text"
+                | "clob"
+                | "lvarchar"
+                | "byte"
+                | "blob"
+        ),
+        _ => false,
+    }
+}
+
 pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str, default_value: &str) -> String {
     if default_value.is_empty() {
         return String::new();
     }
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
-    if is_temporal_type_for_default(dialect, base_type) && !is_temporal_expression(default_value) {
-        quote_string(default_value)
-    } else {
-        default_value.to_string()
+    if is_temporal_type_for_default(dialect, base_type) {
+        if is_temporal_expression(default_value) {
+            return default_value.to_string();
+        }
+        return quote_string(default_value);
     }
+    if is_string_type_for_default(dialect, base_type) {
+        // Only skip quoting for function-call expressions like `gen_random_uuid()`.
+        // Simple identifiers like `CURRENT_TIMESTAMP` are not valid defaults for string columns.
+        if default_value.contains('(') || default_value.contains(')') {
+            return default_value.to_string();
+        }
+        return quote_string(default_value);
+    }
+    default_value.to_string()
 }
 
 pub(super) fn normalize_default(value: Option<&String>) -> String {

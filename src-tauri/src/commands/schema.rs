@@ -30,9 +30,19 @@ pub async fn list_tables(
     filter: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+    object_types: Option<Vec<String>>,
 ) -> Result<Vec<db::TableInfo>, String> {
-    dbx_core::schema::list_tables_core(&state, &connection_id, &database, &schema, filter.as_deref(), limit, offset)
-        .await
+    dbx_core::schema::list_tables_core(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        filter.as_deref(),
+        limit,
+        offset,
+        object_types.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -118,8 +128,9 @@ pub async fn get_table_ddl(
     database: String,
     schema: String,
     table: String,
+    object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table).await
+    dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await
 }
 
 #[tauri::command]

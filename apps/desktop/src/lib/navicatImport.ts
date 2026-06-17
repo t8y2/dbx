@@ -54,6 +54,11 @@ function getAny(values: Record<string, string>, keys: string[]) {
   return "";
 }
 
+function truthyNavicatFlag(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return ["1", "true", "yes", "y", "on", "checked"].includes(normalized);
+}
+
 function hexToBytes(hex: string) {
   const clean = hex.trim();
   if (!clean || clean.length % 2 !== 0 || /[^0-9a-f]/i.test(clean)) return null;
@@ -155,21 +160,40 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     return null;
   }
 
-  const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || getAny(node.values, ["host", "server", "hostname"]) || profile.label;
-  const host = getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]) || getAny(node.values, ["databaseFile", "filename", "path", "databasePath"]) || (profile.dbType === "sqlite" ? "" : "127.0.0.1");
+  // Navicat NCX uses ServiceProvider to distinguish vendor-specific database types.
+  // e.g. OceanBase Oracle reports ConnType="ORACLE" ServiceProvider="AliyunOceanBase"
+  //      GaussDB reports ConnType="POSTGRESQL" ServiceProvider="HuaweiCloudGaussDB"
+  const serviceProvider = getAny(node.values, ["serviceprovider"]);
+  let effectiveProfile = profile;
+  if (serviceProvider) {
+    const sp = serviceProvider.toLowerCase();
+    if (sp.includes("oceanbase")) {
+      effectiveProfile = { ...profile, dbType: "oceanbase-oracle", profile: "oceanbase", label: "OceanBase", port: 2881 };
+    } else if (sp.includes("gaussdb") || sp.includes("huaweicloudgauss")) {
+      effectiveProfile = { ...profile, dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 8000 };
+    }
+  }
+
+  const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || getAny(node.values, ["host", "server", "hostname"]) || effectiveProfile.label;
+  const host = getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]) || getAny(node.values, ["databaseFile", "filename", "path", "databasePath"]) || (effectiveProfile.dbType === "sqlite" ? "" : "127.0.0.1");
   const database = getAny(node.values, ["database", "databaseName", "initialDatabase", "serviceName", "sid", "schema"]);
-  const oracleConnectionType = profile.dbType === "oracle" && getAny(node.values, ["sid"]) ? "sid" : profile.dbType === "oracle" ? "service_name" : undefined;
+  const isOracleLike = effectiveProfile.dbType === "oracle" || effectiveProfile.dbType === "oceanbase-oracle";
+  const oracleConnectionType = isOracleLike && getAny(node.values, ["sid"]) ? "sid" : isOracleLike ? "service_name" : undefined;
   const username = getAny(node.values, ["user", "username", "userName", "uid"]) || profile.user;
   const password = await decryptNavicatPassword(getAny(node.values, ["password"]));
+  const keepaliveValue = Number(getAny(node.values, ["keepAliveInterval", "keepaliveInterval", "keepAliveTime", "keepaliveTime"]));
+  const keepaliveFlag = getAny(node.values, ["keepAlive", "keepalive", "useKeepAlive", "enableKeepAlive"]);
+  const keepaliveEnabled = !keepaliveFlag || truthyNavicatFlag(keepaliveFlag);
+  const keepaliveInterval = Number.isFinite(keepaliveValue) && keepaliveValue > 0 && keepaliveEnabled ? keepaliveValue : 0;
 
   const config: PartialConnection = {
     name,
-    db_type: profile.dbType,
-    driver_profile: profile.profile,
-    driver_label: profile.label,
+    db_type: effectiveProfile.dbType,
+    driver_profile: effectiveProfile.profile,
+    driver_label: effectiveProfile.label,
     url_params: "",
     host,
-    port: port || profile.port,
+    port: port || effectiveProfile.port,
     username,
     password,
     database: database || undefined,
@@ -177,6 +201,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     transport_layers: [],
     connect_timeout_secs: 5,
     query_timeout_secs: 30,
+    keepalive_interval_secs: keepaliveInterval,
     ssl: false,
     oracle_connection_type: oracleConnectionType,
     connection_string: undefined,

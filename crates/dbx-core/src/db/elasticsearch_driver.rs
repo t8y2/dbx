@@ -429,10 +429,7 @@ fn elasticsearch_query_from_document_filter(filter: Option<&str>) -> Result<Opti
     };
     let value: serde_json::Value = serde_json::from_str(filter).map_err(|e| format!("Invalid filter JSON: {e}"))?;
     let query = translate_document_filter_value(&value)?;
-    Ok(match query {
-        Some(query) => Some(query),
-        None => None,
-    })
+    Ok(query)
 }
 
 fn translate_document_filter_value(value: &serde_json::Value) -> Result<Option<serde_json::Value>, String> {

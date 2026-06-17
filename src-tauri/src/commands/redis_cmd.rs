@@ -41,6 +41,7 @@ pub async fn redis_scan_keys_batch(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn redis_scan_values(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

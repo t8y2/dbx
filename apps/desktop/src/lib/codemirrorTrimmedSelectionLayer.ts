@@ -1,6 +1,6 @@
 import { layer, RectangleMarker, type EditorView } from "@codemirror/view";
 
-const MIN_EMPTY_LINE_WIDTH = 14;
+const FALLBACK_EMPTY_SELECTION_WIDTH = 8;
 const END_OF_LINE_PADDING = 3;
 const CONTIGUOUS_LINE_GAP = 1.5;
 const CORNER_COVERAGE_GAP = 1;
@@ -13,6 +13,33 @@ type TrimmedSelectionRect = {
 };
 
 type PositionRect = ReturnType<EditorView["coordsAtPos"]>;
+
+export function trimmedSelectionHorizontalBounds(options: {
+  from: number;
+  to: number;
+  lineFrom: number;
+  lineTo: number;
+  includesLineBreak: boolean;
+  startLeft: number;
+  startRight: number;
+  endLeft: number;
+  endRight: number;
+  lineStartLeft: number;
+  lineEndRight: number;
+  emptySelectionWidth?: number;
+}): {
+  left: number;
+  right: number;
+} {
+  const lineBreakOnlyAtContentEnd = options.from >= options.to && options.includesLineBreak && options.from >= options.lineTo && options.lineTo > options.lineFrom;
+  const left = options.from < options.to ? Math.min(options.startLeft, options.endLeft) : lineBreakOnlyAtContentEnd ? options.lineEndRight : options.lineStartLeft;
+  const emptySelectionWidth = Math.max(1, options.emptySelectionWidth ?? FALLBACK_EMPTY_SELECTION_WIDTH);
+  let right = options.from < options.to ? Math.max(options.startRight, options.endRight) : left + emptySelectionWidth;
+  if (options.includesLineBreak && options.to >= options.lineTo) {
+    right = Math.max(right, options.lineEndRight + END_OF_LINE_PADDING);
+  }
+  return { left, right };
+}
 
 function visualLineVerticalBounds(view: EditorView, start: NonNullable<PositionRect>, end: NonNullable<PositionRect>): { top: number; bottom: number } {
   const top = Math.min(start.top, end.top);
@@ -40,11 +67,20 @@ function markerForLineRange(view: EditorView, from: number, to: number, lineFrom
   const lineEnd = view.coordsAtPos(lineTo, -1) ?? end;
   if (!start || !end || !lineStart || !lineEnd) return null;
 
-  const left = from < to ? Math.min(start.left, end.left) : lineStart.left;
-  let right = from < to ? Math.max(start.right, end.right) : left + MIN_EMPTY_LINE_WIDTH;
-  if (includesLineBreak && to >= lineTo) {
-    right = Math.max(right, lineEnd.right + END_OF_LINE_PADDING);
-  }
+  const { left, right } = trimmedSelectionHorizontalBounds({
+    from,
+    to,
+    lineFrom,
+    lineTo,
+    includesLineBreak,
+    startLeft: start.left,
+    startRight: start.right,
+    endLeft: end.left,
+    endRight: end.right,
+    lineStartLeft: lineStart.left,
+    lineEndRight: lineEnd.right,
+    emptySelectionWidth: view.defaultCharacterWidth,
+  });
 
   const { top, bottom } = visualLineVerticalBounds(view, start, end);
 

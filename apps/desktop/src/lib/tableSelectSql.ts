@@ -18,7 +18,9 @@ export interface BuildTableSelectSqlOptions {
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
   if (databaseType === "iotdb") return name;
-  if (databaseType === "jdbc") return quoteJdbcIdentifier(name);
+  // JDBC connections use the driver-reported identifier quote string
+  // (DatabaseMetaData.getIdentifierQuoteString()) — pass through unquoted.
+  if (databaseType === "jdbc") return name;
   if (databaseType === "mysql" || databaseType === "hive" || databaseType === "databend" || databaseType === "tdengine" || databaseType === "access") return `\`${name.replace(/`/g, "``")}\``;
   if (databaseType === "informix" && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
   if (databaseType === "neo4j") return quoteCypherIdentifier(name);
@@ -27,11 +29,6 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
 }
 
 function quoteCypherIdentifier(name: string): string {
-  return `\`${name.replace(/`/g, "``")}\``;
-}
-
-function quoteJdbcIdentifier(name: string): string {
-  if (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
   return `\`${name.replace(/`/g, "``")}\``;
 }
 

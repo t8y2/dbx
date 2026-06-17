@@ -383,3 +383,81 @@ export function resolveRedisCommandSpec(argvUpper: readonly string[]): RedisComm
   }
   return REDIS_COMMAND_TABLE[main];
 }
+
+/**
+ * Minimal argv tokenizer for the first two tokens of a Redis command line —
+ * enough to resolve a spec (which only needs the command head, optionally a
+ * subcommand). Single-quoted, double-quoted and unquoted tokens are supported
+ * with backslash escapes; quoting errors are tolerated (the token still resolves).
+ * Kept local so this module stays self-contained (no dependency on the syntax
+ * diagnostics tokenizer).
+ */
+function firstRedisArgvUpper(line: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+  const n = line.length;
+  while (i < n && tokens.length < 2) {
+    while (i < n && /\s/.test(line[i])) i++;
+    if (i >= n) break;
+    const quote = line[i] === '"' || line[i] === "'" ? line[i] : "";
+    let token = "";
+    let escaping = false;
+    if (quote) i++;
+    while (i < n) {
+      const ch = line[i];
+      if (escaping) {
+        token += ch;
+        escaping = false;
+        i++;
+        continue;
+      }
+      if (ch === "\\") {
+        escaping = true;
+        i++;
+        continue;
+      }
+      if (quote && ch === quote) {
+        i++;
+        break;
+      }
+      if (!quote && /\s/.test(ch)) break;
+      token += ch;
+      i++;
+    }
+    tokens.push(token.toUpperCase());
+  }
+  return tokens;
+}
+
+// Commands marked `safety: "blocked"` because they are dangerous/administrative,
+// but which do NOT actually change the key set of the current db — so they should
+// NOT trigger key-name completion cache invalidation. (e.g. KEYS is read-only;
+// SAVE/BGSAVE/SHUTDOWN/REPLICAOF/SLAVEOF are server admin.) Everything else in the
+// `blocked` set (FLUSHALL, MIGRATE, EVAL[ESHA]) may mutate keys and is left in.
+const NON_MUTATING_BLOCKED = new Set(["KEYS", "BGSAVE", "SAVE", "SHUTDOWN", "REPLICAOF", "SLAVEOF"]);
+
+/**
+ * True when a command may change the key set of the db it ran on (adds/edits/
+ * removes/renames keys, or wipes the db), and therefore the cached key-name
+ * completion for that db is potentially stale and should be dropped.
+ *
+ * Mapping from the diagnostic `safety` field:
+ *   - `confirm`  → every write command mutates keys (SET/DEL/INCR/HSET/...).
+ *   - `blocked`  → mostly destructive/admin; we keep the ones that may touch keys
+ *                  (FLUSHALL, MIGRATE, EVAL[ESHA]) and exclude the read-only/admin
+ *                  ones in `NON_MUTATING_BLOCKED`.
+ *   - `allowed`  → read-only (GET/LRANGE/SCAN/...), never invalidates.
+ *
+ * Commands absent from the table (unknown or read-only extensions) are treated as
+ * non-mutating so we never thrash the cache on lookups.
+ */
+export function isRedisMutatingCommand(command: string): boolean {
+  const argv = firstRedisArgvUpper(command);
+  const spec = resolveRedisCommandSpec(argv);
+  if (!spec) return false;
+  if (spec.safety === "confirm") return true;
+  if (spec.safety === "blocked") {
+    return !NON_MUTATING_BLOCKED.has(argv[0]);
+  }
+  return false;
+}

@@ -207,6 +207,11 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         return ok(add_fetch_first_limit(&statement, safe_limit, safe_offset));
     }
 
+    // JDBC connections rely on Statement.setMaxRows() for row limiting.
+    if options.database_type == Some(DatabaseType::Jdbc) {
+        return ok(format!("{statement};"));
+    }
+
     ok(add_standard_limit(&statement, safe_limit, safe_offset))
 }
 

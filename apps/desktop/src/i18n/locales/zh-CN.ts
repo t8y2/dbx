@@ -1,4 +1,4 @@
-﻿export default {
+export default {
   app: {
     name: "DBX",
   },
@@ -808,6 +808,7 @@
     save: "保存",
     retry: "重试",
     more: "更多",
+    done: "完成",
   },
   explain: {
     title: "执行计划",
@@ -1824,6 +1825,21 @@
       file_extension: "文件扩展名",
       url: "网址",
       hostname: "主机名",
+      id_number: "证件号",
+    },
+    idTypes: {
+      title: "证件类型",
+      customPattern: "自定义模式",
+      customPatternPlaceholder: "如 ([A-Z]{2})-([0-9]{8})",
+      customPatternHint: "支持 [A-Z] 字母、[0-9] 数字、{n} 重复、连字符等简单模式",
+      id_card: "身份证号",
+      passport: "护照号",
+      hk_macau_pass: "港澳通行证",
+      taiwan_pass: "台湾通行证",
+      uscc: "统一社会信用代码",
+      bank_card: "银行卡号",
+      drivers_license: "驾驶证号",
+      custom: "自定义",
     },
   },
   tableToolbox: {
@@ -2223,6 +2239,8 @@
     sidebarHiddenTablePrefixes: "隐藏表名前缀",
     sidebarHiddenTablePrefixesDescription: "每行一个前缀，仅影响侧边栏表、视图和集合的显示名称，悬浮提示和实际操作仍使用完整名称。",
     sidebarHiddenTablePrefixesPlaceholder: "例如：\nODS_\nT8Y2_LONG_",
+    sidebarTablePageSize: "侧边栏分页大小",
+    sidebarTablePageSizeDescription: "侧边栏树每页最多加载的表/对象数量。表多时可以调大减少翻页次数。",
     sidebarHideTableComments: "隐藏侧边栏表注释",
     sidebarHideTableCommentsDescription: "隐藏侧边栏中表名旁边显示的表/视图注释，以节省横向空间。",
     sidebarAllowHorizontalScroll: "允许侧边栏横向滚动",

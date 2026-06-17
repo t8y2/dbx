@@ -1,4 +1,4 @@
-﻿export default {
+export default {
   app: {
     name: "DBX",
   },
@@ -756,6 +756,7 @@
     close: "Chiudi",
     retry: "Riprova",
     more: "Altro",
+    done: "Fatto",
   },
   explain: {
     title: "Piano di Spiegazione",
@@ -1686,6 +1687,21 @@
       file_extension: "File Extension",
       url: "URL",
       hostname: "Hostname",
+      id_number: "Numero documento",
+    },
+    idTypes: {
+      title: "Tipo documento",
+      customPattern: "Pattern personalizzato",
+      customPatternPlaceholder: "es. ([A-Z]{2})-([0-9]{8})",
+      customPatternHint: "Supporta pattern semplici come [A-Z] lettere, [0-9] cifre, {n} ripetizioni, trattini",
+      id_card: "Carta d'identità cinese",
+      passport: "Passaporto",
+      hk_macau_pass: "Permesso HK/Macao",
+      taiwan_pass: "Permesso Taiwan",
+      uscc: "Codice sociale unificato",
+      bank_card: "Carta bancaria",
+      drivers_license: "Patente di guida",
+      custom: "Personalizzato",
     },
   },
   tableToolbox: {
@@ -1969,6 +1985,8 @@
     sidebarHiddenTablePrefixes: "Prefissi dei nomi delle tabelle nascosti",
     sidebarHiddenTablePrefixesDescription: "Un prefisso per riga. Solo le etichette di tabelle, viste e collezioni della barra laterale vengono abbreviate; i suggerimenti e le azioni utilizzano ancora il nome completo.",
     sidebarHiddenTablePrefixesPlaceholder: "Esempio:\nODS_\nT8Y2_LONG_",
+    sidebarTablePageSize: "Dimensione pagina barra laterale",
+    sidebarTablePageSizeDescription: "Numero massimo di tabelle/oggetti caricati per pagina nell'albero laterale. Aumentalo se hai molte tabelle per ridurre le pagine.",
     sidebarHideTableComments: "Nascondi i commenti delle tabelle nella barra laterale",
     sidebarHideTableCommentsDescription: "Nascondi i commenti in linea delle tabelle/viste mostrati accanto ai nomi nell'albero della barra laterale per risparmiare spazio orizzontale.",
     sidebarAllowHorizontalScroll: "Consenti scorrimento orizzontale barra laterale",

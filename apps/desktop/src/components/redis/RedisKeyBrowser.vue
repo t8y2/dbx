@@ -23,6 +23,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
+import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
 import { formatRedisCommandResult, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
@@ -436,9 +437,16 @@ async function runRedisCommand(command: string) {
       output: formatRedisCommandResult(result.value),
       error: false,
     });
+    // The db this command ran on — capture before nextRedisCommandDb() advances it.
+    const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);
     if (result.safety === "confirm") {
       await loadKeys();
+    }
+    // Drop the cached key-name completion for this db so the editor's autocomplete
+    // reflects keys added/removed/renamed by SET/DEL/RENAME/...
+    if (isRedisMutatingCommand(command)) {
+      connectionStore.invalidateCompletionCache(props.connectionId, String(executedDb));
     }
     // Persist to history
     persistRedisHistory(command, true, result.value);

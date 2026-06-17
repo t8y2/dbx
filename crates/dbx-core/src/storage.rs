@@ -46,6 +46,12 @@ pub struct DesktopSettings {
     pub plugin_store_dir: Option<String>,
     #[serde(default)]
     pub agent_store_dir: Option<String>,
+    #[serde(default = "default_sidebar_table_page_size")]
+    pub sidebar_table_page_size: usize,
+}
+
+fn default_sidebar_table_page_size() -> usize {
+    500
 }
 
 impl Default for DesktopSettings {
@@ -58,6 +64,7 @@ impl Default for DesktopSettings {
             driver_store_dir: None,
             plugin_store_dir: None,
             agent_store_dir: None,
+            sidebar_table_page_size: 500,
         }
     }
 }
@@ -626,6 +633,11 @@ impl Storage {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            sidebar_table_page_size: settings
+                .get("sidebar_table_page_size")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize)
+                .unwrap_or_else(|| DesktopSettings::default().sidebar_table_page_size),
         })
     }
 

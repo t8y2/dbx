@@ -801,6 +801,13 @@ pub fn format_grid_sql_literal(
     if text.is_empty() {
         return if database_type == Some(DatabaseType::SqlServer) { "N''" } else { "''" }.to_string();
     }
+    // MySQL geometry columns: wrap WKT text with ST_GeomFromText()
+    if is_mysql_geometry_literal_database(database_type)
+        && column_info.map(|column| is_geometry_column_type(&column.data_type)).unwrap_or(false)
+    {
+        let escaped = text.replace('\\', "\\\\").replace('\'', "''");
+        return format!("ST_GeomFromText('{}')", escaped);
+    }
     let literal_text = if database_type == Some(DatabaseType::Tdengine) {
         format_tdengine_timestamp_literal_text(&text)
     } else if is_mysql_datetime_literal_database(database_type)
@@ -830,6 +837,35 @@ fn is_bit_literal_column(column_info: Option<&DataGridColumnInfo>) -> bool {
 fn is_bit_column_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
     lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == "bit")
+}
+
+fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::Goldendb
+                | DatabaseType::Sundb
+        )
+    )
+}
+
+fn is_geometry_column_type(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or(&lower).trim();
+    matches!(
+        base,
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
 }
 
 fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {

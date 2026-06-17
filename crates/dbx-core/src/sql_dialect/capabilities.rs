@@ -48,12 +48,3 @@ pub(super) fn is_simple_informix_identifier(name: &str) -> bool {
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
-
-pub(super) fn is_simple_jdbc_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-}

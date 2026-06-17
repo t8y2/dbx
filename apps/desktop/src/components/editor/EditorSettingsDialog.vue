@@ -101,6 +101,7 @@ const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
+const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? 500);
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
@@ -346,6 +347,7 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? 500;
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
@@ -402,6 +404,7 @@ function hasChanges(): boolean {
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
+    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? 500) ||
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
@@ -464,6 +467,7 @@ async function persistSettings() {
     show_tray_icon: editShowTrayIcon.value,
     icon_theme: editIconTheme.value,
     debug_logging_enabled: editDebugLoggingEnabled.value,
+    sidebar_table_page_size: editSidebarTablePageSize.value,
   });
   if (sidebarObjectDisplayChanged) {
     await connectionStore.refreshAllTree();
@@ -493,6 +497,7 @@ function resetDefaults() {
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  editSidebarTablePageSize.value = 500;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
@@ -992,6 +997,7 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? 500;
       webdavPassword.value = "";
       await refreshWebDavPasswordStatus();
       syncAiEditState();
@@ -2044,6 +2050,29 @@ watch(
                 <p class="text-xs text-muted-foreground">
                   {{ t("settings.sidebarHiddenTablePrefixesDescription") }}
                 </p>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-table-page-size">{{ t("settings.sidebarTablePageSize") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.sidebarTablePageSizeDescription") }}
+                  </p>
+                </div>
+                <Input
+                  id="sidebar-table-page-size"
+                  type="number"
+                  class="w-24 text-right"
+                  :min="100"
+                  :max="10000"
+                  :step="100"
+                  :model-value="editSidebarTablePageSize"
+                  @update:model-value="
+                    (value: string | number) => {
+                      const n = typeof value === 'string' ? parseInt(value) : value;
+                      if (!isNaN(n)) editSidebarTablePageSize = n;
+                    }
+                  "
+                />
               </div>
             </section>
 

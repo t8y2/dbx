@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { RotateCcw } from "@lucide/vue";
@@ -48,6 +48,7 @@ import FileNameParams from "./FileNameParams.vue";
 import FileExtensionParams from "./FileExtensionParams.vue";
 import UrlParams from "./UrlParams.vue";
 import HostnameParams from "./HostnameParams.vue";
+import IdNumberParams from "./IdNumberParams.vue";
 import DefaultParams from "./DefaultParams.vue";
 
 const { t } = useI18n();
@@ -61,12 +62,6 @@ function initParams() {
 }
 
 const key = computed(() => props.config.generatorKey);
-
-watch(key, (newKey, oldKey) => {
-  if (newKey && newKey !== oldKey) {
-    resetParams();
-  }
-});
 
 function resetParams() {
   props.config.generatorParams = {} as GeneratorParams;
@@ -116,6 +111,7 @@ const componentMap: Record<string, any> = {
   file_extension: FileExtensionParams,
   url: UrlParams,
   hostname: HostnameParams,
+  id_number: IdNumberParams,
 };
 </script>
 

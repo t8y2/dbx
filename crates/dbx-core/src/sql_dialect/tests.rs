@@ -21,7 +21,7 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "user\"name"), "\"user\"\"name\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
-    assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "`user name`");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
 }
 
@@ -82,6 +82,8 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
         }),
         "SELECT \"id\", \"name\" FROM \"DB2INST1\".\"USERS\" ORDER BY \"id\" ASC FETCH FIRST 100 ROWS ONLY"
     );
+    // JDBC connections skip SQL-level row limiting — the JDBC agent handles
+    // it via Statement.setMaxRows() which is universally supported.
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
             database_type: Some(DatabaseType::Jdbc),
@@ -91,7 +93,7 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             order_columns: &[],
             limit: 100,
         }),
-        "SELECT * FROM dwd_test_df LIMIT 100;"
+        "SELECT * FROM dwd_test_df;"
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {

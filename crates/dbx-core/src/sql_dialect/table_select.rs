@@ -23,7 +23,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     let row_id_alias =
         if options.include_row_id && database_type == Some(DatabaseType::Oracle) { Some("t") } else { None };
-    let default_order_alias = if database_type == Some(DatabaseType::Jdbc) { Some("dbx_t") } else { row_id_alias };
+    let default_order_alias = if database_type == Some(DatabaseType::Jdbc) { None } else { row_id_alias };
     let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {
         // InfluxQL only allows sorting of timestamp column
         Some("time DESC".to_string())
@@ -58,8 +58,6 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     };
     let table_alias = if options.include_row_id && database_type.is_some_and(uses_fetch_first) {
         format!("{table} t")
-    } else if database_type == Some(DatabaseType::Jdbc) && default_order_by.is_some() {
-        format!("{table} dbx_t")
     } else {
         table
     };
@@ -123,6 +121,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     let offset =
         options.offset.filter(|offset| *offset > 0).map(|offset| format!(" OFFSET {offset}")).unwrap_or_default();
+    // JDBC connections rely on Statement.setMaxRows() for row limiting instead of
+    // SQL-level LIMIT, which is not universally supported across all JDBC drivers.
+    if database_type == Some(DatabaseType::Jdbc) {
+        return format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order};");
+    }
     format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order} LIMIT {limit}{offset};")
 }
 
@@ -168,6 +171,11 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
 
     if database_type == Some(DatabaseType::SqlServer) {
         return format!("SELECT TOP ({limit}) {select_columns} FROM {table}{order_by}");
+    }
+
+    // JDBC connections rely on Statement.setMaxRows() for row limiting.
+    if database_type == Some(DatabaseType::Jdbc) {
+        return format!("SELECT {select_columns} FROM {table}{order_by};");
     }
 
     format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {limit};")

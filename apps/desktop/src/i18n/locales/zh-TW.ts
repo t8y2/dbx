@@ -1,4 +1,4 @@
-﻿export default {
+export default {
   app: {
     name: "DBX",
   },
@@ -735,6 +735,7 @@
     close: "關閉",
     retry: "重試",
     more: "更多",
+    done: "完成",
   },
   explain: {
     title: "執行計畫",
@@ -1674,6 +1675,21 @@
       file_extension: "檔案副檔名",
       url: "網址",
       hostname: "主機名稱",
+      id_number: "證件號",
+    },
+    idTypes: {
+      title: "證件類型",
+      customPattern: "自訂模式",
+      customPatternPlaceholder: "如 ([A-Z]{2})-([0-9]{8})",
+      customPatternHint: "支援 [A-Z] 字母、[0-9] 數字、{n} 重複、連字號等簡單模式",
+      id_card: "身份證號",
+      passport: "護照號",
+      hk_macau_pass: "港澳通行證",
+      taiwan_pass: "台灣通行證",
+      uscc: "統一社會信用代碼",
+      bank_card: "銀行卡號",
+      drivers_license: "駕駛證號",
+      custom: "自訂",
     },
   },
   tableToolbox: {
@@ -2006,6 +2022,8 @@
     sidebarHiddenTablePrefixes: "隱藏資料表名稱字首",
     sidebarHiddenTablePrefixesDescription: "每行一個字首。只縮短側邊欄中的資料表、檢視和集合標籤；工具提示和實際操作仍使用完整名稱。",
     sidebarHiddenTablePrefixesPlaceholder: "範例：\nODS_\nT8Y2_LONG_",
+    sidebarTablePageSize: "側邊欄分頁大小",
+    sidebarTablePageSizeDescription: "側邊欄樹每頁最多載入的資料表/物件數量。資料表多時可調大減少翻頁次數。",
     sidebarHideTableComments: "隱藏側邊欄資料表註解",
     sidebarHideTableCommentsDescription: "隱藏側邊欄樹狀清單中名稱旁的資料表/檢視註解，以節省橫向空間。",
     sidebarAllowHorizontalScroll: "允許側邊欄水平捲動",

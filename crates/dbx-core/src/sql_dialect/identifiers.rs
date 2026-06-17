@@ -1,6 +1,6 @@
 use crate::models::connection::DatabaseType;
 
-use super::capabilities::{is_schema_aware, is_simple_informix_identifier, is_simple_jdbc_identifier};
+use super::capabilities::{is_schema_aware, is_simple_informix_identifier};
 
 pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
     if database_type == Some(DatabaseType::Iotdb) {
@@ -30,8 +30,10 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
 pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
     match database_type {
         Some(DatabaseType::Iotdb) => name.to_string(),
-        Some(DatabaseType::Jdbc) if is_simple_jdbc_identifier(name) => name.to_string(),
-        Some(DatabaseType::Jdbc) => format!("`{}`", name.replace('`', "``")),
+        // JDBC connections use the driver-reported identifier quote string
+        // (DatabaseMetaData.getIdentifierQuoteString()) inside the JDBC agent,
+        // so the Rust layer passes identifiers through unquoted.
+        Some(DatabaseType::Jdbc) => name.to_string(),
         Some(
             DatabaseType::Mysql
             | DatabaseType::Goldendb

@@ -51,7 +51,11 @@ import { useSettingsStore } from "@/stores/settingsStore";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
-const SIDEBAR_OBJECT_GROUP_PAGE_SIZE = 500;
+function sidebarObjectGroupPageSize(): number {
+  const settingsStore = useSettingsStore();
+  const size = settingsStore.desktopSettings.sidebar_table_page_size;
+  return typeof size === "number" && size > 0 ? size : 500;
+}
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 // Temporary storage for DataGrip import payload (used to read Keychain passwords after import)
@@ -1321,9 +1325,9 @@ export const useConnectionStore = defineStore("connection", () => {
           effectiveSchema,
           objectTypes,
           offset: 0,
-          pageSize: SIDEBAR_OBJECT_GROUP_PAGE_SIZE,
+          pageSize: sidebarObjectGroupPageSize(),
         });
-        children = page.hasMore && !sidebarSearchQuery.value ? [...page.children, buildLoadMoreNode(node, page.nextOffset, SIDEBAR_OBJECT_GROUP_PAGE_SIZE)] : page.children;
+        children = page.hasMore && !sidebarSearchQuery.value ? [...page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize())] : page.children;
         node.objectCount = page.objectCount;
       } else {
         const objects = await api.listObjects(node.connectionId, node.database, querySchema, objectTypes);
@@ -2791,6 +2795,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
     listRedisCompletionKeys,
+    invalidateCompletionCache,
     exportConnectionsToFile,
     readImportFile,
     importConnectionsFromFile,

@@ -35,6 +35,7 @@ export const GeneratorHierarchy: GeneratorNode[] = [
       { key: "marital_status", label: "婚姻状况" },
       { key: "phone", label: "电话号码" },
       { key: "email", label: "电子邮箱" },
+      { key: "id_number", label: "证件号" },
       { key: "job_title", label: "职位名称" },
       { key: "social_id", label: "社交网络ID" },
     ],
@@ -107,6 +108,7 @@ export interface GeneratorParams {
   // text
   minLength?: number;
   maxLength?: number;
+  textFormat?: "lorem" | "alphanumeric" | "hex" | "bcrypt" | "version" | "language" | "currency" | "slug" | "tag_list" | "level" | "channel";
   // date/time
   allDay?: boolean;
   startTime?: string;
@@ -160,6 +162,9 @@ export interface GeneratorParams {
   // region / country
   regionFormat?: string;
   regionLang?: string;
+  // id numbers
+  idTypes?: string[];
+  idCustomPattern?: string;
   textTransform?: string;
   // product
   productKeywords?: string;
@@ -554,6 +559,154 @@ function generateIPv6(): string {
   return groups.join(":");
 }
 
+// ============================================================
+// ID Numbers (证件号)
+// ============================================================
+
+const areaCodes = [
+  "110101",
+  "110105",
+  "110108",
+  "120101",
+  "120103",
+  "130102",
+  "130105",
+  "210102",
+  "210105",
+  "210203",
+  "310101",
+  "310104",
+  "310115",
+  "320102",
+  "320105",
+  "330102",
+  "330106",
+  "340102",
+  "340104",
+  "350102",
+  "360102",
+  "370102",
+  "370202",
+  "410102",
+  "410105",
+  "420102",
+  "420106",
+  "430102",
+  "440103",
+  "440106",
+  "440303",
+  "440305",
+  "450102",
+  "460105",
+  "500103",
+  "510104",
+  "510107",
+  "520102",
+  "530102",
+  "540102",
+  "610103",
+  "620102",
+  "630102",
+  "640104",
+  "650102",
+];
+
+function generateIdCard(): string {
+  const area = pick(areaCodes);
+  const year = randInt(1960, 2005).toString();
+  const month = randInt(1, 12).toString().padStart(2, "0");
+  const day = randInt(1, 28).toString().padStart(2, "0");
+  const seq = randInt(1, 999).toString().padStart(3, "0");
+  const first17 = `${area}${year}${month}${day}${seq}`;
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+  const checks = ["1", "0", "X", "9", "8", "7", "6", "5", "4", "3", "2"];
+  let sum = 0;
+  for (let i = 0; i < 17; i++) sum += parseInt(first17[i]) * weights[i];
+  const check = checks[sum % 11];
+  return `${first17}${check}`;
+}
+
+function generatePassport(): string {
+  const prefixes = ["E", "G", "E", "E", "E", "H", "P"];
+  const prefix = pick(prefixes);
+  const digits = Array.from({ length: 7 }, () => Math.floor(Math.random() * 10).toString()).join("");
+  return `${prefix}${digits}`;
+}
+
+function generateHKMacauPass(): string {
+  const prefixes = ["C", "W", "H"];
+  const prefix = pick(prefixes);
+  const digits = Array.from({ length: 8 }, () => Math.floor(Math.random() * 10).toString()).join("");
+  return `${prefix}${digits}`;
+}
+
+function generateTaiwanPass(): string {
+  const digits = Array.from({ length: 8 }, () => Math.floor(Math.random() * 10).toString()).join("");
+  return `T${digits}`;
+}
+
+function generateUSCC(): string {
+  const firstPart = "91310115MA";
+  const randChars = randFromCharSet("ABCDEFGHJKLMNPQRSTUVWXY23456789", 6);
+  const randDigits = Array.from({ length: 4 }, () => Math.floor(Math.random() * 10).toString()).join("");
+  return `${firstPart}${randChars}${randDigits}`;
+}
+
+const bankBins = ["622202", "622700", "621700", "622848", "621559", "621798", "622208", "622280", "621661", "621785", "622838", "622510", "622698", "622690", "622556", "622588", "621286", "622218", "622506", "622622", "622696", "621483", "621299", "622155", "622156"];
+
+function luhnCalculateCheckDigit(numStr: string): string {
+  let sum = 0;
+  const digits = numStr.split("").map(Number);
+  for (let i = 0; i < digits.length; i++) {
+    let d = digits[digits.length - 1 - i];
+    if (i % 2 === 0) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  const check = (10 - (sum % 10)) % 10;
+  return check.toString();
+}
+
+function generateBankCard(): string {
+  const bin = pick(bankBins);
+  const middle = Array.from({ length: 10 }, () => Math.floor(Math.random() * 10).toString()).join("");
+  const first15 = `${bin}${middle}`;
+  const check = luhnCalculateCheckDigit(first15);
+  return `${first15}${check}`;
+}
+
+function generateDriversLicense(): string {
+  return generateIdCard();
+}
+
+function generateIdNumber(params?: GeneratorParams): string {
+  const types = params?.idTypes?.length ? params.idTypes : ["id_card"];
+  const type = pick(types);
+  switch (type) {
+    case "id_card":
+      return generateIdCard();
+    case "passport":
+      return generatePassport();
+    case "hk_macau_pass":
+      return generateHKMacauPass();
+    case "taiwan_pass":
+      return generateTaiwanPass();
+    case "uscc":
+      return generateUSCC();
+    case "bank_card":
+      return generateBankCard();
+    case "drivers_license":
+      return generateDriversLicense();
+    case "custom":
+      if (params?.idCustomPattern) return generateSkuFromPattern(params.idCustomPattern);
+      return Array.from({ length: 10 }, () => Math.floor(Math.random() * 10).toString()).join("");
+    default:
+      return generateIdCard();
+  }
+}
+
 // Extension categories
 const extensionCategoryMap: Record<string, string[]> = {
   image: [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".tiff"],
@@ -820,6 +973,7 @@ const GeneratorFunctions: Record<string, (params?: GeneratorParams) => string> =
     return generateBarcode(pick(selected));
   },
   sku: (params) => generateSkuFromPattern(params?.pattern ?? "([A-F]{2}[-]){2}([0-9]{4}[-])([A-Z])"),
+  id_number: generateIdNumber,
   ip_address: (params) => (params?.ipType === "ipv6" ? generateIPv6() : generateIP()),
   mac_address: generateMAC,
   file_path: (params) => generateFilePath(params),
@@ -831,42 +985,417 @@ const GeneratorFunctions: Record<string, (params?: GeneratorParams) => string> =
 
 const KnownColumnPatterns: Array<{ pattern: RegExp; generatorKey: string }> = [
   { pattern: /email|e-?mail|mail/i, generatorKey: "email" },
-  { pattern: /phone|tel|mobile|cell|fax/i, generatorKey: "phone" },
+  { pattern: /phone|tel|mobile|cell|fax|telephone/i, generatorKey: "phone" },
+  { pattern: /id.?card|idcard|身份证|id.?number|证件号|证件|passport|护照|social.?credit|统一社会|信用代码/i, generatorKey: "id_number" },
+  { pattern: /bank.?card|银行卡|bank.?account/i, generatorKey: "id_number" },
+  { pattern: /driver.?license|drivers?|驾驶证|驾照/i, generatorKey: "id_number" },
   { pattern: /first.?name|fname|given.?name/i, generatorKey: "full_name" },
   { pattern: /last.?name|lname|surname|family.?name/i, generatorKey: "full_name" },
-  { pattern: /full.?name|name|user.?name/i, generatorKey: "full_name" },
+  { pattern: /full.?name|name|user.?name|username|nickname|nick.?name/i, generatorKey: "full_name" },
   { pattern: /gender|sex/i, generatorKey: "gender" },
-  { pattern: /city/i, generatorKey: "city" },
-  { pattern: /country/i, generatorKey: "city" },
+  { pattern: /city|town|municipality/i, generatorKey: "city" },
+  { pattern: /country|province|state|region/i, generatorKey: "city" },
   { pattern: /zip|postal.?code|postcode/i, generatorKey: "number" },
-  { pattern: /address|street/i, generatorKey: "address" },
-  { pattern: /url|website|link/i, generatorKey: "url" },
-  { pattern: /ip/i, generatorKey: "ip_address" },
-  { pattern: /mac/i, generatorKey: "mac_address" },
+  { pattern: /address|street|district|county/i, generatorKey: "address" },
+  { pattern: /url|website|link|homepage|href|weburl/i, generatorKey: "url" },
+  { pattern: /ip$/i, generatorKey: "ip_address" },
+  { pattern: /ip.?address|ipv4|ipv6/i, generatorKey: "ip_address" },
+  { pattern: /mac.?address|mac$/i, generatorKey: "mac_address" },
   { pattern: /uuid|guid/i, generatorKey: "uuid" },
-  { pattern: /company|corp|organization|org/i, generatorKey: "company_name" },
-  { pattern: /department|dept/i, generatorKey: "department" },
+  { pattern: /company|corp|organization|org|brand/i, generatorKey: "company_name" },
+  { pattern: /department|dept|division/i, generatorKey: "department" },
   { pattern: /color|colour/i, generatorKey: "color" },
-  { pattern: /title|position/i, generatorKey: "job_title" },
-  { pattern: /description|comment|note|summary|bio|content/i, generatorKey: "text" },
+  { pattern: /title|position|job.?title|role/i, generatorKey: "job_title" },
+  { pattern: /description|comment|note|summary|bio|content|body|detail|remark|memo|intro|introduction|overview/i, generatorKey: "text" },
   { pattern: /status|state/i, generatorKey: "enum" },
-  { pattern: /barcode|upc|ean/i, generatorKey: "barcode" },
+  { pattern: /barcode|upc|ean|qr.?code/i, generatorKey: "barcode" },
   { pattern: /sku/i, generatorKey: "sku" },
+  { pattern: /product.?name|product$/i, generatorKey: "product_name" },
+  { pattern: /category|type|kind|classification/i, generatorKey: "product_category" },
+  { pattern: /size$/i, generatorKey: "size" },
+  { pattern: /weight|weight.?unit|unit.?weight|weight.?unit|weight.?type/i, generatorKey: "weight_unit" },
+  { pattern: /file.?path|filePath|directory|dir$/i, generatorKey: "file_path" },
+  { pattern: /file.?name|filename|original.?name|file.?original.?name/i, generatorKey: "file_name" },
+  { pattern: /file.?extension|ext$|filetype|file.?type/i, generatorKey: "file_extension" },
+  { pattern: /hostname|host$/i, generatorKey: "hostname" },
+  { pattern: /version|ver$/i, generatorKey: "text" },
+  { pattern: /language|locale$/i, generatorKey: "text" },
+  { pattern: /currency|currency.?code|currency.?name/i, generatorKey: "text" },
+  { pattern: /slug|permalink|alias|url.?slug|key$/i, generatorKey: "text" },
+  { pattern: /tag|keyword|labels|tags$/i, generatorKey: "text" },
+  { pattern: /level|tier|stage|phase|channel|source|platform/i, generatorKey: "text" },
+  { pattern: /owner|creator|author|created_by|updated_by|modified_by|operator|user$/i, generatorKey: "full_name" },
 ];
 
-export function findGeneratorKey(columnName: string, dataType: string): string {
+export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
+  if (isAutoIncrement) return "sequence";
+  const type = dataType.toLowerCase();
+  const isNumeric = type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+  const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
+  const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
+  const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
+  const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_\-]?/i.test(columnName);
+  if (isNumeric || isDateTime || isBinary) {
+    if (type.includes("serial")) return "sequence";
+    if (isBoolType || (isNumeric && isBoolName)) return "enum";
+    if (/status|state/i.test(columnName)) return "enum";
+    if (isNumeric) return "number";
+    if (type === "time") return "time";
+    if (isDateTime) return "datetime";
+    if (isBinary) return "text";
+  }
   for (const { pattern, generatorKey } of KnownColumnPatterns) {
     if (pattern.test(columnName)) return generatorKey;
   }
-  const type = dataType.toLowerCase();
-  if (type.includes("int") || type.includes("serial") || type === "bigint" || type === "smallint") return "number";
-  if (type.includes("bool")) return "number";
-  if (type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real") return "number";
-  if (type.includes("date") || type.includes("timestamp")) return "datetime";
-  if (type === "time") return "time";
   if (type.includes("char") || type.includes("text") || type.includes("varchar") || type === "clob") return "text";
   if (type.includes("uuid") || type.includes("guid")) return "uuid";
   return "text";
+}
+
+export interface ColumnAttrs {
+  dataType: string;
+  isAutoIncrement?: boolean;
+  columnDefault?: string | null;
+  numericPrecision?: number | null;
+  numericScale?: number | null;
+  characterMaximumLength?: number | null;
+}
+
+export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, generatorKey: string): GeneratorParams {
+  const params: GeneratorParams = {};
+  const type = attrs.dataType.toLowerCase();
+  const precision = attrs.numericPrecision ?? null;
+  const scale = attrs.numericScale ?? null;
+  const charLen = attrs.characterMaximumLength ?? null;
+
+  if (generatorKey === "sequence") {
+    params.startValue = 1;
+    params.increment = 1;
+    return params;
+  }
+
+  if (generatorKey === "number") {
+    const isDecimal = type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+    const col = _columnName.toLowerCase();
+    const isAmount = /price|amount|total|cost|fee|balance|salary|income|revenue|tax|discount|money|payment|price/i.test(col);
+    const isBigAmount = /salary|income|revenue|balance|total/i.test(col);
+    const isPrice = /price|fee|cost|payment|amount|discount/i.test(col);
+    const isPercent = /percent|percentage|pct|rate|score|rating|progress/i.test(col);
+
+    if (isDecimal) {
+      params.numberType = "decimal";
+      params.decimalPlaces = scale ?? 2;
+      if (isPercent) {
+        params.min = 0;
+        params.max = 100;
+      } else if (isBigAmount) {
+        params.min = 100;
+        params.max = 999999;
+      } else if (isPrice) {
+        params.min = 1;
+        params.max = 9999.99;
+      } else {
+        const effectivePrecision = precision ?? 10;
+        const intDigits = Math.max(1, effectivePrecision - (scale ?? 0));
+        const maxVal = Math.pow(10, intDigits) - 1;
+        params.min = 0;
+        params.max = Math.max(1, Math.min(maxVal, 999999));
+      }
+    } else {
+      params.numberType = "integer";
+      if (type.includes("tinyint") || (precision !== null && precision <= 3)) {
+        params.min = 0;
+        params.max = 127;
+      } else if (type === "smallint" || (precision !== null && precision <= 5)) {
+        params.min = 0;
+        params.max = 32767;
+      } else if (type === "bigint" || (precision !== null && precision >= 19)) {
+        params.min = 1;
+        params.max = 999999;
+      } else if (isPercent) {
+        params.min = 0;
+        params.max = 100;
+      } else if (isAmount) {
+        params.min = 1;
+        params.max = 999999;
+      } else {
+        params.min = 1;
+        params.max = precision ? Math.min(Math.pow(10, Math.min(precision, 6)) - 1, 999999) : 1000;
+      }
+    }
+    return params;
+  }
+
+  if (generatorKey === "text") {
+    const col = _columnName.toLowerCase();
+    if (/^password|^pwd|password$|pwd$/.test(col)) {
+      params.textFormat = "bcrypt";
+      params.minLength = 60;
+      params.maxLength = 60;
+      return params;
+    }
+    if (/token/.test(col)) {
+      params.textFormat = "hex";
+      params.minLength = 32;
+      params.maxLength = 32;
+      return params;
+    }
+    if (/^hash|hash$/.test(col)) {
+      params.textFormat = "hex";
+      params.minLength = 64;
+      params.maxLength = 64;
+      return params;
+    }
+    if (/secret|api[_-]?key/.test(col)) {
+      params.textFormat = "alphanumeric";
+      params.minLength = 32;
+      params.maxLength = 32;
+      return params;
+    }
+    if (/^version|version$|^ver$/i.test(_columnName)) {
+      params.textFormat = "version";
+      params.minLength = 3;
+      params.maxLength = 10;
+      return params;
+    }
+    if (/language|^locale$/i.test(_columnName)) {
+      params.textFormat = "language";
+      params.minLength = 5;
+      params.maxLength = 5;
+      return params;
+    }
+    if (/currency/i.test(_columnName)) {
+      params.textFormat = "currency";
+      params.minLength = 3;
+      params.maxLength = 3;
+      return params;
+    }
+    if (/slug|permalink|alias/i.test(_columnName)) {
+      params.textFormat = "slug";
+      params.minLength = 8;
+      params.maxLength = 40;
+      return params;
+    }
+    if (/tag|keyword|labels/i.test(_columnName)) {
+      params.textFormat = "tag_list";
+      params.minLength = 3;
+      params.maxLength = 30;
+      return params;
+    }
+    if (/level|tier|stage|phase/i.test(_columnName)) {
+      params.textFormat = "level";
+      params.minLength = 4;
+      params.maxLength = 15;
+      return params;
+    }
+    if (/channel|source|platform/i.test(_columnName)) {
+      params.textFormat = "channel";
+      params.minLength = 3;
+      params.maxLength = 20;
+      return params;
+    }
+    if (charLen !== null && charLen > 0) {
+      const effectiveLen = Math.min(charLen, 2000);
+      if (effectiveLen <= 20) {
+        params.minLength = Math.max(1, Math.floor(effectiveLen * 0.6));
+        params.maxLength = effectiveLen;
+      } else {
+        params.minLength = Math.max(10, Math.floor(effectiveLen * 0.3));
+        params.maxLength = effectiveLen;
+      }
+    } else {
+      params.minLength = 50;
+      params.maxLength = 500;
+    }
+    return params;
+  }
+
+  if (generatorKey === "id_number") {
+    if (/passport|护照/.test(_columnName)) {
+      params.idTypes = ["passport"];
+    } else if (/bank.?card|银行卡|credit.?card/.test(_columnName)) {
+      params.idTypes = ["bank_card"];
+    } else if (/driver|驾照|驾驶证/.test(_columnName)) {
+      params.idTypes = ["drivers_license"];
+    } else if (/social.?credit|统一社会|信用.?代码|uscc/.test(_columnName)) {
+      params.idTypes = ["uscc"];
+    } else if (/hk|macau|港澳|港澳通行/.test(_columnName)) {
+      params.idTypes = ["hk_macau_pass"];
+    } else if (/taiwan|台湾|台胞/.test(_columnName)) {
+      params.idTypes = ["taiwan_pass"];
+    } else {
+      params.idTypes = ["id_card"];
+    }
+    return params;
+  }
+
+  if (generatorKey === "datetime" || generatorKey === "date") {
+    params.start = "2020-01-01";
+    params.end = "2030-12-31";
+    return params;
+  }
+
+  if (generatorKey === "time") {
+    params.startTime = "00";
+    params.endTime = "23";
+    return params;
+  }
+
+  if (generatorKey === "uuid") {
+    params.uuidHyphens = true;
+    return params;
+  }
+
+  if (generatorKey === "enum") {
+    const t = attrs.dataType.toLowerCase();
+    const isNum = t.includes("int") || t.includes("bool") || t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real";
+    const isBoolType = t === "bool" || t === "boolean" || t === "bit" || t === "tinyint(1)";
+    const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_\-]?/i.test(_columnName);
+    if (isBoolType || (isNum && isBoolName)) {
+      params.values = "0\n1";
+    } else if (isNum) {
+      params.values = "0\n1\n2";
+    } else {
+      params.values = "A\nB\nC\nD\nE";
+    }
+    return params;
+  }
+
+  // --- 其他生成器的默认参数（确保保存/加载配置时所有参数都被覆盖） ---
+  if (generatorKey === "full_name") {
+    params.nameFormat = "full";
+    params.languages = ["en"];
+    return params;
+  }
+  if (
+    generatorKey === "gender" ||
+    generatorKey === "title" ||
+    generatorKey === "marital_status" ||
+    generatorKey === "job_title" ||
+    generatorKey === "company_name" ||
+    generatorKey === "department" ||
+    generatorKey === "industry" ||
+    generatorKey === "product_category" ||
+    generatorKey === "color" ||
+    generatorKey === "size"
+  ) {
+    params.languages = ["en"];
+    return params;
+  }
+  if (generatorKey === "social_id") {
+    return params;
+  }
+  if (generatorKey === "phone") {
+    params.phoneFormat = "domestic";
+    params.phoneSeparator = true;
+    params.phoneRegions = ["us"];
+    return params;
+  }
+  if (generatorKey === "email") {
+    params.emailDomains = "gmail.com\nyahoo.com\noutlook.com\nexample.com\ntest.org";
+    return params;
+  }
+  if (generatorKey === "payment_method") {
+    params.values = "Credit Card\nPayPal\nApple Pay\nGoogle Pay\nBank Transfer\nCash\nCryptocurrency";
+    return params;
+  }
+  if (generatorKey === "credit_card_type" || generatorKey === "credit_card_number") {
+    params.cardTypes = ["visa", "mastercard"];
+    return params;
+  }
+  if (generatorKey === "credit_card_date") {
+    params.ccDateFormat = "MM/YY";
+    params.ccYearOffsetMin = 0;
+    params.ccYearOffsetMax = 5;
+    return params;
+  }
+  if (generatorKey === "address") {
+    params.addressType = "line1";
+    params.regions = ["us"];
+    return params;
+  }
+  if (generatorKey === "city") {
+    params.regions = ["us"];
+    params.languages = ["en"];
+    return params;
+  }
+  if (generatorKey === "region") {
+    params.regionFormat = "name";
+    params.regionLang = "en";
+    params.textTransform = "none";
+    return params;
+  }
+  if (generatorKey === "product_name") {
+    params.productKeywords = "Premium\nBasic\nUltra\nStandard\nPro\nWidget\nGadget\nTool\nDevice\nKit\nPack\nBundle\nEdition\nPlus\nMax\nMini\nLite\nCore\nSelect\nAdvanced\nSmart";
+    return params;
+  }
+  if (generatorKey === "weight_unit") {
+    params.values = "g\nkg\nlb\noz\nt\nmg\nct";
+    return params;
+  }
+  if (generatorKey === "barcode") {
+    params.barcodeTypes = ["ean13"];
+    return params;
+  }
+  if (generatorKey === "sku") {
+    params.pattern = "([A-F]{2}[-]){2}([0-9]{4}[-])([A-Z])";
+    return params;
+  }
+  if (generatorKey === "ip_address") {
+    params.ipType = "ipv4";
+    return params;
+  }
+  if (generatorKey === "mac_address") {
+    return params;
+  }
+  if (generatorKey === "file_path") {
+    params.pathTypes = ["linux"];
+    params.includeFileName = true;
+    params.extensionCategory = "image";
+    return params;
+  }
+  if (generatorKey === "file_name") {
+    params.includeExtension = true;
+    params.extensionCategory = "image";
+    return params;
+  }
+  if (generatorKey === "file_extension") {
+    params.extensionCategory = "image";
+    return params;
+  }
+  if (generatorKey === "url") {
+    params.urlSubdomains = "auth.\ndrive.\nimage.\nwww.\napi.\nmail.\nshop.\nblog.";
+    params.urlTlds = ".biz\n.co.jp\n.com\n.cn\n.org\n.net\n.io\n.dev\n.xyz";
+    return params;
+  }
+  if (generatorKey === "hostname") {
+    return params;
+  }
+  if (generatorKey === "foreign_key") {
+    params.fkSchema = "";
+    params.fkTable = "";
+    params.fkField = "";
+    params.fkMode = "random";
+    params.min = 1;
+    params.max = 500;
+    return params;
+  }
+  if (generatorKey === "image") {
+    params.imageMode = "generate";
+    params.imageWidth = 200;
+    params.imageHeight = 200;
+    params.imageFormat = "JPEG";
+    params.folderPath = "";
+    params.fileExtensions = "";
+    return params;
+  }
+  if (generatorKey === "regex") {
+    params.pattern = "";
+    params.rawPattern = false;
+    return params;
+  }
+
+  return params;
 }
 
 export function getGeneratorCategoryAndLabel(key: string): { category: string; categoryLabel: string; label: string } {
@@ -953,6 +1482,60 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return vals[Math.floor(Math.random() * vals.length)];
   }
   if (key === "text") {
+    const fmt = params?.textFormat ?? "lorem";
+    if (fmt === "bcrypt") {
+      const b64chars = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+      const b64 = (n: number) => Array.from({ length: n }, () => b64chars[Math.floor(Math.random() * b64chars.length)]).join("");
+      return `$2a$10$${b64(22)}${b64(31)}`;
+    }
+    if (fmt === "hex") {
+      const hex = "0123456789abcdef";
+      const minLen = params?.minLength ?? 32;
+      const maxLen = params?.maxLength ?? 32;
+      const len = Math.floor(Math.random() * (maxLen - minLen + 1)) + minLen;
+      return Array.from({ length: len }, () => hex[Math.floor(Math.random() * 16)]).join("");
+    }
+    if (fmt === "alphanumeric") {
+      const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+      const minLen = params?.minLength ?? 32;
+      const maxLen = params?.maxLength ?? 32;
+      const len = Math.floor(Math.random() * (maxLen - minLen + 1)) + minLen;
+      return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+    }
+    if (fmt === "version") {
+      const v = `${randInt(0, 3)}.${randInt(0, 20)}.${randInt(0, 99)}`;
+      return Math.random() < 0.3 ? `v${v}` : v;
+    }
+    if (fmt === "language") {
+      const langs = ["en-US", "en-GB", "zh-CN", "zh-TW", "ja-JP", "ko-KR", "fr-FR", "de-DE", "es-ES", "pt-BR", "it-IT", "ru-RU", "ar-SA", "hi-IN", "nl-NL", "pl-PL"];
+      return pick(langs);
+    }
+    if (fmt === "currency") {
+      const codes = ["USD", "CNY", "EUR", "JPY", "GBP", "HKD", "SGD", "AUD", "CAD", "CHF", "THB", "TWD", "KRW", "INR", "RUB", "BRL"];
+      return pick(codes);
+    }
+    if (fmt === "slug") {
+      const words = ["product", "item", "category", "page", "service", "plan", "feature", "edition", "version", "type", "mode", "option", "setting", "config"];
+      const count = randInt(2, 4);
+      const parts: string[] = [];
+      for (let i = 0; i < count; i++) parts.push(pick(words).toLowerCase());
+      return parts.join("-");
+    }
+    if (fmt === "tag_list") {
+      const pool = ["new", "featured", "hot", "sale", "discount", "promo", "vip", "limited", "bestseller", "recommended", "popular", "trending", "special", "exclusive", "premium", "basic"];
+      const count = randInt(1, 3);
+      const selected = new Set<string>();
+      while (selected.size < count) selected.add(pick(pool));
+      return Array.from(selected).join(",");
+    }
+    if (fmt === "level") {
+      const tiers = ["basic", "standard", "premium", "enterprise", "professional", "ultimate", "starter", "advanced", "lite", "pro"];
+      return pick(tiers);
+    }
+    if (fmt === "channel") {
+      const channels = ["web", "mobile", "api", "desktop", "ios", "android", "mini-program", "wechat", "official", "direct", "partner", "affiliate", "referral", "organic", "email"];
+      return pick(channels);
+    }
     const texts = [
       "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua Ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat",
       "The quick brown fox jumps over the lazy dog near the bank of the river A gentle breeze carried the scent of wildflowers across the meadow as birds sang melodies from the treetops",

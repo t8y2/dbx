@@ -284,7 +284,12 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
             return row_get::<Vec<u8>, _>(row, idx)
                 .map(|bytes| {
                     if matches!(column.column_type(), ColumnType::MYSQL_TYPE_GEOMETRY) {
-                        mysql_blob_preview(&bytes, "GEOMETRY")
+                        // MySQL prefixes geometry WKB with a 4-byte SRID.
+                        // Strip it before passing to the WKB parser.
+                        let wkb = if bytes.len() >= 4 { &bytes[4..] } else { &bytes };
+                        super::wkb::wkb_to_wkt(wkb)
+                            .map(serde_json::Value::String)
+                            .unwrap_or_else(|| super::binary_value_to_json(&bytes))
                     } else {
                         mysql_bytes_to_json(bytes, column)
                     }

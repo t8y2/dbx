@@ -787,6 +787,11 @@ fn build_data_compare_select_sql(
         );
     }
 
+    // JDBC connections rely on Statement.setMaxRows() for row limiting.
+    if database_type == DatabaseType::Jdbc {
+        return format!("SELECT {select_columns} FROM {table}{order_by};");
+    }
+
     let offset_sql = if offset > 0 { format!(" OFFSET {offset}") } else { String::new() };
     format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {row_limit}{offset_sql};")
 }

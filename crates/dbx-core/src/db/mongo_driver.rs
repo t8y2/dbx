@@ -31,6 +31,13 @@ pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Re
         if idle_timeout.as_secs() > 0 {
             options.max_idle_time = Some(idle_timeout);
         }
+        // For single-host connections, force direct connection to avoid replica
+        // set discovery. This is essential when connecting through a TCP proxy
+        // or NAT where the driver would otherwise receive internal IPs from
+        // the replica set handshake and fail to connect.
+        if !is_multi_host {
+            options.direct_connection = Some(true);
+        }
         Client::with_options(options).map_err(|e| format!("MongoDB connection failed: {e}"))
     })
     .await

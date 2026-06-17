@@ -6902,7 +6902,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               >
                 <template #default="{ item }">
                   <div
-                    class="flex text-xs border-b border-border h-6.5 w-(--total-w)"
+                    class="flex text-[13px] border-b border-border h-6.5 w-(--total-w)"
                     :class="{
                       'bg-destructive/5 opacity-70': item.isDeleted,
                       'bg-primary/5': item.isNew && !isRowActive(item.displayIndex),
@@ -7956,7 +7956,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .canvas-grid-surface {
   cursor: cell;
   font-family: var(--dbx-editor-font-family, var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace));
-  font-size: 0.75rem;
+  font-size: 13px;
   font-weight: 400;
   line-height: 1rem;
   outline: none;

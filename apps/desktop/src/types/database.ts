@@ -519,6 +519,7 @@ export interface QueryTab {
   activeResultIndex?: number;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
+  resultAutoSave?: boolean;
   explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;

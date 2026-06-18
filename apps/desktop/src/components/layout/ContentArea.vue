@@ -804,7 +804,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
           <span class="inline-flex items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground truncate">
             <template v-if="activeTab.tableMeta?.schema">{{ activeTab.tableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}
           </span>
-          <span v-if="activeTab.tableMeta" class="ml-auto text-muted-foreground"> {{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }} </span>
+          <span v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }} </span>
+          <span class="ml-auto" />
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
               <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent text-foreground': (dataGridRef?.hiddenColumnCount ?? 0) > 0 }">

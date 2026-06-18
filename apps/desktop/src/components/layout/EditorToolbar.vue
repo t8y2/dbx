@@ -290,7 +290,7 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
         </Select>
       </div>
     </div>
-    <div v-if="activeTab.tableMeta" class="flex min-w-0 items-center gap-1 ml-2">
+    <div v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="ml-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">
       <Table2 class="h-3.5 w-3.5 shrink-0" />
       <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}</span>
     </div>

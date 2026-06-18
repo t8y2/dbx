@@ -941,6 +941,13 @@ export default {
     enableThinkingHint: "此選項僅對 /chat/completions API 且部分支援的模型生效。設為停用後可大幅節省 token，但產生結果品質可能會略微下降。",
     codexMcpRequiredTitle: "需要 DBX MCP Server",
     codexMcpRequiredDescription: "Codex CLI 會透過 DBX MCP Server 存取資料庫結構與查詢工具。請先安裝後再於 AI 助理中使用 Codex。",
+    reasoningLevel: "推理層級",
+    reasoningLevelDefault: "預設",
+    reasoningLevelMinimal: "最小",
+    reasoningLevelLow: "低",
+    reasoningLevelMedium: "中",
+    reasoningLevelHigh: "高",
+    reasoningLevelHint: "控制 Codex CLI 的 model_reasoning_effort。預設會使用你的 Codex 設定。",
     actions: {
       generate: "產生 SQL",
       explain: "解釋 SQL",

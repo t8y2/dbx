@@ -1023,6 +1023,13 @@ export default {
     codexCliPathHint: "留空则使用 PATH 中的 codex。请先在终端执行 codex login 登录。",
     codexMcpRequiredTitle: "需要 DBX MCP Server",
     codexMcpRequiredDescription: "Codex CLI 通过 DBX MCP Server 访问数据库结构和查询工具。请先安装后再在 AI 助手中使用 Codex。",
+    reasoningLevel: "推理级别",
+    reasoningLevelDefault: "默认",
+    reasoningLevelMinimal: "最小",
+    reasoningLevelLow: "低",
+    reasoningLevelMedium: "中",
+    reasoningLevelHigh: "高",
+    reasoningLevelHint: "控制 Codex CLI 的 model_reasoning_effort。默认使用你的 Codex 配置。",
     actions: {
       generate: "生成 SQL",
       explain: "解释 SQL",

@@ -71,6 +71,29 @@ pub enum AiAuthMethod {
     Bearer,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiReasoningLevel {
+    #[default]
+    Default,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl AiReasoningLevel {
+    pub fn as_codex_effort(&self) -> Option<&'static str> {
+        match self {
+            AiReasoningLevel::Default => None,
+            AiReasoningLevel::Minimal => Some("minimal"),
+            AiReasoningLevel::Low => Some("low"),
+            AiReasoningLevel::Medium => Some("medium"),
+            AiReasoningLevel::High => Some("high"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiConfig {
@@ -91,6 +114,8 @@ pub struct AiConfig {
     pub proxy_url: String,
     #[serde(default = "default_enable_thinking")]
     pub enable_thinking: bool,
+    #[serde(default)]
+    pub reasoning_level: AiReasoningLevel,
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
@@ -2053,7 +2078,7 @@ mod tests {
         build_ai_http_client, claude_headers, claude_system_prompt, gemini_text, is_kimi_model, openai_response_text,
         openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
         resolve_model_list_endpoint, responses_max_output_tokens, responses_text, supports_temperature,
-        validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AUTHORIZATION,
+        validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AiReasoningLevel, AUTHORIZATION,
         CLAUDE_DEFAULT_SYSTEM,
     };
 
@@ -2086,6 +2111,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2107,6 +2133,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: "127.0.0.1:7890".to_string(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2126,6 +2153,7 @@ mod tests {
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2145,6 +2173,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2164,6 +2193,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2184,6 +2214,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2199,6 +2230,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2218,6 +2250,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2272,6 +2305,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };
@@ -2342,6 +2376,7 @@ mod tests {
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
         };

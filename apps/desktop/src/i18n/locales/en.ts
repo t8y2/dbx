@@ -1024,6 +1024,13 @@ export default {
     codexCliPathHint: "Leave empty to use codex from PATH. Sign in separately with codex login.",
     codexMcpRequiredTitle: "DBX MCP Server required",
     codexMcpRequiredDescription: "Codex CLI uses the DBX MCP Server to access database schema and query tools. Install it before using Codex in the AI assistant.",
+    reasoningLevel: "Reasoning level",
+    reasoningLevelDefault: "Default",
+    reasoningLevelMinimal: "Minimal",
+    reasoningLevelLow: "Low",
+    reasoningLevelMedium: "Medium",
+    reasoningLevelHigh: "High",
+    reasoningLevelHint: "Controls Codex CLI model_reasoning_effort. Default uses your Codex config.",
     actions: {
       generate: "Generate SQL",
       explain: "Explain SQL",

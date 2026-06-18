@@ -14,6 +14,7 @@ import { setDebugLoggingEnabled } from "@/lib/debugLog";
 export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses";
 export type AiAuthMethod = "api-key" | "bearer";
+export type AiReasoningLevel = "default" | "minimal" | "low" | "medium" | "high";
 
 export interface AiConfig {
   provider: AiProvider;
@@ -25,6 +26,7 @@ export interface AiConfig {
   proxyEnabled?: boolean;
   proxyUrl?: string;
   enableThinking?: boolean;
+  reasoningLevel?: AiReasoningLevel;
   contextWindow?: number;
   codexCliPath?: string | null;
 }
@@ -185,6 +187,12 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
   }),
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
+const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high"];
+
+function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {
+  return typeof value === "string" && AI_REASONING_LEVELS.includes(value as AiReasoningLevel) ? (value as AiReasoningLevel) : "default";
+}
+
 export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined): AiConfig {
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
   return {
@@ -197,6 +205,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
+    reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
   };

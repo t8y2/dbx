@@ -28,6 +28,7 @@ import {
   type AiProvider,
   type AiApiStyle,
   type AiAuthMethod,
+  type AiReasoningLevel,
   type EditorTheme,
   type DesktopIconTheme,
   type InterfaceLayout,
@@ -1099,6 +1100,7 @@ const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "compl
 const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
 const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
 const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
+const aiEditReasoningLevel = ref<AiReasoningLevel>(settingsStore.aiConfig.reasoningLevel || "default");
 const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
 const aiEditCodexCliPath = ref(settingsStore.aiConfig.codexCliPath || "");
 
@@ -1109,6 +1111,13 @@ const aiModelLoadedSignature = ref("");
 let aiModelRequestToken = 0;
 
 const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
+const aiReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
+  { value: "default", labelKey: "ai.reasoningLevelDefault" },
+  { value: "minimal", labelKey: "ai.reasoningLevelMinimal" },
+  { value: "low", labelKey: "ai.reasoningLevelLow" },
+  { value: "medium", labelKey: "ai.reasoningLevelMedium" },
+  { value: "high", labelKey: "ai.reasoningLevelHigh" },
+];
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
@@ -1190,6 +1199,7 @@ function currentAiEditConfig() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
+    reasoningLevel: aiEditReasoningLevel.value,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
   };
@@ -1265,6 +1275,7 @@ function syncAiEditState() {
   aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
   aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
   aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
+  aiEditReasoningLevel.value = settingsStore.aiConfig.reasoningLevel || "default";
   aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
   aiEditCodexCliPath.value = settingsStore.aiConfig.codexCliPath || "";
   aiTestResult.value = "";
@@ -1280,6 +1291,7 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;
   aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
   aiEditAuthMethod.value = AI_PROVIDER_PRESETS[provider].authMethod;
+  aiEditReasoningLevel.value = "default";
   if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
   aiEditCodexCliPath.value = "";
   aiTestResult.value = "";
@@ -1301,6 +1313,7 @@ function aiHasChanges(): boolean {
     aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
     aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
     aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
+    aiEditReasoningLevel.value !== (settingsStore.aiConfig.reasoningLevel || "default") ||
     aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow ||
     aiEditCodexCliPath.value !== (settingsStore.aiConfig.codexCliPath || "")
   );
@@ -2504,6 +2517,23 @@ watch(
                     <p v-else-if="!aiModelOptionIds.length" class="text-xs text-muted-foreground">
                       {{ aiModelListSupported ? t("ai.modelListHint") : t("ai.modelListUnsupported") }}
                     </p>
+                  </div>
+                </div>
+
+                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.reasoningLevel") }}</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <Select v-model="aiEditReasoningLevel">
+                      <SelectTrigger inputClass="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="option in aiReasoningLevelOptions" :key="option.value" :value="option.value">
+                          {{ t(option.labelKey) }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-[11px] text-muted-foreground">{{ t("ai.reasoningLevelHint") }}</p>
                   </div>
                 </div>
 

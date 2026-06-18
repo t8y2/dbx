@@ -236,7 +236,7 @@ mod tests {
             },
             db::ObjectInfo {
                 name: "active_orders".to_string(),
-                object_type: "MATERIALIZED VIEW".to_string(),
+                object_type: "MATERIALIZED_VIEW".to_string(),
                 schema: None,
                 comment: None,
                 created_at: None,

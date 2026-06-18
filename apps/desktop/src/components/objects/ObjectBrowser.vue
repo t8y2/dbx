@@ -144,7 +144,7 @@ const { addTask: addExportTask } = useExportTracker();
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
 const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE").length);
-const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW").length);
+const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW" || row.type === "MATERIALIZED_VIEW").length);
 const procedureCount = computed(() => rows.value.filter((row) => row.type === "PROCEDURE").length);
 const functionCount = computed(() => rows.value.filter((row) => row.type === "FUNCTION").length);
 const sequenceCount = computed(() => rows.value.filter((row) => row.type === "SEQUENCE").length);
@@ -220,7 +220,7 @@ const selectedTableCount = computed(() => selectedTableRows.value.length);
 const allVisibleTablesSelected = computed(() => visibleSelectableRows.value.length > 0 && visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)));
 
 function iconFor(row: ObjectBrowserRow) {
-  if (row.type === "VIEW") return Eye;
+  if (row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return Eye;
   if (row.type === "PROCEDURE") return ScrollText;
   if (row.type === "FUNCTION") return Braces;
   if (row.type === "SEQUENCE") return ListTree;
@@ -229,7 +229,7 @@ function iconFor(row: ObjectBrowserRow) {
 }
 
 function typeLabel(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW") return t("objects.view");
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("objects.view");
   if (type === "PROCEDURE") return t("objects.procedure");
   if (type === "FUNCTION") return t("objects.function");
   if (type === "SEQUENCE") return t("objects.sequence");
@@ -254,7 +254,7 @@ function toggleSort(key: ObjectBrowserSortKey) {
 
 function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   if (objectFilter.value === "tables") return row.type === "TABLE";
-  if (objectFilter.value === "views") return row.type === "VIEW";
+  if (objectFilter.value === "views") return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW";
   if (objectFilter.value === "procedures") return row.type === "PROCEDURE";
   if (objectFilter.value === "functions") return row.type === "FUNCTION";
   if (objectFilter.value === "sequences") return row.type === "SEQUENCE";
@@ -292,7 +292,7 @@ function groupedFilteredRows() {
 }
 
 function iconClass(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW") return "text-purple-500";
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "text-purple-500";
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
   if (type === "SEQUENCE") return "text-emerald-500";
@@ -313,7 +313,7 @@ function togglePartitionParent(row: ObjectBrowserRow) {
 }
 
 function canOpenSource(row: ObjectBrowserRow) {
-  return row.type === "VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
+  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
 }
 
 function canRename(row: ObjectBrowserRow) {
@@ -372,7 +372,7 @@ async function openSource(row: ObjectBrowserRow) {
 }
 
 async function openViewDdl(row: ObjectBrowserRow) {
-  if (row.type !== "VIEW") return;
+  if (row.type !== "VIEW" && row.type !== "MATERIALIZED_VIEW") return;
   try {
     const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, "VIEW");
     const ddl = await buildViewDdl({
@@ -533,7 +533,7 @@ async function confirmDrop() {
 function dropConfirmTitle(): string {
   if (!dropTarget.value) return "";
   const type = dropTarget.value.type;
-  if (type === "VIEW") return t("contextMenu.confirmDropViewTitle");
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("contextMenu.confirmDropViewTitle");
   if (type === "PROCEDURE") return t("contextMenu.confirmDropProcedureTitle");
   if (type === "FUNCTION") return t("contextMenu.confirmDropFunctionTitle");
   return t("contextMenu.confirmDropTableTitle");
@@ -543,7 +543,7 @@ function dropConfirmMessage(): string {
   if (!dropTarget.value) return "";
   const name = dropTarget.value.name;
   const type = dropTarget.value.type;
-  if (type === "VIEW") return t("contextMenu.confirmDropViewMessage", { name });
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("contextMenu.confirmDropViewMessage", { name });
   if (type === "PROCEDURE") return t("contextMenu.confirmDropProcedureMessage", { name });
   if (type === "FUNCTION") return t("contextMenu.confirmDropFunctionMessage", { name });
   return t("contextMenu.confirmDropTableMessage", { name });
@@ -620,7 +620,7 @@ function openDatabaseExport(row: ObjectBrowserRow) {
     connectionId: props.connection.id,
     database: props.database,
     schema: row.schema || selectedSchema.value,
-    tableName: row.type === "TABLE" || row.type === "VIEW" ? row.name : undefined,
+    tableName: row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" ? row.name : undefined,
   };
 }
 
@@ -728,7 +728,7 @@ async function confirmBatchDropTables() {
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, row.type === "VIEW" ? "VIEW" : undefined);
+    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" ? "VIEW" : undefined);
     await saveFileContent(ddl + "\n", `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
@@ -1233,7 +1233,7 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
-  if (item.type === "VIEW") return getViewMenuItems(item);
+  if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
   if (item.type === "SEQUENCE") return getPackageMenuItems(item);
   if (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);

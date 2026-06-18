@@ -2043,7 +2043,7 @@ export const useConnectionStore = defineStore("connection", () => {
                   return tables.map((table) => ({
                     name: table.name,
                     schema: s,
-                    type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
+                    type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
                   })) as SqlCompletionTable[];
                 } catch {
                   return [] as SqlCompletionTable[];
@@ -2065,7 +2065,7 @@ export const useConnectionStore = defineStore("connection", () => {
                     return tables.map((table) => ({
                       name: table.name,
                       schema: s,
-                      type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
+                      type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
                     })) as SqlCompletionTable[];
                   } catch {
                     return [] as SqlCompletionTable[];
@@ -2092,7 +2092,7 @@ export const useConnectionStore = defineStore("connection", () => {
               return tables.map((table) => ({
                 name: table.name,
                 schema,
-                type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
+                type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
               }));
             } catch {
               return [];
@@ -2111,7 +2111,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       completionTablesCache.value[cacheKey] = tables.map((table) => ({
         name: table.name,
-        type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
+        type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
       }));
       completionTablesCache.value[cacheKey] = limit ? completionTablesCache.value[cacheKey].slice(0, limit) : completionTablesCache.value[cacheKey];
       indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey]);

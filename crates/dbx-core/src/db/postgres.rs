@@ -946,7 +946,7 @@ pub async fn list_tables_filtered(
 fn postgres_tables_sql() -> &'static str {
     "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
-           WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
+           WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
            WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
          obj_description(c.oid) AS table_comment, \
          CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
@@ -984,7 +984,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
         return "SELECT c.relname AS object_name, \
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
-         WHEN 'm' THEN 'VIEW' \
+         WHEN 'm' THEN 'MATERIALIZED_VIEW' \
          WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
@@ -1026,7 +1026,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
     "SELECT c.relname AS object_name, \
        CASE c.relkind \
          WHEN 'v' THEN 'VIEW' \
-         WHEN 'm' THEN 'VIEW' \
+         WHEN 'm' THEN 'MATERIALIZED_VIEW' \
          WHEN 'S' THEN 'SEQUENCE' \
          ELSE 'TABLE' \
        END AS object_type, \
@@ -1678,7 +1678,7 @@ pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, St
             let object_type = match relkind.as_str() {
                 "r" => "TABLE",
                 "v" => "VIEW",
-                "m" => "MATERIALIZED VIEW",
+                "m" => "MATERIALIZED_VIEW",
                 "S" => "SEQUENCE",
                 "f" => "FOREIGN TABLE",
                 "p" => "PARTITIONED TABLE",
@@ -2098,7 +2098,7 @@ mod tests {
         assert!(sql.contains("$1"));
         assert!(sql.contains("BASE TABLE"));
         assert!(sql.contains("VIEW"));
-        assert!(sql.contains("MATERIALIZED VIEW"));
+        assert!(sql.contains("MATERIALIZED_VIEW"));
         assert!(sql.contains("FOREIGN TABLE"));
     }
 

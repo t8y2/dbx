@@ -8,7 +8,9 @@ use serde::Deserialize;
 
 use dbx_core::agent_events::AgentEvent;
 use dbx_core::agent_loop::{run_agent_loop, AgentLoopContext};
-use dbx_core::ai::{AiCompletionRequest, AiConfig, AiConversation, AiModelInfo, AiStreamChunk, AiTestConnectionResult};
+use dbx_core::ai::{
+    AiCompletionRequest, AiConfig, AiConversation, AiModelInfo, AiProvider, AiStreamChunk, AiTestConnectionResult,
+};
 use dbx_core::models::connection::DatabaseType;
 
 use crate::error::AppError;
@@ -79,6 +81,13 @@ fn default_agent_mode() -> String {
     "ask".to_string()
 }
 
+fn reject_web_unsupported_ai_provider(config: &AiConfig) -> Result<(), AppError> {
+    if matches!(config.provider, AiProvider::CodexCli) {
+        return Err(AppError::bad_request("Codex CLI provider is only supported in DBX Desktop."));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -87,6 +96,7 @@ pub async fn save_ai_config(
     State(state): State<Arc<WebState>>,
     Json(body): Json<SaveAiConfigRequest>,
 ) -> Result<Json<()>, AppError> {
+    reject_web_unsupported_ai_provider(&body.config)?;
     state.app.storage.save_ai_config(&body.config).await.map_err(AppError)?;
     Ok(Json(()))
 }
@@ -126,6 +136,7 @@ pub async fn delete_ai_conversation(
 // ---------------------------------------------------------------------------
 
 pub async fn ai_complete(Json(body): Json<AiCompleteRequest>) -> Result<Json<String>, AppError> {
+    reject_web_unsupported_ai_provider(&body.request.config)?;
     let result = dbx_core::ai::complete(&body.request).await.map_err(AppError)?;
     Ok(Json(result))
 }
@@ -137,11 +148,13 @@ pub async fn ai_complete(Json(body): Json<AiCompleteRequest>) -> Result<Json<Str
 pub async fn ai_test_connection(
     Json(body): Json<AiTestConnectionRequest>,
 ) -> Result<Json<AiTestConnectionResult>, AppError> {
+    reject_web_unsupported_ai_provider(&body.config)?;
     let result = dbx_core::ai::test_connection_core(&body.config).await.map_err(AppError)?;
     Ok(Json(result))
 }
 
 pub async fn ai_list_models(Json(body): Json<AiListModelsRequest>) -> Result<Json<Vec<AiModelInfo>>, AppError> {
+    reject_web_unsupported_ai_provider(&body.config)?;
     let result = dbx_core::ai::list_models_core(&body.config).await.map_err(AppError)?;
     Ok(Json(result))
 }
@@ -164,6 +177,7 @@ pub async fn ai_stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let session_id = body.session_id;
     let request = body.request;
+    reject_web_unsupported_ai_provider(&request.config)?;
 
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
     let (tx, rx) = tokio::sync::broadcast::channel::<String>(256);
@@ -205,6 +219,7 @@ pub async fn ai_agent_stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let session_id = body.session_id;
     let request = body.request;
+    reject_web_unsupported_ai_provider(&request.config)?;
 
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
     let (tx, rx) = tokio::sync::broadcast::channel::<String>(256);

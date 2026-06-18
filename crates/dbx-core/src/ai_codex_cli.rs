@@ -137,6 +137,13 @@ pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnection
         .map_err(|e| classify_codex_spawn_error(&e.to_string()))?;
 
     if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.contains("DBX Codex OK") {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "[codexRunFailed] Codex CLI smoke test returned unexpected output. stdout: {stdout} stderr: {stderr}"
+            ));
+        }
         Ok(AiTestConnectionResult {
             success: true,
             message: format!("OK - {}ms", start.elapsed().as_millis()),

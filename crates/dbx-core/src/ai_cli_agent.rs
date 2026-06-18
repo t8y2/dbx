@@ -344,12 +344,19 @@ pub async fn run_cli_jsonl_agent(
 
     let mut final_text = String::new();
     let mut saw_agent_end = false;
+    let mut terminal_error: Option<String> = None;
 
     loop {
         tokio::select! {
             line = lines.next_line() => {
-                let Some(line) = line.map_err(|e| format!("CLI agent stream read failed: {e}"))? else {
-                    break;
+                let line = match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        terminal_error = Some(format!("CLI agent stream read failed: {e}"));
+                        let _ = child.kill().await;
+                        break;
+                    }
                 };
                 let parsed = parse_cli_jsonl_line(&line, spec.dialect);
                 if let Some(text) = parsed.final_text {
@@ -362,18 +369,25 @@ pub async fn run_cli_jsonl_agent(
                     on_event(event);
                 }
                 if let Some(error) = parsed.error {
-                    return Err(error);
+                    terminal_error = Some(error);
+                    let _ = child.kill().await;
+                    break;
                 }
             }
             _ = cancelled.notified() => {
+                terminal_error = Some("Agent loop cancelled".to_string());
                 let _ = child.kill().await;
-                return Err("Agent loop cancelled".to_string());
+                break;
             }
         }
     }
 
     let status = child.wait().await.map_err(|e| format!("CLI agent wait failed: {e}"))?;
     let stderr = stderr_task.await.unwrap_or_default();
+
+    if let Some(error) = terminal_error {
+        return Err(error);
+    }
 
     if !status.success() {
         return Err((spec.classify_run_error)(&stderr));
@@ -384,4 +398,60 @@ pub async fn run_cli_jsonl_agent(
     }
 
     Ok(final_text)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::{sleep, timeout, Duration};
+
+    fn classify_spawn_error(message: &str) -> String {
+        message.to_string()
+    }
+
+    fn classify_run_error(message: &str) -> String {
+        message.to_string()
+    }
+
+    fn process_is_alive(pid: &str) -> bool {
+        StdCommand::new("kill")
+            .args(["-0", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn jsonl_error_kills_and_waits_for_child() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "dbx-cli-agent-error-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let script = format!(
+            "echo $$ > {}; printf '%s\\n' '{{\"type\":\"turn.failed\",\"message\":\"boom\"}}'; exec sleep 30",
+            pid_file.display()
+        );
+
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+
+        let result = timeout(Duration::from_secs(3), run_cli_jsonl_agent(spec, &Notify::new(), |_| {}))
+            .await
+            .expect("runner should return after JSONL error");
+
+        assert_eq!(result.unwrap_err(), "boom");
+        sleep(Duration::from_millis(100)).await;
+        let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
+        assert!(!process_is_alive(pid.trim()));
+        let _ = std::fs::remove_file(pid_file);
+    }
 }

@@ -1088,7 +1088,7 @@ async function changePassword() {
 }
 
 // ---------- AI Settings ----------
-const aiProviderOptions = Object.values(AI_PROVIDER_PRESETS);
+const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || provider.provider !== "codex-cli"));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
 const aiEditProvider = ref<AiProvider>(settingsStore.aiConfig.provider);
@@ -1266,12 +1266,13 @@ function aiSelectModel(modelId: string) {
 }
 
 function syncAiEditState() {
-  aiEditProvider.value = settingsStore.aiConfig.provider;
+  const provider = isWeb && settingsStore.aiConfig.provider === "codex-cli" ? "claude" : settingsStore.aiConfig.provider;
+  aiEditProvider.value = provider;
   aiEditApiKey.value = settingsStore.aiConfig.apiKey;
-  aiEditAuthMethod.value = settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod;
-  aiEditEndpoint.value = settingsStore.aiConfig.endpoint;
-  aiEditModel.value = settingsStore.aiConfig.model;
-  aiEditApiStyle.value = settingsStore.aiConfig.apiStyle || "completions";
+  aiEditAuthMethod.value = settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[provider].authMethod;
+  aiEditEndpoint.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.endpoint : AI_PROVIDER_PRESETS[provider].endpoint;
+  aiEditModel.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.model : AI_PROVIDER_PRESETS[provider].model;
+  aiEditApiStyle.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.apiStyle || "completions" : AI_PROVIDER_PRESETS[provider].apiStyle;
   aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
   aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
   aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
@@ -1286,6 +1287,7 @@ function syncAiEditState() {
 }
 
 function aiSelectProvider(provider: AiProvider) {
+  if (isWeb && provider === "codex-cli") return;
   aiEditProvider.value = provider;
   aiEditEndpoint.value = AI_PROVIDER_PRESETS[provider].endpoint;
   aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;

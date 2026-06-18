@@ -50,6 +50,8 @@ pub enum AiProvider {
     Ollama,
     #[serde(rename = "openai-compatible")]
     OpenaiCompatible,
+    #[serde(rename = "codex-cli")]
+    CodexCli,
     Custom,
 }
 
@@ -91,6 +93,8 @@ pub struct AiConfig {
     pub enable_thinking: bool,
     #[serde(default)]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub codex_cli_path: Option<String>,
 }
 
 fn default_enable_thinking() -> bool {
@@ -234,6 +238,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
     }
     match config.provider {
         AiProvider::Claude => format!("{ep}/messages"),
+        AiProvider::CodexCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -439,6 +444,9 @@ pub fn build_responses_input(system_prompt: &str, messages: &[AiMessage]) -> ser
 // ---------------------------------------------------------------------------
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
+    if matches!(config.provider, AiProvider::CodexCli) {
+        return Ok(());
+    }
     if !matches!(config.provider, AiProvider::Ollama) && config.api_key.trim().is_empty() {
         return Err("API key is required".to_string());
     }
@@ -452,6 +460,9 @@ fn validate_config(config: &AiConfig) -> Result<(), String> {
 }
 
 fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
+    if matches!(config.provider, AiProvider::CodexCli) {
+        return Ok(());
+    }
     if !matches!(config.provider, AiProvider::Ollama) && config.api_key.trim().is_empty() {
         return Err("API key is required".to_string());
     }
@@ -585,6 +596,9 @@ async fn list_openai_compatible_models(
 }
 
 pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
+    if matches!(config.provider, AiProvider::CodexCli) {
+        return crate::ai_codex_cli::list_codex_models(config).await;
+    }
     validate_model_list_config(config)?;
 
     let client = build_ai_http_client(config, 30)?;
@@ -597,6 +611,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
         | AiProvider::Custom => list_openai_compatible_models(&client, config).await,
+        AiProvider::CodexCli => unreachable!(),
         AiProvider::Gemini => {
             Err("Model listing is only supported for OpenAI-compatible and Claude providers".to_string())
         }
@@ -818,6 +833,9 @@ fn claude_system_prompt(system_prompt: &str) -> &str {
 }
 
 pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
+    if matches!(config.provider, AiProvider::CodexCli) {
+        return crate::ai_codex_cli::test_codex_connection(config).await;
+    }
     validate_config(config)?;
 
     let client = build_ai_http_client(config, 15)?;
@@ -947,11 +965,16 @@ fn classify_error(msg: &str) -> &'static str {
 pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
     validate_config(&request.config)?;
 
+    if matches!(request.config.provider, AiProvider::CodexCli) {
+        return Err("Codex CLI provider is only supported in DBX AI agent mode".to_string());
+    }
+
     let client = build_ai_http_client(&request.config, 60)?;
 
     match request.config.provider {
         AiProvider::Claude => call_claude(&client, request.clone()).await,
         AiProvider::Gemini => call_gemini(&client, request.clone()).await,
+        AiProvider::CodexCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -979,12 +1002,17 @@ pub async fn stream(
 ) -> Result<(), String> {
     validate_config(&request.config)?;
 
+    if matches!(request.config.provider, AiProvider::CodexCli) {
+        return Err("Codex CLI provider is only supported in DBX AI agent mode".to_string());
+    }
+
     let stream_timeout = if request.config.enable_thinking { 600 } else { 120 };
     let client = build_ai_http_client(&request.config, stream_timeout)?;
 
     match request.config.provider {
         AiProvider::Claude => stream_claude(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::Gemini => stream_gemini(&client, session_id, request, cancelled, &on_chunk).await,
+        AiProvider::CodexCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -2032,6 +2060,7 @@ mod tests {
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -2052,6 +2081,7 @@ mod tests {
             proxy_url: "127.0.0.1:7890".to_string(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2070,6 +2100,7 @@ mod tests {
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2088,6 +2119,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         assert_eq!(
@@ -2106,6 +2138,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -2125,6 +2158,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -2139,6 +2173,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -2157,6 +2192,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -2210,6 +2246,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -2279,6 +2316,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             context_window: None,
+            codex_cli_path: None,
         };
 
         assert!(!supports_temperature(&config));

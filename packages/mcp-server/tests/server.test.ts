@@ -29,6 +29,22 @@ const backend: Backend = {
   executeQuery: async () => ({ columns: ["total"], rows: [{ total: 1 }], row_count: 1 }),
 };
 
+async function withScopedEnv<T>(env: Record<string, string>, fn: () => T | Promise<T>): Promise<T> {
+  const oldValues = new Map<string, string | undefined>();
+  for (const key of Object.keys(env)) {
+    oldValues.set(key, process.env[key]);
+    process.env[key] = env[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of oldValues) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 test("creates an MCP server without starting stdio transport", () => {
   const server = createDbxMcpServer(backend, { isWebMode: true });
 
@@ -105,6 +121,75 @@ test("execute query reports the blocked statement number for unsafe multi-statem
   assert.match(result.content[0].text, /SQL_BLOCKED:/);
   assert.match(result.content[0].text, /Statement 2/);
   assert.match(result.content[0].text, /WHERE/);
+});
+
+test("scoped MCP lists only the active connection", async () => {
+  const other: ConnectionConfig = { ...connection, id: "2", name: "other", database: "other_db" };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connection, other],
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_list_connections.handler({});
+  });
+
+  assert.match(result.content[0].text, /local/);
+  assert.doesNotMatch(result.content[0].text, /other/);
+});
+
+test("scoped MCP rejects out-of-scope connection tool calls", async () => {
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1" }, () => {
+    const server = createDbxMcpServer(backend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_list_tables.handler({ connection_name: "other" });
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /CONNECTION_OUT_OF_SCOPE:/);
+});
+
+test("scoped MCP defaults connection-taking tools to the active connection and database", async () => {
+  let usedDatabase = "";
+  const scopedBackend: Backend = {
+    ...backend,
+    listTables: async (config) => {
+      usedDatabase = config.database || "";
+      return [{ name: "users", type: "BASE TABLE" }];
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1", DBX_MCP_SCOPE_DATABASE: "scoped_db" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_list_tables.handler({});
+  });
+
+  assert.match(result.content[0].text, /users/);
+  assert.equal(usedDatabase, "scoped_db");
+});
+
+test("scoped MCP does not register mutation or desktop bridge tools", async () => {
+  await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1" }, () => {
+    const server = createDbxMcpServer(backend, { isWebMode: false });
+    const tools = (server as any)._registeredTools;
+
+    assert.equal(tools.dbx_add_connection, undefined);
+    assert.equal(tools.dbx_remove_connection, undefined);
+    assert.equal(tools.dbx_open_table, undefined);
+    assert.equal(tools.dbx_execute_and_show, undefined);
+  });
+});
+
+test("scoped MCP with writes disabled blocks write SQL", async () => {
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1", DBX_MCP_ALLOW_WRITES: "0" }, () => {
+    const server = createDbxMcpServer(backend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_query.handler({
+      sql: "update users set name = 'x' where id = 1",
+    });
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /SQL_BLOCKED:/);
 });
 
 test("mongodb list tables returns collections from the selected database", async () => {

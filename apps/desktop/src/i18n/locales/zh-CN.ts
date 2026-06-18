@@ -1011,6 +1011,8 @@ export default {
     contextWindow: "上下文窗口",
     contextWindowAuto: "自动（根据模型名称推断）",
     contextWindowHint: "单位：token。留空自动推断，本地/自定义模型建议手动设置。",
+    codexCliPath: "Codex CLI 路径",
+    codexCliPathHint: "留空则使用 PATH 中的 codex。请先在终端执行 codex login 登录。",
     actions: {
       generate: "生成 SQL",
       explain: "解释 SQL",

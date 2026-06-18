@@ -346,7 +346,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
 
   if (event.type !== "tool_call_start" && event.type !== "tool_call_end") return undefined;
 
-  const isExecuteQuery = event.tool_name === "execute_query";
+  const isExecuteQuery = event.tool_name === "execute_query" || event.tool_name === "dbx_execute_query";
   const labelKey = event.type === "tool_call_start" ? "ai.agentSteps.callingTool" : isExecuteQuery ? (event.is_error ? "ai.agentSteps.executeBlocked" : "ai.agentSteps.executeSafe") : event.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone";
   const tone = (event.type === "tool_call_start" ? "active" : event.is_error ? "danger" : "success") as AiAgentStepTone;
 

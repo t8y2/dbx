@@ -1082,6 +1082,7 @@ const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
 const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
 const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
 const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
+const aiEditCodexCliPath = ref(settingsStore.aiConfig.codexCliPath || "");
 
 const aiModelOptions = ref<AiModelInfo[]>([]);
 const aiModelLoading = ref(false);
@@ -1095,6 +1096,7 @@ const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
+const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
 const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude");
 const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
@@ -1115,9 +1117,9 @@ const aiEndpointHint = computed(() => {
   }
   return "";
 });
-const aiSupportsApiStyle = computed(() => aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom");
+const aiSupportsApiStyle = computed(() => !aiIsCodexCli.value && (aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom"));
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
-const aiCanListModels = computed(() => aiModelListSupported.value && !!aiEditEndpoint.value.trim() && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
+const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCodexCli.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
 const aiModelOptionIds = computed(() => aiModelOptions.value.map((model) => model.id));
 const aiModelEmptyText = computed(() => {
   if (aiModelError.value) return aiModelError.value;
@@ -1141,6 +1143,7 @@ function aiModelConfigSignature() {
     authMethod: aiEditAuthMethod.value,
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value.trim(),
+    codexCliPath: aiEditCodexCliPath.value.trim(),
   });
 }
 
@@ -1156,6 +1159,7 @@ function currentAiEditConfig() {
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
     contextWindow: aiEditContextWindow.value || undefined,
+    codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
   };
 }
 
@@ -1181,7 +1185,7 @@ async function aiRefreshModels() {
     aiModelError.value = t("ai.modelListUnsupported");
     return;
   }
-  if (!aiEditEndpoint.value.trim()) {
+  if (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) {
     aiModelError.value = t("ai.modelListEndpointRequired");
     return;
   }
@@ -1230,6 +1234,7 @@ function syncAiEditState() {
   aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
   aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
   aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
+  aiEditCodexCliPath.value = settingsStore.aiConfig.codexCliPath || "";
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
@@ -1243,6 +1248,7 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
   aiEditAuthMethod.value = AI_PROVIDER_PRESETS[provider].authMethod;
   if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
+  aiEditCodexCliPath.value = "";
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
@@ -1260,7 +1266,8 @@ function aiHasChanges(): boolean {
     aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
     aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
     aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
-    aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow
+    aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow ||
+    aiEditCodexCliPath.value !== (settingsStore.aiConfig.codexCliPath || "")
   );
 }
 
@@ -1269,7 +1276,7 @@ function aiApplySettings() {
 }
 
 async function aiTestConn() {
-  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || !aiEditEndpoint.value.trim() || !aiEditModel.value.trim()) return;
+  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) || (!aiIsCodexCli.value && !aiEditModel.value.trim())) return;
   aiTesting.value = true;
   aiTestResult.value = "";
   aiTestError.value = "";
@@ -2343,7 +2350,7 @@ watch(
                   </Select>
                 </div>
 
-                <div v-if="aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
                     <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
@@ -2356,16 +2363,24 @@ watch(
                   </Select>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
                   <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
-                <div class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">Endpoint</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
                     <p v-if="aiEndpointHint" class="text-[11px] text-muted-foreground">{{ aiEndpointHint }}</p>
+                  </div>
+                </div>
+
+                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliPath") }}</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <Input v-model="aiEditCodexCliPath" autocomplete="off" class="h-8 text-xs" placeholder="codex" />
+                    <p class="text-[11px] text-muted-foreground">{{ t("ai.codexCliPathHint") }}</p>
                   </div>
                 </div>
 
@@ -2418,7 +2433,7 @@ watch(
                   </div>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
                   <div class="col-span-2 flex items-center gap-2">
                     <label class="flex items-center gap-2 text-xs text-muted-foreground">
@@ -2436,7 +2451,7 @@ watch(
                   </div>
                 </div>
 
-                <div class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
@@ -2444,7 +2459,7 @@ watch(
                   </div>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
                     <input v-model="aiEditProxyEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
@@ -2452,7 +2467,7 @@ watch(
                   </label>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
                   <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
@@ -2722,7 +2737,7 @@ watch(
 
           <DialogFooter v-else-if="activeSettingsTab === 'ai'" class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3">
             <div class="flex flex-1 items-center gap-2">
-              <Button size="sm" variant="outline" :disabled="aiTesting || (aiRequiresApiKey && !aiEditApiKey?.trim()) || !aiEditEndpoint?.trim() || !aiEditModel?.trim()" @click="aiTestConn">
+              <Button size="sm" variant="outline" :disabled="aiTesting || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
                 <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                 {{ t("connection.test") }}
               </Button>

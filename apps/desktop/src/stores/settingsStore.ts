@@ -11,7 +11,7 @@ import type { SqlSnippet } from "@/types/database";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
 import { setDebugLoggingEnabled } from "@/lib/debugLog";
 
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses";
 export type AiAuthMethod = "api-key" | "bearer";
 
@@ -26,6 +26,7 @@ export interface AiConfig {
   proxyUrl?: string;
   enableThinking?: boolean;
   contextWindow?: number;
+  codexCliPath?: string | null;
 }
 
 export interface AiTestConnectionResult {
@@ -154,6 +155,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: true,
   },
+  "codex-cli": {
+    label: "Codex CLI",
+    iconSlug: "openai",
+    provider: "codex-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   custom: {
     label: "Custom",
     provider: "custom",
@@ -185,6 +196,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
     contextWindow: config?.contextWindow ?? undefined,
+    codexCliPath: config?.codexCliPath?.trim() || undefined,
   };
 }
 
@@ -667,6 +679,7 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function isConfigured(): boolean {
     const preset = AI_PROVIDER_PRESETS[aiConfig.value.provider];
+    if (aiConfig.value.provider === "codex-cli") return true;
     return !!aiConfig.value.endpoint && !!aiConfig.value.model && (!preset.requiresApiKey || !!aiConfig.value.apiKey);
   }
 

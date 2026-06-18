@@ -1012,6 +1012,8 @@ export default {
     contextWindow: "Context Window",
     contextWindowAuto: "Auto (detect from model name)",
     contextWindowHint: "Tokens. Leave empty to auto-detect. Set manually for local/custom models.",
+    codexCliPath: "Codex CLI Path",
+    codexCliPathHint: "Leave empty to use codex from PATH. Sign in separately with codex login.",
     actions: {
       generate: "Generate SQL",
       explain: "Explain SQL",

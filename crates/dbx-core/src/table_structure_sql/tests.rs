@@ -187,6 +187,37 @@ fn builds_informix_column_and_index_changes() {
 }
 
 #[test]
+fn iris_drop_index_includes_table_name() {
+    let mut old_index = index("index_id", &["ID"]);
+    old_index.marked_for_drop = true;
+    old_index.original = Some(IndexInfo {
+        name: "index_id".to_string(),
+        columns: vec!["ID".to_string()],
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("SQLUSER".to_string()),
+        table_name: "tb_a".to_string(),
+        columns: Vec::new(),
+        indexes: vec![old_index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["DROP INDEX \"index_id\" ON TABLE \"SQLUSER\".\"tb_a\";"]);
+}
+
+#[test]
 fn mysql_create_index_with_comment() {
     let mut col = column("name");
     col.data_type = "varchar(120)".to_string();

@@ -188,7 +188,7 @@ mod tests {
             connect_timeout_secs: 5,
             expose_lan: false,
             use_ssh_agent: false,
-            ssh_agent_sock_path: "".to_string(),
+            ssh_agent_sock_path: String::new(),
         })
     }
 

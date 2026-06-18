@@ -1098,7 +1098,9 @@ pub fn generate_create_table_ddl(
     ddl.push_str(&format!("{create_prefix} {full_table} (\n"));
     ddl.push_str(&col_lines.join(",\n"));
 
-    if !pks.is_empty() {
+    // ClickHouse: PRIMARY KEY must be a prefix of ORDER BY; skip inline PK
+    // and encode it in the ENGINE clause below instead.
+    if !pks.is_empty() && !matches!(target_db, DatabaseType::ClickHouse) {
         ddl.push_str(&format!(",\n  PRIMARY KEY ({})", pks.join(", ")));
     }
 
@@ -1114,7 +1116,11 @@ pub fn generate_create_table_ddl(
     }
 
     if matches!(target_db, DatabaseType::ClickHouse) {
-        ddl.push_str(" ENGINE = MergeTree() ORDER BY tuple()");
+        if pks.is_empty() {
+            ddl.push_str(" ENGINE = MergeTree() ORDER BY tuple()");
+        } else {
+            ddl.push_str(&format!(" ENGINE = MergeTree() ORDER BY ({})", pks.join(", ")));
+        }
     }
 
     ddl
@@ -3653,6 +3659,47 @@ mod tests {
         // PostgreSQL target should NOT have inline COMMENT
         let ddl = generate_create_table_ddl(&cols, "t", "", "", &DatabaseType::Postgres, &DatabaseType::Postgres, None);
         assert!(!ddl.contains("COMMENT"));
+    }
+
+    #[test]
+    fn clickhouse_create_table_with_pk_uses_order_by_pk() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "UInt64") },
+            db::ColumnInfo { ..test_column("name", "String") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "logs",
+            "",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::ClickHouse,
+            None,
+        );
+
+        // Must include ENGINE with ORDER BY using the PK columns
+        assert!(ddl.contains("ENGINE = MergeTree() ORDER BY (`id`)"));
+        // Must NOT have a separate PRIMARY KEY clause (ORDER BY serves that role)
+        assert!(!ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn clickhouse_create_table_without_pk_uses_order_by_tuple() {
+        let cols = vec![db::ColumnInfo { ..test_column("message", "String") }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "logs",
+            "",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::ClickHouse,
+            None,
+        );
+
+        assert!(ddl.contains("ENGINE = MergeTree() ORDER BY tuple()"));
+        assert!(!ddl.contains("PRIMARY KEY"));
     }
 
     #[test]

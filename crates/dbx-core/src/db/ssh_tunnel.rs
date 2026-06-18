@@ -679,6 +679,18 @@ impl TunnelManager {
             }
         }
     }
+
+    pub async fn stop_tunnels_with_prefix(&self, connection_id_prefix: &str) {
+        let mut tunnels = self.tunnels.lock().await;
+        let keys: Vec<String> = tunnels.keys().filter(|key| key.starts_with(connection_id_prefix)).cloned().collect();
+        for key in keys {
+            if let Some(entry) = tunnels.remove(&key) {
+                for handle in entry.handles {
+                    handle.abort();
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

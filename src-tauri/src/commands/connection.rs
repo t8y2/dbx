@@ -548,7 +548,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             }
             DatabaseType::Redis => {
                 let con = if config.uses_redis_cluster() {
-                    db::redis_driver::connect_cluster(&config).await?;
+                    state.connect_redis_cluster(&tunnel_id, &config).await?;
                     return Ok("Connection successful".to_string());
                 } else if config.uses_redis_sentinel() {
                     db::redis_driver::connect_sentinel(&config).await?
@@ -779,7 +779,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(
-                    db::redis_driver::connect_cluster(&db_config).await?,
+                    state.connect_redis_cluster(&id, &db_config).await?,
                 ))
             } else if db_config.uses_redis_sentinel() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(

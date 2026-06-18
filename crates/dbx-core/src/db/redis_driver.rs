@@ -5,11 +5,11 @@ use redis::{
     cluster::ClusterClient,
     cluster_async::ClusterConnection,
     sentinel::{Sentinel, SentinelNodeConnectionInfo},
-    ConnectionAddr, ConnectionInfo, FromRedisValue, ProtocolVersion, RedisConnectionInfo, TlsMode,
-    Value as RedisRawValue,
+    Cmd, ConnectionAddr, ConnectionInfo, FromRedisValue, Pipeline, ProtocolVersion, RedisConnectionInfo, RedisFuture,
+    TlsMode, Value as RedisRawValue,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 const STREAM_ENTRY_LIMIT: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
@@ -81,12 +81,39 @@ pub enum RedisConnection {
 }
 
 pub struct RedisClusterPool {
-    pub connection: Mutex<ClusterConnection>,
+    pub connection: Option<Mutex<ClusterConnection>>,
     pub seed_nodes: Vec<RedisNodeEndpoint>,
+    pub seed_routes: Vec<RedisNodeRoute>,
+    pub slot_ranges: Vec<RedisClusterSlotRange>,
+    pub node_routes: Vec<RedisNodeRoute>,
     pub tls: bool,
     pub tls_insecure: bool,
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisClusterAuth {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisNodeRoute {
+    pub advertised: RedisNodeEndpoint,
+    pub connect: RedisNodeEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisClusterSlotRange {
+    pub start: u16,
+    pub end: u16,
+    pub master: RedisNodeEndpoint,
+}
+
+pub enum RedisClusterConnectionGuard<'a> {
+    Native(MutexGuard<'a, ClusterConnection>),
+    Direct(redis::aio::MultiplexedConnection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +126,34 @@ struct RedisAuthCandidate {
 pub struct RedisNodeEndpoint {
     pub host: String,
     pub port: u16,
+}
+
+impl ConnectionLike for RedisClusterConnectionGuard<'_> {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
+        match self {
+            RedisClusterConnectionGuard::Native(con) => con.req_packed_command(cmd),
+            RedisClusterConnectionGuard::Direct(con) => con.req_packed_command(cmd),
+        }
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        cmd: &'a Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<RedisRawValue>> {
+        match self {
+            RedisClusterConnectionGuard::Native(con) => con.req_packed_commands(cmd, offset, count),
+            RedisClusterConnectionGuard::Direct(con) => con.req_packed_commands(cmd, offset, count),
+        }
+    }
+
+    fn get_db(&self) -> i64 {
+        match self {
+            RedisClusterConnectionGuard::Native(con) => con.get_db(),
+            RedisClusterConnectionGuard::Direct(con) => con.get_db(),
+        }
+    }
 }
 
 pub async fn connect(url: &str, timeout: std::time::Duration) -> Result<redis::aio::MultiplexedConnection, String> {
@@ -222,9 +277,23 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
             .map_err(|e| format!("Redis cluster authentication failed or command rejected: {e}"))
         {
             Ok(_) => {
+                let seed_routes = identity_routes(&seed_nodes);
+                let slot_ranges = cluster_slot_ranges_from_routes(
+                    &seed_routes,
+                    config.ssl,
+                    config.redis_tls_insecure(),
+                    &auth.username,
+                    &auth.password,
+                )
+                .await
+                .unwrap_or_default();
+                let node_routes = identity_routes(&unique_master_nodes(&slot_ranges));
                 return Ok(RedisClusterPool {
-                    connection: Mutex::new(con),
+                    connection: Some(Mutex::new(con)),
                     seed_nodes,
+                    seed_routes,
+                    slot_ranges,
+                    node_routes,
                     tls: config.ssl,
                     tls_insecure: config.redis_tls_insecure(),
                     username: auth.username,
@@ -244,6 +313,69 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
     Err(last_error.unwrap_or_else(|| "Redis cluster connection failed".to_string()))
 }
 
+pub async fn discover_cluster_slot_ranges_from_routes(
+    config: &ConnectionConfig,
+    seed_routes: &[RedisNodeRoute],
+) -> Result<(RedisClusterAuth, Vec<RedisClusterSlotRange>), String> {
+    let mut last_error = None;
+    for auth in redis_auth_candidates(&config.username, &config.password) {
+        match cluster_slot_ranges_from_routes(
+            seed_routes,
+            config.ssl,
+            config.redis_tls_insecure(),
+            &auth.username,
+            &auth.password,
+        )
+        .await
+        {
+            Ok(slot_ranges) if !slot_ranges.is_empty() => {
+                return Ok((RedisClusterAuth { username: auth.username, password: auth.password }, slot_ranges));
+            }
+            Ok(_) => {
+                last_error = Some("Redis cluster master discovery returned no slots".to_string());
+            }
+            Err(err) if last_error.is_none() || is_redis_auth_error(&err) => {
+                let should_retry = is_redis_auth_error(&err);
+                last_error = Some(err);
+                if !should_retry {
+                    break;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Redis cluster master discovery failed".to_string()))
+}
+
+pub async fn connect_routed_cluster(
+    config: &ConnectionConfig,
+    seed_routes: Vec<RedisNodeRoute>,
+    slot_ranges: Vec<RedisClusterSlotRange>,
+    node_routes: Vec<RedisNodeRoute>,
+    auth: RedisClusterAuth,
+) -> Result<RedisClusterPool, String> {
+    let seed_nodes = redis_cluster_seed_nodes(config)?;
+    let mut pool = RedisClusterPool {
+        connection: None,
+        seed_nodes,
+        seed_routes,
+        slot_ranges,
+        node_routes,
+        tls: config.ssl,
+        tls_insecure: config.redis_tls_insecure(),
+        username: auth.username,
+        password: auth.password,
+    };
+    if pool.node_routes.is_empty() {
+        pool.node_routes = identity_routes(&unique_master_nodes(&pool.slot_ranges));
+    }
+    {
+        let mut con = cluster_any_connection(&pool).await?;
+        redis_ping(&mut con, "Redis cluster").await?;
+    }
+    Ok(pool)
+}
+
 pub async fn test_connection(connection: &RedisConnection) -> Result<(), String> {
     match connection {
         RedisConnection::Direct(con) => {
@@ -251,8 +383,8 @@ pub async fn test_connection(connection: &RedisConnection) -> Result<(), String>
             redis_ping(&mut *con, "Redis").await
         }
         RedisConnection::Cluster(cluster) => {
-            let mut con = cluster.connection.lock().await;
-            redis_ping(&mut *con, "Redis cluster").await
+            let mut con = cluster_any_connection(cluster).await?;
+            redis_ping(&mut con, "Redis cluster").await
         }
     }
 }
@@ -288,7 +420,7 @@ fn redis_sentinel_nodes(config: &ConnectionConfig) -> Result<Vec<ConnectionInfo>
     endpoints.iter().map(|endpoint| redis_sentinel_node_connection_info(config, endpoint)).collect()
 }
 
-fn redis_cluster_seed_nodes(config: &ConnectionConfig) -> Result<Vec<RedisNodeEndpoint>, String> {
+pub fn redis_cluster_seed_nodes(config: &ConnectionConfig) -> Result<Vec<RedisNodeEndpoint>, String> {
     redis_node_endpoints(
         config.redis_cluster_nodes.trim(),
         config.host.trim(),
@@ -630,8 +762,7 @@ pub async fn scan_cluster_keys_page(
     let total_keys = cluster_total_keys(pool, &master_nodes).await;
     for index in node_index..master_nodes.len() {
         let endpoint = &master_nodes[index];
-        let mut con =
-            connect_direct_node(endpoint, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await?;
+        let mut con = connect_cluster_node(pool, endpoint).await?;
         let current_cursor = if index == node_index { node_cursor } else { 0 };
         let result = scan_keys_page(&mut con, current_cursor, pattern, count).await?;
         if !result.keys.is_empty() {
@@ -677,8 +808,7 @@ pub async fn scan_cluster_values_page(
     let total_keys = cluster_total_keys(pool, &master_nodes).await;
     for index in node_index..master_nodes.len() {
         let endpoint = &master_nodes[index];
-        let mut con =
-            connect_direct_node(endpoint, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await?;
+        let mut con = connect_cluster_node(pool, endpoint).await?;
         let current_cursor = if index == node_index { node_cursor } else { 0 };
         let result = scan_values_page(&mut con, current_cursor, pattern, query, include_key_matches, count).await?;
         if !result.keys.is_empty() {
@@ -704,14 +834,26 @@ pub async fn scan_cluster_values_page(
 }
 
 pub async fn cluster_master_nodes(pool: &RedisClusterPool) -> Result<Vec<RedisNodeEndpoint>, String> {
-    cluster_master_nodes_from_seeds(&pool.seed_nodes, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await
+    if !pool.seed_routes.is_empty() {
+        return cluster_slot_ranges_from_routes(
+            &pool.seed_routes,
+            pool.tls,
+            pool.tls_insecure,
+            &pool.username,
+            &pool.password,
+        )
+        .await
+        .map(|slot_ranges| unique_master_nodes(&slot_ranges));
+    }
+    cluster_slot_ranges_from_seeds(&pool.seed_nodes, pool.tls, pool.tls_insecure, &pool.username, &pool.password)
+        .await
+        .map(|slot_ranges| unique_master_nodes(&slot_ranges))
 }
 
 pub async fn flush_cluster(pool: &RedisClusterPool) -> Result<(), String> {
     let master_nodes = cluster_master_nodes(pool).await?;
     for endpoint in master_nodes {
-        let mut con =
-            connect_direct_node(&endpoint, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await?;
+        let mut con = connect_cluster_node(pool, &endpoint).await?;
         flush_db(&mut con).await?;
     }
     Ok(())
@@ -720,9 +862,7 @@ pub async fn flush_cluster(pool: &RedisClusterPool) -> Result<(), String> {
 async fn cluster_total_keys(pool: &RedisClusterPool, master_nodes: &[RedisNodeEndpoint]) -> u64 {
     let mut total = 0;
     for endpoint in master_nodes {
-        let Ok(mut con) =
-            connect_direct_node(endpoint, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await
-        else {
+        let Ok(mut con) = connect_cluster_node(pool, endpoint).await else {
             continue;
         };
         total += redis::cmd("DBSIZE").query_async::<u64>(&mut con).await.unwrap_or(0);
@@ -730,16 +870,27 @@ async fn cluster_total_keys(pool: &RedisClusterPool, master_nodes: &[RedisNodeEn
     total
 }
 
-async fn cluster_master_nodes_from_seeds(
+async fn cluster_slot_ranges_from_seeds(
     seed_nodes: &[RedisNodeEndpoint],
     tls: bool,
     insecure: bool,
     username: &str,
     password: &str,
-) -> Result<Vec<RedisNodeEndpoint>, String> {
+) -> Result<Vec<RedisClusterSlotRange>, String> {
+    let seed_routes = identity_routes(seed_nodes);
+    cluster_slot_ranges_from_routes(&seed_routes, tls, insecure, username, password).await
+}
+
+async fn cluster_slot_ranges_from_routes(
+    seed_routes: &[RedisNodeRoute],
+    tls: bool,
+    insecure: bool,
+    username: &str,
+    password: &str,
+) -> Result<Vec<RedisClusterSlotRange>, String> {
     let mut last_error = None;
-    for endpoint in seed_nodes {
-        let mut con = match connect_direct_node(endpoint, tls, insecure, username, password).await {
+    for route in seed_routes {
+        let mut con = match connect_direct_node(&route.connect, tls, insecure, username, password).await {
             Ok(con) => con,
             Err(err) => {
                 last_error = Some(err);
@@ -753,22 +904,21 @@ async fn cluster_master_nodes_from_seeds(
                 continue;
             }
         };
-        let nodes = parse_cluster_slots(raw, &endpoint.host)?;
-        if !nodes.is_empty() {
-            return Ok(nodes);
+        let slot_ranges = parse_cluster_slots(raw, &route.advertised.host)?;
+        if !slot_ranges.is_empty() {
+            return Ok(slot_ranges);
         }
     }
 
     Err(last_error.unwrap_or_else(|| "Redis cluster master discovery failed".to_string()))
 }
 
-fn parse_cluster_slots(raw: RedisRawValue, fallback_host: &str) -> Result<Vec<RedisNodeEndpoint>, String> {
+fn parse_cluster_slots(raw: RedisRawValue, fallback_host: &str) -> Result<Vec<RedisClusterSlotRange>, String> {
     let RedisRawValue::Array(slots) = raw else {
         return Err("Invalid Redis CLUSTER SLOTS response".to_string());
     };
 
-    let mut seen = std::collections::HashSet::new();
-    let mut nodes = Vec::new();
+    let mut slot_ranges = Vec::new();
     for slot in slots {
         let RedisRawValue::Array(parts) = slot else {
             continue;
@@ -776,14 +926,20 @@ fn parse_cluster_slots(raw: RedisRawValue, fallback_host: &str) -> Result<Vec<Re
         if parts.len() < 3 {
             continue;
         }
+        let Some(start_text) = redis_value_to_string(parts[0].clone()) else {
+            return Err("Invalid Redis cluster slot start".to_string());
+        };
+        let Some(end_text) = redis_value_to_string(parts[1].clone()) else {
+            return Err("Invalid Redis cluster slot end".to_string());
+        };
+        let start = parse_cluster_slot_number(&start_text)?;
+        let end = parse_cluster_slot_number(&end_text)?;
         let Some(endpoint) = parse_cluster_slot_master(parts[2].clone(), fallback_host)? else {
             continue;
         };
-        if seen.insert((endpoint.host.clone(), endpoint.port)) {
-            nodes.push(endpoint);
-        }
+        slot_ranges.push(RedisClusterSlotRange { start, end, master: endpoint });
     }
-    Ok(nodes)
+    Ok(slot_ranges)
 }
 
 fn parse_cluster_slot_master(value: RedisRawValue, fallback_host: &str) -> Result<Option<RedisNodeEndpoint>, String> {
@@ -805,6 +961,111 @@ fn parse_cluster_slot_master(value: RedisRawValue, fallback_host: &str) -> Resul
     };
     let port = parse_redis_port(&port_text)?;
     Ok(Some(RedisNodeEndpoint { host, port }))
+}
+
+fn parse_cluster_slot_number(value: &str) -> Result<u16, String> {
+    let slot = value.parse::<u16>().map_err(|_| format!("Invalid Redis cluster slot '{value}'"))?;
+    if slot > 16_383 {
+        return Err(format!("Invalid Redis cluster slot '{value}'"));
+    }
+    Ok(slot)
+}
+
+fn identity_routes(endpoints: &[RedisNodeEndpoint]) -> Vec<RedisNodeRoute> {
+    endpoints
+        .iter()
+        .cloned()
+        .map(|endpoint| RedisNodeRoute { advertised: endpoint.clone(), connect: endpoint })
+        .collect()
+}
+
+pub fn unique_master_nodes(slot_ranges: &[RedisClusterSlotRange]) -> Vec<RedisNodeEndpoint> {
+    let mut seen = std::collections::HashSet::new();
+    let mut nodes = Vec::new();
+    for slot_range in slot_ranges {
+        if seen.insert((slot_range.master.host.clone(), slot_range.master.port)) {
+            nodes.push(slot_range.master.clone());
+        }
+    }
+    nodes
+}
+
+pub async fn cluster_any_connection(pool: &RedisClusterPool) -> Result<RedisClusterConnectionGuard<'_>, String> {
+    if let Some(connection) = &pool.connection {
+        return Ok(RedisClusterConnectionGuard::Native(connection.lock().await));
+    }
+    let endpoint = pool
+        .node_routes
+        .first()
+        .or_else(|| pool.seed_routes.first())
+        .map(|route| &route.advertised)
+        .ok_or_else(|| "Redis cluster has no routable nodes".to_string())?;
+    connect_cluster_node(pool, endpoint).await.map(RedisClusterConnectionGuard::Direct)
+}
+
+pub async fn cluster_key_connection<'a>(
+    pool: &'a RedisClusterPool,
+    key: &[u8],
+) -> Result<RedisClusterConnectionGuard<'a>, String> {
+    if let Some(connection) = &pool.connection {
+        return Ok(RedisClusterConnectionGuard::Native(connection.lock().await));
+    }
+    let endpoint = cluster_master_for_key(pool, key)?;
+    connect_cluster_node(pool, &endpoint).await.map(RedisClusterConnectionGuard::Direct)
+}
+
+async fn connect_cluster_node(
+    pool: &RedisClusterPool,
+    advertised_endpoint: &RedisNodeEndpoint,
+) -> Result<redis::aio::MultiplexedConnection, String> {
+    let connect_endpoint = mapped_cluster_endpoint(pool, advertised_endpoint);
+    connect_direct_node(&connect_endpoint, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await
+}
+
+fn mapped_cluster_endpoint(pool: &RedisClusterPool, advertised_endpoint: &RedisNodeEndpoint) -> RedisNodeEndpoint {
+    pool.node_routes
+        .iter()
+        .chain(pool.seed_routes.iter())
+        .find(|route| route.advertised == *advertised_endpoint)
+        .map(|route| route.connect.clone())
+        .unwrap_or_else(|| advertised_endpoint.clone())
+}
+
+fn cluster_master_for_key(pool: &RedisClusterPool, key: &[u8]) -> Result<RedisNodeEndpoint, String> {
+    let slot = redis_cluster_slot(key);
+    pool.slot_ranges
+        .iter()
+        .find(|range| range.start <= slot && slot <= range.end)
+        .map(|range| range.master.clone())
+        .ok_or_else(|| format!("Redis cluster slot {slot} has no known master"))
+}
+
+fn redis_cluster_slot(key: &[u8]) -> u16 {
+    let hashtag = key.iter().position(|byte| *byte == b'{').and_then(|start| {
+        key[start + 1..].iter().position(|byte| *byte == b'}').and_then(|relative_end| {
+            if relative_end == 0 {
+                None
+            } else {
+                Some(&key[start + 1..start + 1 + relative_end])
+            }
+        })
+    });
+    crc16_xmodem(hashtag.unwrap_or(key)) % 16_384
+}
+
+fn crc16_xmodem(bytes: &[u8]) -> u16 {
+    let mut crc = 0_u16;
+    for byte in bytes {
+        crc ^= (*byte as u16) << 8;
+        for _ in 0..8 {
+            if (crc & 0x8000) != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
 }
 
 pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
@@ -1833,11 +2094,11 @@ mod tests {
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
-        parse_stream_entries, redis_auth_candidates, redis_command_raw_to_json, redis_database_index,
-        redis_json_raw_to_json, redis_json_value_preview, redis_key_bytes_to_display, redis_key_bytes_to_raw,
-        redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_raw_to_json,
-        redis_value_contains_binary, redis_value_matches_query, RedisAuthCandidate, RedisCommandSafety,
-        RedisNodeEndpoint, RedisRawValue,
+        parse_stream_entries, redis_auth_candidates, redis_cluster_slot, redis_command_raw_to_json,
+        redis_database_index, redis_json_raw_to_json, redis_json_value_preview, redis_key_bytes_to_display,
+        redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview,
+        redis_raw_to_json, redis_value_contains_binary, redis_value_matches_query, RedisAuthCandidate,
+        RedisClusterSlotRange, RedisCommandSafety, RedisNodeEndpoint, RedisRawValue,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::ConnectionAddr;
@@ -2200,10 +2461,24 @@ mod tests {
         assert_eq!(
             parse_cluster_slots(raw, "127.0.0.1").unwrap(),
             vec![
-                RedisNodeEndpoint { host: "10.0.0.1".to_string(), port: 7000 },
-                RedisNodeEndpoint { host: "10.0.0.2".to_string(), port: 7001 },
+                RedisClusterSlotRange {
+                    start: 0,
+                    end: 5460,
+                    master: RedisNodeEndpoint { host: "10.0.0.1".to_string(), port: 7000 },
+                },
+                RedisClusterSlotRange {
+                    start: 5461,
+                    end: 10922,
+                    master: RedisNodeEndpoint { host: "10.0.0.2".to_string(), port: 7001 },
+                },
             ]
         );
+    }
+
+    #[test]
+    fn calculates_redis_cluster_hash_tag_slots() {
+        assert_eq!(redis_cluster_slot(b"issue1246:{user}:a"), redis_cluster_slot(b"issue1246:{user}:b"));
+        assert_ne!(redis_cluster_slot(b"issue1246:{user}:a"), redis_cluster_slot(b"issue1246:{other}:a"));
     }
 
     #[test]

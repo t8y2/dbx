@@ -200,8 +200,7 @@ pub async fn run_codex_agent(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_codex_exec_command, build_codex_exec_command_with_capabilities, codex_enabled_tools,
-        codex_exec_supports_reasoning_effort_flag, parse_codex_jsonl_event, parse_codex_models, CodexRunOptions,
+        build_codex_exec_command, codex_enabled_tools, parse_codex_jsonl_event, parse_codex_models, CodexRunOptions,
         DEFAULT_CODEX_MODELS,
     };
     use crate::agent_events::AgentEvent;
@@ -276,30 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn builds_codex_command_with_reasoning_effort_config_override_fallback() {
+    fn builds_codex_command_with_reasoning_effort_override() {
         let mut config = codex_config("default");
         config.reasoning_level = AiReasoningLevel::High;
         let spec = build_codex_exec_command(&config, "hello", &run_options());
 
         assert!(!spec.args.contains(&"--reasoning-effort".to_string()));
         assert!(spec.args.contains(&"model_reasoning_effort=\"high\"".to_string()));
-    }
-
-    #[test]
-    fn builds_codex_command_with_reasoning_effort_flag_when_supported() {
-        let mut config = codex_config("default");
-        config.reasoning_level = AiReasoningLevel::High;
-        let spec = build_codex_exec_command_with_capabilities(&config, "hello", &run_options(), true);
-
-        let flag_pos = spec.args.iter().position(|arg| arg == "--reasoning-effort").unwrap();
-        assert_eq!(spec.args[flag_pos + 1], "high");
-        assert!(!spec.args.contains(&"model_reasoning_effort=\"high\"".to_string()));
-    }
-
-    #[test]
-    fn detects_codex_reasoning_effort_flag_from_help() {
-        assert!(codex_exec_supports_reasoning_effort_flag("Options:\n      --reasoning-effort <REASONING_EFFORT>\n"));
-        assert!(!codex_exec_supports_reasoning_effort_flag("Options:\n      --json\n"));
     }
 
     #[test]

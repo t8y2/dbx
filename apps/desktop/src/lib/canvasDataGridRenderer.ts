@@ -51,8 +51,6 @@ export interface DrawCanvasDataGridOptions {
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number) => string;
   isRowActive: (rowIndex: number) => boolean;
-  isRowSelected: (rowId: number) => boolean;
-  isSelectingAll: boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
@@ -220,8 +218,6 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     currentSearchMatch,
     formatCell,
     isRowActive,
-    isRowSelected,
-    isSelectingAll,
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover,
@@ -277,23 +273,18 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillStyle = rowIsActive && !item.isDeleted ? theme.cellSelectedSingle : rowBase;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
-    let rowNumberFill = item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
-    if ((rowIsActive || isRowSelected(item.id)) && !item.isDeleted) rowNumberFill = theme.cellSelectedSingle;
+    const rowNumberFill = item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-    if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx < 0 && !isScrolling && item.status === "clean" && !rowIsActive && !isRowSelected(item.id)) {
-      ctx.fillStyle = theme.cellHover;
-      ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-    }
     ctx.strokeStyle = theme.border;
     ctx.beginPath();
     ctx.moveTo(rowNumberBorderX, y);
     ctx.lineTo(rowNumberBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.stroke();
 
-    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : isRowSelected(item.id) ? theme.primary : theme.rowNumberTextClean;
+    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : theme.rowNumberTextClean;
     ctx.fillStyle = rowNumberText;
-    ctx.font = item.status === "new" || item.status === "edited" || isRowSelected(item.id) ? semiboldFont : normalFont;
+    ctx.font = item.status === "new" || item.status === "edited" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
     ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
@@ -304,24 +295,6 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.moveTo(0, rowBorderY);
     ctx.lineTo(width, rowBorderY);
     ctx.stroke();
-    if ((isRowSelected(item.id) || isSelectingAll) && !item.isDeleted) {
-      const selectedLeftX = 0.5;
-      const selectedRightX = rowNumberWidth - 1.5;
-      const selectedTopY = Math.max(y + 0.5, 1);
-      ctx.strokeStyle = theme.cellSelectedSingleBorder;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(selectedLeftX, selectedTopY);
-      ctx.lineTo(selectedRightX, selectedTopY);
-      ctx.moveTo(selectedLeftX, rowBorderY);
-      ctx.lineTo(selectedRightX, rowBorderY);
-      ctx.moveTo(selectedLeftX, selectedTopY);
-      ctx.lineTo(selectedLeftX, rowBorderY);
-      ctx.moveTo(selectedRightX, selectedTopY);
-      ctx.lineTo(selectedRightX, rowBorderY);
-      ctx.stroke();
-    }
-
     let x = rowNumberWidth + columnOffset - scrollLeft;
     for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x < width; visibleColIdx++) {
       const colWidth = renderedColumnWidths[visibleColIdx] ?? 0;

@@ -4122,8 +4122,6 @@ function drawCanvasGrid() {
     currentSearchMatch: currentSearchMatch.value,
     formatCell: formatCellCached,
     isRowActive,
-    isRowSelected,
-    isSelectingAll: isSelectingAll.value,
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover: canEditCellItem,
@@ -7113,14 +7111,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :data-row-index="item.displayIndex"
                   >
                     <div
-                      class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-10 bg-background"
-                      :class="[
-                        rowNumberStatusClass(item),
-                        {
-                          'row-selected': isSelectingAll,
-                          'row-selected text-primary font-semibold !bg-gray-300 dark:!bg-gray-800': isRowSelected(item.id) && item.status !== 'new' && item.status !== 'edited' && item.status !== 'deleted',
-                        },
-                      ]"
+                      class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10 bg-background"
+                      :class="rowNumberStatusClass(item)"
                       @click="handleRowClick(item.displayIndex, item.id, $event)"
                       @dblclick.stop="toggleTranspose(item.displayIndex)"
                       @contextmenu="onRowContext(item.id, item.displayIndex)"
@@ -8251,13 +8243,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .cell-selected,
-.active-row > div:not(.cell-dirty),
-.active-row > .data-grid-row-number:not(.cell-dirty) {
+.active-row > div:not(.cell-dirty):not(.data-grid-row-number) {
   @apply text-foreground bg-gray-300 dark:bg-gray-900;
 }
 
-.cell-selected,
-.active-row .row-selected.data-grid-row-number {
+.cell-selected {
   @apply outline outline-primary -outline-offset-1;
 }
 

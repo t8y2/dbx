@@ -144,8 +144,8 @@ pub async fn redis_get_value_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::get_value(&mut *con, &key).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::get_value(&mut con, &key).await
                 }
             }
         }
@@ -185,8 +185,8 @@ pub async fn redis_set_string_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::set_string(&mut *con, &key, value, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_string(&mut con, &key, value, ttl).await
                 }
             }
         }
@@ -218,8 +218,8 @@ pub async fn redis_delete_key_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::delete_key(&mut *con, &key).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::delete_key(&mut con, &key).await
                 }
             }
         }
@@ -260,8 +260,8 @@ pub async fn redis_hash_set_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::hash_set(&mut *con, &key, field, value, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::hash_set(&mut con, &key, field, value, ttl).await
                 }
             }
         }
@@ -293,8 +293,8 @@ pub async fn redis_hash_del_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::hash_del(&mut *con, &key, field).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::hash_del(&mut con, &key, field).await
                 }
             }
         }
@@ -333,8 +333,8 @@ pub async fn redis_list_push_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::list_push(&mut *con, &key, value, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::list_push(&mut con, &key, value, ttl).await
                 }
             }
         }
@@ -363,8 +363,8 @@ pub async fn redis_list_set_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::list_set(&mut *con, &key, index, value).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::list_set(&mut con, &key, index, value).await
                 }
             }
         }
@@ -401,8 +401,8 @@ pub async fn redis_list_remove_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::list_remove(&mut *con, &key, index).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::list_remove(&mut con, &key, index).await
                 }
             }
         }
@@ -441,8 +441,8 @@ pub async fn redis_set_add_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::set_add(&mut *con, &key, member, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_add(&mut con, &key, member, ttl).await
                 }
             }
         }
@@ -479,8 +479,8 @@ pub async fn redis_set_remove_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::set_remove(&mut *con, &key, member).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_remove(&mut con, &key, member).await
                 }
             }
         }
@@ -510,8 +510,8 @@ pub async fn redis_zadd_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::zadd(&mut *con, &key, member, score, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::zadd(&mut con, &key, member, score, ttl).await
                 }
             }
         }
@@ -539,8 +539,8 @@ pub async fn redis_zrem_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::zrem(&mut *con, &key, member).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::zrem(&mut con, &key, member).await
                 }
             }
         }
@@ -570,8 +570,8 @@ pub async fn redis_stream_add_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::stream_add(&mut *con, &key, entry_id, &fields, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::stream_add(&mut con, &key, entry_id, &fields, ttl).await
                 }
             }
         }
@@ -600,8 +600,8 @@ pub async fn redis_json_set_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::json_set(&mut *con, &key, value, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::json_set(&mut con, &key, value, ttl).await
                 }
             }
         }
@@ -625,8 +625,8 @@ pub async fn redis_check_json_module_in_db_core(
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
-                let mut con = cluster.connection.lock().await;
-                redis_driver::check_json_module(&mut *con).await
+                let mut con = redis_driver::cluster_any_connection(cluster).await?;
+                redis_driver::check_json_module(&mut con).await
             }
         },
         _ => Err("Not a Redis connection".to_string()),
@@ -653,8 +653,8 @@ pub async fn redis_set_ttl_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::set_ttl(&mut *con, &key, ttl).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_ttl(&mut con, &key, ttl).await
                 }
             }
         }
@@ -683,10 +683,10 @@ pub async fn redis_delete_keys_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
                     let mut deleted = 0;
                     for key in &keys {
-                        deleted += redis_driver::delete_keys(&mut *con, std::slice::from_ref(key)).await?;
+                        let mut con = redis_driver::cluster_key_connection(cluster, key).await?;
+                        deleted += redis_driver::delete_keys(&mut con, std::slice::from_ref(key)).await?;
                     }
                     Ok(deleted)
                 }
@@ -733,16 +733,36 @@ pub async fn redis_execute_command_core(
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
-                if let Ok(argv) = redis_driver::parse_command_argv(command) {
-                    if argv.first().is_some_and(|name| name.eq_ignore_ascii_case("SELECT")) {
-                        return Err("Redis Cluster only supports db0; SELECT is not available".to_string());
+                let mut con = if let Ok(argv) = redis_driver::parse_command_argv(command) {
+                    if let Some(command_name) = argv.first() {
+                        if command_name.eq_ignore_ascii_case("SELECT") {
+                            return Err("Redis Cluster only supports db0; SELECT is not available".to_string());
+                        }
                     }
-                }
-                let mut con = cluster.connection.lock().await;
-                redis_driver::execute_command(&mut *con, command, skip_safety_check).await
+                    if command_may_target_first_key(&argv) {
+                        redis_driver::cluster_key_connection(cluster, argv[1].as_bytes()).await?
+                    } else {
+                        redis_driver::cluster_any_connection(cluster).await?
+                    }
+                } else {
+                    redis_driver::cluster_any_connection(cluster).await?
+                };
+                redis_driver::execute_command(&mut con, command, skip_safety_check).await
             }
         },
         _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+fn command_may_target_first_key(argv: &[String]) -> bool {
+    if argv.len() < 2 {
+        return false;
+    }
+    match argv[0].to_ascii_uppercase().as_str() {
+        "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT" => {
+            false
+        }
+        _ => true,
     }
 }
 
@@ -768,8 +788,8 @@ pub async fn redis_load_more_in_db_core(
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_db(db)?;
-                    let mut con = cluster.connection.lock().await;
-                    redis_driver::load_more_collection(&mut *con, &key, key_type, cursor, count).await
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::load_more_collection(&mut con, &key, key_type, cursor, count).await
                 }
             }
         }
@@ -795,8 +815,8 @@ pub async fn redis_publish_core(
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
-                let mut con = cluster.connection.lock().await;
-                redis_driver::publish_message(&mut *con, channel, message).await
+                let mut con = redis_driver::cluster_any_connection(cluster).await?;
+                redis_driver::publish_message(&mut con, channel, message).await
             }
         },
         _ => Err("Not a Redis connection".to_string()),

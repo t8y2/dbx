@@ -719,6 +719,10 @@ export const useConnectionStore = defineStore("connection", () => {
     connectedIds.value.delete(config.id);
     invalidateCompletionCache(config.id);
     clearLoadedChildrenCache(config.id);
+    const node = findNode(treeNodes.value, config.id);
+    if (node?.isExpanded) {
+      await reloadConnectionDatabaseChildren(config.id);
+    }
   }
 
   async function setDefaultDatabase(connectionId: string, database: string) {

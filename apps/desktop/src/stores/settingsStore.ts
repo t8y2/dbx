@@ -387,7 +387,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   infiniteScrollMaxRows: 5000,
   redisScanPageSize: 1000,
   mongoViewMode: "document",
-  showColumnCommentsInHeader: false,
+  showColumnCommentsInHeader: true,
   showColumnTypesInHeader: true,
   compactColumnHeaderActions: true,
   dataGridRenderMode: "canvas",

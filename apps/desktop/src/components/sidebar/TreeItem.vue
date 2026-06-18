@@ -60,7 +60,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
@@ -305,22 +305,110 @@ function visibleLabel(node: TreeNode): string {
   return displayLabel(node);
 }
 
-function cleanTooltipValue(value: string | null | undefined): string {
+type DetailTooltipRow = {
+  label: string;
+  value: string;
+  multiline?: boolean;
+};
+
+function cleanTooltipValue(value: string | number | null | undefined): string {
   return String(value ?? "").trim();
 }
+
+function isLocalFileConnection(config: Pick<ConnectionConfig, "db_type" | "port">): boolean {
+  return config.db_type === "sqlite" || config.db_type === "duckdb" || config.db_type === "access" || (config.db_type === "h2" && config.port === 0);
+}
+
+function redactedConnectionString(value: string): string {
+  return value.replace(/(:\/\/[^/\s:@?#;]+):([^@\s/?#;]+)@/g, "$1:***@").replace(/([?&;](?:password|pwd|pass|token|secret|key)=)[^&;]*/gi, "$1***");
+}
+
+function connectionTooltipScheme(config: Pick<ConnectionConfig, "db_type" | "ssl">): string {
+  switch (config.db_type) {
+    case "postgres":
+    case "gaussdb":
+    case "kwdb":
+    case "yashandb":
+    case "redshift":
+    case "questdb":
+      return "postgresql";
+    case "sqlserver":
+      return "mssql";
+    case "elasticsearch":
+    case "rqlite":
+    case "turso":
+    case "mq":
+      return config.ssl ? "https" : "http";
+    case "dameng":
+      return "dm";
+    default:
+      return config.db_type;
+  }
+}
+
+function hostForDisplay(host: string): string {
+  if (!host.includes(":") || host.startsWith("[") || host.includes("://")) return host;
+  return `[${host}]`;
+}
+
+function connectionTooltipUrl(config: ConnectionConfig): string {
+  const explicit = cleanTooltipValue(config.connection_string);
+  if (explicit) return redactedConnectionString(explicit);
+
+  const host = cleanTooltipValue(config.host);
+  if (!host) return "";
+  if (host.includes("://")) return redactedConnectionString(host);
+
+  if (isLocalFileConnection(config)) {
+    if (config.db_type === "access") return `jdbc:ucanaccess://${host}`;
+    return `${config.db_type}://${host}`;
+  }
+
+  const scheme = connectionTooltipScheme(config);
+  const port = Number(config.port) > 0 ? `:${config.port}` : "";
+  const user = cleanTooltipValue(config.username);
+  const userInfo = user ? `${encodeURIComponent(user)}@` : "";
+  const database = cleanTooltipValue(config.database);
+  const path = database ? `/${encodeURIComponent(database)}` : "";
+  const params = cleanTooltipValue(config.url_params);
+  const query = params ? (params.startsWith("?") ? params : `?${params}`) : "";
+  return redactedConnectionString(`${scheme}://${userInfo}${hostForDisplay(host)}${port}${path}${query}`);
+}
+
+const connectionInfoTooltip = computed(() => {
+  const node = props.node;
+  if (node.type !== "connection" || !node.connectionId) return null;
+  const config = connectionStore.getConfig(node.connectionId);
+  if (!config) return null;
+
+  const hostLabel = isLocalFileConnection(config) ? t("connection.filePath") : t("connection.host");
+  const rows: DetailTooltipRow[] = [
+    { label: t("connection.name"), value: cleanTooltipValue(config.name) },
+    { label: "URL", value: connectionTooltipUrl(config), multiline: true },
+    { label: hostLabel, value: cleanTooltipValue(config.host), multiline: isLocalFileConnection(config) },
+    { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
+    { label: t("connection.database"), value: cleanTooltipValue(config.database) },
+    { label: t("connection.user"), value: cleanTooltipValue(config.username) },
+    { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
+  ].filter((row) => row.value);
+
+  return { rows };
+});
 
 const tableInfoTooltip = computed(() => {
   const node = props.node;
   if (node.type !== "table" && node.type !== "view") return null;
-  const rows = [
+  const rows: DetailTooltipRow[] = [
     { label: t("structureEditor.tableName"), value: visibleLabel(node) },
     { label: t("structureEditor.comment"), value: cleanTooltipValue(node.comment), multiline: true },
   ].filter((row) => row.value);
   return { rows };
 });
 
+const detailTooltip = computed(() => connectionInfoTooltip.value ?? tableInfoTooltip.value);
+
 function isTooltipDisabled(): boolean {
-  if (tableInfoTooltip.value?.rows.length && !settingsStore.editorSettings.sidebarHideTableComments) return true;
+  if (detailTooltip.value?.rows.length) return isRenamingGroup.value;
   return isRenamingGroup.value || !isLabelTruncated();
 }
 
@@ -1400,6 +1488,7 @@ function viewObjectSource() {
           objectType,
         });
       }
+      queryStore.markTabClean(queryStore.tabs.find((tab) => tab.id === tabId));
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -3459,7 +3548,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
 <template>
   <CustomContextMenu :items="treeItemMenuItems()" v-slot="{ onContextMenu }">
     <div @contextmenu="onTreeItemContextMenu($event, onContextMenu)">
-      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled" side="right" :side-offset="8" :delay="0">
+      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0">
         <div
           ref="rowRef"
           class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent relative outline-none"
@@ -3535,10 +3624,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
             <Pin class="w-3 h-3" :class="{ 'fill-current': isPinned }" />
           </button>
         </div>
-        <template v-if="tableInfoTooltip" #content>
+        <template v-if="detailTooltip" #content>
           <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
             <div class="space-y-1">
-              <div v-for="row in tableInfoTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-[11px] leading-4">
+              <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
                 <span class="text-muted-foreground">{{ row.label }}</span>
                 <span v-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
                   {{ row.value }}

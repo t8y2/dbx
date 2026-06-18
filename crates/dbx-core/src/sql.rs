@@ -1542,8 +1542,28 @@ fn starts_with_oracle_plsql_block(sql: &str) -> bool {
         {
             true
         }
+        [first, ..] if first.eq_ignore_ascii_case("CREATE") => {
+            let rest = &tokens[1..];
+            // Skip optional OR REPLACE
+            let rest = skip_or_replace(rest);
+            is_oracle_plsql_object_type(rest)
+        }
         _ => false,
     }
+}
+
+/// Skip the optional `OR REPLACE` token pair.
+fn skip_or_replace(tokens: &[String]) -> &[String] {
+    match tokens {
+        [or, replace, rest @ ..] if or.eq_ignore_ascii_case("OR") && replace.eq_ignore_ascii_case("REPLACE") => rest,
+        _ => tokens,
+    }
+}
+
+/// Check whether the first token is an Oracle PL/SQL object type
+/// (FUNCTION, PROCEDURE, TRIGGER, PACKAGE, or TYPE).
+fn is_oracle_plsql_object_type(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|t| matches!(t.as_str(), "FUNCTION" | "PROCEDURE" | "TRIGGER" | "PACKAGE" | "TYPE"))
 }
 
 fn oracle_plsql_block_is_complete(sql: &str) -> bool {
@@ -2288,6 +2308,105 @@ SELECT 1;";
         assert_eq!(
             split_sql_statements_for_database("BEGIN; INSERT INTO t VALUES (1); COMMIT;", DatabaseType::Gaussdb),
             vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_create_function_together() {
+        let sql = "\
+CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))
+RETURN VARCHAR(20)
+AS
+    res VARCHAR(20);
+BEGIN
+    RETURN '一';
+END;
+/
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Dameng),
+            vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_create_procedure_together() {
+        let sql = "\
+CREATE OR REPLACE PROCEDURE update_salary(p_id NUMBER, p_amount NUMBER)
+AS
+BEGIN
+    UPDATE employees SET salary = salary + p_amount WHERE id = p_id;
+    COMMIT;
+END;
+/
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec![
+                "CREATE OR REPLACE PROCEDURE update_salary(p_id NUMBER, p_amount NUMBER)\nAS\nBEGIN\n    UPDATE employees SET salary = salary + p_amount WHERE id = p_id;\n    COMMIT;\nEND;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_create_trigger_together() {
+        let sql = "\
+CREATE TRIGGER trg_audit
+BEFORE INSERT ON employees
+FOR EACH ROW
+BEGIN
+    INSERT INTO audit_log VALUES (:NEW.id, 'INSERT');
+END;
+/
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec![
+                "CREATE TRIGGER trg_audit\nBEFORE INSERT ON employees\nFOR EACH ROW\nBEGIN\n    INSERT INTO audit_log VALUES (:NEW.id, 'INSERT');\nEND;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_create_package_together() {
+        let sql = "\
+CREATE OR REPLACE PACKAGE pkg_utils AS
+    FUNCTION get_version RETURN VARCHAR2;
+    PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;
+/
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_does_not_affect_create_table() {
+        let sql = "\
+CREATE TABLE users (id NUMBER PRIMARY KEY, name VARCHAR2(100));
+CREATE OR REPLACE VIEW v_users AS SELECT id, name FROM users;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec![
+                "CREATE TABLE users (id NUMBER PRIMARY KEY, name VARCHAR2(100))",
+                "CREATE OR REPLACE VIEW v_users AS SELECT id, name FROM users"
+            ]
         );
     }
 

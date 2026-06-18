@@ -40,7 +40,7 @@ import { uuid } from "@/lib/utils";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { sqlFileTitleFromPath } from "@/lib/sqlFileOpen";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
@@ -404,6 +404,11 @@ function defaultSavedSqlName(title: string) {
 async function handleSaveTab(tabId: string) {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab || !tab.sql.trim()) return;
+  if (tab.objectSource) {
+    const saved = await saveActiveObjectSource(tab);
+    if (saved) queryStore.closeTab(tabId, { force: true });
+    return;
+  }
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
     const updated = await savedSqlStore.saveFile({
@@ -450,6 +455,7 @@ async function openSaveSqlDialog() {
       sql: tab.sql,
     });
     queryStore.linkSavedSql(tab.id, updated.id, updated.name);
+    queryStore.markTabClean(tab);
     toast(t("savedSql.saved"), 2000);
     return;
   }
@@ -459,10 +465,10 @@ async function openSaveSqlDialog() {
   showSaveSqlDialog.value = true;
 }
 
-async function saveActiveObjectSource(tab: NonNullable<typeof activeTab.value>) {
+async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
   const connection = connectionStore.getConfig(tab.connectionId);
   const source = tab.objectSource;
-  if (!connection || !source) return;
+  if (!connection || !source) return false;
 
   try {
     const statements = await buildExecutableObjectSourceStatements({
@@ -479,9 +485,12 @@ async function saveActiveObjectSource(tab: NonNullable<typeof activeTab.value>) 
         await api.executeScript(tab.connectionId, tab.database, sql, source.schema || tab.schema);
       }
     }
+    queryStore.markTabClean(tab);
     toast(t("objects.sourceSaved"), 2000);
+    return true;
   } catch (e: any) {
     toast(t("objects.sourceSaveFailed", { message: e?.message || String(e) }), 5000);
+    return false;
   }
 }
 

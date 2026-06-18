@@ -7,6 +7,7 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
   { type: "starrocks", patterns: [/starrocks/i] },
   { type: "doris", patterns: [/doris/i] },
+  { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
   { type: "hive", patterns: [/org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /kyuubi/i, /hive2/i] },
   { type: "postgres", patterns: [/jdbc:postgresql:/i, /postgres/i] },
@@ -28,15 +29,15 @@ export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseTy
 
 export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
-  if (connection.db_type === "gbase" && connection.driver_profile === "gbase8a") return "mysql";
-  if (connection.db_type === "gbase" && connection.driver_profile === "gbase8s") return "informix";
+  if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return "informix";
+  if (connection.db_type === "gbase") return "mysql";
   if (connection.db_type !== "jdbc") return connection.db_type;
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
-  if (connection.db_type === "gbase" && connection.driver_profile === "gbase8a") return "gbase";
+  if (connection.db_type === "gbase" && !isGbase8sProfile(connection.driver_profile)) return "gbase";
   return effectiveDatabaseTypeForConnection(connection);
 }
 
@@ -55,14 +56,13 @@ export function connectionUsesSchemaExecutionContext(connection?: Pick<Connectio
 }
 
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
-  if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8a") return "";
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
   return schema || database;
 }
 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
-  if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8a") return undefined;
+  if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;
@@ -75,4 +75,8 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
   if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
   if (dbType === "sqlserver") return "sqlserver";
   return "mysql";
+}
+
+function isGbase8sProfile(driverProfile?: string): boolean {
+  return driverProfile === "gbase8s";
 }

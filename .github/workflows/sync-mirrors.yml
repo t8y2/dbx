@@ -1,0 +1,74 @@
+name: Sync Mirrors
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "**"
+  delete:
+  workflow_dispatch:
+
+jobs:
+  sync-cnb:
+    name: Sync to CNB
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Push to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add cnb "https://cnb:${CNB_TOKEN}@cnb.cool/dbxio.com/dbx.git"
+          git push cnb --all --force
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push cnb ":refs/tags/${GITHUB_REF_NAME}" || true
+          fi
+          git push cnb --tags --force
+
+  sync-atomgit:
+    name: Sync to AtomGit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Push to AtomGit
+        env:
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
+          git push atomgit --all --force
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push atomgit ":refs/tags/${GITHUB_REF_NAME}" || true
+          fi
+          git push atomgit --tags --force
+
+  sync-gitee:
+    name: Sync to Gitee
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Push to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add gitee "https://codetty:${GITEE_TOKEN}@gitee.com/codetty/dbx.git"
+          git push gitee --all --force
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push gitee ":refs/tags/${GITHUB_REF_NAME}" || true
+          fi
+          git push gitee --tags --force

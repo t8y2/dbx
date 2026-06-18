@@ -8,6 +8,7 @@ import { useToast } from "@/composables/useToast";
 import { classifySqlActivityKind } from "@/lib/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
+import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sqlExecutionTarget";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -37,7 +38,7 @@ export function useSqlExecution(deps: {
   activeTab: ComputedRef<QueryTab | undefined>;
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
   executableSql: ComputedRef<string>;
-  resolveExecutableSql?: () => Promise<string>;
+  resolveExecutableSql?: (snapshot?: SqlExecutionSnapshot) => Promise<string>;
   activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
   blockDangerousRedisCommands?: Ref<boolean>;
 }) {
@@ -54,13 +55,16 @@ export function useSqlExecution(deps: {
   const suppressDangerConfirm = ref(false);
   const explainMode = ref<"explain" | "autotrace">("explain");
 
-  async function resolvedExecutableSql(): Promise<string> {
-    return deps.resolveExecutableSql ? await deps.resolveExecutableSql() : deps.executableSql.value;
+  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<string> {
+    if (typeof source === "string") return source;
+    if (deps.resolveExecutableSql) return await deps.resolveExecutableSql(source);
+    if (isSqlExecutionSnapshot(source)) return resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos });
+    return deps.executableSql.value;
   }
 
-  async function tryExecute(sqlOverride?: string) {
+  async function tryExecute(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = sqlOverride ?? (await resolvedExecutableSql());
+    const sql = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
     // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
@@ -135,9 +139,9 @@ export function useSqlExecution(deps: {
     return t("explain.emptySql");
   }
 
-  async function tryExplain(sqlOverride?: string) {
+  async function tryExplain(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = sqlOverride ?? (await resolvedExecutableSql());
+    const sql = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) {
       toast(t("explain.emptySql"));
       return;

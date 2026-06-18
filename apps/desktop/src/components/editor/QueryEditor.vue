@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { Play, Copy, TextSelect } from "@lucide/vue";
+import { Play, Copy, Table2, TextSelect } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
@@ -8,7 +8,7 @@ import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard } from "@/lib/clipboard";
-import { resolveExecutableSql } from "@/lib/sqlExecutionTarget";
+import { resolveExecutableSql, type SqlExecutionSnapshot } from "@/lib/sqlExecutionTarget";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -35,6 +35,7 @@ import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/shortc
 import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
 import { selectionMatchOccurrences } from "@/lib/codemirrorSelectionMatches";
 import { isSchemaAware, isSingleDatabase } from "@/lib/databaseFeatureSupport";
+import { qualifiedTableNameAtSqlPosition } from "@/lib/queryCursorTableTarget";
 import * as api from "@/lib/api";
 import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, shouldRunSqlSemanticDiagnostics, type SqlSemanticDiagnostic } from "@/lib/sqlSemanticDiagnostics";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redisSyntaxDiagnostics";
@@ -63,9 +64,10 @@ const emit = defineEmits<{
   selectionChange: [value: string];
   cursorChange: [pos: number];
   formatError: [message: string];
-  execute: [sql: string];
+  execute: [snapshot: SqlExecutionSnapshot];
   save: [];
   clickTable: [tableName: string];
+  viewTableData: [tableName: string];
   clickColumn: [columns: Array<{ name: string; table: string; schema?: string }>, error?: string | undefined];
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
@@ -141,6 +143,7 @@ const isGestureZooming = ref(false);
 const searchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const selectedSql = ref("");
 const executableSql = ref("");
+const contextTableName = ref<string | null>(null);
 
 const hasSelectedSql = computed(() => selectedSql.value.trim().length > 0);
 const canCopySelectedSql = computed(() => selectedSql.value.length > 0);
@@ -285,13 +288,19 @@ function handleTab(view: EditorViewType): boolean {
 }
 
 function executeCurrentSql() {
-  if (view.value) emit("execute", executableSqlFromView(view.value));
+  if (view.value) emit("execute", sqlExecutionSnapshotFromView(view.value));
   return true;
 }
 
 function syncContextMenuState(currentView: EditorViewType) {
   selectedSql.value = selectedSqlFromView(currentView);
   executableSql.value = executableSqlFromView(currentView);
+}
+
+function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEvent) {
+  syncContextMenuState(currentView);
+  const pos = currentView.posAtCoords({ x: event.clientX, y: event.clientY });
+  contextTableName.value = pos == null ? null : qualifiedTableNameAtSqlPosition(currentView.state.doc.toString(), pos);
 }
 
 function focusEditor() {
@@ -352,6 +361,12 @@ function selectAllSqlFromContextMenu() {
   focusEditor();
 }
 
+function openTableFromContextMenu() {
+  if (!contextTableName.value) return;
+  emit("viewTableData", contextTableName.value);
+  focusEditor();
+}
+
 function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {
   if (!(event instanceof MouseEvent) || event.button !== 0) return false;
   event.preventDefault();
@@ -370,6 +385,12 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => [
     action: executeFromContextMenu,
     disabled: !canExecuteContextSql.value,
     icon: Play,
+  },
+  {
+    label: t("contextMenu.viewData"),
+    action: openTableFromContextMenu,
+    disabled: !contextTableName.value,
+    icon: Table2,
   },
   { label: "", separator: true },
   {
@@ -438,6 +459,14 @@ function selectedSqlFromView(currentView: EditorViewType): string {
 
 function executableSqlFromView(currentView: EditorViewType): string {
   return resolveExecutableSql(currentView.state.doc.toString(), selectedSqlFromView(currentView));
+}
+
+function sqlExecutionSnapshotFromView(currentView: EditorViewType): SqlExecutionSnapshot {
+  return {
+    fullSql: currentView.state.doc.toString(),
+    selectedSql: selectedSqlFromView(currentView),
+    cursorPos: currentView.state.selection.main.head,
+  };
 }
 
 function identifierRangeAt(sql: string, pos: number): { from: number; to: number; text: string } | null {
@@ -1033,6 +1062,7 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
         databaseType: props.databaseType,
+        keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       });
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
     }
@@ -1050,6 +1080,7 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
         databaseType: props.databaseType,
+        keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       });
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
     }
@@ -1193,6 +1224,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
     databaseType: props.databaseType,
+    keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
   });
 
   return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
@@ -1479,6 +1511,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
     databaseType: props.databaseType,
+    keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
   });
 
   return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
@@ -1676,7 +1709,16 @@ onMounted(async () => {
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
-      foldGutter(),
+      foldGutter({
+        markerDOM(open: boolean) {
+          const span = document.createElement("span");
+          span.className = "cm-foldMarker-svg";
+          span.innerHTML = open
+            ? '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 6.5l3.5 3.5 3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            : '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 4.5l3.5 3.5-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+          return span;
+        },
+      }),
       drawSelection(),
       trimmedSelectionLayer(),
       selectionMatchOccurrences(),
@@ -2205,7 +2247,7 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView });
         class="h-full w-full overflow-hidden"
         @contextmenu="
           (e: MouseEvent) => {
-            if (view) syncContextMenuState(view);
+            if (view) syncContextMenuStateAtEvent(view, e);
             onContextMenu(e);
           }
         "
@@ -2219,5 +2261,27 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView });
 .query-editor--table-navigation-hover :deep(.cm-content),
 .query-editor--table-navigation-hover :deep(.cm-line) {
   cursor: pointer;
+}
+
+:deep(.cm-foldMarker-svg) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
+  opacity: 0.65;
+  transition: opacity 0.15s;
+}
+
+:deep(.cm-foldMarker-svg:hover) {
+  opacity: 0.95;
+}
+
+:deep(.cm-foldMarker-svg svg) {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 </style>

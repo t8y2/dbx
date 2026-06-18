@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/mcp-server",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "description": "MCP server for DBX — query databases from Claude Code, Cursor, and other AI agents",
   "keywords": [
     "ai-agent",

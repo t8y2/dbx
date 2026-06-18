@@ -10,7 +10,7 @@ use crate::transfer::{
     count_sql_with_where, execute_on_pool, execute_on_pool_with_max_rows, keyset_pagination_sql,
     pagination_sql_with_filter_order,
 };
-use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
+use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook};
 
 const DEFAULT_BATCH_SIZE: usize = 10_000;
 
@@ -325,7 +325,13 @@ pub async fn export_table_data_core(
             }
         }
         "xlsx" => {
-            let mut all_rows: Vec<Vec<Value>> = Vec::new();
+            // Create a dedicated file handle for the streaming XLSX writer
+            // instead of cloning the outer BufWriter's handle.  This avoids
+            // sharing a file descriptor between two independent buffers.
+            let xlsx_file =
+                std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
+            let mut writer =
+                start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some(&request.table_name), &col_names)?;
 
             loop {
                 // Check cancellation between batches
@@ -358,12 +364,14 @@ pub async fn export_table_data_core(
                     break;
                 }
 
-                all_rows.extend(result.rows);
+                for row in &result.rows {
+                    writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                }
                 rows_exported += row_count as u64;
 
                 if use_keyset {
                     // Keyset pagination: track last PK values for next batch
-                    if let Some(last_row) = all_rows.last() {
+                    if let Some(last_row) = result.rows.last() {
                         last_pk_values = pk_indices.iter().map(|&i| last_row[i].clone()).collect();
                     }
                 } else {
@@ -394,11 +402,12 @@ pub async fn export_table_data_core(
                 error_message: None,
             });
 
-            // Build XLSX workbook from accumulated rows
-            let workbook_data =
-                XlsxWorksheetData { sheet_name: Some(request.table_name.clone()), columns: col_names, rows: all_rows };
-            let xlsx_bytes = build_xlsx_workbook(&workbook_data)?;
-            file.write_all(&xlsx_bytes).map_err(|e| format!("Failed to write XLSX file: {e}"))?;
+            // Explicitly flush the XLSX writer's BufWriter so IO errors
+            // (e.g. disk-full) are surfaced rather than silently swallowed
+            // by Drop.
+            let mut xlsx_buf =
+                finish_streaming_xlsx_workbook(writer).map_err(|e| format!("Failed to finalize XLSX file: {e}"))?;
+            xlsx_buf.flush().map_err(|e| format!("Failed to flush XLSX file: {e}"))?;
         }
         "json" => {
             file.write_all(b"[\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
@@ -636,6 +645,7 @@ pub async fn export_table_data_core(
 mod tests {
     use super::*;
     use crate::database_export::{clear_export_cancelled, set_export_cancelled};
+    use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
     use serde_json::json;
 
     // -----------------------------------------------------------------------

@@ -59,6 +59,7 @@ pub async fn start_transport_layers(
                     &ssh.key_path,
                     &ssh.key_passphrase,
                     ssh.use_ssh_agent,
+                    &ssh.ssh_agent_sock_path,
                     effective_ssh_connect_timeout_secs(ssh.connect_timeout_secs),
                     &target_endpoint.host,
                     target_endpoint.port,
@@ -187,6 +188,7 @@ mod tests {
             connect_timeout_secs: 5,
             expose_lan: false,
             use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
         })
     }
 

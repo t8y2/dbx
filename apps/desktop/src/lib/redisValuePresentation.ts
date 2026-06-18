@@ -57,6 +57,34 @@ export function formatRedisCommandResult(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+/**
+ * Detect if a value is a cluster-aggregated INFO response:
+ * `[[addr, infoText], ...]` where each `infoText` starts with `"# "`
+ * (the INFO section marker). This is the format produced by the backend
+ * in `redis_driver.rs::execute_command` for cluster-mode INFO.
+ */
+function isRedisClusterInfoValue(value: unknown): value is [string, string][] {
+  return Array.isArray(value) && value.length > 0 && (value as unknown[]).every((item) => Array.isArray(item) && item.length === 2 && typeof item[0] === "string" && typeof item[1] === "string" && item[1].startsWith("# "));
+}
+
+/**
+ * Format a Redis command result for the **command console terminal** (RedisKeyBrowser.vue).
+ * Unlike `formatRedisCommandResult` (used by the query result table UI), this function
+ * renders cluster-aggregated INFO output as plain text (not JSON), matching the native
+ * redis-cli display style.
+ *
+ * - Cluster INFO `[[addr, infoText], ...]` → `"{addr}\n{infoText}"` per node, joined by newlines.
+ * - Plain string → passthrough (handles single-node INFO text correctly).
+ * - Everything else → JSON.stringify (arrays, objects, etc.).
+ */
+export function formatRedisConsoleValue(value: unknown): string {
+  if (isRedisClusterInfoValue(value)) {
+    return value.map(([addr, info]) => `${addr}\n${info}`).join("\n");
+  }
+  if (typeof value === "string") return formatRedisStringValue(value);
+  return JSON.stringify(value, null, 2);
+}
+
 function formatRedisJsonString(value: string): string | null {
   return parseRedisJsonDetail(value)?.formattedText ?? null;
 }

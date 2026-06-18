@@ -348,6 +348,13 @@ pub fn build_executable_object_source_sql(
 }
 
 #[tauri::command]
+pub fn build_editable_object_source(
+    input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
+) -> Result<String, String> {
+    Ok(dbx_core::object_source_sql::build_editable_object_source(input))
+}
+
+#[tauri::command]
 pub fn build_routine_rename_object_source_statements(
     input: dbx_core::object_source_sql::RoutineRenameObjectSourceInput,
 ) -> Result<Vec<String>, String> {
@@ -447,9 +454,37 @@ pub fn build_export_sql_insert(
 }
 
 #[tauri::command]
-pub fn build_database_sql_export(
-    options: dbx_core::database_export::BuildDatabaseSqlExportOptions,
+pub async fn build_database_sql_export(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    mut options: dbx_core::database_export::BuildDatabaseSqlExportOptions,
 ) -> Result<String, String> {
+    // Sort tables by FK dependency when connection info is available.
+    if let (Some(ref conn_id), Some(ref database), Some(ref schema)) =
+        (&options.connection_id, &options.database, &options.schema)
+    {
+        if options.tables.len() > 1 {
+            let table_names: Vec<String> = options.tables.iter().filter_map(|t| t.table_name.clone()).collect();
+            if table_names.len() > 1 {
+                if let Ok(sorted_names) = dbx_core::transfer::sort_tables_by_fk_dependency(
+                    &state,
+                    conn_id,
+                    database,
+                    schema,
+                    &table_names,
+                    true,
+                )
+                .await
+                {
+                    options.tables.sort_by_key(|t| {
+                        sorted_names
+                            .iter()
+                            .position(|n| Some(n.as_str()) == t.table_name.as_deref())
+                            .unwrap_or(usize::MAX)
+                    });
+                }
+            }
+        }
+    }
     dbx_core::database_export::build_database_sql_export(options)
 }
 
@@ -462,6 +497,9 @@ pub async fn get_explain_info(
     sql: String,
     mode: Option<String>,
 ) -> Result<String, String> {
+    let database_for_pool = database.as_deref().filter(|database| !database.trim().is_empty());
+    state.get_or_create_pool(&connection_id, database_for_pool).await?;
+
     let client = {
         let connections = state.connections.read().await;
         let pool = connections.get(&connection_id).ok_or_else(|| "Connection not found".to_string())?;

@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects } from "../../apps/desktop/src/lib/tableTree.ts";
+import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren } from "../../apps/desktop/src/lib/tableTree.ts";
 import type { ObjectInfo, TableInfo, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function table(name: string, parent?: string): TableInfo {
@@ -72,6 +72,36 @@ test("buildTableTreeNodes keeps partitions visible when their parent is not load
   assert.deepEqual(
     nodes.map((node) => node.label),
     ["events_2026"],
+  );
+});
+
+test("mergeTableTreePageChildren attaches later page partitions to loaded parents", () => {
+  const firstPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("events"), table("events_region_0", "events")],
+  });
+  const secondPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("events_region_0_2026_01", "events_region_0")],
+  });
+
+  const merged = mergeTableTreePageChildren(firstPage, secondPage, "conn", "app");
+  assert.deepEqual(
+    merged.map((node) => node.label),
+    ["events"],
+  );
+
+  const regionPartition = partitionGroup(merged[0])?.children?.[0];
+  assert.equal(regionPartition?.label, "events_region_0");
+  assert.deepEqual(
+    partitionGroup(regionPartition!)?.children?.map((node) => node.label),
+    ["events_region_0_2026_01"],
   );
 });
 

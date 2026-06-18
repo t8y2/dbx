@@ -24,6 +24,7 @@ const props = defineProps<{
   executableSql: string;
   explainMode?: string;
   blockDangerousRedisCommands?: boolean;
+  sqlKeywordCase: "preserve" | "upper" | "lower";
 }>();
 
 const emit = defineEmits<{
@@ -32,6 +33,7 @@ const emit = defineEmits<{
   explain: [];
   "update:explainMode": [mode: "explain" | "autotrace"];
   formatSql: [];
+  toggleSqlKeywordCase: [];
   saveSql: [];
   openSql: [];
   importResultArchive: [];
@@ -65,6 +67,8 @@ const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_ty
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
+const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
+const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
 
 const showSchemaSelector = computed(() => {
   const connection = props.activeConnection;
@@ -161,6 +165,21 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.formatSql") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 font-mono text-[11px] leading-none"
+            :class="keywordCaseIsLower ? 'bg-amber-500/10 text-amber-700 hover:bg-amber-500/20 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+            :aria-label="keywordCaseToggleTooltip"
+            @click="emit('toggleSqlKeywordCase')"
+          >
+            {{ keywordCaseIsLower ? "a" : "A" }}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ keywordCaseToggleTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="activeConnection?.db_type === 'redis'">
         <TooltipTrigger as-child>
@@ -290,7 +309,7 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
         </Select>
       </div>
     </div>
-    <div v-if="activeTab.tableMeta" class="flex min-w-0 items-center gap-1 ml-2">
+    <div v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="ml-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">
       <Table2 class="h-3.5 w-3.5 shrink-0" />
       <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}</span>
     </div>

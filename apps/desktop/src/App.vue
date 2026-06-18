@@ -35,12 +35,12 @@ import { quickConnectionOpenTarget } from "@/lib/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/newQueryContext";
 import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/objectSourceEditor";
-import { resolveExecutableSql, resolveExecutableSqlWithBackend } from "@/lib/sqlExecutionTarget";
+import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sqlExecutionTarget";
 import { uuid } from "@/lib/utils";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { sqlFileTitleFromPath } from "@/lib/sqlFileOpen";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
@@ -179,12 +179,12 @@ const executableSql = computed(() => {
     : "";
 });
 
-async function resolveActiveExecutableSql() {
+async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
   const tab = activeTab.value;
   return tab
-    ? await resolveExecutableSqlWithBackend(tab.sql, selectedSql.value, {
+    ? await resolveExecutableSqlWithBackend(snapshot?.fullSql ?? tab.sql, snapshot?.selectedSql ?? selectedSql.value, {
         mode: settingsStore.editorSettings.executeMode,
-        cursorPos: cursorPos.value,
+        cursorPos: snapshot?.cursorPos ?? cursorPos.value,
         databaseType: activeConnection.value?.db_type,
       })
     : "";
@@ -395,6 +395,16 @@ function formatActiveSql() {
   };
 }
 
+function toggleSqlKeywordCase() {
+  const sqlFormatter = settingsStore.editorSettings.sqlFormatter;
+  settingsStore.updateEditorSettings({
+    sqlFormatter: {
+      ...sqlFormatter,
+      keywordCase: sqlFormatter.keywordCase === "lower" ? "upper" : "lower",
+    },
+  });
+}
+
 function defaultSavedSqlName(title: string) {
   const trimmed = title.trim() || "query";
   const normalized = trimmed.replace(/\s+/g, "_");
@@ -404,6 +414,11 @@ function defaultSavedSqlName(title: string) {
 async function handleSaveTab(tabId: string) {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab || !tab.sql.trim()) return;
+  if (tab.objectSource) {
+    const saved = await saveActiveObjectSource(tab);
+    if (saved) queryStore.closeTab(tabId, { force: true });
+    return;
+  }
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
     const updated = await savedSqlStore.saveFile({
@@ -450,6 +465,7 @@ async function openSaveSqlDialog() {
       sql: tab.sql,
     });
     queryStore.linkSavedSql(tab.id, updated.id, updated.name);
+    queryStore.markTabClean(tab);
     toast(t("savedSql.saved"), 2000);
     return;
   }
@@ -459,10 +475,10 @@ async function openSaveSqlDialog() {
   showSaveSqlDialog.value = true;
 }
 
-async function saveActiveObjectSource(tab: NonNullable<typeof activeTab.value>) {
+async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
   const connection = connectionStore.getConfig(tab.connectionId);
   const source = tab.objectSource;
-  if (!connection || !source) return;
+  if (!connection || !source) return false;
 
   try {
     const statements = await buildExecutableObjectSourceStatements({
@@ -479,9 +495,12 @@ async function saveActiveObjectSource(tab: NonNullable<typeof activeTab.value>) 
         await api.executeScript(tab.connectionId, tab.database, sql, source.schema || tab.schema);
       }
     }
+    queryStore.markTabClean(tab);
     toast(t("objects.sourceSaved"), 2000);
+    return true;
   } catch (e: any) {
     toast(t("objects.sourceSaveFailed", { message: e?.message || String(e) }), 5000);
+    return false;
   }
 }
 
@@ -762,9 +781,9 @@ function openSavedSqlFromWelcome(fileId: string) {
   toast(t("welcome.fileOpened", { name: file.name }), 2000);
 }
 
-async function onClickTable(tableName: string) {
+function tableTargetFromActiveTab(tableName: string) {
   const tab = activeTab.value;
-  if (!tab) return;
+  if (!tab) return null;
   const connectionId = tab.connectionId;
   let database = tab.database;
   let schema = tab.schema;
@@ -784,8 +803,24 @@ async function onClickTable(tableName: string) {
     }
   }
 
+  return { connectionId, database, schema, tableName: rawTableName };
+}
+
+async function onClickTable(tableName: string) {
+  const target = tableTargetFromActiveTab(tableName);
+  if (!target) return;
   try {
-    await openTableTarget({ connectionId, database, schema, tableName: rawTableName }, { tableInfoTab: "ddl" });
+    await openTableTarget(target, { tableInfoTab: "ddl" });
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
+async function onViewTableData(tableName: string) {
+  const target = tableTargetFromActiveTab(tableName);
+  if (!target) return;
+  try {
+    await openTableTarget(target);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1212,12 +1247,14 @@ onUnmounted(() => {
                   :executable-sql="executableSql"
                   :explain-mode="explainMode"
                   :block-dangerous-redis-commands="blockDangerousRedisCommands"
+                  :sql-keyword-case="settingsStore.editorSettings.sqlFormatter.keywordCase"
                   @update:explain-mode="(m: 'explain' | 'autotrace') => (explainMode = m)"
                   @update:block-dangerous-redis-commands="(v: boolean) => (blockDangerousRedisCommands = v)"
-                  @execute="tryExecute()"
+                  @execute="tryExecute($event)"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
                   @format-sql="formatActiveSql"
+                  @toggle-sql-keyword-case="toggleSqlKeywordCase"
                   @save-sql="void openSaveSqlDialog()"
                   @open-sql="openSqlFile"
                   @import-result-archive="importResultArchive"
@@ -1240,7 +1277,7 @@ onUnmounted(() => {
                     :cursor-pos="cursorPos"
                     @update:active-output-view="activeOutputView = $event"
                     @fix-with-ai="fixWithAi"
-                    @execute="tryExecute()"
+                    @execute="tryExecute($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
@@ -1255,6 +1292,7 @@ onUnmounted(() => {
                     @sort="onSort"
                     @execute-sql="onExecuteSql"
                     @click-table="onClickTable"
+                    @view-table-data="onViewTableData"
                     @open-object-table="
                       (target) =>
                         activeTab &&
@@ -1370,7 +1408,7 @@ onUnmounted(() => {
       </div>
       <Teleport to="body">
         <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text">
+          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 w-max mx-auto z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text">
             {{ toastMessage }}
           </div>
         </Transition>
@@ -1429,11 +1467,12 @@ onUnmounted(() => {
 <style scoped>
 .toast-enter-active,
 .toast-leave-active {
-  transition: all 0.25s ease;
+  transition: 0.25s ease;
+  transition-property: transform, opacity;
 }
 .toast-enter-from,
 .toast-leave-to {
   opacity: 0;
-  transform: translate(-50%, 8px);
+  transform: translateY(100%) scale(0.95);
 }
 </style>

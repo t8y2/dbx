@@ -68,6 +68,10 @@ pub struct ConnectionConfig {
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub gbase_server: String,
+    /// Informix server name (INFORMIXSERVER). When empty, the agent
+    /// derives it from the hostname.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub informix_server: String,
     /// Typed configuration for external tabular sources.
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
@@ -144,6 +148,11 @@ pub struct SshTunnelConfig {
     pub expose_lan: bool,
     #[serde(default)]
     pub use_ssh_agent: bool,
+    /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
+    /// When set and `use_ssh_agent` is true, this path is used instead of
+    /// the `SSH_AUTH_SOCK` environment variable.
+    #[serde(default)]
+    pub ssh_agent_sock_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -374,6 +383,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub gbase_server: String,
     #[serde(default)]
+    pub informix_server: String,
+    #[serde(default)]
     pub external_config: Option<serde_json::Value>,
     #[serde(default)]
     pub jdbc_driver_class: Option<String>,
@@ -424,6 +435,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_key_separator: data.redis_key_separator,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
+            informix_server: data.informix_server,
             external_config: data.external_config,
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
@@ -1463,6 +1475,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

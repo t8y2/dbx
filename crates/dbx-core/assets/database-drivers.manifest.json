@@ -939,7 +939,7 @@
         "fieldLineage": false,
         "sqlExplain": true,
         "userAdmin": false,
-        "driverManagement": true
+        "driverManagement": false
       }
     },
     {
@@ -1474,8 +1474,8 @@
       "supportLevel": "connect",
       "capabilities": {
         "queryExecution": false,
-        "metadataBrowse": false,
-        "objectBrowser": false,
+        "metadataBrowse": true,
+        "objectBrowser": true,
         "objectSource": false,
         "schemaSearch": false,
         "diagram": false,

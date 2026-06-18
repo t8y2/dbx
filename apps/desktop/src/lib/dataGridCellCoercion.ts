@@ -80,15 +80,21 @@ function isPostgresArrayColumn(columnInfo: Pick<ColumnInfo, "data_type"> | undef
 }
 
 function normalizeSmartQuotedJsonInput(value: string): string {
-  if (!/[“”]/.test(value)) return value;
+  // Check for smart double quotes that input methods might insert.
+  // U+201C, U+201D, U+201E, U+201F, U+FF02
+  if (!hasSmartDoubleQuotes(value)) return value;
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+
   try {
     JSON.parse(value);
     return value;
   } catch {
-    // macOS smart punctuation can turn JSON delimiters into Chinese-style quotes.
+    // Input methods can turn JSON delimiters into smart quotes.
   }
+
+  // Input methods (especially on macOS and with Chinese IME) can turn JSON delimiters
+  // into smart quotes. Normalize them to standard ASCII quotes.
   const normalized = normalizeSmartQuotes(value);
   try {
     JSON.parse(normalized);
@@ -98,8 +104,29 @@ function normalizeSmartQuotedJsonInput(value: string): string {
   }
 }
 
+function hasSmartDoubleQuotes(value: string): boolean {
+  // Check for smart double quotes: U+201C, U+201D, U+201E, U+201F, U+FF02
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0x201c || code === 0x201d || code === 0x201e || code === 0x201f || code === 0xff02) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function normalizeSmartQuotes(value: string): string {
-  return value.replace(/[“”]/g, '"');
+  let result = "";
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0x201c || code === 0x201d || code === 0x201e || code === 0x201f || code === 0xff02) {
+      // Convert to standard double quote
+      result += '"';
+    } else {
+      result += value[i];
+    }
+  }
+  return result;
 }
 
 function formatPostgresArrayText(value: unknown[]): string {

@@ -44,6 +44,10 @@ const STORAGE_KEY = "dbx-open-tabs";
 const ACTIVE_TAB_KEY = "dbx-active-tab";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 
+function resultRunCacheKey(tabId: string, runId: string): string {
+  return `tab:${tabId}:run:${runId}`;
+}
+
 function markQueryResultRowsRaw(result: QueryResult): QueryResult {
   markRaw(result.rows);
   return result;
@@ -197,6 +201,12 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function clearResultRunSnapshots(tab: QueryTab) {
+    for (const run of tab.resultRuns ?? []) {
+      if (run.resultCacheKey) void deleteTabResultSnapshot(run.resultCacheKey);
+    }
+  }
+
   function projectResultRun(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
     const activeIndex = run.activeResultIndex ?? 0;
     tab.activeResultRunId = run.id;
@@ -227,10 +237,33 @@ export const useQueryStore = defineStore("query", () => {
     touchResult(tab);
   }
 
-  function setActiveResultRun(id: string, runId: string) {
+  async function restoreResultRunPayload(tab: QueryTab, runId: string) {
+    const run = tab.resultRuns?.find((item) => item.id === runId);
+    if (!run || run.result || run.results?.length) return run;
+
+    const cacheKey = run.resultCacheKey ?? tab.resultCacheKey;
+    if (!cacheKey) return run;
+
+    const snapshot = await readTabResultSnapshot(cacheKey);
+    const snapshotRun = snapshot?.resultRuns?.find((item) => item.id === runId);
+    if (!snapshotRun) return run;
+
+    const restoredRun = {
+      ...run,
+      ...snapshotRun,
+      result: snapshotRun.result ? markQueryResultRowsRaw(snapshotRun.result) : undefined,
+      results: snapshotRun.results ? markQueryResultsRowsRaw(snapshotRun.results) : undefined,
+      resultCacheState: "memory" as const,
+    };
+    tab.resultRuns = tab.resultRuns?.map((item) => (item.id === runId ? restoredRun : item));
+    return restoredRun;
+  }
+
+  async function setActiveResultRun(id: string, runId: string) {
     const tab = tabs.value.find((t) => t.id === id);
-    const run = tab?.resultRuns?.find((item) => item.id === runId);
-    if (!tab || !run) return false;
+    if (!tab) return false;
+    const run = await restoreResultRunPayload(tab, runId);
+    if (!run?.result && !run?.results?.length) return false;
     projectResultRun(tab, run);
     return true;
   }
@@ -240,6 +273,8 @@ export const useQueryStore = defineStore("query", () => {
     const runIndex = tab?.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
     if (!tab || !tab.resultRuns || runIndex < 0) return false;
 
+    const removedRun = tab.resultRuns[runIndex];
+    if (removedRun?.resultCacheKey) void deleteTabResultSnapshot(removedRun.resultCacheKey);
     const wasActive = tab.activeResultRunId === runId;
     const remainingRuns = tab.resultRuns.filter((run) => run.id !== runId);
     tab.resultRuns = remainingRuns;
@@ -259,6 +294,29 @@ export const useQueryStore = defineStore("query", () => {
 
   function nextResultRunSequence(tab: QueryTab): number {
     return (tab.resultRuns?.reduce((max, run) => Math.max(max, run.sequence), 0) ?? 0) + 1;
+  }
+
+  function persistResultRun(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
+    const key = run.resultCacheKey ?? resultRunCacheKey(tab.id, run.id);
+    run.resultCacheKey = key;
+    run.resultCacheState = "memory";
+    void writeTabResultSnapshot(key, {
+      result: run.result,
+      results: run.results,
+      activeResultIndex: run.activeResultIndex,
+      resultRuns: [run],
+      activeResultRunId: run.id,
+      queryAnalysis: run.queryAnalysis,
+      querySourceColumns: run.querySourceColumns,
+      queryEditabilityReason: run.queryEditabilityReason,
+      tableMeta: run.tableMeta,
+      resultPageSql: run.resultPageSql,
+      resultPageLimit: run.resultPageLimit,
+      resultPageOffset: run.resultPageOffset,
+      resultCountSql: run.resultCountSql,
+      resultTotalRowCount: run.resultTotalRowCount,
+      cachedAt: Date.now(),
+    });
   }
 
   function captureDisplayedResultRun(tab: QueryTab, sql: string, createdAt = Date.now()) {
@@ -295,15 +353,26 @@ export const useQueryStore = defineStore("query", () => {
       queryEditabilityReason: tab.queryEditabilityReason,
       tableMeta: tab.tableMeta,
     };
+    persistResultRun(tab, run);
     tab.resultRuns = [...(tab.resultRuns ?? []), run];
     tab.activeResultRunId = run.id;
+  }
+
+  function toggleResultAutoSave(id: string): boolean {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "query") return false;
+    tab.resultAutoSave = tab.resultAutoSave ? undefined : true;
+    if (tab.resultAutoSave && tab.result && !tab.activeResultRunId) {
+      captureDisplayedResultRun(tab, tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql);
+    }
+    return tab.resultAutoSave === true;
   }
 
   function syncActiveResultRunFromDisplayed(tab: QueryTab) {
     if (!tab.activeResultRunId || !tab.resultRuns?.length) return;
     const index = tab.resultRuns.findIndex((run) => run.id === tab.activeResultRunId);
     if (index < 0) return;
-    tab.resultRuns[index] = {
+    const run = {
       ...tab.resultRuns[index],
       result: tab.result,
       results: tab.results,
@@ -330,6 +399,17 @@ export const useQueryStore = defineStore("query", () => {
       queryEditabilityReason: tab.queryEditabilityReason,
       tableMeta: tab.tableMeta,
     };
+    persistResultRun(tab, run);
+    tab.resultRuns[index] = run;
+  }
+
+  function syncDisplayedResultRun(tab: QueryTab, sql: string) {
+    if (tab.mode !== "query" || !tab.result) return;
+    if (tab.activeResultRunId) {
+      syncActiveResultRunFromDisplayed(tab);
+    } else if (tab.resultAutoSave) {
+      captureDisplayedResultRun(tab, sql);
+    }
   }
 
   function resultRunHasPayload(run: NonNullable<QueryTab["resultRuns"]>[number]): boolean {
@@ -370,6 +450,7 @@ export const useQueryStore = defineStore("query", () => {
       whereInput: t.whereInput,
       pinned: t.pinned,
       mode: t.mode,
+      resultAutoSave: t.resultAutoSave,
       structureTableName: t.structureTableName,
       objectBrowser: t.objectBrowser,
       objectSource: t.objectSource,
@@ -564,6 +645,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tabs.value[idx].isExplaining) void cancelTabExplain(id);
     void closeResultSession(tabs.value[idx]);
     void closeClientConnectionSession(tabs.value[idx]);
+    clearResultRunSnapshots(tabs.value[idx]);
     clearResultPayload(tabs.value[idx]);
     tabs.value.splice(idx, 1);
     if (activeTabId.value === id) {
@@ -600,6 +682,7 @@ export const useQueryStore = defineStore("query", () => {
         if (tab.isExplaining) void cancelTabExplain(tab.id);
         void closeResultSession(tab);
         void closeClientConnectionSession(tab);
+        clearResultRunSnapshots(tab);
         clearResultPayload(tab);
       });
     const next = closeOtherTabsState(tabs.value, activeTabId.value, id);
@@ -614,6 +697,7 @@ export const useQueryStore = defineStore("query", () => {
       if (tab.isExplaining) void cancelTabExplain(tab.id);
       void closeResultSession(tab);
       void closeClientConnectionSession(tab);
+      clearResultRunSnapshots(tab);
       clearResultPayload(tab);
     });
     const next = closeAllTabsState(tabs.value, activeTabId.value);
@@ -697,6 +781,7 @@ export const useQueryStore = defineStore("query", () => {
         if (tab.isExplaining) void cancelTabExplain(tab.id);
         void closeResultSession(tab);
         void closeClientConnectionSession(tab);
+        clearResultRunSnapshots(tab);
         clearResultPayload(tab);
       });
 
@@ -1150,6 +1235,10 @@ export const useQueryStore = defineStore("query", () => {
     }
     tab.executionId = executionId;
     tab.lastExecutedSql = sql;
+    const updateActiveResultRun = !!tab.activeResultRunId && options?.preserveResultDuringExecution === true;
+    if (!updateActiveResultRun) {
+      tab.activeResultRunId = undefined;
+    }
     if (!options?.preserveTotalRowCountDuringExecution) {
       tab.resultTotalRowCount = undefined;
     }
@@ -1179,7 +1268,7 @@ export const useQueryStore = defineStore("query", () => {
       await connStore.ensureConnected(tab.connectionId);
       const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
-      const useAgentCursor = supportsDatabaseFeature(conn?.db_type, "driverManagement");
+      const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
       await previousResultSessionClose;
@@ -1197,6 +1286,7 @@ export const useQueryStore = defineStore("query", () => {
 
         const allResults: QueryResult[] = [];
         const skipSafety = options?.skipRedisSafetyCheck;
+        let hadMutatingCommand = false;
         for (const command of commands) {
           try {
             const result = await api.redisExecuteCommand(tab.connectionId, currentDb, command, skipSafety);
@@ -1206,6 +1296,7 @@ export const useQueryStore = defineStore("query", () => {
             // Write commands (SET/DEL/...) mutate the key set — drop the cached key-name completion
             // for the db this command ran on so the next autocomplete fetch reflects the new keys.
             if (isRedisMutatingCommand(command)) {
+              hadMutatingCommand = true;
               connStore.invalidateCompletionCache(tab.connectionId, String(currentDb));
             }
           } catch (e: any) {
@@ -1234,12 +1325,18 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
           // Reflect db switches from SELECT N in the tab so the toolbar dropdown, tab title and
           // sidebar stay in sync with the command's effective db.
           if (current.database !== String(currentDb)) {
             current.database = String(currentDb);
           }
+        }
+        // Refresh the sidebar db key counts (INFO keyspace) when at least one command in
+        // this batch mutated the key set, so `dbN (count)` stays accurate without a manual
+        // refresh. Fire-and-forget: never block result display.
+        if (hadMutatingCommand) {
+          void connStore.refreshRedisDbKeyCounts(tab.connectionId);
         }
         return;
       }
@@ -1286,7 +1383,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1312,7 +1409,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1344,7 +1441,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1371,7 +1468,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1412,7 +1509,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          captureDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
         }
         return;
       }
@@ -1423,7 +1520,6 @@ export const useQueryStore = defineStore("query", () => {
         ...(typeof pageLimit === "number"
           ? useAgentResultSession
             ? {
-                maxRows: pageLimit,
                 fetchSize: pageLimit,
                 pageSize: pageLimit,
                 resultSessionId: options?.pagination?.sessionId,
@@ -1477,7 +1573,7 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCountLoading = false;
         }
         touchResult(current);
-        captureDisplayedResultRun(current, queryBaseSql);
+        syncDisplayedResultRun(current, queryBaseSql);
         if (current.mode === "query" && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
@@ -1531,7 +1627,7 @@ export const useQueryStore = defineStore("query", () => {
         current.resultTotalRowCount = undefined;
         current.resultTotalRowCountLoading = false;
         touchResult(current);
-        captureDisplayedResultRun(current, queryBaseSql);
+        syncDisplayedResultRun(current, queryBaseSql);
       }
     } finally {
       const current = tabs.value.find((t) => t.id === id);
@@ -1902,7 +1998,7 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
-    const useAgentCursor = supportsDatabaseFeature(conn?.db_type, "driverManagement");
+    const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
     const queryBaseSql = tab.resultBaseSql ?? sql;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
     const rows: QueryResult["rows"] = [];
@@ -1924,7 +2020,6 @@ export const useQueryStore = defineStore("query", () => {
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return tab.result;
         const executionOptions = plan.useAgentResultSession
           ? {
-              maxRows: plan.pageLimit,
               fetchSize: plan.pageLimit,
               pageSize: plan.pageLimit,
               resultSessionId: sessionId,
@@ -1998,6 +2093,7 @@ export const useQueryStore = defineStore("query", () => {
     setExecuting,
     setExecutingWithId,
     setErrorResult,
+    toggleResultAutoSave,
     setActiveResultRun,
     removeResultRun,
     setActiveResultIndex,

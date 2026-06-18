@@ -79,6 +79,20 @@ pub async fn start_transfer(
         };
 
         let tables = req.tables.clone();
+        // Sort by FK dependency so referenced tables are transferred first.
+        let tables = transfer::sort_tables_by_fk_dependency(
+            &app,
+            &req.source_connection_id,
+            &req.source_database,
+            &req.source_schema,
+            &tables,
+            true,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+            tables
+        });
         for (i, table) in tables.iter().enumerate() {
             if transfer::is_cancelled(&req.transfer_id).await {
                 let progress = transfer::TransferProgress {
@@ -194,4 +208,31 @@ pub async fn cancel_transfer(
 ) -> Json<serde_json::Value> {
     transfer::set_cancelled(&req.transfer_id).await;
     Json(serde_json::json!({ "cancelled": true }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortTablesByFkRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub schema: String,
+    pub tables: Vec<String>,
+    pub parents_first: bool,
+}
+
+pub async fn sort_tables_by_fk_dependency(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SortTablesByFkRequest>,
+) -> Result<Json<Vec<String>>, AppError> {
+    transfer::sort_tables_by_fk_dependency(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.schema,
+        &req.tables,
+        req.parents_first,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError)
 }

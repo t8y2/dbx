@@ -134,6 +134,12 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
   return { connectionId: tab.connectionId, database, schema, tableName };
 }
 
+export function qualifiedTableNameAtSqlPosition(sql: string, pos: number): string | null {
+  const parts = extractQualifiedIdentifierPartsAt(sql, pos).map((part) => part.value);
+  if (parts.length === 0) return null;
+  return parts.join(".");
+}
+
 export function queryContextTargetFromCandidate(tab: QueryTab | undefined | null, candidate?: QueryCursorTableCandidate | null): ActiveTabSidebarTarget | null {
   if (!tab || tab.mode !== "query" || !tab.connectionId || !tab.database) return null;
   return {

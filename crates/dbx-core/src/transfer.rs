@@ -8,7 +8,7 @@ use crate::db;
 use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
-use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 #[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
@@ -170,6 +170,21 @@ fn is_mysql_family_target(target_db: &DatabaseType) -> bool {
             | DatabaseType::StarRocks
             | DatabaseType::Goldendb
             | DatabaseType::Sundb
+    )
+}
+
+/// QuestDB is not included. It only uses the PGWire protocol. SQL DDL syntax is not compatible.
+fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
+    matches!(
+        target_db,
+        DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Kwdb
+            | DatabaseType::Vastbase
     )
 }
 
@@ -624,6 +639,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 {
                     format!("b'{escaped}'")
                 }
+                DatabaseType::SqlServer => format!("N'{escaped}'"),
                 _ => format!("'{escaped}'"),
             }
         }
@@ -1098,7 +1114,9 @@ pub fn generate_create_table_ddl(
     ddl.push_str(&format!("{create_prefix} {full_table} (\n"));
     ddl.push_str(&col_lines.join(",\n"));
 
-    if !pks.is_empty() {
+    // ClickHouse: PRIMARY KEY must be a prefix of ORDER BY; skip inline PK
+    // and encode it in the ENGINE clause below instead.
+    if !pks.is_empty() && !matches!(target_db, DatabaseType::ClickHouse) {
         ddl.push_str(&format!(",\n  PRIMARY KEY ({})", pks.join(", ")));
     }
 
@@ -1114,7 +1132,11 @@ pub fn generate_create_table_ddl(
     }
 
     if matches!(target_db, DatabaseType::ClickHouse) {
-        ddl.push_str(" ENGINE = MergeTree() ORDER BY tuple()");
+        if pks.is_empty() {
+            ddl.push_str(" ENGINE = MergeTree() ORDER BY tuple()");
+        } else {
+            ddl.push_str(&format!(" ENGINE = MergeTree() ORDER BY ({})", pks.join(", ")));
+        }
     }
 
     ddl
@@ -1830,7 +1852,13 @@ pub async fn execute_on_pool_with_max_rows(
             let client = client.clone();
             drop(connections);
             let mut client = client.lock().await;
-            db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await
+            let result = db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await;
+            drop(client);
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(Some(DatabaseType::SqlServer), err))
+            {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::Agent(client) => {
             let client = client.clone();
@@ -2458,6 +2486,101 @@ pub async fn clear_cancelled(transfer_id: &str) {
     CANCELLED.write().await.remove(transfer_id);
 }
 
+/// Sort table names by foreign key dependency.
+///
+/// When `parents_first` is true (data transfer / SQL export), referenced (parent)
+/// tables come before referencing (child) tables so inserts don't violate FK
+/// constraints.
+///
+/// When `parents_first` is false (batch drop), referencing (child) tables come
+/// first so they are dropped before the tables they reference.
+///
+/// Uses Kahn's algorithm for topological sort; tables involved in cycles keep
+/// their original relative order after all cycle-free tables.
+pub async fn sort_tables_by_fk_dependency(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    tables: &[String],
+    parents_first: bool,
+) -> Result<Vec<String>, String> {
+    if tables.len() <= 1 {
+        return Ok(tables.to_vec());
+    }
+
+    let table_set: HashSet<&str> = tables.iter().map(|t| t.as_str()).collect();
+
+    // Gather FK relationships for every table.
+    let mut dependency_map: HashMap<String, Vec<String>> = HashMap::new();
+    for table in tables {
+        let fks = crate::schema::list_foreign_keys_core(state, connection_id, database, schema, table).await?;
+        let deps: Vec<String> = fks
+            .iter()
+            .map(|fk| fk.ref_table.clone())
+            .filter(|ref_table| table_set.contains(ref_table.as_str()))
+            .collect();
+        dependency_map.insert(table.clone(), deps);
+    }
+
+    // Build in-degree and dependents graph.
+    // parents_first=true:  edge ref_table → table     (parent before child)
+    // parents_first=false: edge table → ref_table      (child before parent)
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for table in tables {
+        in_degree.entry(table.as_str()).or_insert(0);
+    }
+    for table in tables {
+        if let Some(deps) = dependency_map.get(table) {
+            for ref_table in deps {
+                if parents_first {
+                    // FK-bearing table depends on ref_table — parent comes first.
+                    *in_degree.entry(table.as_str()).or_insert(0) += 1;
+                    dependents.entry(ref_table.as_str()).or_default().push(table.as_str());
+                } else {
+                    // ref_table depends on FK-bearing table — child comes first.
+                    *in_degree.entry(ref_table.as_str()).or_insert(0) += 1;
+                    dependents.entry(table.as_str()).or_default().push(ref_table.as_str());
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm.
+    let mut queue: std::collections::VecDeque<&str> =
+        in_degree.iter().filter(|(_, &deg)| deg == 0).map(|(&table, _)| table).collect();
+
+    let mut sorted: Vec<String> = Vec::new();
+    while let Some(table) = queue.pop_front() {
+        sorted.push(table.to_string());
+        if let Some(deps) = dependents.get(table) {
+            for &dependent in deps {
+                let deg = in_degree.get_mut(dependent).unwrap();
+                *deg -= 1;
+                if *deg == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+    }
+
+    // Append any tables left behind by cycles in their original order.
+    if sorted.len() < tables.len() {
+        let sorted_set: HashSet<&str> = sorted.iter().map(|s| s.as_str()).collect();
+        let mut remaining: Vec<String> = Vec::new();
+        for table in tables {
+            if !sorted_set.contains(table.as_str()) {
+                remaining.push(table.clone());
+            }
+        }
+        sorted.extend(remaining);
+    }
+
+    Ok(sorted)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transfer_mongodb_table<F>(
     state: &AppState,
@@ -2746,6 +2869,7 @@ where
         Some(table),
         Some(1),
         None,
+        None,
     )
     .await
     .unwrap_or_default()
@@ -2760,6 +2884,7 @@ where
         &request.target_schema,
         Some(table),
         Some(1),
+        None,
         None,
     )
     .await
@@ -2803,8 +2928,28 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
-        let ddl = if is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type) {
-            query_mysql_create_table_ddl(state, source_pool_key, &request.source_schema, table).await?
+        let ddl = if (source_db_type == target_db_type)
+            || (is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type))
+            || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type))
+        {
+            crate::schema::get_table_ddl_core(
+                &state,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                table,
+                None,
+            )
+            .await
+            .unwrap_or(generate_create_table_ddl(
+                &columns,
+                table,
+                &request.source_schema,
+                &request.target_schema,
+                target_db_type,
+                source_db_type,
+                table_comment.as_deref(),
+            ))
         } else {
             generate_create_table_ddl(
                 &columns,
@@ -2973,17 +3118,6 @@ where
     }
 
     Ok(total_transferred)
-}
-
-async fn query_mysql_create_table_ddl(
-    state: &AppState,
-    source_pool_key: &str,
-    source_schema: &str,
-    table: &str,
-) -> Result<String, String> {
-    let sql = format!("SHOW CREATE TABLE {}", qualified_table(table, source_schema, &DatabaseType::Mysql));
-    let rows = execute_on_pool(state, source_pool_key, &sql).await?.rows;
-    rows.first().and_then(|row| json_string_cell(row, 1)).ok_or_else(|| format!("Failed to get MySQL DDL: {sql}"))
 }
 
 pub async fn transfer_postgres_schema_dependencies<F>(
@@ -3366,6 +3500,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -3555,6 +3690,47 @@ mod tests {
         // PostgreSQL target should NOT have inline COMMENT
         let ddl = generate_create_table_ddl(&cols, "t", "", "", &DatabaseType::Postgres, &DatabaseType::Postgres, None);
         assert!(!ddl.contains("COMMENT"));
+    }
+
+    #[test]
+    fn clickhouse_create_table_with_pk_uses_order_by_pk() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "UInt64") },
+            db::ColumnInfo { ..test_column("name", "String") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "logs",
+            "",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::ClickHouse,
+            None,
+        );
+
+        // Must include ENGINE with ORDER BY using the PK columns
+        assert!(ddl.contains("ENGINE = MergeTree() ORDER BY (`id`)"));
+        // Must NOT have a separate PRIMARY KEY clause (ORDER BY serves that role)
+        assert!(!ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn clickhouse_create_table_without_pk_uses_order_by_tuple() {
+        let cols = vec![db::ColumnInfo { ..test_column("message", "String") }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "logs",
+            "",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::ClickHouse,
+            None,
+        );
+
+        assert!(ddl.contains("ENGINE = MergeTree() ORDER BY tuple()"));
+        assert!(!ddl.contains("PRIMARY KEY"));
     }
 
     #[test]
@@ -3916,6 +4092,20 @@ mod tests {
             sql,
             "INSERT INTO `policies` (`dt`, `raw_text`, `d`, `t`) VALUES\n('2026-05-12 00:00:00', '2026-05-12T00:00:00+00:00', '2026-05-12', '09:30:45')"
         );
+    }
+
+    #[test]
+    fn sqlserver_insert_prefixes_string_literals_as_unicode() {
+        let sql = generate_insert_typed(
+            &[String::from("name"), String::from("note")],
+            &[Some(String::from("nvarchar(100)")), Some(String::from("varchar(100)"))],
+            &[vec![json!("Tiếng Việt"), json!("O'Brien")]],
+            "customers",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
     }
 
     #[test]

@@ -37,8 +37,14 @@ pub fn is_metadata_connection_scoped(db_type: &DatabaseType) -> bool {
 }
 
 pub fn skips_tcp_probe(db_type: &DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Sqlite | DatabaseType::DuckDb | DatabaseType::Turso | DatabaseType::Jdbc)
-        || is_agent_type(db_type)
+    matches!(
+        db_type,
+        DatabaseType::Sqlite
+            | DatabaseType::DuckDb
+            | DatabaseType::Turso
+            | DatabaseType::Jdbc
+            | DatabaseType::MessageQueue
+    ) || is_agent_type(db_type)
 }
 
 /// Database types whose connection backs onto a single local file (or may, in the

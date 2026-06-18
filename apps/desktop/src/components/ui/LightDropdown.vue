@@ -23,6 +23,7 @@ const props = withDefaults(
     triggerTitle?: string;
     triggerIcon?: Component;
     triggerLabel?: string;
+    disabled?: boolean;
     showTriggerLabel?: boolean;
     showChevron?: boolean;
     checkPosition?: "left" | "right" | "none";
@@ -46,6 +47,7 @@ const props = withDefaults(
     triggerTitle: undefined,
     triggerIcon: undefined,
     triggerLabel: undefined,
+    disabled: false,
     showTriggerLabel: true,
     showChevron: true,
     checkPosition: "left",
@@ -115,6 +117,7 @@ function fitPositionToViewport() {
 }
 
 function openMenu() {
+  if (props.disabled) return;
   updatePosition();
   open.value = true;
   nextTick(fitPositionToViewport);
@@ -160,7 +163,7 @@ onBeforeUnmount(close);
 </script>
 
 <template>
-  <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" :aria-expanded="open" @click="toggle">
+  <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" :aria-expanded="open" :disabled="disabled" @click="toggle">
     <component :is="triggerIcon" v-if="triggerIcon" :class="triggerIconClass" />
     <span v-if="showTriggerLabel">{{ triggerLabel ?? selectedItem?.label }}</span>
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />

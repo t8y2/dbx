@@ -241,6 +241,7 @@ async fn execute_list_tables(
         None,
         Some(LIST_TABLES_LIMIT + 1),
         None,
+        None,
     )
     .await
     .map_err(|e| format!("Failed to list tables: {e}"))?;

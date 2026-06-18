@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/node-core",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "description": "Shared Node.js database and DBX connection utilities for DBX CLI and MCP server",
   "license": "Apache-2.0",
   "files": [

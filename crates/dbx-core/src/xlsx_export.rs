@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Seek, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,21 +10,147 @@ pub struct XlsxWorksheetData {
     pub rows: Vec<Vec<Value>>,
 }
 
-fn escape_xml(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| {
-            let code = *ch as u32;
-            code == 9 || code == 10 || code == 13 || code >= 32
-        })
-        .flat_map(|ch| match ch {
-            '&' => "&amp;".chars().collect::<Vec<_>>(),
-            '<' => "&lt;".chars().collect::<Vec<_>>(),
-            '>' => "&gt;".chars().collect::<Vec<_>>(),
-            '"' => "&quot;".chars().collect::<Vec<_>>(),
-            _ => vec![ch],
+/// Streaming XLSX writer that incrementally writes rows to a ZIP-backed
+/// workbook.  This avoids accumulating all rows in memory before building the
+/// final file, drastically reducing peak memory for large exports.
+pub struct StreamingXlsxWriter<W: Write + Seek> {
+    zip: zip::ZipWriter<W>,
+    columns: Vec<String>,
+    next_row_number: usize,
+}
+
+/// Estimate column widths from header names only (used by the streaming path
+/// where full row data is not available up-front).  Each width is clamped to
+/// [10, 60] to stay within reasonable bounds.
+fn estimate_header_widths(columns: &[String]) -> Vec<usize> {
+    columns.iter().map(|col| (col.chars().count() + 2).clamp(10, 60)).collect()
+}
+
+/// Build the `<cols>` XML fragment from a width slice.
+fn cols_xml(widths: &[usize]) -> String {
+    widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            format!("<col min=\"{}\" max=\"{}\" width=\"{}\" customWidth=\"1\"/>", index + 1, index + 1, width)
         })
         .collect()
+}
+
+/// Build a single `<row>` XML fragment for the header row (row 1).
+pub(crate) fn header_row_xml(columns: &[String]) -> String {
+    format!(
+        "<row r=\"1\">{}</row>",
+        columns
+            .iter()
+            .enumerate()
+            .map(|(index, col)| cell_xml(Some(&Value::String(col.clone())), 0, index, Some(1)))
+            .collect::<String>()
+    )
+}
+
+/// Build a single `<row>` XML fragment for a data row.
+pub(crate) fn data_row_xml(row_number: usize, columns: &[String], row: &[Value]) -> String {
+    let cells = columns
+        .iter()
+        .enumerate()
+        .map(|(col_index, _)| cell_xml(row.get(col_index), row_number - 1, col_index, None))
+        .collect::<String>();
+    format!("<row r=\"{row_number}\">{cells}</row>")
+}
+
+fn write_zip_entry<W: Write + Seek>(zip: &mut zip::ZipWriter<W>, path: &str, content: &str) -> Result<(), String> {
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file(path, options).map_err(|err| err.to_string())?;
+    zip.write_all(content.as_bytes()).map_err(|err| err.to_string())
+}
+
+/// Start a new streaming XLSX workbook.  The ZIP skeleton, worksheet header,
+/// column widths (estimated from header names) and the header row are written
+/// immediately.  Callers then feed data rows via [`StreamingXlsxWriter::write_row`]
+/// and finalize with [`StreamingXlsxWriter::finish`].
+pub(crate) fn start_streaming_xlsx_workbook<W: Write + Seek>(
+    writer: W,
+    sheet_name: Option<&str>,
+    columns: &[String],
+) -> Result<StreamingXlsxWriter<W>, String> {
+    let sheet_name = normalize_sheet_name(sheet_name);
+    let widths = estimate_header_widths(columns);
+
+    let mut zip = zip::ZipWriter::new(writer);
+    write_zip_entry(&mut zip, "[Content_Types].xml", content_types_xml())?;
+    write_zip_entry(&mut zip, "_rels/.rels", root_rels_xml())?;
+    write_zip_entry(&mut zip, "xl/workbook.xml", &workbook_xml(&sheet_name))?;
+    write_zip_entry(&mut zip, "xl/_rels/workbook.xml.rels", workbook_rels_xml())?;
+    write_zip_entry(&mut zip, "xl/styles.xml", styles_xml())?;
+
+    // Begin the sheet1.xml entry with header, frozen pane, column widths and
+    // the header row.
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("xl/worksheets/sheet1.xml", options).map_err(|err| err.to_string())?;
+
+    let sheet_header = format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
+            "<sheetViews><sheetView workbookViewId=\"0\">",
+            "<pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/>",
+            "</sheetView></sheetViews>",
+            "<sheetFormatPr defaultRowHeight=\"15\"/>",
+            "<cols>{cols}</cols>",
+            "<sheetData>"
+        ),
+        cols = cols_xml(&widths),
+    );
+    zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
+    zip.write_all(header_row_xml(columns).as_bytes()).map_err(|err| err.to_string())?;
+
+    Ok(StreamingXlsxWriter { zip, columns: columns.to_vec(), next_row_number: 2 })
+}
+
+impl<W: Write + Seek> StreamingXlsxWriter<W> {
+    /// Append a single data row to the worksheet.
+    pub fn write_row(&mut self, row: &[Value]) -> Result<(), String> {
+        self.zip
+            .write_all(data_row_xml(self.next_row_number, &self.columns, row).as_bytes())
+            .map_err(|err| err.to_string())?;
+        self.next_row_number += 1;
+        Ok(())
+    }
+
+    /// Finalize the worksheet and close the ZIP archive.  Returns the
+    /// underlying writer so callers can flush / close it as needed.
+    pub fn finish(mut self) -> Result<W, String> {
+        let row_count = self.next_row_number.saturating_sub(1);
+        let range = sheet_range(self.columns.len(), row_count);
+        self.zip
+            .write_all(format!("</sheetData><autoFilter ref=\"{range}\"/></worksheet>").as_bytes())
+            .map_err(|err| err.to_string())?;
+        self.zip.finish().map_err(|err| err.to_string())
+    }
+}
+
+/// Convenience wrapper that finalizes a streaming workbook.
+pub(crate) fn finish_streaming_xlsx_workbook<W: Write + Seek>(writer: StreamingXlsxWriter<W>) -> Result<W, String> {
+    writer.finish()
+}
+
+fn escape_xml(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    for ch in value.chars() {
+        let code = ch as u32;
+        if code != 9 && code != 10 && code != 13 && code < 32 {
+            continue;
+        }
+        match ch {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
 fn column_name(index: usize) -> String {
@@ -32,10 +158,10 @@ fn column_name(index: usize) -> String {
     let mut n = index + 1;
     while n > 0 {
         let rem = (n - 1) % 26;
-        out.insert(0, (b'A' + rem as u8) as char);
+        out.push((b'A' + rem as u8) as char);
         n = (n - 1) / 26;
     }
-    out
+    out.chars().rev().collect()
 }
 
 fn cell_ref(row_index: usize, col_index: usize) -> String {
@@ -67,13 +193,7 @@ fn normalize_sheet_name(input: Option<&str>) -> String {
 fn value_text(value: Option<&Value>) -> String {
     match value {
         Some(Value::Null) | None => String::new(),
-        Some(Value::Bool(v)) => {
-            if *v {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            }
-        }
+        Some(Value::Bool(v)) => v.to_string(),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
@@ -85,10 +205,8 @@ fn estimate_column_widths(columns: &[String], rows: &[Vec<Value>]) -> Vec<usize>
         .iter()
         .enumerate()
         .map(|(col_index, column)| {
-            let values = rows.iter().take(100).map(|row| value_text(row.get(col_index)));
-            let max_len = std::iter::once(column.clone())
-                .chain(values)
-                .map(|v| v.chars().count().min(60))
+            let max_len = std::iter::once(column.chars().count().min(60))
+                .chain(rows.iter().take(100).map(|row| value_text(row.get(col_index)).chars().count().min(60)))
                 .fold(8usize, usize::max);
             (max_len + 2).clamp(10, 60)
         })
@@ -265,8 +383,10 @@ pub fn build_xlsx_workbook(data: &XlsxWorksheetData) -> Result<Vec<u8>, String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_xlsx_workbook, XlsxWorksheetData};
+    use super::{build_xlsx_workbook, start_streaming_xlsx_workbook, XlsxWorksheetData};
+    use calamine::{open_workbook_auto, Reader};
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn builds_xlsx_zip_with_sheet_data() {
@@ -298,5 +418,26 @@ mod tests {
         .expect("build workbook");
         let text = String::from_utf8_lossy(&workbook);
         assert!(text.contains("name=\"bad name with chars and-a-very-\""));
+    }
+
+    #[test]
+    fn streams_xlsx_rows_to_a_readable_workbook() {
+        let path = std::env::temp_dir().join(format!("dbx-stream-test-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let mut writer =
+                start_streaming_xlsx_workbook(file, Some("Streamed"), &["id".to_string(), "name".to_string()])
+                    .expect("start workbook");
+            writer.write_row(&[json!(1), json!("Ada")]).expect("write row");
+            writer.write_row(&[json!(2), json!("Bob")]).expect("write row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let mut workbook = open_workbook_auto(&path).expect("open workbook");
+        let range = workbook.worksheet_range("Streamed").expect("read worksheet");
+        assert_eq!(range.get_value((0, 0)).expect("header"), &calamine::Data::String("id".to_string()));
+        assert_eq!(range.get_value((1, 0)).expect("row1"), &calamine::Data::Float(1.0));
+        assert_eq!(range.get_value((2, 1)).expect("row2"), &calamine::Data::String("Bob".to_string()));
+        let _ = fs::remove_file(&path);
     }
 }

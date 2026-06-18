@@ -3,6 +3,18 @@ import type { DatabaseType } from "@/types/database";
 
 export type ExecuteMode = "all" | "current";
 
+export interface SqlExecutionSnapshot {
+  fullSql: string;
+  selectedSql: string;
+  cursorPos: number;
+}
+
+export type SqlExecutionOverride = string | SqlExecutionSnapshot;
+
+export function isSqlExecutionSnapshot(value: SqlExecutionOverride | undefined): value is SqlExecutionSnapshot {
+  return typeof value === "object" && value !== null && typeof value.fullSql === "string" && typeof value.selectedSql === "string" && typeof value.cursorPos === "number";
+}
+
 export function resolveExecutableSql(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number }): string {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;

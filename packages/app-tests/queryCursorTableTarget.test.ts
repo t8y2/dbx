@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { extractQualifiedIdentifierPartsAt, findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate } from "../../apps/desktop/src/lib/queryCursorTableTarget.ts";
+import { extractQualifiedIdentifierPartsAt, findLoadedTableTargetForCandidate, qualifiedTableNameAtSqlPosition, queryContextTargetFromCandidate, queryCursorTableCandidate } from "../../apps/desktop/src/lib/queryCursorTableTarget.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(sql: string, head: number, schema = "public"): QueryTab {
@@ -31,6 +31,14 @@ test("extracts the qualified identifier under or after the cursor", () => {
     extractQualifiedIdentifierPartsAt('select * from "public"."order"', 26).map((part) => part.value),
     ["public", "order"],
   );
+});
+
+test("resolves the table name at a context-menu position", () => {
+  const sql = "select * from reporting.users where id = 1";
+
+  assert.equal(qualifiedTableNameAtSqlPosition(sql, sql.indexOf("users") + 2), "reporting.users");
+  assert.equal(qualifiedTableNameAtSqlPosition("select * from users", "select * from users".length), "users");
+  assert.equal(qualifiedTableNameAtSqlPosition(sql, sql.indexOf("where") + 1), null);
 });
 
 test("builds schema-aware cursor table candidates", () => {

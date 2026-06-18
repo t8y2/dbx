@@ -25,7 +25,7 @@ import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, f
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
-import { formatRedisCommandResult, formatRedisStringValue } from "@/lib/redisValuePresentation";
+import { formatRedisConsoleValue, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
@@ -434,7 +434,7 @@ async function runRedisCommand(command: string) {
     appendCommandHistory({
       prompt,
       command,
-      output: formatRedisCommandResult(result.value),
+      output: formatRedisConsoleValue(result.value),
       error: false,
     });
     // The db this command ran on — capture before nextRedisCommandDb() advances it.
@@ -447,6 +447,9 @@ async function runRedisCommand(command: string) {
     // reflects keys added/removed/renamed by SET/DEL/RENAME/...
     if (isRedisMutatingCommand(command)) {
       connectionStore.invalidateCompletionCache(props.connectionId, String(executedDb));
+      // Refresh the sidebar db key counts (INFO keyspace) so `dbN (count)` stays accurate
+      // after the write. Fire-and-forget so the terminal stays responsive.
+      void connectionStore.refreshRedisDbKeyCounts(props.connectionId);
     }
     // Persist to history
     persistRedisHistory(command, true, result.value);

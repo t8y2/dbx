@@ -787,7 +787,7 @@ fn build_data_compare_select_sql(
         );
     }
 
-    // JDBC connections rely on Statement.setMaxRows() for row limiting.
+    // JDBC connections avoid SQL-level LIMIT; the agent truncates rows while reading.
     if database_type == DatabaseType::Jdbc {
         return format!("SELECT {select_columns} FROM {table}{order_by};");
     }

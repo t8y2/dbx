@@ -34,6 +34,7 @@ pub(super) struct TableStructureCapabilities {
     pub(super) index_filter: bool,
     pub(super) index_comment: bool,
     pub(super) alter_primary_key: bool,
+    pub(super) foreign_key: bool,
 }
 
 impl Default for TableStructureCapabilities {
@@ -54,6 +55,7 @@ impl Default for TableStructureCapabilities {
             index_filter: false,
             index_comment: false,
             alter_primary_key: false,
+            foreign_key: false,
         }
     }
 }
@@ -82,6 +84,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_type: true,
             index_comment: true,
             alter_primary_key: true,
+            foreign_key: true,
             ..base
         },
         Some(DatabaseType::Gbase) => TableStructureCapabilities {
@@ -115,6 +118,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_filter: true,
             index_comment: true,
             alter_primary_key: true,
+            foreign_key: true,
             ..base
         },
         Some(DatabaseType::Questdb) => TableStructureCapabilities {
@@ -133,6 +137,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_filter: false,
             index_comment: false,
             alter_primary_key: false,
+            foreign_key: false,
         },
         Some(DatabaseType::Redshift | DatabaseType::Vertica) => TableStructureCapabilities {
             dialect: StructureDialect::Postgres,

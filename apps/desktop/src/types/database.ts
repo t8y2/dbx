@@ -101,6 +101,7 @@ export interface ConnectionConfig {
   redis_key_separator?: string;
   etcd_endpoints?: string;
   gbase_server?: string;
+  informix_server?: string;
   external_config?: unknown;
   one_time?: boolean;
   read_only?: boolean;
@@ -121,6 +122,7 @@ export interface SshTunnelConfig {
   connect_timeout_secs?: number;
   expose_lan?: boolean;
   use_ssh_agent?: boolean;
+  ssh_agent_sock_path?: string;
 }
 
 export interface ProxyTunnelConfig {
@@ -203,6 +205,13 @@ export interface JdbcPluginStatus {
 
 export interface DatabaseInfo {
   name: string;
+}
+
+export interface LinkedServerInfo {
+  name: string;
+  product?: string | null;
+  provider?: string | null;
+  data_source?: string | null;
 }
 
 export interface TableInfo {
@@ -389,6 +398,10 @@ export type TreeNodeType =
   | "connection"
   | "connection-group"
   | "database"
+  | "linked-server-root"
+  | "linked-server"
+  | "linked-server-catalog"
+  | "linked-server-schema"
   | "schema"
   | "table"
   | "view"
@@ -450,6 +463,9 @@ export interface TreeNode {
   pinned?: boolean;
   connectionId?: string;
   database?: string;
+  linkedServer?: string;
+  linkedCatalog?: string;
+  linkedSchema?: string;
   mqTenant?: string;
   schema?: string;
   tableName?: string;
@@ -457,6 +473,8 @@ export interface TreeNode {
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;
+  partitionParentSchema?: string;
+  partitionParentName?: string;
   hiddenChildren?: TreeNode[];
   savedSqlId?: string;
   savedSqlFolderId?: string;
@@ -503,6 +521,7 @@ export interface QueryTab {
   activeResultIndex?: number;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
+  resultAutoSave?: boolean;
   explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;

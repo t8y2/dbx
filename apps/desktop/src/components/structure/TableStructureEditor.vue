@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, Loader2, Maximize2, Plus, RefreshCw, Save, SlidersHorizontal, Trash2, X } from "@lucide/vue";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -300,6 +300,68 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlite: ["BTREE"],
 };
 const indexTypeOptions = computed(() => (structureCapabilities.value.indexType ? (indexTypesByDb[structureDialect.value] ?? []) : []));
+
+interface DefaultValuePreset {
+  label: string;
+  value: string;
+}
+
+const defaultValuePresets = computed((): DefaultValuePreset[] => {
+  const universal: DefaultValuePreset[] = [
+    { label: "''", value: "''" },
+    { label: "NULL", value: "NULL" },
+    { label: "0", value: "0" },
+    { label: "1", value: "1" },
+  ];
+
+  const dialectPresets: Record<string, DefaultValuePreset[]> = {
+    mysql: [
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+      { label: "CURRENT_TIME", value: "CURRENT_TIME" },
+    ],
+    postgres: [
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+      { label: "now()", value: "now()" },
+      { label: "gen_random_uuid()", value: "gen_random_uuid()" },
+    ],
+    sqlite: [
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+      { label: "CURRENT_TIME", value: "CURRENT_TIME" },
+    ],
+    duckdb: [
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+    ],
+    sqlserver: [
+      { label: "GETDATE()", value: "GETDATE()" },
+      { label: "GETUTCDATE()", value: "GETUTCDATE()" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "NEWID()", value: "NEWID()" },
+    ],
+    oracle: [
+      { label: "SYSDATE", value: "SYSDATE" },
+      { label: "SYSTIMESTAMP", value: "SYSTIMESTAMP" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+    ],
+    h2: [
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+    ],
+    clickhouse: [
+      { label: "now()", value: "now()" },
+      { label: "today()", value: "today()" },
+    ],
+    informix: [
+      { label: "CURRENT", value: "CURRENT" },
+      { label: "TODAY", value: "TODAY" },
+    ],
+  };
+
+  return [...universal, ...(dialectPresets[structureDialect.value] ?? [])];
+});
 
 function isPostgresIdentityType(dbType: string | undefined): boolean {
   return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "vastbase" || dbType === "kingbase";
@@ -654,7 +716,7 @@ function canDropIndex(index: EditableStructureIndex): boolean {
   return !!index.original && !index.isPrimary && structureCapabilities.value.dropIndex;
 }
 
-const canEditMysqlForeignKeys = computed(() => structureDialect.value === "mysql");
+const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
 const canEditMysqlTriggers = computed(() => structureDialect.value === "mysql");
 
 function generatedForeignKeyName(column = ""): string {
@@ -674,7 +736,7 @@ function generatedForeignKeyName(column = ""): string {
 }
 
 function addForeignKey() {
-  if (!canEditMysqlForeignKeys.value) return;
+  if (!canEditForeignKeys.value) return;
   activeTab.value = "foreignKeys";
   foreignKeys.value.push({
     id: `new:${uuid()}`,
@@ -699,7 +761,7 @@ function toggleDropForeignKey(foreignKey: EditableStructureForeignKey) {
 }
 
 function canEditForeignKeyDraft(foreignKey: EditableStructureForeignKey): boolean {
-  return canEditMysqlForeignKeys.value && !foreignKey.markedForDrop;
+  return canEditForeignKeys.value && !foreignKey.markedForDrop;
 }
 
 function addTrigger() {
@@ -802,7 +864,7 @@ function addItemForActiveTab(): boolean {
     addIndex();
     return true;
   }
-  if (activeTab.value === "foreignKeys" && canEditMysqlForeignKeys.value) {
+  if (activeTab.value === "foreignKeys" && canEditForeignKeys.value) {
     addForeignKey();
     return true;
   }
@@ -965,7 +1027,7 @@ watch(activeTab, (tab) => {
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addIndex") }}
               </Button>
-              <Button v-if="activeTab === 'foreignKeys'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditMysqlForeignKeys" @click="addForeignKey">
+              <Button v-if="activeTab === 'foreignKeys'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditForeignKeys" @click="addForeignKey">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addForeignKey") }}
               </Button>
@@ -1035,7 +1097,21 @@ watch(activeTab, (tab) => {
                     />
                   </td>
                   <td v-if="columnEditorControls.defaultValue" :class="structureCellClass">
-                    <Input v-model="column.defaultValue" :class="structureMonoControlClass" :disabled="isColumnDefaultDisabled(column)" />
+                    <div class="flex min-w-0 items-center gap-1">
+                      <Input v-model="column.defaultValue" :class="[structureMonoControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
+                      <DropdownMenu>
+                        <DropdownMenuTrigger as-child>
+                          <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'shrink-0']" :disabled="isColumnDefaultDisabled(column)" :aria-label="t('structureEditor.defaultValuePresets')" :title="t('structureEditor.defaultValuePresets')">
+                            <ChevronDown :class="structureIconClass" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" class="max-h-56 min-w-36 overflow-y-auto">
+                          <DropdownMenuItem v-for="preset in defaultValuePresets" :key="preset.value" @click="column.defaultValue = preset.value">
+                            <code class="font-mono text-[length:var(--structure-font-size)]">{{ preset.label }}</code>
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
                   </td>
                   <td v-if="columnEditorControls.comment" :class="structureCellClass">
                     <div class="flex min-w-0 items-center gap-1">

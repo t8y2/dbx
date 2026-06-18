@@ -466,7 +466,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
     match object_type {
         DatabaseObjectType::Table => "TABLE",
         DatabaseObjectType::View => "VIEW",
-        DatabaseObjectType::MaterializedView => "MATERIALIZED VIEW",
+        DatabaseObjectType::MaterializedView => "MATERIALIZED_VIEW",
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
     }

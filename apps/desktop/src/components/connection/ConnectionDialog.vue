@@ -135,6 +135,7 @@ const defaultForm = (): ConnectionForm => ({
   redis_key_separator: ":",
   etcd_endpoints: "",
   gbase_server: "",
+  informix_server: "",
   external_config: undefined,
   read_only: false,
   visible_databases: undefined,
@@ -154,6 +155,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     connect_timeout_secs: 5,
     expose_lan: false,
     use_ssh_agent: false,
+    ssh_agent_sock_path: "",
   };
 }
 
@@ -171,6 +173,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     connect_timeout_secs: Number(hop.connect_timeout_secs) || 5,
     expose_lan: !!hop.expose_lan,
     use_ssh_agent: !!hop.use_ssh_agent,
+    ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
   };
 }
 
@@ -247,6 +250,7 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
         connect_timeout_secs: config.ssh_connect_timeout_secs || 5,
         expose_lan: config.ssh_expose_lan || false,
         use_ssh_agent: false,
+        ssh_agent_sock_path: "",
       }),
     ];
   }
@@ -736,6 +740,7 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         redis_key_separator: config.redis_key_separator ?? ":",
         etcd_endpoints: config.etcd_endpoints || "",
+        informix_server: config.informix_server || "",
         read_only: config.read_only || false,
         visible_databases: config.visible_databases,
       };
@@ -1255,6 +1260,13 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
   }
+  if (config.db_type === "informix" && config.informix_server) {
+    // Strip INFORMIXSERVER from url_params to avoid duplicate when dedicated field is used
+    config.url_params = (config.url_params || "")
+      .replace(/(?:^|[;])\s*INFORMIXSERVER\s*=[^;]*/gi, "")
+      .replace(/^[;]|[;]$/g, "")
+      .trim();
+  }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
   if (config.db_type === "mq") {
@@ -1625,6 +1637,28 @@ function resetVisibleDatabaseDraftState() {
   visibleDatabaseShowSystem.value = false;
 }
 
+/** Silently load database names so the summary count shows a real total. */
+async function preloadVisibleDatabaseNames() {
+  if (!ensureConnectionHostResolvedFromUrl()) return;
+  if (visibleDatabaseNames.value.length > 0) return;
+  isLoadingVisibleDatabases.value = true;
+  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  const draftConfig = {
+    ...connectionConfigForSubmit(draftId),
+    id: draftId,
+    one_time: true,
+  };
+  try {
+    await api.connectDb(draftConfig);
+    visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
+  } catch {
+    // silently fail
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+    isLoadingVisibleDatabases.value = false;
+  }
+}
+
 async function openVisibleDatabasesPicker() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (!canChooseVisibleDatabases.value || isLoadingVisibleDatabases.value) return;
@@ -1806,6 +1840,12 @@ watch(
       void loadJdbcDrivers();
       void loadAgentDrivers();
     }
+    // Preload database names so the summary count is accurate right away.
+    void nextTick(() => {
+      if (canChooseVisibleDatabases.value && hasVisibleDatabaseFilter.value) {
+        void preloadVisibleDatabaseNames();
+      }
+    });
   },
   { immediate: true },
 );
@@ -2945,6 +2985,11 @@ function openExternalUrl(url: string) {
                     <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
                   </div>
 
+                  <div v-if="form.db_type === 'informix'" class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right text-xs">{{ t("connection.informixServer") }}</Label>
+                    <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
+                  </div>
+
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
@@ -3015,7 +3060,7 @@ function openExternalUrl(url: string) {
                               : form.db_type === 'bigquery'
                                 ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
                                 : form.db_type === 'informix'
-                                  ? 'INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
+                                  ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
                                   : 'sslmode=disable'
                       "
                     />
@@ -3434,6 +3479,10 @@ function openExternalUrl(url: string) {
                         <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
                         <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
                       </label>
+                    </div>
+                    <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
+                      <Label class="text-right text-xs">{{ t("connection.sshAgentSockPath") }}</Label>
+                      <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />

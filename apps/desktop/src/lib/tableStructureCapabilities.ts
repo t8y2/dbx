@@ -22,6 +22,7 @@ export interface TableStructureCapabilities {
   indexInclude: boolean;
   indexFilter: boolean;
   indexComment: boolean;
+  foreignKey: boolean;
 }
 
 const unsupportedCapabilities: TableStructureCapabilities = {
@@ -44,6 +45,7 @@ const unsupportedCapabilities: TableStructureCapabilities = {
   indexInclude: false,
   indexFilter: false,
   indexComment: false,
+  foreignKey: false,
 };
 
 function capabilities(overrides: Partial<TableStructureCapabilities>): TableStructureCapabilities {
@@ -68,6 +70,7 @@ const mysqlCapabilities = capabilities({
   indexType: true,
   indexComment: true,
   alterPrimaryKey: true,
+  foreignKey: true,
 });
 
 const gbaseCapabilities = capabilities({
@@ -98,6 +101,7 @@ const postgresCapabilities = capabilities({
   indexFilter: true,
   indexComment: true,
   alterPrimaryKey: true,
+  foreignKey: true,
 });
 
 const redshiftCapabilities = capabilities({
@@ -264,6 +268,12 @@ const questdbCapabilities = capabilities({
   indexFilter: false,
   indexComment: false,
   alterPrimaryKey: false,
+  foreignKey: false,
+});
+
+const firebirdCapabilities = capabilities({
+  ...postgresCapabilities,
+  foreignKey: false,
 });
 
 const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>> = {
@@ -284,7 +294,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   highgo: postgresCapabilities,
   vastbase: postgresCapabilities,
   kingbase: postgresCapabilities,
-  firebird: postgresCapabilities,
+  firebird: firebirdCapabilities,
   sqlite: sqliteCapabilities,
   rqlite: sqliteCapabilities,
   turso: sqliteCapabilities,

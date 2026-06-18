@@ -23,7 +23,7 @@ import { buildAiAgentStepItems, type AiAgentStepItem, type AiAgentStepTone } fro
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/aiMessageRender";
 import { Marked } from "marked";
-import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/api";
+import { aiCancelStream, aiListModels, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation, type AiModelInfo } from "@/lib/api";
 import type { AiMessage } from "@/lib/api";
 import type { ConnectionConfig, QueryTab, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
@@ -79,6 +79,65 @@ const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
 const agentTokens = ref<{ input: number; output: number } | null>(null);
+
+// Inline model selector
+const modelOptions = ref<AiModelInfo[]>([]);
+const modelLoading = ref(false);
+let modelRequestToken = 0;
+
+const currentModelLabel = computed(() => {
+  const currentModel = settings.aiConfig.model;
+  const found = modelOptions.value.find((m) => m.id === currentModel);
+  const raw = found?.displayName || currentModel;
+  if (!raw) return t("ai.model");
+  return raw.length > 20 ? raw.slice(0, 18) + "…" : raw;
+});
+
+function normalizeModelOptions(models: AiModelInfo[]): AiModelInfo[] {
+  const seen = new Set<string>();
+  const normalized: AiModelInfo[] = [];
+  for (const model of models) {
+    const id = model.id?.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push({ id, displayName: model.displayName?.trim() || undefined });
+  }
+  return normalized;
+}
+
+async function fetchModelOptions() {
+  if (modelLoading.value) return;
+  if (!settings.isConfigured()) return;
+  const token = ++modelRequestToken;
+  modelLoading.value = true;
+  try {
+    const models = normalizeModelOptions(await aiListModels(settings.aiConfig));
+    if (token !== modelRequestToken) return;
+    modelOptions.value = models;
+  } catch {
+    if (token !== modelRequestToken) return;
+    modelOptions.value = [];
+  } finally {
+    if (token === modelRequestToken) modelLoading.value = false;
+  }
+}
+
+function handleModelSelect(modelId: string) {
+  settings.updateAiConfig({ model: modelId });
+}
+
+const modelDropdownItems = computed(() => {
+  const currentModel = settings.aiConfig.model;
+  const items = modelOptions.value.map((m) => ({
+    value: m.id,
+    label: m.displayName || m.id,
+    title: m.id,
+  }));
+  if (currentModel && !items.some((item) => item.value === currentModel)) {
+    items.unshift({ value: currentModel, label: currentModel, title: currentModel });
+  }
+  return items;
+});
 
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
 const pendingCompaction = ref<{ summary: string; compactedMessages: number } | null>(null);
@@ -789,6 +848,9 @@ onMounted(async () => {
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
+
+  // Load available AI models for inline selector
+  fetchModelOptions();
 });
 
 function startResize(event: MouseEvent) {
@@ -858,7 +920,11 @@ const markedInstance = new Marked({
 });
 
 function formatInlineText(text: string): string {
-  return markedInstance.parse(text) as string;
+  try {
+    return markedInstance.parse(text) as string;
+  } catch {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
 }
 
 const messageRenderer = computed(() => {
@@ -922,7 +988,7 @@ const messageRenderer = computed(() => {
       <div class="flex flex-col gap-3 p-3">
         <template v-for="(msg, i) in visibleMessages" :key="i">
           <div v-if="msg.role === 'user'" class="flex justify-end">
-            <div class="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+            <div class="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
               {{ msg.content }}
             </div>
           </div>
@@ -1125,6 +1191,20 @@ const messageRenderer = computed(() => {
             <LightDropdown v-model="assistantMode" :items="assistantModeItems" :aria-label="activeModeHint" item-class="text-xs px-2" />
             <LightDropdown :model-value="activeAction" :items="actionMenuItems" content-class="w-max min-w-0" item-class="text-xs px-2" @update:model-value="(value) => selectAction(value as AiAction)" />
             <span class="flex-1" />
+            <LightDropdown
+              v-if="settings.isConfigured()"
+              :model-value="settings.aiConfig.model"
+              :items="modelDropdownItems"
+              :trigger-title="settings.aiConfig.model"
+              :aria-label="t('ai.model')"
+              :trigger-label="currentModelLabel"
+              trigger-class="flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground truncate max-w-[130px]"
+              item-class="text-xs px-2"
+              :match-trigger-width="false"
+              content-class="w-max min-w-36 max-w-64"
+              check-position="right"
+              @update:model-value="handleModelSelect"
+            />
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>

@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  CNB_REPOSITORY: "dbxio.com/dbx"
+  CNB_USERNAME: "cnb"
+  CNB_REGISTRY: "docker.cnb.cool"
+
 jobs:
   bump-jdbc-plugin-version:
     runs-on: ubuntu-latest
@@ -17,7 +22,7 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -44,9 +49,21 @@ jobs:
         if: steps.bump.outputs.changed == 'true'
         shell: bash
         run: |
+          TMP_DIR="$(mktemp -d)"
+          cp plugins/jdbc/pom.xml "$TMP_DIR/pom.xml"
+          cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git switch -C jdbc-plugin-version-bump origin/main
+          cp "$TMP_DIR/pom.xml" plugins/jdbc/pom.xml
+          cp "$TMP_DIR/manifest.json" plugins/jdbc/manifest.json
           git add plugins/jdbc/pom.xml plugins/jdbc/manifest.json
+          if git diff --cached --quiet; then
+            echo "JDBC plugin version ${{ steps.bump.outputs.new_version }} is already on main."
+            exit 0
+          fi
           git commit -m "chore(jdbc): bump plugin version [skip ci]"
           git push origin HEAD:main
 
@@ -72,10 +89,10 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -238,12 +255,12 @@ jobs:
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -302,6 +319,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
 
+  sync-release-to-cnb:
+    name: Sync release to CNB
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync release assets to CNB
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_USERNAME: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CNB_USERNAME: cnb
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          wget -q https://cnb.cool/znb/mpgrm/-/releases/download/v0.1.0/mpgrm_linux_amd64.tar.gz
+          tar -xf mpgrm_linux_amd64.tar.gz
+          chmod +x mpgrm
+
+          ./mpgrm releases sync \
+            --repo "https://github.com/${GITHUB_REPOSITORY}.git" \
+            --target-repo "https://cnb.cool/${CNB_REPOSITORY}.git" \
+            --tags "${TAG_NAME}"
+
   docker:
     runs-on: ubuntu-latest
     strategy:
@@ -309,7 +351,7 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -323,8 +365,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Login to CNB Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CNB_REGISTRY }}
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
+
+      - name: Build and push Docker Hub by digest
+        id: build-dockerhub
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -334,17 +383,37 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
 
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
+      - name: Build and push CNB by digest
+        id: build-cnb
+        uses: docker/build-push-action@v6
         with:
-          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: /tmp/digests/*
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+
+      - name: Export digests
+        run: |
+          mkdir -p /tmp/digests/dockerhub /tmp/digests/cnb
+          dockerhub_digest="${{ steps.build-dockerhub.outputs.digest }}"
+          cnb_digest="${{ steps.build-cnb.outputs.digest }}"
+          touch "/tmp/digests/dockerhub/${dockerhub_digest#sha256:}"
+          touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+
+      - name: Upload Docker Hub digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: dockerhub-digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/dockerhub/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload CNB digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: cnb-digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/cnb/*
           if-no-files-found: error
           retention-days: 1
 
@@ -352,11 +421,18 @@ jobs:
     needs: docker
     runs-on: ubuntu-latest
     steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
+      - name: Download Docker Hub digests
+        uses: actions/download-artifact@v8
         with:
-          path: /tmp/digests
-          pattern: digests-*
+          path: /tmp/digests/dockerhub
+          pattern: dockerhub-digests-*
+          merge-multiple: true
+
+      - name: Download CNB digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests/cnb
+          pattern: cnb-digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -368,14 +444,25 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login to CNB Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CNB_REGISTRY }}
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
+
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest list and push
-        working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:${{ steps.version.outputs.version }} \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest \
-            $(printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
+            $(cd /tmp/digests/dockerhub && printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
+
+          docker buildx imagetools create \
+            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
+            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
+            $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)

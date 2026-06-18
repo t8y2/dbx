@@ -219,8 +219,9 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
         password: z.string().default("").describe("Password"),
         database: z.string().optional().describe("Default database name"),
         ssl: z.boolean().default(false).describe("Enable SSL"),
+        driver_profile: z.string().optional().describe("Driver profile (e.g. 'gbase8a', 'gbase8s')"),
       },
-      async ({ name, db_type, host, port, username, password, database, ssl }) => {
+      async ({ name, db_type, host, port, username, password, database, ssl, driver_profile }) => {
         const existing = await backend.findConnection(name);
         if (existing) return text(`Connection "${name}" already exists.`);
         const DEFAULT_PORTS: Record<string, number> = {
@@ -241,6 +242,7 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
           password,
           database,
           ssl,
+          driver_profile,
           ssh_enabled: false,
         } as Omit<ConnectionConfig, "id">);
         await notifyReload();

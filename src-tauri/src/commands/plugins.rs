@@ -26,6 +26,7 @@ pub async fn install_jdbc_plugin(
     state: State<'_, Arc<AppState>>,
 ) -> Result<JdbcPluginStatus, String> {
     let app_handle = app.clone();
+    state.remove_external_driver_pools("jdbc").await;
     jdbc::install_jdbc_plugin_with_progress(state.plugins.root_dir(), move |event| {
         emit_agent_progress(&app_handle, event);
     })
@@ -37,11 +38,13 @@ pub async fn install_jdbc_plugin_local(
     state: State<'_, Arc<AppState>>,
     path: String,
 ) -> Result<JdbcPluginStatus, String> {
+    state.remove_external_driver_pools("jdbc").await;
     jdbc::install_jdbc_plugin_from_file(state.plugins.root_dir(), &path).await
 }
 
 #[tauri::command]
 pub async fn uninstall_jdbc_plugin(state: State<'_, Arc<AppState>>) -> Result<JdbcPluginStatus, String> {
+    state.remove_external_driver_pools("jdbc").await;
     let root_dir = state.plugins.root_dir().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || jdbc::uninstall_jdbc_plugin(&root_dir))
         .await

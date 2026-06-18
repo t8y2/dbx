@@ -677,4 +677,34 @@ mod tests {
             row_count: 1,
         }]);
     }
+
+    #[test]
+    fn import_insert_batches_preserve_sqlserver_unicode_text() {
+        let mappings =
+            vec![TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() }];
+        let data = ParsedImportFile {
+            columns: vec!["name".to_string()],
+            rows: vec![vec![serde_json::json!("Tiếng Việt")]],
+            total_rows: 1,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("name".to_string(), "nvarchar(100)".to_string())],
+            "customers",
+            "dbo",
+            &DatabaseType::SqlServer,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches,
+            vec![ImportSqlBatch {
+                sql: "INSERT INTO [dbo].[customers] ([name]) VALUES\n(N'Tiếng Việt')".to_string(),
+                row_count: 1,
+            }]
+        );
+    }
 }

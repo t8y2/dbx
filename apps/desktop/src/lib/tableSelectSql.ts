@@ -1,6 +1,7 @@
 import type { DatabaseType } from "../types/database.ts";
 import { isSchemaAware, usesDatabaseObjectTreeMode } from "./databaseCapabilities.ts";
 import * as api from "./api.ts";
+import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "./sqlServerLinkedServers.ts";
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
@@ -42,6 +43,10 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
     return quoteTableIdentifier(databaseType, tableName);
   }
   if (isSchemaAware(databaseType) && !usesDatabaseObjectTreeMode(databaseType) && schema) {
+    if (databaseType === "sqlserver") {
+      const linked = parseSqlServerLinkedSchema(schema);
+      if (linked) return sqlServerLinkedTableName(linked, tableName);
+    }
     return `${quoteTableIdentifier(databaseType, schema)}.${quoteTableIdentifier(databaseType, tableName)}`;
   }
   return quoteTableIdentifier(databaseType, tableName);

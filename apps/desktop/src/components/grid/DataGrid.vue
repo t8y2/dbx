@@ -68,6 +68,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
+import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -136,6 +137,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { nextDataGridSortState, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
+import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGridConditionHistory";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 
@@ -145,6 +147,12 @@ const settingsStore = useSettingsStore();
 const { isDark } = useTheme();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
+const binaryCellDownloadMenuItems = computed(() =>
+  BINARY_CELL_DOWNLOAD_MODES.map((mode) => ({
+    label: t(`grid.binaryDownload.${mode}`),
+    value: mode,
+  })),
+);
 
 interface PreparedCopyValue {
   key: string;
@@ -152,6 +160,11 @@ interface PreparedCopyValue {
   loading: boolean;
   ready: boolean;
 }
+
+type ConditionSuggestion = {
+  value: string;
+  kind: "column" | "history";
+};
 
 const props = defineProps<{
   result: QueryResult;
@@ -208,6 +221,12 @@ console.info("[DBX][DataGrid:setup]", {
   loading: props.loading,
 });
 
+const transposeRowIndex = ref<number | null>(null);
+const showTranspose = ref(false);
+const multiRowTranspose = ref(false);
+const preserveTransposeOnNextResult = ref(false);
+const autoTransposedForResult = ref(false);
+
 watch(
   () => props.result,
   (result) => {
@@ -221,6 +240,17 @@ watch(
       loading: props.loading,
       elapsedSinceSetup: dataGridElapsed(),
     });
+    // Auto-transpose when a new result has exactly 1 row with multiple columns.
+    if (result.rows.length === 1 && result.columns.length > 1 && !preserveTransposeOnNextResult.value) {
+      autoTransposedForResult.value = true;
+      nextTick(() => {
+        showTranspose.value = true;
+        transposeRowIndex.value = 0;
+      });
+    } else {
+      autoTransposedForResult.value = false;
+    }
+
     nextTick(() => {
       console.info("[DBX][DataGrid:result:nextTick]", {
         traceId: dataGridTraceId,
@@ -361,10 +391,6 @@ const sideGeometryCanvas = ref<HTMLCanvasElement | null>(null);
 const dialogGeometryCanvas = ref<HTMLCanvasElement | null>(null);
 const previewDialogOpen = ref(false);
 const previewDialogConfig = shallowRef<{ component: any; props: Record<string, any> } | null>(null);
-const transposeRowIndex = ref<number | null>(null);
-const showTranspose = ref(false);
-const multiRowTranspose = ref(false);
-const preserveTransposeOnNextResult = ref(false);
 const transposeScrollRef = ref<HTMLElement | { $el?: HTMLElement }>();
 const transposeScrollLeft = ref(0);
 const transposeViewportWidth = ref(0);
@@ -383,14 +409,14 @@ const searchInputRef = ref<HTMLInputElement>();
 const measureRef = ref<HTMLSpanElement>();
 const suggestionLeft = ref(0);
 
-const whereSuggestions = ref<string[]>([]);
+const whereSuggestions = ref<ConditionSuggestion[]>([]);
 const whereSuggestionIndex = ref(-1);
 const whereFilterInputRef = ref<HTMLInputElement>();
 const whereMeasureRef = ref<HTMLSpanElement>();
 const whereSuggestionLeft = ref(0);
 const whereSuggestionPosition = ref({ left: 0, top: 0 });
 
-const orderBySuggestions = ref<string[]>([]);
+const orderBySuggestions = ref<ConditionSuggestion[]>([]);
 const orderBySuggestionIndex = ref(-1);
 const orderByInputRef = ref<HTMLInputElement>();
 const orderByMeasureRef = ref<HTMLSpanElement>();
@@ -401,6 +427,12 @@ const orderByInput = ref(props.initialOrderByInput ?? "");
 const hasOrderByInput = computed(() => orderByInput.value.trim().length > 0);
 const whereFilterInput = ref(props.initialWhereInput ?? "");
 const hasWhereFilterInput = computed(() => whereFilterInput.value.trim().length > 0);
+const conditionHistoryScope = computed(() => ({
+  connectionId: props.connectionId,
+  database: props.database,
+  schema: props.tableMeta?.schema ?? props.schema,
+  tableName: props.tableMeta?.tableName,
+}));
 const searchSplitContainerRef = ref<HTMLDivElement>();
 const searchSplitWhereWidth = ref<number | null>(null);
 const isResizingSearchSplit = ref(false);
@@ -623,6 +655,30 @@ function openCompactLocalFilter(colIdx: number) {
       openLocalFilter(colIdx);
     }, 0);
   });
+}
+
+function compactColumnActionMenuItems(columnName: string) {
+  return [
+    {
+      label: t("grid.columnFormatter"),
+      value: "formatter",
+      icon: Code2,
+      disabled: !formatterKeyForColumn(columnName),
+    },
+    {
+      label: t("grid.localFilter"),
+      value: "localFilter",
+      icon: Filter,
+    },
+  ];
+}
+
+function selectCompactColumnAction(value: string, columnIndex: number) {
+  if (value === "formatter") {
+    openCompactColumnFormatter(columnIndex);
+  } else if (value === "localFilter") {
+    openCompactLocalFilter(columnIndex);
+  }
 }
 
 function handleLocalFilterOpenChange(value: boolean, columnIndex: number) {
@@ -1200,11 +1256,18 @@ function acceptWhereSuggestion() {
   const idx = whereSuggestionIndex.value;
   if (idx < 0 || idx >= whereSuggestions.value.length) return;
   const sug = whereSuggestions.value[idx];
+  if (sug.kind === "history") {
+    whereFilterInput.value = sug.value;
+    whereSuggestions.value = [];
+    whereSuggestionIndex.value = -1;
+    whereFilterInputRef.value?.focus();
+    return;
+  }
   const lastWordMatch = whereFilterInput.value.match(/([^\s,()><=!&|]+)$/);
   if (lastWordMatch) {
     const lastWord = lastWordMatch[1];
     const prefix = whereFilterInput.value.slice(0, -lastWord.length);
-    whereFilterInput.value = prefix + sug;
+    whereFilterInput.value = prefix + sug.value;
   }
   whereSuggestions.value = [];
   whereSuggestionIndex.value = -1;
@@ -1221,20 +1284,39 @@ function navigateWhereSuggestion(delta: number) {
   whereSuggestionIndex.value = Math.min(Math.max(whereSuggestionIndex.value + delta, 0), whereSuggestions.value.length - 1);
 }
 
+function showWhereHistorySuggestions() {
+  const history = loadDataGridConditionHistory("where", conditionHistoryScope.value, whereFilterInput.value);
+  whereSuggestions.value = history.map((value) => ({ value, kind: "history" }));
+  whereSuggestionIndex.value = whereSuggestions.value.length ? 0 : -1;
+  if (whereSuggestions.value.length) updateWhereSuggestionPosition();
+}
+
+function deleteWhereHistorySuggestion(value: string) {
+  const history = forgetDataGridConditionHistory("where", conditionHistoryScope.value, value);
+  const query = whereFilterInput.value;
+  const filtered = query.trim() ? loadDataGridConditionHistory("where", conditionHistoryScope.value, query) : history;
+  whereSuggestions.value = filtered.map((item) => ({ value: item, kind: "history" }));
+  whereSuggestionIndex.value = whereSuggestions.value.length ? Math.min(whereSuggestionIndex.value, whereSuggestions.value.length - 1) : -1;
+}
+
 watch(whereFilterInput, (val) => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
   whereSuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
-  if (trimmed.length === 0) return;
+  if (trimmed.length === 0) {
+    showWhereHistorySuggestions();
+    return;
+  }
   const lastToken = trimmed.split(/[\s,()><=!&|]+/).pop() || "";
   if (lastToken.length > 0) {
     const tl = lastToken.toLowerCase();
     whereSuggestions.value = props.tableMeta.columns
       .map((c) => c.name)
       .filter((n) => n.toLowerCase().startsWith(tl) && n.toLowerCase() !== tl)
-      .slice(0, 8);
+      .slice(0, 8)
+      .map((value) => ({ value, kind: "column" }));
     whereSuggestionIndex.value = 0;
     updateWhereSuggestionPosition();
   }
@@ -1322,11 +1404,18 @@ function acceptOrderBySuggestion() {
   const idx = orderBySuggestionIndex.value;
   if (idx < 0 || idx >= orderBySuggestions.value.length) return;
   const sug = orderBySuggestions.value[idx];
+  if (sug.kind === "history") {
+    orderByInput.value = sug.value;
+    orderBySuggestions.value = [];
+    orderBySuggestionIndex.value = -1;
+    orderByInputRef.value?.focus();
+    return;
+  }
   const lastWordMatch = orderByInput.value.match(/([^\s,()]+)$/);
   if (lastWordMatch) {
     const lastWord = lastWordMatch[1];
     const prefix = orderByInput.value.slice(0, -lastWord.length);
-    orderByInput.value = prefix + sug;
+    orderByInput.value = prefix + sug.value;
   }
   orderBySuggestions.value = [];
   orderBySuggestionIndex.value = -1;
@@ -1343,19 +1432,38 @@ function navigateOrderBySuggestion(delta: number) {
   orderBySuggestionIndex.value = Math.min(Math.max(orderBySuggestionIndex.value + delta, 0), orderBySuggestions.value.length - 1);
 }
 
+function showOrderByHistorySuggestions() {
+  const history = loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByInput.value);
+  orderBySuggestions.value = history.map((value) => ({ value, kind: "history" }));
+  orderBySuggestionIndex.value = orderBySuggestions.value.length ? 0 : -1;
+  if (orderBySuggestions.value.length) updateOrderBySuggestionPosition();
+}
+
+function deleteOrderByHistorySuggestion(value: string) {
+  const history = forgetDataGridConditionHistory("orderBy", conditionHistoryScope.value, value);
+  const query = orderByInput.value;
+  const filtered = query.trim() ? loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, query) : history;
+  orderBySuggestions.value = filtered.map((item) => ({ value: item, kind: "history" }));
+  orderBySuggestionIndex.value = orderBySuggestions.value.length ? Math.min(orderBySuggestionIndex.value, orderBySuggestions.value.length - 1) : -1;
+}
+
 watch(orderByInput, (val) => {
   emit("update:orderByInput", val);
   orderBySuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
-  if (trimmed.length === 0) return;
+  if (trimmed.length === 0) {
+    showOrderByHistorySuggestions();
+    return;
+  }
   const lastToken = trimmed.split(/[\s,()]+/).pop() || "";
   if (lastToken.length > 0 && !["asc", "desc"].includes(lastToken.toLowerCase())) {
     const tl = lastToken.toLowerCase();
     orderBySuggestions.value = props.tableMeta.columns
       .map((c) => c.name)
       .filter((n) => n.toLowerCase().startsWith(tl) && n.toLowerCase() !== tl)
-      .slice(0, 8);
+      .slice(0, 8)
+      .map((value) => ({ value, kind: "column" }));
     orderBySuggestionIndex.value = 0;
     updateOrderBySuggestionPosition();
   }
@@ -2781,6 +2889,7 @@ const selection = useDataGridSelection({
 });
 
 const {
+  isSelectingAll,
   selectedRange,
   selectedCells,
   selectedCellCount,
@@ -3437,6 +3546,7 @@ async function applyOrderBySearch() {
   if (!props.onExecuteSql) return;
   const orderByClause = orderByInput.value.trim() || undefined;
   emit("update:orderByInput", orderByInput.value);
+  if (orderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByClause);
   isApplyingWhere.value = true;
   saveError.value = "";
   currentPage.value = 1;
@@ -3467,10 +3577,12 @@ async function applyOrderBySearch() {
 
 async function applyWhereFilter() {
   if (!props.onExecuteSql) return;
+  const whereInput = currentWhereInput();
+  if (whereInput) rememberDataGridConditionHistory("where", conditionHistoryScope.value, whereInput);
   isApplyingWhere.value = true;
   saveError.value = "";
   currentPage.value = 1;
-  emit("update:whereInput", currentWhereInput() ?? "");
+  emit("update:whereInput", whereInput ?? "");
   try {
     const tableMeta = await waitForTableMeta();
     if (!tableMeta) return;
@@ -3482,7 +3594,7 @@ async function applyWhereFilter() {
       primaryKeys: tableMeta.primaryKeys,
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
-      whereInput: currentWhereInput(),
+      whereInput,
       includeRowId: usesSyntheticRowIdKey(props.databaseType, tableMeta.primaryKeys),
     });
     await props.onExecuteSql(sql);
@@ -3956,12 +4068,6 @@ const canvasEditingCell = computed(() => {
   return { rowIndex, visibleColIdx, actualColIdx: editing.col, rect };
 });
 
-const canvasSingleSelectedCell = computed(() => {
-  const range = selectedRange.value;
-  if (!range || range.startRow !== range.endRow || range.startCol !== range.endCol) return null;
-  return { rowIndex: range.startRow, visibleColIdx: range.startCol };
-});
-
 function canvasEffectiveViewportWidth(): number {
   return canvasViewportWidth.value || canvasScrollerElement()?.clientWidth || 0;
 }
@@ -4043,12 +4149,10 @@ function drawCanvasGrid() {
     hoverCell: canvasHoverCell.value,
     isScrolling: isScrolling.value,
     editingCell: editingCell.value,
-    singleSelectedCell: canvasSingleSelectedCell.value,
     searchMatchKeys: searchMatchSet.value,
     currentSearchMatch: currentSearchMatch.value,
     formatCell: formatCellCached,
     isRowActive,
-    isRowSelected,
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover: canEditCellItem,
@@ -4065,6 +4169,7 @@ watch(
     selectedRowIds,
     hasCellSelection,
     hasRowSelection,
+    isSelectingAll,
     searchMatchSet,
     currentSearchMatch,
     isDark,
@@ -5167,6 +5272,7 @@ function currentTransposeViewportRowIndex(): number {
 }
 
 function closeTranspose(scrollToCurrentRecord = true) {
+  autoTransposedForResult.value = false;
   const rowIndex = currentTransposeViewportRowIndex();
   showTranspose.value = false;
   transposeRowIndex.value = null;
@@ -5197,6 +5303,7 @@ function openContextTranspose() {
 }
 
 function toggleTranspose(rowIndex: number) {
+  autoTransposedForResult.value = false;
   const next = nextTransposeState(showTranspose.value, transposeRowIndex.value, rowIndex);
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
@@ -6253,18 +6360,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
                     placeholder=""
                     @keydown="onWhereFilterKeydown"
+                    @focus="showWhereHistorySuggestions"
                     @click="updateWhereSuggestionPosition"
                     @blur="dismissWhereSuggestions"
                   />
+                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showWhereHistorySuggestions">
+                    <ChevronDown class="w-3 h-3" />
+                  </button>
                   <span ref="whereMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- WHERE suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="whereSuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
                       <div
                         v-for="(sug, idx) in whereSuggestions"
-                        :key="sug"
-                        class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                        :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
+                        :key="`${sug.kind}:${sug.value}`"
+                        class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
+                        :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
                         @mousedown.prevent="
                           whereSuggestionIndex = idx;
                           acceptWhereSuggestion();
@@ -6272,7 +6383,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @mouseenter="whereSuggestionIndex = idx"
                       >
                         <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
-                        <span>{{ sug }}</span>
+                        <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
+                        <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteWhereHistorySuggestion(sug.value)">
+                          <X class="h-3 w-3" />
+                        </button>
                       </div>
                     </div>
                   </Teleport>
@@ -6307,18 +6421,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
                     placeholder=""
                     @keydown="onOrderByKeydown"
+                    @focus="showOrderByHistorySuggestions"
                     @click="updateOrderBySuggestionPosition"
                     @blur="dismissOrderBySuggestions"
                   />
+                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showOrderByHistorySuggestions">
+                    <ChevronDown class="w-3 h-3" />
+                  </button>
                   <span ref="orderByMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- ORDER BY suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="orderBySuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
                       <div
                         v-for="(sug, idx) in orderBySuggestions"
-                        :key="sug"
-                        class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                        :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
+                        :key="`${sug.kind}:${sug.value}`"
+                        class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
+                        :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
                         @mousedown.prevent="
                           orderBySuggestionIndex = idx;
                           acceptOrderBySuggestion();
@@ -6326,7 +6444,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @mouseenter="orderBySuggestionIndex = idx"
                       >
                         <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
-                        <span>{{ sug }}</span>
+                        <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
+                        <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteOrderByHistorySuggestion(sug.value)">
+                          <X class="h-3 w-3" />
+                        </button>
                       </div>
                     </div>
                   </Teleport>
@@ -6438,7 +6559,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     v-for="(sug, idx) in searchSuggestions"
                     :key="sug"
                     class="flex items-center px-3 py-1.5 text-xs cursor-pointer"
-                    :class="idx === suggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'"
+                    :class="idx === suggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
                     @mousedown.prevent="
                       suggestionIndex = idx;
                       acceptSuggestion();
@@ -6539,7 +6660,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                         'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
-                        'hover:bg-accent/50':
+                        'hover:bg-gray-200 dark:hover:bg-gray-800':
                           !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                       }"
                       :style="{ width: `${getTransposeRecordWidth(cell.recordIndex)}px` }"
@@ -6569,18 +6690,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <template v-else>
                         {{ cell.display }}
                         <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
-                          <DropdownMenu v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)" :open="quickDownloadMenuOpenFor(cell.recordIndex, cell.valueIndex)" @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, cell.recordIndex, cell.valueIndex)">
-                            <DropdownMenuTrigger as-child>
-                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" @mousedown.stop @click.stop>
+                          <LightDropdownMenu
+                            v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
+                            :items="binaryCellDownloadMenuItems"
+                            :open="quickDownloadMenuOpenFor(cell.recordIndex, cell.valueIndex)"
+                            align="end"
+                            content-class="w-44"
+                            :match-trigger-width="false"
+                            @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, cell.recordIndex, cell.valueIndex)"
+                            @select="(mode: string) => downloadCellBinaryValue(cell.recordIndex, cell.valueIndex, mode as BinaryCellDownloadMode)"
+                          >
+                            <template #trigger="{ open, toggle }">
+                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
                                 <Download class="h-3 w-3" />
                               </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" class="w-44">
-                              <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadCellBinaryValue(cell.recordIndex, cell.valueIndex, mode)">
-                                {{ t(`grid.binaryDownload.${mode}`) }}
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                            </template>
+                          </LightDropdownMenu>
                           <button
                             class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                             :title="t('grid.cellDetails')"
@@ -6599,15 +6724,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </div>
             <template v-else>
               <!-- Sticky header -->
-              <div ref="headerRef" class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 border-y border-border overflow-hidden">
-                <div class="flex text-xs font-semibold text-foreground" :style="{ width: 'var(--header-total-w)' }">
-                  <div class="shrink-0 px-2 py-1.5 border-r border-border text-center text-muted-foreground select-none cursor-pointer hover:bg-accent/60 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted" :style="{ width: 'var(--row-num-w)' }" @click="selectAllCells">#</div>
+              <div ref="headerRef" class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 w-full border-y border-border overflow-hidden">
+                <div class="flex w-(--header-total-w) text-xs font-semibold text-foreground">
+                  <div
+                    class="shrink-0 px-2 py-1.5 border-r w-(--row-num-w) border-border text-center text-muted-foreground select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted"
+                    :class="{ '!bg-gray-300 dark:!bg-gray-900 outline outline-primary -outline-offset-1': isSelectingAll }"
+                    @click="selectAllCells"
+                  >
+                    #
+                  </div>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
                   <LightTooltip v-for="col in renderedGridColumns" :key="`${col.name}-${col.actualColIdx}`" :text="col.name" side="bottom" :side-offset="4">
                     <div
-                      class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-accent/60 select-none relative overflow-hidden"
+                      class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-gray-200 dark:hover:bg-gray-800 select-none relative overflow-hidden"
                       :class="{
-                        'bg-primary/15 ring-1 ring-inset ring-primary/40': highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
+                        '!bg-gray-300 dark:!bg-gray-900 outline outline-primary -outline-offset-1': highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
                         'bg-amber-500/20 ring-1 ring-inset ring-amber-500/40': currentSearchMatch?.kind === 'column' && currentSearchMatch.col === col.actualColIdx,
                       }"
                       :style="renderedColumnStyle(col.visibleColIdx)"
@@ -6630,7 +6761,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <button
                           v-if="headerColumnSortable(col.actualColIdx)"
                           type="button"
-                          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                           :class="sortCol === col.name && sortColIndex === col.actualColIdx ? 'text-primary opacity-100' : 'opacity-80'"
                           :title="t('grid.sort')"
                           @click.stop="toggleSort(col.name, col.actualColIdx)"
@@ -6639,29 +6770,31 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <ArrowDown v-else-if="sortCol === col.name && sortColIndex === col.actualColIdx && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
                           <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
                         </button>
-                        <DropdownMenu v-if="compactColumnHeaderActions" :open="headerActionMenuOpenColumn === col.actualColIdx" @update:open="(value: boolean) => (headerActionMenuOpenColumn = value ? col.actualColIdx : null)">
-                          <DropdownMenuTrigger as-child>
+                        <LightDropdownMenu
+                          v-if="compactColumnHeaderActions"
+                          :items="compactColumnActionMenuItems(col.name)"
+                          :open="headerActionMenuOpenColumn === col.actualColIdx"
+                          align="end"
+                          content-class="w-max min-w-28 max-w-48 p-0.5"
+                          item-class="gap-1 px-1.5 py-0.5 text-xs"
+                          item-icon-class="h-3 w-3"
+                          :match-trigger-width="false"
+                          @update:open="(value: boolean) => (headerActionMenuOpenColumn = value ? col.actualColIdx : null)"
+                          @select="(value: string) => selectCompactColumnAction(value, col.actualColIdx)"
+                        >
+                          <template #trigger="{ open, toggle }">
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx) ? 'text-primary opacity-90' : 'opacity-80'"
                               :title="t('grid.columnActions')"
-                              @click.stop
+                              :aria-expanded="open"
+                              @click.stop="toggle"
                             >
                               <ChevronDown class="h-3 w-3" />
                             </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" class="w-max min-w-28 max-w-48 p-0.5" @click.stop @keydown.stop>
-                            <DropdownMenuItem class="gap-1 px-1.5 py-0.5 text-xs" :disabled="!formatterKeyForColumn(col.name)" @select.prevent="openCompactColumnFormatter(col.actualColIdx)">
-                              <Code2 class="h-3 w-3" />
-                              {{ t("grid.columnFormatter") }}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem class="gap-1 px-1.5 py-0.5 text-xs" @select.prevent="openCompactLocalFilter(col.actualColIdx)">
-                              <Filter class="h-3 w-3" />
-                              {{ t("grid.localFilter") }}
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                          </template>
+                        </LightDropdownMenu>
                         <Popover :open="formatterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleColumnFormatterOpenChange(value, col.actualColIdx)">
                           <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
                             <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
@@ -6669,7 +6802,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <PopoverTrigger v-else as-child>
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="columnHasFormatter(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
                               :disabled="!formatterKeyForColumn(col.name)"
                               :title="t('grid.columnFormatter')"
@@ -6813,7 +6946,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <PopoverTrigger v-else as-child>
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="localFilterActive(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
                               :title="t('grid.localFilter')"
                               @click.stop
@@ -6902,7 +7035,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </template>
                   </LightTooltip>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.afterWidth}px` }" />
-                  <div v-if="gridScrollbarGutter > 0" class="shrink-0 border-l border-border" :style="{ width: 'var(--grid-scrollbar-gutter)' }" />
+                  <div v-if="gridScrollbarGutter > 0" class="shrink-0 border-l border-border w-(--grid-scrollbar-gutter)" />
                 </div>
               </div>
 
@@ -6956,22 +7089,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       />
                     </div>
                     <div v-if="canvasDetailButtonCell" class="absolute pointer-events-auto z-20 flex items-center gap-1" :style="canvasDetailButtonStyle" @mouseenter="keepCanvasDetailHover" @mouseleave="clearCanvasDetailHover">
-                      <DropdownMenu
+                      <LightDropdownMenu
                         v-if="canvasDetailButtonCell.canQuickDownload"
+                        :items="binaryCellDownloadMenuItems"
                         :open="quickDownloadMenuOpenFor(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                        align="end"
+                        content-class="w-44"
+                        :match-trigger-width="false"
                         @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx)"
+                        @select="(mode: string) => downloadCellBinaryValue(canvasDetailButtonCell!.rowIndex, canvasDetailButtonCell!.actualColIdx, mode as BinaryCellDownloadMode)"
                       >
-                        <DropdownMenuTrigger as-child>
-                          <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" @mousedown.stop @click.stop>
+                        <template #trigger="{ open, toggle }">
+                          <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
                             <Download class="h-3 w-3" />
                           </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" class="w-44">
-                          <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadCellBinaryValue(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx, mode)">
-                            {{ t(`grid.binaryDownload.${mode}`) }}
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                        </template>
+                      </LightDropdownMenu>
                       <button
                         class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                         :title="t('grid.cellDetails')"
@@ -7005,25 +7138,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               >
                 <template #default="{ item }">
                   <div
-                    class="flex text-xs border-b border-border"
+                    class="flex text-[13px] border-b border-border h-6.5 w-(--total-w)"
                     :class="{
                       'bg-destructive/5 opacity-70': item.isDeleted,
                       'bg-primary/5': item.isNew && !isRowActive(item.displayIndex),
                       'bg-muted/30': !item.isNew && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
                       'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
                     }"
-                    :style="{ height: '26px', width: 'var(--total-w)' }"
                     :data-row-index="item.displayIndex"
                   >
                     <div
-                      class="data-grid-row-number shrink-0 px-2 py-1 border-r border-border text-center select-none cursor-default hover:bg-accent/50 sticky left-0 z-10 bg-[rgb(255_255_255)] dark:bg-[rgb(35_37_42)]"
-                      :class="[
-                        rowNumberStatusClass(item),
-                        {
-                          'text-primary font-semibold !bg-primary/25': isRowSelected(item.id) && item.status !== 'new' && item.status !== 'edited' && item.status !== 'deleted',
-                        },
-                      ]"
-                      :style="{ width: 'var(--row-num-w)' }"
+                      class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10 bg-background"
+                      :class="rowNumberStatusClass(item)"
                       @click="handleRowClick(item.displayIndex, item.id, $event)"
                       @dblclick.stop="toggleTranspose(item.displayIndex)"
                       @contextmenu="onRowContext(item.id, item.displayIndex)"
@@ -7045,7 +7171,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                         'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                         'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
-                        'cursor-text hover:bg-accent/50': !isScrolling && canEditCellItem(item, col.actualColIdx),
+                        'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
+                        'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx),
                         'line-through': item.isDeleted,
                       }"
                       @mousedown="handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event)"
@@ -7074,18 +7201,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <template v-else>
                         {{ formatCellCached(item.data[col.actualColIdx], col.actualColIdx) }}
                         <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
-                          <DropdownMenu v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)" :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)" @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)">
-                            <DropdownMenuTrigger as-child>
-                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" @mousedown.stop @click.stop>
+                          <LightDropdownMenu
+                            v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
+                            :items="binaryCellDownloadMenuItems"
+                            :open="quickDownloadMenuOpenFor(item.displayIndex, col.actualColIdx)"
+                            align="end"
+                            content-class="w-44"
+                            :match-trigger-width="false"
+                            @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, item.displayIndex, col.actualColIdx)"
+                            @select="(mode: string) => downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode as BinaryCellDownloadMode)"
+                          >
+                            <template #trigger="{ open, toggle }">
+                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
                                 <Download class="h-3 w-3" />
                               </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" class="w-44">
-                              <DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadCellBinaryValue(item.displayIndex, col.actualColIdx, mode)">
-                                {{ t(`grid.binaryDownload.${mode}`) }}
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                            </template>
+                          </LightDropdownMenu>
                           <button
                             class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                             :title="t('grid.cellDetails')"
@@ -7123,14 +7254,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <!-- Table Info Drawer -->
           <div v-if="showTableInfo" class="relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
             <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDdlResizeStart" />
-            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
               <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="sm" class="h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                 <Copy class="w-3 h-3" />
                 <span>{{ t("grid.copyDdl") }}</span>
               </Button>
-              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-5 w-5" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
+              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
                 <WrapText class="w-3 h-3" />
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">
@@ -7141,7 +7272,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <button
                 v-for="tab in tableInfoTabs"
                 :key="tab.id"
-                class="h-9 min-w-0 px-1.5 text-[11px] text-muted-foreground border-b-2 border-transparent hover:bg-muted/50 hover:text-foreground"
+                class="h-9 min-w-0 px-1.5 text-[11px] text-muted-foreground border-b-2 border-transparent hover:bg-gray-200 dark:hover:bg-gray-800/50 hover:text-foreground"
                 :class="{ 'border-primary text-foreground bg-muted/40': activeTableInfoTab === tab.id }"
                 :title="tab.label"
                 @click="selectTableInfoTab(tab.id)"
@@ -7168,17 +7299,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               <table v-else class="w-full text-xs">
                 <thead class="sticky top-0 bg-muted text-muted-foreground">
                   <tr class="border-b">
-                    <th class="text-left font-medium px-3 py-2 w-8">#</th>
-                    <th class="text-left font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
-                    <th class="text-left font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
-                    <th class="text-left font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr
                     v-for="(column, index) in filteredColumns"
                     :key="column.name"
-                    class="border-b cursor-pointer hover:bg-muted/30"
+                    class="border-b cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800/30"
                     role="button"
                     tabindex="0"
                     :title="column.name"
@@ -7897,6 +8028,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 </template>
 
 <style scoped>
+@reference "../../styles/globals.css";
+
 [data-grid-root] {
   --data-grid-row-muted-bg: rgb(248 248 248);
   --data-grid-row-new-bg: rgb(243 243 243);
@@ -8069,7 +8202,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .canvas-grid-surface {
   cursor: cell;
   font-family: var(--dbx-data-grid-font-family);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 400;
   line-height: 1rem;
   outline: none;
@@ -8108,12 +8241,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .detail-drawer-resizing {
   transition: none;
-}
-
-.cell-selected {
-  background-color: var(--data-grid-cell-selected-bg);
-  outline: 1px solid var(--data-grid-cell-selected-border);
-  outline-offset: -1px;
 }
 
 .row-cell-selected {
@@ -8156,16 +8283,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   background-color: var(--data-grid-row-number-deleted-bg);
 }
 
-.active-row > div:not(.cell-dirty) {
-  background-color: var(--data-grid-cell-active-bg);
+.cell-selected,
+.active-row > div:not(.cell-dirty):not(.data-grid-row-number) {
+  @apply text-foreground bg-gray-300 dark:bg-gray-900;
 }
 
-.active-row > .data-grid-row-number:not(.cell-dirty) {
-  background-color: var(--data-grid-row-number-active-bg);
-}
-
-.data-grid-row-number.\!bg-primary\/25 {
-  background-color: var(--data-grid-row-number-selected-bg) !important;
+.cell-selected {
+  @apply outline outline-primary -outline-offset-1;
 }
 
 .ddl-code :deep(.ddl-kw) {

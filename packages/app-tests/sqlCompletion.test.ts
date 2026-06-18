@@ -90,6 +90,21 @@ test("suggests SQL keywords for generic keyword input", () => {
   assert.equal(keyword.type, "keyword");
 });
 
+test("suggests lower-case SQL keywords when configured", () => {
+  const items = buildSqlCompletionItems("sel", 3, {
+    tables,
+    columnsByTable,
+    keywordCase: "lower",
+  });
+
+  const keyword = items.find((item) => item.type === "keyword" && item.label === "select");
+  assert.ok(keyword);
+  assert.equal(
+    items.some((item) => item.type === "keyword" && item.label === "SELECT"),
+    false,
+  );
+});
+
 test("suggests PostgreSQL-specific data types and functions", () => {
   const typeItems = buildSqlCompletionItems("create table events (payload js", "create table events (payload js".length, {
     tables: [],
@@ -159,15 +174,11 @@ test("suggests Manticore Search SQL functions and command snippets", () => {
     databaseType: "manticoresearch",
   });
 
-  assert.ok(
-    matchItems.some((item) => item.type === "function" && item.label === "MATCH" && item.apply === "MATCH(${query})"),
-  );
+  assert.ok(matchItems.some((item) => item.type === "function" && item.label === "MATCH" && item.apply === "MATCH(${query})"));
   assert.ok(facetItems.some((item) => item.type === "keyword" && item.label === "FACET"));
   assert.ok(showItems.some((item) => item.type === "snippet" && item.label === "show meta" && item.apply === "SHOW META;"));
   assert.ok(showTablesItems.some((item) => item.type === "snippet" && item.label === "show tables" && item.apply === "SHOW TABLES;"));
-  assert.ok(
-    callPqItems.some((item) => item.type === "snippet" && item.label === "call pq" && item.apply === "CALL PQ ('pq', ('{\"title\":\"query\"}'));"),
-  );
+  assert.ok(callPqItems.some((item) => item.type === "snippet" && item.label === "call pq" && item.apply === "CALL PQ ('pq', ('{\"title\":\"query\"}'));"));
   assert.ok(rankingItems.some((item) => item.type === "function" && item.label === "BM25F"));
 });
 
@@ -778,6 +789,18 @@ test("suggests SQL snippets for common abbreviations", () => {
   const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
   assert.ok(snippet);
   assert.equal(snippet.apply, "SELECT *\nFROM table\nLIMIT 100;");
+});
+
+test("applies keyword case to built-in SQL snippets", () => {
+  const items = buildSqlCompletionItems("sel", 3, {
+    tables,
+    columnsByTable,
+    keywordCase: "lower",
+  });
+
+  const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
+  assert.ok(snippet);
+  assert.equal(snippet.apply, "select *\nfrom table\nlimit 100;");
 });
 
 test("suggests DATE_FORMAT as parameter snippet", () => {
@@ -1422,6 +1445,48 @@ test("prefers explicit foreign-key join condition with table aliases", () => {
     apply: "o.customer_id = c.id",
     boost: 3201,
   });
+});
+
+test("applies keyword case to composite join condition snippets", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    [
+      "public.order_lines",
+      [
+        { name: "order_lines_product_fkey", column: "tenant_id", ref_table: "products", ref_column: "tenant_id" },
+        { name: "order_lines_product_fkey", column: "product_id", ref_table: "products", ref_column: "id" },
+      ],
+    ],
+  ]);
+  const cols = new Map<string, SqlCompletionColumn[]>([
+    [
+      "public.order_lines",
+      [
+        { name: "tenant_id", table: "order_lines", schema: "public", dataType: "bigint" },
+        { name: "product_id", table: "order_lines", schema: "public", dataType: "bigint" },
+      ],
+    ],
+    [
+      "public.products",
+      [
+        { name: "tenant_id", table: "products", schema: "public", dataType: "bigint" },
+        { name: "id", table: "products", schema: "public", dataType: "bigint" },
+      ],
+    ],
+  ]);
+  const sql = "select * from public.order_lines ol join public.products p on ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "order_lines", schema: "public", type: "table" },
+      { name: "products", schema: "public", type: "table" },
+    ],
+    columnsByTable: cols,
+    foreignKeysByTable,
+    keywordCase: "lower",
+  });
+
+  const fkJoin = items.find((item) => item.detail === "JOIN condition from composite foreign key");
+  assert.equal(fkJoin?.label, "ol.tenant_id = p.tenant_id and ol.product_id = p.id");
+  assert.equal(fkJoin?.apply, "ol.tenant_id = p.tenant_id and ol.product_id = p.id");
 });
 
 test("suggests explicit foreign-key join when the joined table owns the key", () => {

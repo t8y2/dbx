@@ -313,30 +313,25 @@ impl PluginDriverSession {
         process.stdin.write_all(&line).await.map_err(|err| err.to_string())?;
         process.stdin.flush().await.map_err(|err| err.to_string())?;
 
-        let response_line = match read_plugin_line(&mut process.stdout, "response").await {
-            Ok(line) => line,
-            Err(err) if err.contains("end of stream") => {
-                let status = process.child.try_wait().map_err(|err| err.to_string())?;
-                return Err(match status {
-                    Some(status) => format!("Plugin '{}' exited with status {}", self.plugin.manifest.id, status),
-                    None => format!("Plugin '{}' closed stdout without a response", self.plugin.manifest.id),
-                });
-            }
-            Err(err) => return Err(err),
-        };
-        if response_line.is_empty() {
-            let status = process.child.try_wait().map_err(|err| err.to_string())?;
-            return Err(match status {
+        let stdout = &mut process.stdout;
+        let child = &mut process.child;
+        read_decoded_plugin_response(&self.plugin, request_id, stdout, || {
+            let status = child.try_wait().map_err(|err| err.to_string())?;
+            Ok(match status {
                 Some(status) => format!("Plugin '{}' exited with status {}", self.plugin.manifest.id, status),
                 None => format!("Plugin '{}' closed stdout without a response", self.plugin.manifest.id),
-            });
-        }
-        decode_plugin_response(&self.plugin, request_id, &response_line)
+            })
+        })
+        .await
     }
 
     async fn kill(&self) {
         let mut process = self.process.lock().await;
         let _ = process.child.kill().await;
+    }
+
+    pub async fn shutdown(&self) {
+        self.kill().await;
     }
 
     pub async fn pid(&self) -> Option<u32> {
@@ -368,14 +363,17 @@ where
     let stdout = child.stdout.take().ok_or("Plugin stdout unavailable")?;
     let mut stderr = child.stderr.take().ok_or("Plugin stderr unavailable")?;
     let mut reader = BufReader::new(stdout);
-    let response_line_result = read_plugin_line(&mut reader, "response").await;
+    let response_result = read_decoded_plugin_response(plugin, request.id, &mut reader, || {
+        Ok(format!("Plugin '{}' exited without a response", plugin.manifest.id))
+    })
+    .await;
     let mut stderr_bytes = Vec::new();
     stderr.read_to_end(&mut stderr_bytes).await.map_err(|err| err.to_string())?;
     let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
     let status = child.wait().await.map_err(|err| err.to_string())?;
 
-    let response_line = match response_line_result {
-        Ok(line) => line,
+    let response = match response_result {
+        Ok(response) => response,
         Err(err) if err.contains("end of stream") => {
             let stderr = stderr_text.trim().to_string();
             return Err(if stderr.is_empty() {
@@ -386,14 +384,6 @@ where
         }
         Err(err) => return Err(err),
     };
-    if response_line.is_empty() {
-        let stderr = stderr_text.trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("Plugin '{}' exited without a response", plugin.manifest.id)
-        } else {
-            format!("Plugin '{}' exited without a response: {stderr}", plugin.manifest.id)
-        });
-    }
     if !status.success() {
         let stderr = stderr_text.trim().to_string();
         return Err(if stderr.is_empty() {
@@ -403,7 +393,7 @@ where
         });
     }
 
-    decode_plugin_response(plugin, request.id, &response_line)
+    Ok(response)
 }
 
 fn encode_plugin_request_line(request: &PluginRequest) -> Result<Vec<u8>, String> {
@@ -453,6 +443,42 @@ where
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+async fn read_decoded_plugin_response<T, R, F>(
+    plugin: &InstalledPlugin,
+    request_id: u64,
+    reader: &mut R,
+    end_of_stream_message: F,
+) -> Result<T, String>
+where
+    T: DeserializeOwned,
+    R: tokio::io::AsyncBufRead + Unpin,
+    F: FnMut() -> Result<String, String>,
+{
+    let mut end_of_stream_message = end_of_stream_message;
+    const MAX_NOISY_LINES: usize = 20;
+    for _ in 0..MAX_NOISY_LINES {
+        let line = match read_plugin_line(reader, "response").await {
+            Ok(line) => line,
+            Err(err) if err.contains("end of stream") => return Err(end_of_stream_message()?),
+            Err(err) => return Err(err),
+        };
+        match decode_plugin_response(plugin, request_id, &line) {
+            Ok(response) => return Ok(response),
+            Err(err) if err.starts_with(&format!("Failed to parse plugin '{}' response:", plugin.manifest.id)) => {
+                log::warn!("[plugin:{}] ignored non-protocol stdout: {}", plugin.manifest.id, line.trim_end());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    match read_plugin_line(reader, "response").await {
+        Ok(_) => {
+            Err(format!("Plugin '{}' wrote too many non-protocol stdout lines before its response", plugin.manifest.id))
+        }
+        Err(err) if err.contains("end of stream") => Err(end_of_stream_message()?),
+        Err(err) => Err(err),
+    }
+}
+
 fn decode_plugin_response<T>(plugin: &InstalledPlugin, request_id: u64, response_line: &str) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -487,7 +513,11 @@ fn resolve_plugin_executable(plugin_dir: &Path, executable: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::read_plugin_line;
+    use super::{
+        read_decoded_plugin_response, read_plugin_line, InstalledPlugin, PluginDriverManifest, PluginDriverSession,
+        PluginManifest, PluginRuntimeEnv,
+    };
+    use std::path::PathBuf;
     use tokio::io::BufReader;
 
     #[tokio::test]
@@ -498,5 +528,85 @@ mod tests {
         let line = read_plugin_line(&mut reader, "response").await.expect("line should be readable");
 
         assert_eq!(line, format!("{{\"error\":{}}}\n", "\u{fffd}\u{fffd}"));
+    }
+
+    #[tokio::test]
+    async fn skips_noisy_plugin_stdout_before_json_response() {
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: None,
+                drivers: Vec::new(),
+            },
+            path: PathBuf::new(),
+        };
+        let bytes = b"driver banner\n{\"id\":1,\"result\":{\"ok\":true}}\n";
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+
+        let result: serde_json::Value =
+            read_decoded_plugin_response(&plugin, 1, &mut reader, || Ok("closed".to_string()))
+                .await
+                .expect("response should decode after noisy line");
+
+        assert_eq!(result["ok"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_plugin_child_process() {
+        let dir = std::env::temp_dir().join(format!("dbx-plugin-shutdown-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+        }
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+
+        let session = PluginDriverSession::start(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("session should start");
+        let pid = session.pid().await.expect("child should have a pid");
+
+        session.shutdown().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!process_exists(pid));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }

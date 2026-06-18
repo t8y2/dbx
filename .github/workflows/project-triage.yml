@@ -22,10 +22,10 @@ jobs:
       PROJECT_OWNER: t8y2
       PROJECT_NUMBER: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.13.0
 

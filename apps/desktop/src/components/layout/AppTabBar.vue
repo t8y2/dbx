@@ -14,6 +14,8 @@ import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
 import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabPresentation";
 import { hexToRgba } from "@/lib/color";
+import { copyToClipboard } from "@/lib/clipboard";
+import { useToast } from "@/composables/useToast";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -30,6 +32,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
   queryStore.reorderTab(draggedId, targetId, position);
 });
@@ -91,6 +94,18 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: () => queryStore.duplicateTab(tab.id),
       icon: Copy,
       visible: canRenameTab(tab),
+    },
+    {
+      label: t("contextMenu.copyName"),
+      action: async () => {
+        try {
+          await copyToClipboard(tabDisplayTitle(tab, t));
+          toast(t("connection.copied"), 2000);
+        } catch (e: any) {
+          toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+        }
+      },
+      icon: Copy,
     },
     { label: "", separator: true },
     {

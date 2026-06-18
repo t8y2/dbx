@@ -19,6 +19,9 @@ export interface ColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   comment: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
+  character_maximum_length?: number | null;
 }
 
 export interface QueryResult {
@@ -148,6 +151,10 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
 }
 
 type ProxyLayer = { type: "proxy" } & ProxyTunnelConfig;
+
+function hasActiveSshLayer(config: ConnectionConfig): boolean {
+  return config.transport_layers?.some((layer) => layer.type === "ssh" && layer.enabled !== false && !!layer.host) ?? false;
+}
 
 function firstProxyLayer(config: ConnectionConfig): ProxyLayer | undefined {
   return config.transport_layers?.find((layer): layer is ProxyLayer => layer.type === "proxy" && layer.enabled !== false && !!layer.host);
@@ -308,6 +315,9 @@ interface BridgeColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   comment: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
+  character_maximum_length?: number | null;
 }
 
 interface MongoDocumentResult {
@@ -502,6 +512,17 @@ async function rqliteRequest(config: ConnectionConfig, endpoint: "/db/query" | "
 }
 
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
+  if (hasActiveSshLayer(config)) {
+    const result = await withTimeout(
+      bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+        connection_name: config.name,
+        database: config.database || "",
+        sql,
+      }),
+      resolveTimeoutMs(options),
+    );
+    return convertBridgeQueryResult(result, options);
+  }
   if (config.db_type === "mongodb") {
     const find = parseMongoFindCommand(sql);
     if (find) {
@@ -561,7 +582,7 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
     const result = await query(config, `SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name`);
     return result.rows.map((r) => ({ name: String(r.name || ""), type: String(r.type || "table") }));
   }
-  if (!isDirectQueryType(config.db_type)) {
+  if (hasActiveSshLayer(config) || !isDirectQueryType(config.db_type)) {
     const tables = await bridgeDataRequest<BridgeTableInfo[]>("/data/list-tables", {
       connection_name: config.name,
       database: config.database || "",
@@ -594,7 +615,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       comment: null,
     }));
   }
-  if (!isDirectQueryType(config.db_type)) {
+  if (hasActiveSshLayer(config) || !isDirectQueryType(config.db_type)) {
     const columns = await bridgeDataRequest<BridgeColumnInfo[]>("/data/describe-table", {
       connection_name: config.name,
       database: config.database || "",
@@ -608,6 +629,9 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       column_default: c.column_default,
       is_primary_key: c.is_primary_key,
       comment: c.comment,
+      numeric_precision: c.numeric_precision,
+      numeric_scale: c.numeric_scale,
+      character_maximum_length: c.character_maximum_length,
     }));
   }
   let result: QueryResult;

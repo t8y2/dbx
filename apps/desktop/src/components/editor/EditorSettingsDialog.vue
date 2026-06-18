@@ -24,6 +24,7 @@ import {
   FONT_FAMILIES,
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
+  DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
   type AiProvider,
   type AiApiStyle,
   type AiAuthMethod,
@@ -76,6 +77,9 @@ const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const { isDark, themeMode, setThemeMode } = useTheme();
 
+let cachedSystemFonts: string[] | null = null;
+let pendingSystemFonts: Promise<string[]> | null = null;
+
 const props = defineProps<{
   open: boolean;
   initialTab?: string;
@@ -101,7 +105,7 @@ const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
-const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? 500);
+const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
@@ -288,6 +292,7 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
 }
 
 const presetFontLabels = new Map(FONT_FAMILIES.map((font) => [font.value, font.label]));
+const presetFontValues = new Set(FONT_FAMILIES.map((font) => font.value));
 
 function cssFontFamilyForName(name: string): string {
   return `'${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}', monospace`;
@@ -316,11 +321,23 @@ function displayFontFamily(value: string): string {
   return presetFontLabels.get(value) ?? readableFontFamily(value);
 }
 
+function fontOptionStyle(value: string) {
+  return presetFontValues.has(value) || value === editFontFamily.value ? { fontFamily: value } : undefined;
+}
+
 async function loadSystemFontOptions() {
   if (systemFontsLoaded.value || systemFontsLoading.value) return;
   systemFontsLoading.value = true;
   try {
-    systemFonts.value = await listSystemFonts();
+    if (cachedSystemFonts) {
+      systemFonts.value = cachedSystemFonts;
+    } else {
+      pendingSystemFonts ??= listSystemFonts().finally(() => {
+        pendingSystemFonts = null;
+      });
+      cachedSystemFonts = await pendingSystemFonts;
+      systemFonts.value = cachedSystemFonts;
+    }
     systemFontsLoaded.value = true;
   } catch {
     systemFonts.value = [];
@@ -347,7 +364,7 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
-      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? 500;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
@@ -369,7 +386,6 @@ watch(
       editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
       editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
       editSnippets.value = settingsStore.editorSettings.snippets.map((s) => ({ ...s }));
-      void loadSystemFontOptions();
     }
   },
   { immediate: true },
@@ -404,7 +420,7 @@ function hasChanges(): boolean {
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
-    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? 500) ||
+    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE) ||
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
@@ -497,7 +513,7 @@ function resetDefaults() {
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
-  editSidebarTablePageSize.value = 500;
+  editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
@@ -997,7 +1013,7 @@ watch(
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
-      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? 500;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
       webdavPassword.value = "";
       await refreshWebDavPasswordStatus();
       syncAiEditState();
@@ -1419,7 +1435,6 @@ watch(
                     :search-placeholder="t('settings.searchFont')"
                     :empty-text="t('settings.noFontsFound')"
                     :loading-text="t('settings.loadingFonts')"
-                    :loading="systemFontsLoading"
                     allow-custom
                     :display-name="displayFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
@@ -1434,7 +1449,7 @@ watch(
                       </span>
                     </template>
                     <template #option-label="{ option, label }">
-                      <span class="truncate" :style="{ fontFamily: option }">{{ label }}</span>
+                      <span class="truncate" :style="fontOptionStyle(option)">{{ label }}</span>
                     </template>
                     <template #custom-option-label="{ value }">
                       <span class="truncate" :style="{ fontFamily: value }">

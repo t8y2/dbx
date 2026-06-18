@@ -8,18 +8,20 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
     }
 
     let database_label = database_label(options.database_type);
-    if super::dialect::capabilities_for(options.database_type).dialect != StructureDialect::Mysql {
+    let capabilities = super::dialect::capabilities_for(options.database_type);
+    let dialect = capabilities.dialect;
+    if !capabilities.foreign_key {
         warnings.push(format!("Editing foreign keys is not supported for {database_label} from this editor."));
         return Vec::new();
     }
 
-    let table = qualified_table(StructureDialect::Mysql, options.schema.as_deref(), &options.table_name);
+    let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let mut statements = Vec::new();
 
     for foreign_key in &options.foreign_keys {
         if foreign_key.marked_for_drop {
             if let Some(original) = &foreign_key.original {
-                statements.push(drop_foreign_key_sql(&table, &original.name));
+                statements.push(drop_foreign_key_sql(dialect, &table, &original.name));
             }
             continue;
         }
@@ -28,10 +30,10 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
             if !has_foreign_key_change(foreign_key, original) {
                 continue;
             }
-            statements.push(drop_foreign_key_sql(&table, &original.name));
+            statements.push(drop_foreign_key_sql(dialect, &table, &original.name));
         }
 
-        if let Some(sql) = create_foreign_key_sql(&table, foreign_key, warnings) {
+        if let Some(sql) = create_foreign_key_sql(dialect, &table, foreign_key, warnings) {
             statements.push(sql);
         }
     }
@@ -49,11 +51,16 @@ fn has_foreign_key_change(foreign_key: &EditableStructureForeignKey, original: &
         || normalize_action(&foreign_key.on_delete) != normalize_action(original.on_delete.as_deref().unwrap_or(""))
 }
 
-fn drop_foreign_key_sql(table: &str, name: &str) -> String {
-    format!("ALTER TABLE {table} DROP FOREIGN KEY {};", quote_ident(StructureDialect::Mysql, name))
+fn drop_foreign_key_sql(dialect: StructureDialect, table: &str, name: &str) -> String {
+    match dialect {
+        StructureDialect::Mysql => format!("ALTER TABLE {table} DROP FOREIGN KEY {};", quote_ident(dialect, name)),
+        StructureDialect::Postgres => format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name)),
+        _ => unreachable!("foreign key SQL requested for unsupported dialect"),
+    }
 }
 
 fn create_foreign_key_sql(
+    dialect: StructureDialect,
     table: &str,
     foreign_key: &EditableStructureForeignKey,
     warnings: &mut Vec<String>,
@@ -72,20 +79,16 @@ fn create_foreign_key_sql(
     }
 
     let ref_target = if clean(&foreign_key.ref_schema).is_empty() {
-        quote_ident(StructureDialect::Mysql, &ref_table)
+        quote_ident(dialect, &ref_table)
     } else {
-        format!(
-            "{}.{}",
-            quote_ident(StructureDialect::Mysql, &foreign_key.ref_schema),
-            quote_ident(StructureDialect::Mysql, &ref_table)
-        )
+        format!("{}.{}", quote_ident(dialect, &foreign_key.ref_schema), quote_ident(dialect, &ref_table))
     };
 
     let mut sql = format!(
         "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {ref_target} ({}",
-        quote_ident(StructureDialect::Mysql, &name),
-        columns.iter().map(|column| quote_ident(StructureDialect::Mysql, column)).collect::<Vec<_>>().join(", "),
-        ref_columns.iter().map(|column| quote_ident(StructureDialect::Mysql, column)).collect::<Vec<_>>().join(", ")
+        quote_ident(dialect, &name),
+        columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", "),
+        ref_columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ")
     );
     sql.push(')');
 

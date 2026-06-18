@@ -20,6 +20,8 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
     let database_label = database_label(options.database_type);
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
     let has_original_column_positions = active_columns.iter().any(|column| column.original_position.is_some());
+    let mut simulated_column_order =
+        if has_original_column_positions { original_active_column_order(&active_columns) } else { Vec::new() };
     let mut statements = Vec::new();
 
     for column in &options.columns {
@@ -49,10 +51,12 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         } else {
             String::new()
         };
+        let desired_previous_column_id = active_previous_column_id(&active_columns, active_index);
         let has_position_change = has_original_column_positions
             && matches!(dialect, StructureDialect::Mysql | StructureDialect::ClickHouse)
             && column.original.is_some()
-            && mysql_column_position_changed(&active_columns, active_index);
+            && column.original_position.is_some()
+            && simulated_column_position_changed(&simulated_column_order, &column.id, desired_previous_column_id);
 
         if column.original.is_none() {
             if !capabilities.add_column {
@@ -67,6 +71,11 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 options.schema.as_deref(),
                 &options.table_name,
             ));
+            if has_original_column_positions
+                && matches!(dialect, StructureDialect::Mysql | StructureDialect::ClickHouse)
+            {
+                apply_simulated_column_position(&mut simulated_column_order, &column.id, desired_previous_column_id);
+            }
             continue;
         }
 
@@ -122,6 +131,9 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
+        }
+        if has_position_change {
+            apply_simulated_column_position(&mut simulated_column_order, &column.id, desired_previous_column_id);
         }
     }
 
@@ -241,40 +253,46 @@ pub(super) fn column_position_clause(
     format!(" AFTER {}", quote_ident(dialect, columns.get(index - 1).map(|column| column.name.as_str()).unwrap_or("")))
 }
 
-pub(super) fn mysql_column_position_changed(columns: &[&EditableStructureColumn], index: usize) -> bool {
-    let Some(column) = columns.get(index) else {
+pub(super) fn original_active_column_order(columns: &[&EditableStructureColumn]) -> Vec<String> {
+    let mut original_columns: Vec<_> = columns
+        .iter()
+        .filter(|column| column.original.is_some() && column.original_position.is_some())
+        .copied()
+        .collect();
+    original_columns.sort_by_key(|column| column.original_position.unwrap_or(0));
+    original_columns.into_iter().map(|column| column.id.clone()).collect()
+}
+
+pub(super) fn active_previous_column_id<'a>(columns: &[&'a EditableStructureColumn], index: usize) -> Option<&'a str> {
+    if index == 0 {
+        None
+    } else {
+        columns.get(index - 1).map(|column| column.id.as_str())
+    }
+}
+
+pub(super) fn simulated_column_position_changed(
+    simulated_column_order: &[String],
+    column_id: &str,
+    desired_previous_column_id: Option<&str>,
+) -> bool {
+    let Some(index) = simulated_column_order.iter().position(|id| id == column_id) else {
         return false;
     };
-    if column.original.is_none() || column.original_position.is_none() {
-        return false;
-    }
-    current_previous_original_column_name(columns, index) != original_previous_column_name(columns, column)
+    let current_previous_column_id = if index == 0 { None } else { Some(simulated_column_order[index - 1].as_str()) };
+    current_previous_column_id != desired_previous_column_id
 }
 
-pub(super) fn original_previous_column_name(
-    columns: &[&EditableStructureColumn],
-    column: &EditableStructureColumn,
-) -> Option<String> {
-    let mut original_columns: Vec<_> =
-        columns.iter().filter(|item| item.original.is_some() && item.original_position.is_some()).copied().collect();
-    original_columns.sort_by_key(|item| item.original_position.unwrap_or(0));
-    let index = original_columns.iter().position(|item| item.id == column.id)?;
-    if index == 0 {
-        None
-    } else {
-        original_columns[index - 1].original.as_ref().map(|original| original.name.clone())
+pub(super) fn apply_simulated_column_position(
+    simulated_column_order: &mut Vec<String>,
+    column_id: &str,
+    desired_previous_column_id: Option<&str>,
+) {
+    if let Some(index) = simulated_column_order.iter().position(|id| id == column_id) {
+        simulated_column_order.remove(index);
     }
-}
-
-pub(super) fn current_previous_original_column_name(
-    columns: &[&EditableStructureColumn],
-    index: usize,
-) -> Option<String> {
-    if index == 0 {
-        None
-    } else {
-        columns.get(index - 1).map(|column| {
-            column.original.as_ref().map(|original| original.name.clone()).unwrap_or_else(|| column.name.clone())
-        })
-    }
+    let index = desired_previous_column_id
+        .and_then(|previous_id| simulated_column_order.iter().position(|id| id == previous_id).map(|index| index + 1))
+        .unwrap_or(0);
+    simulated_column_order.insert(index, column_id.to_string());
 }

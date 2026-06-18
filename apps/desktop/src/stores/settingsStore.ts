@@ -52,6 +52,8 @@ export type DesktopIconTheme = "default" | "black";
 
 export type InterfaceLayout = "separated" | "classic";
 
+export const DEFAULT_SIDEBAR_TABLE_PAGE_SIZE = 1000;
+
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
   icon_theme: "default",
@@ -60,7 +62,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   driver_store_dir: null,
   plugin_store_dir: null,
   agent_store_dir: null,
-  sidebar_table_page_size: 500,
+  sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
 
 function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
@@ -397,7 +399,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   infiniteScrollMaxRows: 5000,
   redisScanPageSize: 1000,
   mongoViewMode: "document",
-  showColumnCommentsInHeader: false,
+  showColumnCommentsInHeader: true,
   showColumnTypesInHeader: true,
   compactColumnHeaderActions: true,
   dataGridRenderMode: "canvas",

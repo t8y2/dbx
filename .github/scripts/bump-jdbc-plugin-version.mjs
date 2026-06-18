@@ -31,6 +31,10 @@ function isReleaseBumpRelevantJdbcPluginChange(file) {
   return true;
 }
 
+function hasJdbcPluginVersionChange(file) {
+  return file === POM_PATH || file === MANIFEST_PATH;
+}
+
 function updatePomVersion(pomXml, version) {
   return pomXml.replace(/(<project[\s\S]*?<version>)([^<]+)(<\/version>)/, `$1${version}$3`);
 }
@@ -48,7 +52,7 @@ export function evaluateJdbcPluginReleaseBump({ changedFiles, pomXml, manifestJs
     throw new Error(`JDBC plugin version mismatch: pom.xml is ${pomVersion} but manifest.json is ${currentManifestVersion}.`);
   }
 
-  const shouldBump = changedFiles.some(isReleaseBumpRelevantJdbcPluginChange);
+  const shouldBump = changedFiles.some(isReleaseBumpRelevantJdbcPluginChange) && !changedFiles.some(hasJdbcPluginVersionChange);
   const newVersion = shouldBump ? bumpPatchVersion(pomVersion) : pomVersion;
   return {
     changed: shouldBump,

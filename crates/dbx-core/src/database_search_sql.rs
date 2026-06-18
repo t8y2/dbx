@@ -112,7 +112,7 @@ pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<Da
     } else if options.database_type.is_some_and(uses_fetch_first) {
         format!("SELECT * FROM {table} WHERE ({where_clause}) FETCH FIRST {limit} ROWS ONLY")
     } else if options.database_type == Some(DatabaseType::Jdbc) {
-        // JDBC connections rely on Statement.setMaxRows() for row limiting.
+        // JDBC connections avoid SQL-level LIMIT; the agent truncates rows while reading.
         format!("SELECT * FROM {table} WHERE ({where_clause});")
     } else {
         format!("SELECT * FROM {table} WHERE ({where_clause}) LIMIT {limit};")

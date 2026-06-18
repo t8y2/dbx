@@ -21,23 +21,34 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
         .collect())
 }
 
+/// try query `table`, `view` and `materialized view` using statement supported by the newer version.
+/// if there is an error, rollback to the previous version of the statement
 pub async fn list_tables(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
+    match list_tables_new_version(pool, _schema).await {
+        Ok(ddl) => Ok(ddl),
+        Err(_) => list_tables_older_version(pool, _schema).await,
+    }
+}
+
+async fn list_tables_new_version(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
 
-    let stmt = client.prepare_cached(questdb_tables_sql()).await.map_err(|e| e.to_string())?;
+    let stmt = client.prepare_cached(questdb_tables_sql_new_version()).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| {
             let table_type_col = row.get::<_, String>(1);
-            let table_type = if table_type_col.eq_ignore_ascii_case("T") { "TABLE" } else { "VIEW" };
-            let comment =
-                if table_type_col.eq_ignore_ascii_case("M") { Some("Materialized".to_string()) } else { None };
+            let table_type = match table_type_col.as_ref() {
+                "V" => "VIEW",
+                "M" => "MATERIALIZED_VIEW",
+                _ => "TABLE",
+            };
             TableInfo {
                 name: row.get::<_, String>(0),
                 table_type: table_type.to_string(),
-                comment,
+                comment: None,
                 parent_schema: None,
                 parent_name: None,
             }
@@ -45,8 +56,34 @@ pub async fn list_tables(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, S
         .collect())
 }
 
-fn questdb_tables_sql() -> &'static str {
+fn questdb_tables_sql_new_version() -> &'static str {
     "SELECT table_name, table_type FROM tables"
+}
+
+async fn list_tables_older_version(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+
+    let stmt = client.prepare_cached(questdb_tables_sql_older_version()).await.map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[]).await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let mat_view_col = row.get::<_, bool>(1);
+            let table_type = if mat_view_col { "MATERIALIZED_VIEW" } else { "TABLE" };
+            TableInfo {
+                name: row.get::<_, String>(0),
+                table_type: table_type.to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            }
+        })
+        .collect())
+}
+
+fn questdb_tables_sql_older_version() -> &'static str {
+    "SELECT table_name, matView FROM tables"
 }
 
 pub async fn get_columns(pool: &Pool, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
@@ -109,9 +146,9 @@ pub async fn questdb_object_source(pool: &Pool, name: &str) -> Result<String, St
 }
 
 pub async fn questdb_table_or_view_ddl(pool: &Pool, table_or_view: &str) -> Result<String, String> {
-    match questdb_table_ddl(pool, table_or_view).await {
+    match questdb_view_ddl(pool, table_or_view).await {
         Ok(ddl) => Ok(ddl),
-        Err(_) => questdb_view_ddl(pool, table_or_view).await,
+        Err(_) => questdb_table_ddl(pool, table_or_view).await,
     }
 }
 

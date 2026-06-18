@@ -82,6 +82,30 @@ test("renames query tab titles", () => {
   assert.equal(tab?.customTitle, true);
 });
 
+test("marked-clean object source tabs close without unsaved confirmation", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db", "Source - refresh_orders");
+  store.updateSql(tabId, "CREATE PROCEDURE refresh_orders() SELECT 1;");
+  store.setObjectSource(tabId, {
+    schema: "public",
+    name: "refresh_orders",
+    objectType: "PROCEDURE",
+  });
+
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  assert.equal(store.isTabDirty(tab), true);
+
+  store.markTabClean(tab);
+  assert.equal(store.isTabDirty(tab), false);
+
+  store.closeTab(tabId);
+
+  assert.equal(store.showCloseConfirm, false);
+  assert.equal(store.tabs.some((item) => item.id === tabId), false);
+});
+
 test("editing query sql preserves the displayed result editability state", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
@@ -133,7 +157,7 @@ test("editing query sql preserves the displayed result editability state", () =>
   assert.equal(tab.tableMeta?.tableName, "users");
 });
 
-test("selecting a result run restores its displayed result without changing SQL draft", () => {
+test("selecting a result run restores its displayed result without changing SQL draft", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db");
@@ -163,7 +187,7 @@ test("selecting a result run restores its displayed result without changing SQL 
   ];
   tab.activeResultRunId = "run-2";
 
-  store.setActiveResultRun(tabId, "run-1");
+  await store.setActiveResultRun(tabId, "run-1");
 
   assert.equal(tab.sql, "select draft");
   assert.equal(tab.activeResultRunId, "run-1");
@@ -172,7 +196,7 @@ test("selecting a result run restores its displayed result without changing SQL 
   assert.equal(tab.resultBaseSql, "select 1");
 });
 
-test("removing the active result run selects an adjacent run", () => {
+test("removing the active result run selects an adjacent run", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db");
@@ -209,7 +233,7 @@ test("removing the active result run selects an adjacent run", () => {
       resultBaseSql: "select 3",
     },
   ];
-  store.setActiveResultRun(tabId, "run-2");
+  await store.setActiveResultRun(tabId, "run-2");
 
   assert.equal(store.removeResultRun(tabId, "run-2"), true);
 
@@ -325,7 +349,7 @@ test("result archives import into a new query tab with switchable runs", async (
     },
   ];
   tab.activeResultRunId = "run-2";
-  store.setActiveResultRun(tabId, "run-2");
+  await store.setActiveResultRun(tabId, "run-2");
 
   const archive = await store.exportResultArchive(tabId);
   assert.ok(archive);
@@ -345,7 +369,7 @@ test("result archives import into a new query tab with switchable runs", async (
   assert.deepEqual(imported?.result?.columns, ["two"]);
   assert.deepEqual(imported?.result?.rows, [[2]]);
 
-  store.setActiveResultRun(importedTabId, "run-1");
+  await store.setActiveResultRun(importedTabId, "run-1");
   assert.deepEqual(imported?.result?.columns, ["one"]);
   assert.deepEqual(imported?.result?.rows, [[1]]);
 });
@@ -386,6 +410,7 @@ test("completed query executions append result runs and select the latest run", 
 
   try {
     const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
     await store.executeTabSql(tabId, "select 1");
     await store.executeTabSql(tabId, "select 2");
 
@@ -397,7 +422,7 @@ test("completed query executions append result runs and select the latest run", 
     assert.equal(tab?.activeResultRunId, tab?.resultRuns?.[1]?.id);
     assert.deepEqual(tab?.result?.columns, ["run_2"]);
 
-    store.setActiveResultRun(tabId, tab!.resultRuns![0]!.id);
+    await store.setActiveResultRun(tabId, tab!.resultRuns![0]!.id);
     assert.deepEqual(tab?.result?.columns, ["run_1"]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -430,6 +455,7 @@ test("failed query executions append switchable error result runs", async () => 
 
   try {
     const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
     await store.executeTabSql(tabId, "select broken");
 
     const tab = store.tabs.find((item) => item.id === tabId);
@@ -443,7 +469,7 @@ test("failed query executions append switchable error result runs", async () => 
   }
 });
 
-test("statement result switching is scoped to the active result run", () => {
+test("statement result switching is scoped to the active result run", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db");
@@ -477,13 +503,13 @@ test("statement result switching is scoped to the active result run", () => {
     },
   ];
   tab.activeResultRunId = "run-1";
-  store.setActiveResultRun(tabId, "run-1");
+  await store.setActiveResultRun(tabId, "run-1");
 
   store.setActiveResultIndex(tabId, 1);
   assert.deepEqual(tab.result?.columns, ["b"]);
   assert.equal(tab.resultRuns[0]?.activeResultIndex, 1);
 
-  store.setActiveResultRun(tabId, "run-2");
+  await store.setActiveResultRun(tabId, "run-2");
   assert.deepEqual(tab.result?.columns, ["c"]);
   assert.equal(tab.activeResultIndex, 0);
 });
@@ -1288,6 +1314,80 @@ test("query result export fetches every paginated page", async () => {
     assert.deepEqual(timeoutSecs, [600, 600]);
     assert.equal(exported?.rows.length, 10_002);
     assert.deepEqual(exported?.rows.at(-1), [10_002]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("jdbc query pagination uses result sessions without capping max rows to one page", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let prepareBody: any;
+  let executeBody: any;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("jdbc-1"),
+    db_type: "jdbc",
+    connection_string: "jdbc:Cache://127.0.0.1:1972/USER",
+    jdbc_driver_class: "com.intersys.jdbc.CacheDriver",
+  });
+  const tabId = store.createTab("jdbc-1", "", "Query", "query", "SQLUser");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      prepareBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: "SELECT * FROM CT_Loc",
+          pageLimit: 100,
+          pageOffset: 0,
+          useAgentResultSession: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["id"],
+            rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+            affected_rows: 0,
+            execution_time_ms: 1,
+            session_id: "session-1",
+            has_more: true,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    await store.executeTabSql(tabId, "SELECT * FROM CT_Loc");
+
+    assert.equal(prepareBody.options.useAgentCursor, true);
+    assert.equal(executeBody.pageSize, 100);
+    assert.equal(executeBody.fetchSize, 100);
+    assert.equal(executeBody.maxRows, undefined);
+    assert.equal(executeBody.clientSessionId, tabId);
+    assert.equal(tab.resultSessionId, "session-1");
+    assert.equal(tab.result?.has_more, true);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -263,6 +263,20 @@ function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
   }
 }
 
+/** Map a JDBC table_type to an ObjectSourceKind for getTableDdl routing.
+ *  Views and materialized views need the object_type parameter so the
+ *  backend can call DBMS_METADATA.GET_DDL with the correct type. */
+function isViewOrMaterializedView(tableType: string): ObjectSourceKind | undefined {
+  switch (tableType.toUpperCase()) {
+    case "VIEW":
+      return "VIEW";
+    case "MATERIALIZED VIEW":
+      return "MATERIALIZED_VIEW";
+    default:
+      return undefined;
+  }
+}
+
 async function handleCompare() {
   loading.value = true;
   step.value = "compare";
@@ -276,12 +290,13 @@ async function handleCompare() {
     // Load schema details in parallel
     const sourceDetails = await Promise.all(
       srcTables.map(async (table) => {
+        const objectType = isViewOrMaterializedView(table.table_type);
         const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
           api.getColumns(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
           api.listIndexes(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
           api.listForeignKeys(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
           api.listTriggers(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
-          api.getTableDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
+          api.getTableDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name, objectType),
         ]);
         return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
       }),
@@ -289,12 +304,13 @@ async function handleCompare() {
 
     const targetDetails = await Promise.all(
       tgtTables.map(async (table) => {
+        const objectType = isViewOrMaterializedView(table.table_type);
         const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
           api.getColumns(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
           api.listIndexes(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
           api.listForeignKeys(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
           api.listTriggers(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
-          api.getTableDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
+          api.getTableDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name, objectType),
         ]);
         return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
       }),

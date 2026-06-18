@@ -188,6 +188,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::Gbase));
     assert!(skips_tcp_probe(&DatabaseType::Databend));
     assert!(skips_tcp_probe(&DatabaseType::InfluxDb));
+    assert!(skips_tcp_probe(&DatabaseType::MessageQueue));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
@@ -202,6 +203,10 @@ fn driver_manifest_matches_core_database_capabilities() {
     let support_levels = ["connect", "browse", "understand", "operate"];
 
     for driver in &manifest.drivers {
+        // MQ is a message queue, not a database — skip database capability checks
+        if driver.db_type == DatabaseType::MessageQueue {
+            continue;
+        }
         assert!(
             support_levels.contains(&driver.support_level.as_str()),
             "invalid support level for {:?}",

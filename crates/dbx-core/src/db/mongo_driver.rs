@@ -129,7 +129,11 @@ pub async fn find_documents(
         _ => doc! {},
     };
 
-    let total = col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?;
+    let total = if filter_doc.is_empty() {
+        col.estimated_document_count().await.map_err(|e| e.to_string())?
+    } else {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
     if let Some(s) = sort {

@@ -1,6 +1,8 @@
 use crate::query::MAX_ROWS;
 use crate::sql::starts_with_executable_sql_keyword;
-use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+use crate::types::{
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, QueryResult, TableInfo, TriggerInfo,
+};
 use futures::{FutureExt, TryStreamExt};
 use rust_decimal::Decimal;
 use std::future::Future;
@@ -11,6 +13,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 pub type SqlServerClient = Client<Compat<TcpStream>>;
+pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -173,11 +176,15 @@ where
 {
     match AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result.map_err(|e| e.to_string()),
-        Err(_) => {
-            Err("SQL Server driver could not decode this result set. Unsupported columns may need to be cast to text."
-                .to_string())
-        }
+        Err(_) => Err(format!(
+            "{SQLSERVER_DRIVER_PANIC_ERROR_PREFIX} the current client will be rebuilt. \
+                 Unsupported columns may need to be cast to text."
+        )),
     }
+}
+
+pub fn is_driver_panic_error(error: &str) -> bool {
+    error.starts_with(SQLSERVER_DRIVER_PANIC_ERROR_PREFIX)
 }
 
 async fn describe_sqlserver_result_set(
@@ -577,6 +584,220 @@ pub async fn test_connection(client: &mut SqlServerClient) -> Result<(), String>
     Ok(())
 }
 
+pub async fn list_linked_servers(client: &mut SqlServerClient) -> Result<Vec<LinkedServerInfo>, String> {
+    let stream = client
+        .query(
+            "SELECT name, product, provider, data_source \
+             FROM sys.servers \
+             WHERE is_linked = 1 \
+             ORDER BY name",
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| LinkedServerInfo {
+            name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+            product: row.get::<&str, _>(1).filter(|value| !value.trim().is_empty()).map(str::to_string),
+            provider: row.get::<&str, _>(2).filter(|value| !value.trim().is_empty()).map(str::to_string),
+            data_source: row.get::<&str, _>(3).filter(|value| !value.trim().is_empty()).map(str::to_string),
+        })
+        .filter(|server| !server.name.trim().is_empty())
+        .collect())
+}
+
+pub async fn list_linked_server_catalogs(
+    client: &mut SqlServerClient,
+    server: &str,
+) -> Result<Vec<DatabaseInfo>, String> {
+    let stream = client.query("EXEC sp_catalogs @server_name = @P1", &[&server]).await.map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get::<&str, _>(0).map(str::trim).filter(|name| !name.is_empty()))
+        .map(|name| DatabaseInfo { name: name.to_string() })
+        .collect())
+}
+
+pub async fn list_linked_server_schemas(
+    client: &mut SqlServerClient,
+    server: &str,
+    catalog: &str,
+) -> Result<Vec<String>, String> {
+    let tables = linked_server_table_rows(client, server, catalog, None, None).await?;
+    let mut schemas = Vec::new();
+    for table in tables {
+        if let Some(schema) = table.schema.filter(|value| !value.trim().is_empty()) {
+            if !schemas.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&schema)) {
+                schemas.push(schema);
+            }
+        }
+    }
+    schemas.sort_by_key(|schema| (if schema.eq_ignore_ascii_case("dbo") { 0 } else { 1 }, schema.to_lowercase()));
+    Ok(schemas)
+}
+
+pub async fn list_linked_server_tables(
+    client: &mut SqlServerClient,
+    server: &str,
+    catalog: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<TableInfo>, String> {
+    let filter = filter.map(str::trim).filter(|value| !value.is_empty()).map(str::to_lowercase);
+    let limit = limit.unwrap_or(usize::MAX);
+    let offset = offset.unwrap_or(0);
+    let rows = linked_server_table_rows(client, server, catalog, Some(schema), None).await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| filter.as_ref().is_none_or(|value| row.name.to_lowercase().contains(value)))
+        .skip(offset)
+        .take(limit)
+        .map(|row| TableInfo {
+            name: row.name,
+            table_type: normalize_linked_server_table_type(row.table_type.as_deref()),
+            comment: row.comment,
+            parent_schema: None,
+            parent_name: None,
+        })
+        .collect())
+}
+
+pub async fn get_linked_server_columns(
+    client: &mut SqlServerClient,
+    server: &str,
+    catalog: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ColumnInfo>, String> {
+    let stream = client
+        .query(
+            "EXEC sp_columns_ex \
+             @table_server = @P1, \
+             @table_name = @P2, \
+             @table_schema = @P3, \
+             @table_catalog = @P4",
+            &[&server, &table, &schema, &catalog],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = row.get::<&str, _>(3)?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let base_type = row.get::<&str, _>(5).unwrap_or("").trim();
+            let column_size = linked_i32(row, 6);
+            let numeric_scale = linked_i32(row, 8);
+            let nullable = linked_i32(row, 10).unwrap_or(1) != 0;
+            let data_type = linked_server_column_type(base_type, column_size, numeric_scale);
+            Some(ColumnInfo {
+                name: name.to_string(),
+                data_type,
+                is_nullable: nullable,
+                column_default: row.get::<&str, _>(12).filter(|value| !value.trim().is_empty()).map(str::to_string),
+                is_primary_key: false,
+                extra: None,
+                comment: row.get::<&str, _>(11).filter(|value| !value.trim().is_empty()).map(str::to_string),
+                numeric_precision: column_size,
+                numeric_scale,
+                character_maximum_length: linked_i32(row, 15),
+            })
+        })
+        .collect())
+}
+
+struct LinkedServerTableRow {
+    schema: Option<String>,
+    name: String,
+    table_type: Option<String>,
+    comment: Option<String>,
+}
+
+async fn linked_server_table_rows(
+    client: &mut SqlServerClient,
+    server: &str,
+    catalog: &str,
+    schema: Option<&str>,
+    table_name: Option<&str>,
+) -> Result<Vec<LinkedServerTableRow>, String> {
+    let sql = format!(
+        "EXEC sp_tables_ex \
+         @table_server = {}, \
+         @table_name = {}, \
+         @table_schema = {}, \
+         @table_catalog = {}, \
+         @table_type = '''TABLE'',''VIEW''', \
+         @fUsePattern = 0",
+        sqlserver_nstring_literal(server),
+        sqlserver_optional_nstring_literal(table_name),
+        sqlserver_optional_nstring_literal(schema),
+        sqlserver_nstring_literal(catalog),
+    );
+    let stream = client.query(sql.as_str(), &[]).await.map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = row.get::<&str, _>(2)?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(LinkedServerTableRow {
+                schema: row.get::<&str, _>(1).filter(|value| !value.trim().is_empty()).map(str::to_string),
+                name: name.to_string(),
+                table_type: row.get::<&str, _>(3).filter(|value| !value.trim().is_empty()).map(str::to_string),
+                comment: row.get::<&str, _>(4).filter(|value| !value.trim().is_empty()).map(str::to_string),
+            })
+        })
+        .collect())
+}
+
+fn sqlserver_optional_nstring_literal(value: Option<&str>) -> String {
+    value.filter(|value| !value.trim().is_empty()).map(sqlserver_nstring_literal).unwrap_or_else(|| "NULL".to_string())
+}
+
+fn sqlserver_nstring_literal(value: &str) -> String {
+    format!("N'{}'", value.replace('\'', "''"))
+}
+
+fn normalize_linked_server_table_type(value: Option<&str>) -> String {
+    let upper = value.unwrap_or("TABLE").to_ascii_uppercase();
+    if upper.contains("VIEW") {
+        "VIEW".to_string()
+    } else {
+        "BASE TABLE".to_string()
+    }
+}
+
+fn linked_server_column_type(base_type: &str, size: Option<i32>, scale: Option<i32>) -> String {
+    let lower = base_type.to_ascii_lowercase();
+    if matches!(lower.as_str(), "varchar" | "nvarchar" | "char" | "nchar" | "binary" | "varbinary") {
+        if let Some(size) = size {
+            if size > 0 {
+                return format!("{base_type}({size})");
+            }
+        }
+    }
+    if matches!(lower.as_str(), "decimal" | "numeric") {
+        if let (Some(size), Some(scale)) = (size, scale) {
+            return format!("{base_type}({size},{scale})");
+        }
+    }
+    base_type.to_string()
+}
+
+fn linked_i32(row: &tiberius::Row, index: usize) -> Option<i32> {
+    row.try_get::<i32, _>(index).ok().flatten().or_else(|| row.try_get::<i16, _>(index).ok().flatten().map(i32::from))
+}
+
 pub async fn list_schemas(client: &mut SqlServerClient) -> Result<Vec<String>, String> {
     let stream = client
         .query(
@@ -720,22 +941,26 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
                 .try_get::<i32, _>(7)
                 .ok()
                 .flatten()
-                .or_else(|| row.try_get::<i16, _>(7).ok().flatten().map(|v| v as i32));
+                .or_else(|| row.try_get::<i16, _>(7).ok().flatten().map(|v| v as i32))
+                .or_else(|| row.try_get::<u8, _>(7).ok().flatten().map(|v| v as i32));
             let dt_prec = row
                 .try_get::<i32, _>(8)
                 .ok()
                 .flatten()
-                .or_else(|| row.try_get::<i16, _>(8).ok().flatten().map(|v| v as i32));
+                .or_else(|| row.try_get::<i16, _>(8).ok().flatten().map(|v| v as i32))
+                .or_else(|| row.try_get::<u8, _>(8).ok().flatten().map(|v| v as i32));
             let num_prec = row
                 .try_get::<i32, _>(5)
                 .ok()
                 .flatten()
-                .or_else(|| row.try_get::<i16, _>(5).ok().flatten().map(|v| v as i32));
+                .or_else(|| row.try_get::<i16, _>(5).ok().flatten().map(|v| v as i32))
+                .or_else(|| row.try_get::<u8, _>(5).ok().flatten().map(|v| v as i32));
             let num_scale = row
                 .try_get::<i32, _>(6)
                 .ok()
                 .flatten()
-                .or_else(|| row.try_get::<i16, _>(6).ok().flatten().map(|v| v as i32));
+                .or_else(|| row.try_get::<i16, _>(6).ok().flatten().map(|v| v as i32))
+                .or_else(|| row.try_get::<u8, _>(6).ok().flatten().map(|v| v as i32));
             let data_type = match base.to_lowercase().as_str() {
                 "varchar" => match max_len {
                     Some(-1) => "varchar(max)".to_string(),

@@ -45,6 +45,7 @@ export interface SshTunnelConfig {
   connect_timeout_secs?: number;
   expose_lan?: boolean;
   use_ssh_agent?: boolean;
+  ssh_agent_sock_path?: string;
 }
 
 export interface ProxyTunnelConfig {

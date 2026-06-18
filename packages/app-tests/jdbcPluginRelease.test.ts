@@ -70,6 +70,22 @@ test("auto bumps JDBC plugin patch version when runtime files changed for releas
   assert.match(result.manifestJson, /"version": "0\.1\.10"/);
 });
 
+test("does not auto bump JDBC plugin again when release range already includes a version bump", () => {
+  const result = evaluateJdbcPluginReleaseBump({
+    changedFiles: [
+      "plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java",
+      "plugins/jdbc/pom.xml",
+      "plugins/jdbc/manifest.json",
+    ],
+    pomXml: "<project><version>0.1.10</version></project>",
+    manifestJson: '{ "version": "0.1.10" }',
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.oldVersion, "0.1.10");
+  assert.equal(result.newVersion, "0.1.10");
+});
+
 test("does not auto bump JDBC plugin version for release packaging-only changes", () => {
   const result = evaluateJdbcPluginReleaseBump({
     changedFiles: ["plugins/jdbc/README.md", "plugins/jdbc/package.sh"],

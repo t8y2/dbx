@@ -173,6 +173,21 @@ fn is_mysql_family_target(target_db: &DatabaseType) -> bool {
     )
 }
 
+/// QuestDB is not included. It only uses the PGWire protocol. SQL DDL syntax is not compatible.
+fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
+    matches!(
+        target_db,
+        DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Kwdb
+            | DatabaseType::Vastbase
+    )
+}
+
 fn is_mysql_numeric_base_type(data_type: &str) -> bool {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ' ']).next().unwrap_or("");
@@ -2906,8 +2921,28 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
-        let ddl = if is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type) {
-            query_mysql_create_table_ddl(state, source_pool_key, &request.source_schema, table).await?
+        let ddl = if (source_db_type == target_db_type)
+            || (is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type))
+            || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type))
+        {
+            crate::schema::get_table_ddl_core(
+                &state,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                table,
+                None,
+            )
+            .await
+            .unwrap_or(generate_create_table_ddl(
+                &columns,
+                table,
+                &request.source_schema,
+                &request.target_schema,
+                target_db_type,
+                source_db_type,
+                table_comment.as_deref(),
+            ))
         } else {
             generate_create_table_ddl(
                 &columns,

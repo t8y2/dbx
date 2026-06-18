@@ -159,7 +159,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
   },
   "codex-cli": {
     label: "Codex CLI",
-    iconSlug: "openai",
+    iconSlug: "codex",
     provider: "codex-cli",
     endpoint: "",
     model: "default",

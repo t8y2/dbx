@@ -1,10 +1,11 @@
 use crate::agent_events::AgentEvent;
 use crate::ai::{AiConfig, AiModelInfo, AiTestConnectionResult};
 use crate::ai_cli_agent::{
-    append_config_overrides, build_cli_agent_prompt, dbx_mcp_enabled_tools, dbx_mcp_scope_env,
-    list_json_models_or_default, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array,
-    CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
+    append_config_overrides, build_cli_agent_prompt, dbx_mcp_enabled_tools, dbx_mcp_scope_env, model_infos,
+    parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
+    CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
+use serde_json::Value;
 use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::Notify;
@@ -18,19 +19,33 @@ fn codex_program(config: &AiConfig) -> String {
     config.codex_cli_path.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or("codex").to_string()
 }
 
+fn codex_mcp_server_command(config: &AiConfig) -> String {
+    config
+        .codex_mcp_server_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or("dbx-mcp-server")
+        .to_string()
+}
+
 pub fn codex_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
     dbx_mcp_enabled_tools(agent_mode)
 }
 
-fn codex_mcp_config_overrides(options: &CodexRunOptions) -> Vec<String> {
+fn codex_mcp_config_overrides(config: &AiConfig, options: &CodexRunOptions) -> Vec<String> {
     let mut overrides = vec![
-        "mcp_servers.dbx.command=\"dbx-mcp-server\"".to_string(),
+        format!("mcp_servers.dbx.command={}", toml_string(&codex_mcp_server_command(config))),
         "mcp_servers.dbx.required=true".to_string(),
         "mcp_servers.dbx.startup_timeout_sec=20".to_string(),
         "mcp_servers.dbx.tool_timeout_sec=120".to_string(),
         "mcp_servers.dbx.default_tools_approval_mode=\"auto\"".to_string(),
         format!("mcp_servers.dbx.enabled_tools={}", toml_string_array(&dbx_mcp_enabled_tools(options.agent_mode))),
     ];
+    if !config.codex_mcp_server_args.is_empty() {
+        let args = config.codex_mcp_server_args.iter().map(String::as_str).collect::<Vec<_>>();
+        overrides.push(format!("mcp_servers.dbx.args={}", toml_string_array(&args)));
+    }
     overrides.extend(
         dbx_mcp_scope_env(options)
             .into_iter()
@@ -46,14 +61,12 @@ pub fn build_codex_exec_command(config: &AiConfig, prompt: &str, options: &Codex
         "--skip-git-repo-check".to_string(),
         "--sandbox".to_string(),
         "read-only".to_string(),
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
     ];
     append_config_overrides(
         &mut args,
         ["features.shell_tool=false".to_string(), "web_search=\"disabled\"".to_string()]
             .into_iter()
-            .chain(codex_mcp_config_overrides(options)),
+            .chain(codex_mcp_config_overrides(config, options)),
     );
 
     let model = config.model.trim();
@@ -72,18 +85,54 @@ pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]
 }
 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    list_json_models_or_default(
-        codex_program(config),
-        ["debug".to_string(), "models".to_string()],
-        DEFAULT_CODEX_MODELS,
-    )
-    .await
+    let output = Command::new(codex_program(config)).args(["debug", "models"]).output().await;
+
+    let Ok(output) = output else {
+        return Ok(model_infos(DEFAULT_CODEX_MODELS));
+    };
+    if !output.status.success() {
+        return Ok(model_infos(DEFAULT_CODEX_MODELS));
+    }
+
+    Ok(parse_codex_models(&String::from_utf8_lossy(&output.stdout))
+        .unwrap_or_else(|| model_infos(DEFAULT_CODEX_MODELS)))
+}
+
+fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
+    let json_start = stdout.find('{')?;
+    let data = serde_json::from_str::<Value>(&stdout[json_start..]).ok()?;
+    let models = data.get("models").and_then(Value::as_array)?;
+
+    let mut result = vec![AiModelInfo { id: "default".to_string(), display_name: Some("Default".to_string()) }];
+    for model in models {
+        let Some(id) = model
+            .get("slug")
+            .and_then(Value::as_str)
+            .or_else(|| model.get("id").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if result.iter().any(|existing| existing.id == id) {
+            continue;
+        }
+        let display_name = model
+            .get("display_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string);
+        result.push(AiModelInfo { id: id.to_string(), display_name });
+    }
+
+    (result.len() > 1).then_some(result)
 }
 
 pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
     let start = Instant::now();
     let mut command = Command::new(codex_program(config));
-    command.args(["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--ask-for-approval", "never"]);
+    command.args(["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]);
 
     let model = config.model.trim();
     if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
@@ -160,7 +209,8 @@ pub async fn run_codex_agent(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_codex_exec_command, codex_enabled_tools, parse_codex_jsonl_event, CodexRunOptions, DEFAULT_CODEX_MODELS,
+        build_codex_exec_command, codex_enabled_tools, parse_codex_jsonl_event, parse_codex_models, CodexRunOptions,
+        DEFAULT_CODEX_MODELS,
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider};
@@ -179,6 +229,8 @@ mod tests {
             enable_thinking: true,
             context_window: None,
             codex_cli_path: None,
+            codex_mcp_server_path: None,
+            codex_mcp_server_args: Vec::new(),
         }
     }
 
@@ -198,6 +250,7 @@ mod tests {
         assert_eq!(spec.program, "codex");
         assert!(spec.args.contains(&"--json".to_string()));
         assert!(!spec.args.contains(&"--model".to_string()));
+        assert!(!spec.args.contains(&"--ask-for-approval".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.command=\"dbx-mcp-server\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_WRITES=\"0\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_SCOPE_CONNECTION_ID=\"conn-1\"".to_string()));
@@ -218,8 +271,34 @@ mod tests {
     }
 
     #[test]
+    fn builds_codex_command_with_resolved_mcp_server_path() {
+        let mut config = codex_config("default");
+        config.codex_mcp_server_path = Some("/opt/dbx/bin/dbx-mcp-server".to_string());
+        config.codex_mcp_server_args = vec!["--stdio".to_string()];
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+
+        assert!(spec.args.contains(&"mcp_servers.dbx.command=\"/opt/dbx/bin/dbx-mcp-server\"".to_string()));
+        assert!(spec.args.contains(&"mcp_servers.dbx.args=[\"--stdio\"]".to_string()));
+    }
+
+    #[test]
     fn default_model_list_matches_plan() {
         assert_eq!(model_infos(DEFAULT_CODEX_MODELS), model_infos(&["default", "gpt-5.5", "gpt-5.4-mini"]));
+    }
+
+    #[test]
+    fn parses_codex_model_catalog_without_service_tiers() {
+        let models = parse_codex_models(
+            r#"{"models":[{"slug":"gpt-5.5","display_name":"GPT-5.5","service_tiers":[{"id":"priority","name":"Priority"}]},{"slug":"gpt-5.4-mini","display_name":"GPT-5.4 mini"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["default", "gpt-5.5", "gpt-5.4-mini"]
+        );
+        assert_eq!(models[1].display_name.as_deref(), Some("GPT-5.5"));
+        assert!(!models.iter().any(|model| model.id == "priority" || model.id == "Priority"));
     }
 
     #[test]

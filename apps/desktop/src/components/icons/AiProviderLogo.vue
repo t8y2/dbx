@@ -20,7 +20,7 @@ watch(
   },
 );
 
-const usesWhiteDarkIcon = computed(() => props.provider === "claude" || props.provider === "ollama" || props.provider === "openai" || props.provider === "openai-compatible" || props.provider === "codex-cli");
+const usesWhiteDarkIcon = computed(() => props.provider === "claude" || props.provider === "ollama" || props.provider === "openai" || props.provider === "openai-compatible");
 const localIconUrl = computed(() => {
   if (props.provider === "openai-compatible") return "/icons/ai/openai.svg";
   return props.iconSlug ? `/icons/ai/${props.iconSlug}.svg` : "";

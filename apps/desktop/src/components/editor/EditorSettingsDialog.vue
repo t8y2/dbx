@@ -1112,6 +1112,7 @@ const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
+const aiTestErrorCopied = ref(false);
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
 const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude");
@@ -1254,6 +1255,7 @@ function syncAiEditState() {
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
+  aiTestErrorCopied.value = false;
   clearAiModelOptions();
 }
 
@@ -1268,6 +1270,7 @@ function aiSelectProvider(provider: AiProvider) {
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
+  aiTestErrorCopied.value = false;
   clearAiModelOptions();
 }
 
@@ -1297,6 +1300,7 @@ async function aiTestConn() {
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
+  aiTestErrorCopied.value = false;
   try {
     const result = await aiTestConnection(currentAiEditConfig());
     aiTestResult.value = "success";
@@ -1307,6 +1311,15 @@ async function aiTestConn() {
   } finally {
     aiTesting.value = false;
   }
+}
+
+async function copyAiTestError() {
+  if (!aiTestError.value) return;
+  await copyToClipboard(aiTestError.value);
+  aiTestErrorCopied.value = true;
+  window.setTimeout(() => {
+    aiTestErrorCopied.value = false;
+  }, 1500);
 }
 
 // ---------- CodeMirror preview ----------
@@ -2760,8 +2773,20 @@ watch(
                 <span>{{ t("connection.testSuccess") }}</span>
                 <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
               </span>
-              <span v-else-if="aiTestResult === 'error'" class="text-xs text-destructive truncate max-w-[200px]" :title="aiTestError">
-                {{ aiTestError }}
+              <span v-else-if="aiTestResult === 'error'" class="min-w-0 max-w-[360px] flex items-center gap-1.5 text-xs text-destructive">
+                <span class="select-text truncate" :title="aiTestError">{{ aiTestError }}</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
+                  :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                  :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                  @click="copyAiTestError"
+                >
+                  <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
+                  <Copy v-else class="h-3.5 w-3.5" />
+                </Button>
               </span>
             </div>
             <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>

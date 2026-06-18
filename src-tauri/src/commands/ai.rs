@@ -44,6 +44,7 @@ pub async fn ai_stream(app: AppHandle, session_id: String, request: AiCompletion
 
 use dbx_core::agent_events::AgentEvent;
 use dbx_core::agent_loop::{run_agent_loop, AgentLoopContext};
+use dbx_core::ai_cli_agent::CliAgentCommandSpec;
 use dbx_core::models::connection::DatabaseType;
 
 #[tauri::command]
@@ -68,7 +69,18 @@ pub async fn ai_agent_stream(
     let parsed_db_type: DatabaseType =
         serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?;
 
-    let agent_ctx = AgentLoopContext { state: state.inner().clone(), connection_id, database, db_type: parsed_db_type };
+    let cli_mcp_server_command = if matches!(request.config.provider, AiProvider::CodexCli) {
+        super::mcp::resolve_mcp_server_command().map(|(program, args)| CliAgentCommandSpec { program, args })
+    } else {
+        None
+    };
+    let agent_ctx = AgentLoopContext {
+        state: state.inner().clone(),
+        connection_id,
+        database,
+        db_type: parsed_db_type,
+        cli_mcp_server_command,
+    };
     let is_agent_mode = mode.as_deref() == Some("agent");
 
     let result = run_agent_loop(

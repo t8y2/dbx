@@ -13,6 +13,7 @@ pub struct CliAgentRunOptions {
     pub connection_name: String,
     pub database: String,
     pub agent_mode: bool,
+    pub mcp_server_command: Option<CliAgentCommandSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

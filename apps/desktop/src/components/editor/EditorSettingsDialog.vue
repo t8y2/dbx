@@ -1018,6 +1018,7 @@ watch(
       await refreshWebDavPasswordStatus();
       syncAiEditState();
       if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
+      if (!isWeb && activeSettingsTab.value === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
     }
   },
   { immediate: true },
@@ -1032,6 +1033,7 @@ watch(webdavRememberPassword, (val) => {
 
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (tab === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
     checkIconThemeDescTruncation();
@@ -1114,6 +1116,9 @@ const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
 const aiTestErrorCopied = ref(false);
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
+watch(aiIsCodexCli, (isCodex) => {
+  if (isCodex) void ensureCodexMcpStatus();
+});
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
 const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude");
 const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
@@ -1135,6 +1140,16 @@ const aiEndpointHint = computed(() => {
   return "";
 });
 const aiSupportsApiStyle = computed(() => !aiIsCodexCli.value && (aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom"));
+const aiCodexMcpNeedsInstall = computed(() => aiIsCodexCli.value && (!mcpStatus.value || !mcpStatus.value.installed));
+const aiCodexMcpCanInstall = computed(() => {
+  const status = mcpStatus.value;
+  return !mcpInstalling.value && !!status?.npm_available && (!status.installed || status.update_available);
+});
+const aiCodexMcpActionLabel = computed(() => {
+  if (!mcpStatus.value?.installed) return t("settings.mcpInstallButton");
+  if (mcpStatus.value.update_available) return t("settings.mcpUpdateButton");
+  return t("settings.mcpUpToDate");
+});
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
 const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCodexCli.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
 const aiModelOptionIds = computed(() => aiModelOptions.value.map((model) => model.id));
@@ -1272,6 +1287,7 @@ function aiSelectProvider(provider: AiProvider) {
   aiTestLatency.value = null;
   aiTestErrorCopied.value = false;
   clearAiModelOptions();
+  if (provider === "codex-cli") void ensureCodexMcpStatus();
 }
 
 function aiHasChanges(): boolean {
@@ -1320,6 +1336,11 @@ async function copyAiTestError() {
   window.setTimeout(() => {
     aiTestErrorCopied.value = false;
   }, 1500);
+}
+
+async function ensureCodexMcpStatus() {
+  if (isWeb || activeSettingsTab.value !== "ai" || !aiIsCodexCli.value || mcpStatus.value || mcpStatusLoading.value) return;
+  await refreshMcpStatus();
 }
 
 // ---------- CodeMirror preview ----------
@@ -2376,6 +2397,39 @@ watch(
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div v-if="aiIsCodexCli && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCodexMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
+                  <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div class="min-w-0 space-y-1">
+                      <div class="flex min-w-0 items-center gap-2 font-medium">
+                        <Loader2 v-if="mcpStatusLoading" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                        <AlertTriangle v-else-if="aiCodexMcpNeedsInstall || mcpStatus?.error || mcpStatusError" class="h-3.5 w-3.5 shrink-0" />
+                        <CheckCircle2 v-else class="h-3.5 w-3.5 shrink-0" />
+                        <span>{{ t("ai.codexMcpRequiredTitle") }}</span>
+                        <Badge variant="outline" class="h-5 shrink-0 rounded-md border-current/30 px-1.5 text-[11px] font-normal">
+                          {{ mcpStatusLabel }}
+                        </Badge>
+                      </div>
+                      <p class="leading-relaxed">
+                        {{ t("ai.codexMcpRequiredDescription") }}
+                      </p>
+                      <p v-if="mcpStatus?.error || mcpStatusError" class="select-text leading-relaxed">
+                        {{ mcpStatusError || mcpStatus?.error }}
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Button type="button" size="sm" variant="outline" class="h-7 bg-background/80 px-2 text-xs" :disabled="mcpStatusLoading" @click="refreshMcpStatus">
+                        <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
+                        <RefreshCw v-else class="mr-1 h-3 w-3" />
+                        {{ t("settings.mcpRefresh") }}
+                      </Button>
+                      <Button v-if="aiCodexMcpNeedsInstall || mcpStatus?.update_available" type="button" size="sm" class="h-7 px-2 text-xs" :disabled="!aiCodexMcpCanInstall" @click="installMcp">
+                        <Loader2 v-if="mcpInstalling" class="mr-1 h-3 w-3 animate-spin" />
+                        {{ mcpInstalling ? t("settings.mcpInstalling") : aiCodexMcpActionLabel }}
+                      </Button>
+                    </div>
+                  </div>
                 </div>
 
                 <div v-if="!aiIsCodexCli && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">

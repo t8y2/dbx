@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 use crate::agent_events::{AgentEvent, ToolCall, ToolDefinition, ToolResult};
 use crate::agent_tools;
 use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiStreamChunk};
+use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::token_usage::TokenUsage;
@@ -27,6 +28,7 @@ pub struct AgentLoopContext {
     pub connection_id: String,
     pub database: String,
     pub db_type: DatabaseType,
+    pub cli_mcp_server_command: Option<CliAgentCommandSpec>,
 }
 
 /// Check if the provider supports function calling / tool use.
@@ -76,6 +78,7 @@ pub async fn run_agent_loop(
                 connection_name,
                 database: agent_ctx.database.clone(),
                 agent_mode: is_agent_mode,
+                mcp_server_command: agent_ctx.cli_mcp_server_command.clone(),
             },
             cancelled,
             on_event,

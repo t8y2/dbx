@@ -1021,6 +1021,8 @@ export default {
     contextWindowHint: "单位：token。留空自动推断，本地/自定义模型建议手动设置。",
     codexCliPath: "Codex CLI 路径",
     codexCliPathHint: "留空则使用 PATH 中的 codex。请先在终端执行 codex login 登录。",
+    codexMcpRequiredTitle: "需要 DBX MCP Server",
+    codexMcpRequiredDescription: "Codex CLI 通过 DBX MCP Server 访问数据库结构和查询工具。请先安装后再在 AI 助手中使用 Codex。",
     actions: {
       generate: "生成 SQL",
       explain: "解释 SQL",

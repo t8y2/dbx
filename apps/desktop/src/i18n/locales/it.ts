@@ -888,6 +888,8 @@ export default {
     modelListUnsupported: "Questo provider non supporta il recupero di un elenco di modelli.",
     modelListEndpointRequired: "Inserisci un endpoint prima di caricare i modelli.",
     modelListApiKeyRequired: "Inserisci una chiave API prima di caricare i modelli.",
+    codexMcpRequiredTitle: "DBX MCP Server richiesto",
+    codexMcpRequiredDescription: "Codex CLI usa il DBX MCP Server per accedere allo schema del database e agli strumenti di query. Installalo prima di usare Codex nell'assistente AI.",
     run: "Esegui",
     readingSchema: "Lettura schema",
     noConnection: "Nessuna connessione disponibile per questa scheda",

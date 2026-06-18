@@ -940,6 +940,8 @@ export default {
     modelListUnsupported: "このプロバイダーはモデル一覧の取得をサポートしていません。",
     modelListEndpointRequired: "モデルを読み込む前にエンドポイントを入力してください。",
     modelListApiKeyRequired: "モデルを読み込む前にAPIキーを入力してください。",
+    codexMcpRequiredTitle: "DBX MCP Serverが必要です",
+    codexMcpRequiredDescription: "Codex CLIはDBX MCP Server経由でデータベーススキーマとクエリツールにアクセスします。AIアシスタントでCodexを使う前にインストールしてください。",
     run: "実行",
     readingSchema: "スキーマを読み取り中",
     noConnection: "このタブに利用可能な接続がありません",

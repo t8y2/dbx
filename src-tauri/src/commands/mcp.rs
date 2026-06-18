@@ -114,6 +114,12 @@ fn installed_mcp_version() -> Option<String> {
     value.get("version")?.as_str().map(ToOwned::to_owned)
 }
 
+pub(crate) fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
+    locate_mcp_bin()
+        .map(|path| (path, Vec::new()))
+        .or_else(|| installed_mcp_bin_script().map(|script| ("node".to_string(), vec![script])))
+}
+
 fn locate_mcp_bin() -> Option<String> {
     #[cfg(windows)]
     {
@@ -123,6 +129,12 @@ fn locate_mcp_bin() -> Option<String> {
     {
         command_stdout("which", &["dbx-mcp-server"]).ok().and_then(first_non_empty_line)
     }
+}
+
+fn installed_mcp_bin_script() -> Option<String> {
+    let root = command_stdout("npm", &["root", "-g"]).ok()?;
+    let script = Path::new(root.trim()).join(MCP_PACKAGE_NAME).join("dist").join("index.js");
+    script.is_file().then(|| script.to_string_lossy().to_string())
 }
 
 #[cfg(windows)]

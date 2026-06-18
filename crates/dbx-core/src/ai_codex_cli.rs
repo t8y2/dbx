@@ -19,31 +19,23 @@ fn codex_program(config: &AiConfig) -> String {
     config.codex_cli_path.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or("codex").to_string()
 }
 
-fn codex_mcp_server_command(config: &AiConfig) -> String {
-    config
-        .codex_mcp_server_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .unwrap_or("dbx-mcp-server")
-        .to_string()
-}
-
 pub fn codex_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
     dbx_mcp_enabled_tools(agent_mode)
 }
 
-fn codex_mcp_config_overrides(config: &AiConfig, options: &CodexRunOptions) -> Vec<String> {
+fn codex_mcp_config_overrides(options: &CodexRunOptions) -> Vec<String> {
+    let mcp_command =
+        options.mcp_server_command.as_ref().map(|command| command.program.as_str()).unwrap_or("dbx-mcp-server");
     let mut overrides = vec![
-        format!("mcp_servers.dbx.command={}", toml_string(&codex_mcp_server_command(config))),
+        format!("mcp_servers.dbx.command={}", toml_string(mcp_command)),
         "mcp_servers.dbx.required=true".to_string(),
         "mcp_servers.dbx.startup_timeout_sec=20".to_string(),
         "mcp_servers.dbx.tool_timeout_sec=120".to_string(),
         "mcp_servers.dbx.default_tools_approval_mode=\"auto\"".to_string(),
         format!("mcp_servers.dbx.enabled_tools={}", toml_string_array(&dbx_mcp_enabled_tools(options.agent_mode))),
     ];
-    if !config.codex_mcp_server_args.is_empty() {
-        let args = config.codex_mcp_server_args.iter().map(String::as_str).collect::<Vec<_>>();
+    if let Some(command) = options.mcp_server_command.as_ref().filter(|command| !command.args.is_empty()) {
+        let args = command.args.iter().map(String::as_str).collect::<Vec<_>>();
         overrides.push(format!("mcp_servers.dbx.args={}", toml_string_array(&args)));
     }
     overrides.extend(
@@ -66,7 +58,7 @@ pub fn build_codex_exec_command(config: &AiConfig, prompt: &str, options: &Codex
         &mut args,
         ["features.shell_tool=false".to_string(), "web_search=\"disabled\"".to_string()]
             .into_iter()
-            .chain(codex_mcp_config_overrides(config, options)),
+            .chain(codex_mcp_config_overrides(options)),
     );
 
     let model = config.model.trim();
@@ -214,7 +206,7 @@ mod tests {
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider};
-    use crate::ai_cli_agent::model_infos;
+    use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
 
     fn codex_config(model: &str) -> AiConfig {
         AiConfig {
@@ -229,8 +221,6 @@ mod tests {
             enable_thinking: true,
             context_window: None,
             codex_cli_path: None,
-            codex_mcp_server_path: None,
-            codex_mcp_server_args: Vec::new(),
         }
     }
 
@@ -240,6 +230,7 @@ mod tests {
             connection_name: "local".to_string(),
             database: "demo".to_string(),
             agent_mode: true,
+            mcp_server_command: None,
         }
     }
 
@@ -272,10 +263,12 @@ mod tests {
 
     #[test]
     fn builds_codex_command_with_resolved_mcp_server_path() {
-        let mut config = codex_config("default");
-        config.codex_mcp_server_path = Some("/opt/dbx/bin/dbx-mcp-server".to_string());
-        config.codex_mcp_server_args = vec!["--stdio".to_string()];
-        let spec = build_codex_exec_command(&config, "hello", &run_options());
+        let mut options = run_options();
+        options.mcp_server_command = Some(CliAgentCommandSpec {
+            program: "/opt/dbx/bin/dbx-mcp-server".to_string(),
+            args: vec!["--stdio".to_string()],
+        });
+        let spec = build_codex_exec_command(&codex_config("default"), "hello", &options);
 
         assert!(spec.args.contains(&"mcp_servers.dbx.command=\"/opt/dbx/bin/dbx-mcp-server\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.args=[\"--stdio\"]".to_string()));

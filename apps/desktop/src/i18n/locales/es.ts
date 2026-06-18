@@ -827,6 +827,8 @@ export default {
     modelListUnsupported: "Este proveedor no admite obtener una lista de modelos.",
     modelListEndpointRequired: "Ingresa un endpoint antes de cargar modelos.",
     modelListApiKeyRequired: "Ingresa una clave API antes de cargar modelos.",
+    codexMcpRequiredTitle: "Se requiere DBX MCP Server",
+    codexMcpRequiredDescription: "Codex CLI usa DBX MCP Server para acceder al esquema de la base de datos y a las herramientas de consulta. Instálalo antes de usar Codex en el asistente de IA.",
     run: "Ejecutar",
     readingSchema: "Leyendo esquema",
     noConnection: "No hay una conexión disponible para esta pestaña",

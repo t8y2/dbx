@@ -217,6 +217,7 @@ pub async fn ai_agent_stream(
         connection_id: body.connection_id,
         database: body.database,
         db_type: parsed_db_type,
+        cli_mcp_server_command: None,
     };
 
     let sid = session_id.clone();

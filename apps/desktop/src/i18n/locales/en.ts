@@ -1022,6 +1022,8 @@ export default {
     contextWindowHint: "Tokens. Leave empty to auto-detect. Set manually for local/custom models.",
     codexCliPath: "Codex CLI Path",
     codexCliPathHint: "Leave empty to use codex from PATH. Sign in separately with codex login.",
+    codexMcpRequiredTitle: "DBX MCP Server required",
+    codexMcpRequiredDescription: "Codex CLI uses the DBX MCP Server to access database schema and query tools. Install it before using Codex in the AI assistant.",
     actions: {
       generate: "Generate SQL",
       explain: "Explain SQL",

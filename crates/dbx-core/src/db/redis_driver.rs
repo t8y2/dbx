@@ -11,6 +11,8 @@ use redis::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
 
+use super::json_value_for_js;
+
 const STREAM_ENTRY_LIMIT: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
 const DEFAULT_REDIS_DATABASES: u32 = 16;
@@ -1182,7 +1184,7 @@ pub fn redis_command_raw_to_json(value: RedisRawValue) -> serde_json::Value {
             let trimmed = text.trim();
             if trimmed.starts_with('{') || trimmed.starts_with('[') {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    return super::json_value_for_js(json);
+                    return json_value_for_js(json);
                 }
             }
             serde_json::Value::String(text)
@@ -1209,10 +1211,10 @@ pub fn is_redis_json_type(key_type: &str) -> bool {
 pub fn redis_json_raw_to_json(value: RedisRawValue) -> Result<serde_json::Value, String> {
     match redis_raw_to_json(value) {
         serde_json::Value::Null => Ok(serde_json::Value::Null),
-        serde_json::Value::String(text) => serde_json::from_str(&text)
-            .map(super::json_value_for_js)
-            .map_err(|e| format!("Invalid RedisJSON value: {e}")),
-        other => Ok(super::json_value_for_js(other)),
+        serde_json::Value::String(text) => {
+            serde_json::from_str(&text).map(json_value_for_js).map_err(|e| format!("Invalid RedisJSON value: {e}"))
+        }
+        other => Ok(json_value_for_js(other)),
     }
 }
 
@@ -1481,7 +1483,11 @@ where
         "string" => {
             let v: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
             let value_is_binary = redis_value_contains_binary(&v);
-            (redis_raw_to_json(v), value_is_binary, None, None)
+            let value = match v {
+                RedisRawValue::BulkString(bytes) => json_string_to_js_safe(redis_bytes_to_display(&bytes)),
+                other => redis_raw_to_json(other),
+            };
+            (value, value_is_binary, None, None)
         }
         "list" => {
             let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
@@ -1667,7 +1673,7 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
         };
         if let Some(field_name) = redis_value_to_string(field) {
             let value = redis_value_to_string(value).unwrap_or_default();
-            field_map.insert(field_name, serde_json::Value::String(value));
+            field_map.insert(field_name, json_string_to_js_safe(value));
         }
     }
 
@@ -1713,7 +1719,15 @@ fn redis_value_to_bytes(value: RedisRawValue) -> Option<Vec<u8>> {
 
 fn redis_array_to_json(value: RedisRawValue) -> serde_json::Value {
     match value {
-        RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
+        RedisRawValue::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|v| match v {
+                    RedisRawValue::BulkString(bytes) => json_string_to_js_safe(redis_bytes_to_display(&bytes)),
+                    other => redis_raw_to_json(other),
+                })
+                .collect(),
+        ),
         other => redis_raw_to_json(other),
     }
 }
@@ -1724,6 +1738,21 @@ fn redis_raw_to_json(value: RedisRawValue) -> serde_json::Value {
         RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
         other => serde_json::Value::String(redis_value_to_string(other).unwrap_or_default()),
     }
+}
+
+/// If the text is JSON (starts with `{` or `[`), parse it, apply
+/// `json_value_for_js` (converting large ints to strings), then re-serialize
+/// back to a compact JSON string. Otherwise return the text unchanged.
+fn json_string_to_js_safe(text: String) -> serde_json::Value {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let safe = json_value_for_js(json);
+            let re_serialized = serde_json::to_string(&safe).unwrap_or(text);
+            return serde_json::Value::String(re_serialized);
+        }
+    }
+    serde_json::Value::String(text)
 }
 
 fn redis_bytes_to_display(bytes: &[u8]) -> String {
@@ -2055,11 +2084,11 @@ fn parse_scan_pairs(raw: RedisRawValue, kind: &str) -> Result<(u64, Vec<serde_js
     while let Some(a) = iter.next() {
         let Some(b) = iter.next() else { break };
         let a_str = redis_value_to_string(a.clone()).unwrap_or_default();
-        let b_str = redis_value_to_string(b.clone()).unwrap_or_default();
+        let b = redis_value_to_string(b.clone()).unwrap_or_default();
         if kind == "zset" {
-            items.push(serde_json::json!({"member": a_str, "score": b_str}));
+            items.push(serde_json::json!({"member": a_str, "score": b}));
         } else {
-            items.push(serde_json::json!({"field": a_str, "value": b_str}));
+            items.push(serde_json::json!({"field": a_str, "value": json_string_to_js_safe(b)}));
         }
     }
 
@@ -2083,8 +2112,7 @@ fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<serde_json::Value>
         return Err("Invalid SCAN entries".to_string());
     };
 
-    let items =
-        entries.iter().filter_map(|v| redis_value_to_string(v.clone())).map(serde_json::Value::String).collect();
+    let items = entries.iter().filter_map(|v| redis_value_to_string(v.clone())).map(json_string_to_js_safe).collect();
 
     Ok((cursor, items))
 }

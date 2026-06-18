@@ -33,7 +33,22 @@ pub async fn start_transfer(
         state.get_or_create_pool(&request.target_connection_id, Some(&request.target_database)).await?;
 
     tokio::spawn(async move {
-        let total_tables = request.tables.len();
+        // Sort tables by FK dependency so referenced tables are transferred first.
+        let sorted_tables = dbx_core::transfer::sort_tables_by_fk_dependency(
+            &state,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            &request.tables,
+            true,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+            request.tables.clone()
+        });
+
+        let total_tables = sorted_tables.len();
         log::info!("[transfer] starting transfer_id={} tables={}", transfer_id, total_tables);
 
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
@@ -86,7 +101,7 @@ pub async fn start_transfer(
             }
         }
 
-        for (i, table) in request.tables.iter().enumerate() {
+        for (i, table) in sorted_tables.iter().enumerate() {
             if dbx_core::transfer::is_cancelled(&transfer_id).await {
                 emit_progress(
                     &app,
@@ -248,4 +263,21 @@ pub async fn start_transfer(
 pub async fn cancel_transfer(transfer_id: String) -> Result<(), String> {
     dbx_core::transfer::set_cancelled(&transfer_id).await;
     Ok(())
+}
+
+/// Sort table names by foreign key dependency.
+/// `parents_first: true` → parent tables first (insert/export order).
+/// `parents_first: false` → child tables first (drop order).
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn sort_tables_by_fk_dependency(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    tables: Vec<String>,
+    parents_first: bool,
+) -> Result<Vec<String>, String> {
+    dbx_core::transfer::sort_tables_by_fk_dependency(&state, &connection_id, &database, &schema, &tables, parents_first)
+        .await
 }

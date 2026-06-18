@@ -32,6 +32,7 @@ import {
   Upload,
   FileCode,
   Network,
+  Server,
   PencilRuler,
   Search,
   FolderInput,
@@ -59,7 +60,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
@@ -111,6 +112,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { hasEnabledTransportLayers } from "@/lib/connectionTransport";
 import { formatShortcut } from "@/lib/shortcutRegistry";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSqlHistory";
+import { isSqlServerLinkedNode } from "@/lib/sqlServerLinkedServers";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import VisibleDatabasesDialog from "@/components/sidebar/VisibleDatabasesDialog.vue";
@@ -195,6 +197,14 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-500" };
     case "database":
       return { icon: Database, colorClass: "text-yellow-500" };
+    case "linked-server-root":
+      return { icon: Network, colorClass: "text-blue-500" };
+    case "linked-server":
+      return { icon: Server, colorClass: "text-blue-400" };
+    case "linked-server-catalog":
+      return { icon: Database, colorClass: "text-yellow-500" };
+    case "linked-server-schema":
+      return { icon: FolderOpen, colorClass: "text-sky-400" };
     case "schema":
       return { icon: FolderOpen, colorClass: "text-sky-400" };
     case "table":
@@ -273,7 +283,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
 }
 
 const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
-const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "schema", "table", "view", "materialized_view", "redis-db", "mongo-db", "mongo-collection", "elasticsearch-index"]);
+const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "linked-server", "linked-server-catalog", "linked-server-schema", "schema", "table", "view", "materialized_view", "redis-db", "mongo-db", "mongo-collection", "elasticsearch-index"]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -283,6 +293,7 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
   if (node.type === "user-admin") return t(node.label);
+  if (node.type === "linked-server-root") return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
 }
@@ -294,22 +305,110 @@ function visibleLabel(node: TreeNode): string {
   return displayLabel(node);
 }
 
-function cleanTooltipValue(value: string | null | undefined): string {
+type DetailTooltipRow = {
+  label: string;
+  value: string;
+  multiline?: boolean;
+};
+
+function cleanTooltipValue(value: string | number | null | undefined): string {
   return String(value ?? "").trim();
 }
+
+function isLocalFileConnection(config: Pick<ConnectionConfig, "db_type" | "port">): boolean {
+  return config.db_type === "sqlite" || config.db_type === "duckdb" || config.db_type === "access" || (config.db_type === "h2" && config.port === 0);
+}
+
+function redactedConnectionString(value: string): string {
+  return value.replace(/(:\/\/[^/\s:@?#;]+):([^@\s/?#;]+)@/g, "$1:***@").replace(/([?&;](?:password|pwd|pass|token|secret|key)=)[^&;]*/gi, "$1***");
+}
+
+function connectionTooltipScheme(config: Pick<ConnectionConfig, "db_type" | "ssl">): string {
+  switch (config.db_type) {
+    case "postgres":
+    case "gaussdb":
+    case "kwdb":
+    case "yashandb":
+    case "redshift":
+    case "questdb":
+      return "postgresql";
+    case "sqlserver":
+      return "mssql";
+    case "elasticsearch":
+    case "rqlite":
+    case "turso":
+    case "mq":
+      return config.ssl ? "https" : "http";
+    case "dameng":
+      return "dm";
+    default:
+      return config.db_type;
+  }
+}
+
+function hostForDisplay(host: string): string {
+  if (!host.includes(":") || host.startsWith("[") || host.includes("://")) return host;
+  return `[${host}]`;
+}
+
+function connectionTooltipUrl(config: ConnectionConfig): string {
+  const explicit = cleanTooltipValue(config.connection_string);
+  if (explicit) return redactedConnectionString(explicit);
+
+  const host = cleanTooltipValue(config.host);
+  if (!host) return "";
+  if (host.includes("://")) return redactedConnectionString(host);
+
+  if (isLocalFileConnection(config)) {
+    if (config.db_type === "access") return `jdbc:ucanaccess://${host}`;
+    return `${config.db_type}://${host}`;
+  }
+
+  const scheme = connectionTooltipScheme(config);
+  const port = Number(config.port) > 0 ? `:${config.port}` : "";
+  const user = cleanTooltipValue(config.username);
+  const userInfo = user ? `${encodeURIComponent(user)}@` : "";
+  const database = cleanTooltipValue(config.database);
+  const path = database ? `/${encodeURIComponent(database)}` : "";
+  const params = cleanTooltipValue(config.url_params);
+  const query = params ? (params.startsWith("?") ? params : `?${params}`) : "";
+  return redactedConnectionString(`${scheme}://${userInfo}${hostForDisplay(host)}${port}${path}${query}`);
+}
+
+const connectionInfoTooltip = computed(() => {
+  const node = props.node;
+  if (node.type !== "connection" || !node.connectionId) return null;
+  const config = connectionStore.getConfig(node.connectionId);
+  if (!config) return null;
+
+  const hostLabel = isLocalFileConnection(config) ? t("connection.filePath") : t("connection.host");
+  const rows: DetailTooltipRow[] = [
+    { label: t("connection.name"), value: cleanTooltipValue(config.name) },
+    { label: "URL", value: connectionTooltipUrl(config), multiline: true },
+    { label: hostLabel, value: cleanTooltipValue(config.host), multiline: isLocalFileConnection(config) },
+    { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
+    { label: t("connection.database"), value: cleanTooltipValue(config.database) },
+    { label: t("connection.user"), value: cleanTooltipValue(config.username) },
+    { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
+  ].filter((row) => row.value);
+
+  return { rows };
+});
 
 const tableInfoTooltip = computed(() => {
   const node = props.node;
   if (node.type !== "table" && node.type !== "view") return null;
-  const rows = [
+  const rows: DetailTooltipRow[] = [
     { label: t("structureEditor.tableName"), value: visibleLabel(node) },
     { label: t("structureEditor.comment"), value: cleanTooltipValue(node.comment), multiline: true },
   ].filter((row) => row.value);
   return { rows };
 });
 
+const detailTooltip = computed(() => connectionInfoTooltip.value ?? tableInfoTooltip.value);
+
 function isTooltipDisabled(): boolean {
-  if (tableInfoTooltip.value?.rows.length && !settingsStore.editorSettings.sidebarHideTableComments) return true;
+  if (detailTooltip.value?.rows.length) return isRenamingGroup.value;
   return isRenamingGroup.value || !isLabelTruncated();
 }
 
@@ -391,6 +490,14 @@ async function toggle() {
         await connectionStore.loadTables(node.connectionId, node.database);
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
+      await connectionStore.loadTables(node.connectionId, node.database, node.schema);
+    } else if (node.type === "linked-server-root" && node.connectionId) {
+      await connectionStore.loadSqlServerLinkedServers(node.connectionId);
+    } else if (node.type === "linked-server" && node.connectionId) {
+      await connectionStore.loadSqlServerLinkedServerCatalogs(node);
+    } else if (node.type === "linked-server-catalog" && node.connectionId) {
+      await connectionStore.loadSqlServerLinkedServerSchemas(node);
+    } else if (node.type === "linked-server-schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
@@ -1381,6 +1488,7 @@ function viewObjectSource() {
           objectType,
         });
       }
+      queryStore.markTabClean(queryStore.tabs.find((tab) => tab.id === tabId));
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -1447,6 +1555,7 @@ function requestDropTableChildObject() {
 }
 
 function canDropTreeNode(node: TreeNode): boolean {
+  if (isSqlServerLinkedNode(node)) return false;
   if (node.type === "table") return !!node.connectionId && !!node.database;
   if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function") {
     return !!node.connectionId && !!node.database && !!dropObjectSqlOptionsForNode(node);
@@ -1684,7 +1793,7 @@ async function confirmBatchDrop() {
   }
 }
 
-const isTableNotView = computed(() => props.node.type === "table");
+const isTableNotView = computed(() => props.node.type === "table" && !isSqlServerLinkedNode(props.node));
 
 const supportsTruncate = computed(() => {
   return supportsTableTruncate(currentDatabaseType());
@@ -1692,7 +1801,7 @@ const supportsTruncate = computed(() => {
 
 const canCreateTable = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !!props.node.database && supportsTableStructureEditing(tableStructureDatabaseTypeForConnection(config));
+  return (props.node.type === "database" || props.node.type === "schema" || props.node.type === "group-tables") && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableStructureEditing(tableStructureDatabaseTypeForConnection(config));
 });
 
 const canCreateDatabase = computed(() => {
@@ -1712,7 +1821,7 @@ const canSetCreateDatabaseCharset = computed(() => {
 
 const canDropDatabase = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return props.node.type === "database" && supportsDatabaseCreation(config?.db_type);
+  return props.node.type === "database" && !isSqlServerLinkedNode(props.node) && supportsDatabaseCreation(config?.db_type);
 });
 
 const canCreateSchema = computed(() => {
@@ -1722,7 +1831,7 @@ const canCreateSchema = computed(() => {
 
 const canDropSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
-  return props.node.type === "schema" && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
+  return props.node.type === "schema" && !isSqlServerLinkedNode(props.node) && usesTreeSchemaMode(effectiveDatabaseTypeForConnection(config)) && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 function tableAdminSqlOptions(): TableAdminSqlOptions {
@@ -2096,7 +2205,7 @@ async function exportStructure() {
     const parts: string[] = [];
     for (const target of targets) {
       await connectionStore.ensureConnected(target.connectionId);
-      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label);
+      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, target.type === "view" ? "VIEW" : undefined);
       parts.push(ddl.trim());
     }
     structurePreviewSql.value = `${parts.filter(Boolean).join("\n\n")}\n`;
@@ -2598,10 +2707,10 @@ const canOpenObjectBrowser = computed(() => {
   return supportsObjectBrowserTreeNode(rawDatabaseType(), props.node.type);
 });
 const canOpenTableImport = computed(() => {
-  return props.node.type === "table" && !!props.node.database && supportsTableImport(currentDatabaseType());
+  return props.node.type === "table" && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableImport(currentDatabaseType());
 });
 const canOpenStructureEditor = computed(() => {
-  return props.node.type === "table" && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
+  return props.node.type === "table" && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
 });
 const canOpenFieldLineage = computed(() => {
   return props.node.type === "column" && !!props.node.database && !!props.node.tableName && supportsFieldLineage(currentDatabaseType());
@@ -3439,7 +3548,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
 <template>
   <CustomContextMenu :items="treeItemMenuItems()" v-slot="{ onContextMenu }">
     <div @contextmenu="onTreeItemContextMenu($event, onContextMenu)">
-      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled" side="right" :side-offset="8" :delay="0">
+      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0">
         <div
           ref="rowRef"
           class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent relative outline-none"
@@ -3515,10 +3624,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
             <Pin class="w-3 h-3" :class="{ 'fill-current': isPinned }" />
           </button>
         </div>
-        <template v-if="tableInfoTooltip" #content>
+        <template v-if="detailTooltip" #content>
           <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
             <div class="space-y-1">
-              <div v-for="row in tableInfoTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-[11px] leading-4">
+              <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
                 <span class="text-muted-foreground">{{ row.label }}</span>
                 <span v-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
                   {{ row.value }}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount, h } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package } from "@lucide/vue";
+import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -10,6 +10,16 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import { shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/appTheme";
+
+const GithubIcon = {
+  render() {
+    return h("svg", { class: "h-4 w-4", viewBox: "0 0 24 24", fill: "currentColor" }, [
+      h("path", {
+        d: "M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z",
+      }),
+    ]);
+  },
+};
 
 const props = defineProps<{
   isDark: boolean;
@@ -75,12 +85,139 @@ function checkToolbarWidth() {
   toolbarCollapsed.value = el.clientWidth < threshold;
 }
 
+// ──────────── Right-side overflow detection ────────────
+
+const rightWrapper = ref<HTMLElement>();
+const rightOverflowCount = ref(0);
+let prevRightAvailable = 0;
+
+/** Ordered list of right-side item keys that can overflow into "More".
+ *  Items earlier in the list overflow first when space shrinks. */
+const collapsibleRightItemDefs = computed(() => {
+  interface ItemDef {
+    key: string;
+    label: string;
+    icon: any;
+    action: () => void;
+    disabled: boolean;
+  }
+  const items: ItemDef[] = [];
+  if (toolbarItems.value.checkUpdates) {
+    items.push({
+      key: "checkUpdates",
+      label: t("updates.check"),
+      icon: CloudDownload,
+      action: () => emit("check-updates"),
+      disabled: checkingUpdates.value,
+    });
+  }
+  items.push({
+    key: "exportProgress",
+    label: t("exportProgress.tooltip"),
+    icon: FileDown,
+    action: () => {},
+    disabled: false,
+  });
+  if (toolbarItems.value.sqlLibrary) {
+    items.push({
+      key: "sqlLibrary",
+      label: t("sqlLibrary.title"),
+      icon: BookMarked,
+      action: () => emit("toggle-sql-library"),
+      disabled: false,
+    });
+  }
+  if (toolbarItems.value.history) {
+    items.push({
+      key: "history",
+      label: t("history.title"),
+      icon: History,
+      action: () => emit("toggle-history"),
+      disabled: false,
+    });
+  }
+  if (toolbarItems.value.ai) {
+    items.push({
+      key: "ai",
+      label: "AI",
+      icon: Bot,
+      action: () => emit("toggle-ai"),
+      disabled: false,
+    });
+  }
+  if (toolbarItems.value.theme) {
+    items.push({
+      key: "theme",
+      label: t("toolbar.theme"),
+      icon: SunMoon,
+      action: () => {},
+      disabled: false,
+    });
+  }
+  if (toolbarItems.value.github) {
+    items.push({
+      key: "github",
+      label: "GitHub",
+      icon: GithubIcon,
+      action: () => emit("open-github"),
+      disabled: false,
+    });
+  }
+  return items;
+});
+
+const overflowedRightKeys = computed(() => {
+  const defs = collapsibleRightItemDefs.value;
+  const overflowKeys = defs.slice(0, rightOverflowCount.value).map((d) => d.key);
+  return new Set(overflowKeys);
+});
+
+/** Overflowed right items to show in the "More" dropdown. */
+const overflowRightMenuItems = computed(() => {
+  const defs = collapsibleRightItemDefs.value;
+  return defs.slice(0, rightOverflowCount.value).map((d) => ({
+    value: d.key,
+    label: d.label,
+    icon: d.icon,
+    action: d.action,
+    disabled: d.disabled,
+  }));
+});
+
+function checkRightOverflow() {
+  const wrapper = rightWrapper.value;
+  if (!wrapper) return;
+
+  const available = wrapper.clientWidth;
+  const growing = available > prevRightAvailable + 1;
+  prevRightAvailable = available;
+
+  if (wrapper.scrollWidth > wrapper.clientWidth) {
+    // Overflow — move one more item to "More" (always, even when growing
+    // brought an item back that still doesn't fit)
+    if (rightOverflowCount.value < collapsibleRightItemDefs.value.length) {
+      rightOverflowCount.value++;
+    }
+  } else if (growing && rightOverflowCount.value > 0) {
+    // Window growing — try bringing one item back
+    rightOverflowCount.value--;
+  }
+}
+
+// ──────────── Resize observer ────────────
+
 let resizeObserver: ResizeObserver | null = null;
 
 onMounted(() => {
-  resizeObserver = new ResizeObserver(checkToolbarWidth);
+  resizeObserver = new ResizeObserver(() => {
+    checkToolbarWidth();
+    checkRightOverflow();
+  });
   if (toolbarEl.value) resizeObserver.observe(toolbarEl.value);
-  window.addEventListener("resize", checkToolbarWidth);
+  window.addEventListener("resize", () => {
+    checkToolbarWidth();
+    checkRightOverflow();
+  });
 });
 
 onBeforeUnmount(() => {
@@ -88,10 +225,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", checkToolbarWidth);
 });
 
+// ──────────── Left-side "More" items ────────────
+
 const moreItems = computed(() => {
   const items: Array<{ value: string; label: string; icon: any; action: () => void; disabled: boolean }> = [];
 
-  // Hidden left-side items go into "更多"
+  // Hidden left-side items go into "More"
   if (!toolbarItems.value.dataTransfer) {
     items.push({
       value: "transfer",
@@ -111,7 +250,7 @@ const moreItems = computed(() => {
     });
   }
 
-  // "更多" menu items (individually toggleable)
+  // "More" menu items (individually toggleable)
   if (toolbarItems.value.sqlFile) {
     items.push({
       value: "sql-file",
@@ -140,6 +279,17 @@ const moreItems = computed(() => {
     });
   }
 
+  // Append overflowed right-side items at the end
+  for (const ri of overflowRightMenuItems.value) {
+    items.push({
+      value: `right-${ri.value}`,
+      label: ri.label,
+      icon: ri.icon,
+      action: ri.action,
+      disabled: ri.disabled,
+    });
+  }
+
   return items;
 });
 
@@ -165,12 +315,20 @@ const collapsedItems = computed(() => {
       disabled: false,
     });
   }
-  // Always include moreItems (may contain hidden left-side items)
+  // Always include moreItems (may contain hidden left-side items + overflowed right items)
   if (moreItems.value.length > 0) {
     items.push(...moreItems.value);
   }
   return items;
 });
+
+// Per-item overflow visibility helper
+function isRightItemVisible(key: string) {
+  return !overflowedRightKeys.value.has(key);
+}
+
+// Track checking updates state for the overflow menu disabled state
+const checkingUpdates = computed(() => props.checkingUpdates);
 </script>
 
 <template>
@@ -242,86 +400,92 @@ const collapsedItems = computed(() => {
 
     <div class="flex-1" data-tauri-drag-region />
 
-    <template v-if="toolbarItems.checkUpdates">
-      <Tooltip>
+    <!-- Right-side items wrapped in overflow-aware container -->
+    <div ref="rightWrapper" class="flex items-center gap-1 overflow-hidden">
+      <template v-if="toolbarItems.checkUpdates">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button v-show="isRightItemVisible('checkUpdates')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
+              <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
+              <CloudDownload v-else class="h-4 w-4" />
+              <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t("updates.check") }}</TooltipContent>
+        </Tooltip>
+      </template>
+
+      <div v-show="isRightItemVisible('exportProgress')" class="contents">
+        <ExportProgressPopover />
+      </div>
+
+      <Tooltip v-if="toolbarItems.sqlLibrary">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="relative h-8 w-8" :disabled="checkingUpdates" @click="emit('check-updates')">
-            <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
-            <CloudDownload v-else class="h-4 w-4" />
-            <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
+          <Button v-show="isRightItemVisible('sqlLibrary')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlLibrary }" @click="emit('toggle-sql-library')">
+            <BookMarked class="h-4 w-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{{ t("updates.check") }}</TooltipContent>
+        <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
       </Tooltip>
-    </template>
 
-    <ExportProgressPopover />
+      <Tooltip v-if="toolbarItems.history">
+        <TooltipTrigger as-child>
+          <Button v-show="isRightItemVisible('history')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showHistory }" @click="emit('toggle-history')">
+            <History class="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("history.title") }}</TooltipContent>
+      </Tooltip>
 
-    <Tooltip v-if="toolbarItems.sqlLibrary">
-      <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8" :class="{ 'bg-accent': showSqlLibrary }" @click="emit('toggle-sql-library')">
-          <BookMarked class="h-4 w-4" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
-    </Tooltip>
+      <Tooltip v-if="toolbarItems.ai">
+        <TooltipTrigger as-child>
+          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
+            <Bot class="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>AI</TooltipContent>
+      </Tooltip>
 
-    <Tooltip v-if="toolbarItems.history">
-      <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8" :class="{ 'bg-accent': showHistory }" @click="emit('toggle-history')">
-          <History class="h-4 w-4" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{{ t("history.title") }}</TooltipContent>
-    </Tooltip>
-
-    <Tooltip v-if="toolbarItems.ai">
-      <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
-          <Bot class="h-4 w-4" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>AI</TooltipContent>
-    </Tooltip>
-
-    <Tooltip v-if="toolbarItems.theme">
-      <TooltipTrigger as-child>
-        <span class="inline-flex">
-          <LightDropdown
-            :model-value="themeMode"
-            :items="themeItems"
-            :aria-label="t('toolbar.theme')"
-            :trigger-icon="themeTriggerIcon"
-            trigger-class="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
-            trigger-icon-class="h-4 w-4"
-            item-icon-class="h-4 w-4"
-            :show-trigger-label="false"
-            :show-chevron="false"
-            check-position="right"
-            align="end"
-            @update:model-value="(value) => emit('set-theme-mode', value as AppThemeMode)"
-          />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{{ t("toolbar.theme") }}</TooltipContent>
-    </Tooltip>
-
-    <Tooltip v-if="toolbarItems.github">
-      <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8" @click="emit('open-github')">
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-            <path
-              d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z"
+      <Tooltip v-if="toolbarItems.theme">
+        <TooltipTrigger as-child>
+          <span v-show="isRightItemVisible('theme')" class="inline-flex shrink-0">
+            <LightDropdown
+              :model-value="themeMode"
+              :items="themeItems"
+              :aria-label="t('toolbar.theme')"
+              :trigger-icon="themeTriggerIcon"
+              trigger-class="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
+              trigger-icon-class="h-4 w-4"
+              item-icon-class="h-4 w-4"
+              :show-trigger-label="false"
+              :show-chevron="false"
+              check-position="right"
+              align="end"
+              @update:model-value="(value) => emit('set-theme-mode', value as AppThemeMode)"
             />
-          </svg>
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>GitHub</TooltipContent>
-    </Tooltip>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.theme") }}</TooltipContent>
+      </Tooltip>
+
+      <Tooltip v-if="toolbarItems.github">
+        <TooltipTrigger as-child>
+          <Button v-show="isRightItemVisible('github')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" @click="emit('open-github')">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+              <path
+                d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z"
+              />
+            </svg>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>GitHub</TooltipContent>
+      </Tooltip>
+    </div>
+    <!-- /rightWrapper -->
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8" @click="emit('open-settings')">
+        <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" @click="emit('open-settings')">
           <Settings class="h-4 w-4" />
         </Button>
       </TooltipTrigger>

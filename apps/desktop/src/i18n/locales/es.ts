@@ -283,6 +283,8 @@ export default {
     sshHopInvalidPort: "{hop}: el puerto SSH debe estar entre 1 y 65535",
     sshHopInvalidAuth: "{hop}: se requiere contraseña, ruta de clave o ssh-agent",
     sshUseAgent: "Usar ssh-agent",
+    sshAgentSockPath: "Ruta del socket del agente",
+    sshAgentSockPathPlaceholder: "ej. ~/.ssh/agent.sock",
     sshHopInvalidTimeout: "{hop}: el tiempo de espera SSH debe estar entre 1 y 300 segundos",
     connectTimeout: "Tiempo de espera de conexión (segundos)",
     queryTimeout: "Tiempo de espera de consulta (segundos)",

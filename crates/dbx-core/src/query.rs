@@ -18,6 +18,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::connection::{AppState, PoolKind};
+use crate::database_capabilities;
 use crate::db;
 use crate::models::connection::DatabaseType;
 #[cfg(feature = "duckdb-bundled")]
@@ -29,6 +30,13 @@ pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
 #[cfg(feature = "duckdb-bundled")]
 const DUCKDB_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolErrorAction {
+    Keep,
+    Discard,
+    ReconnectAndRetry,
+}
 
 /// Check read-only protection for a connection, blocking write SQL statements.
 /// Only clones the connection name when read-only mode is active, avoiding
@@ -683,6 +691,28 @@ fn should_discard_agent_pool_after_error(err: &str) -> bool {
         || lower.contains("agent rpc task failed")
 }
 
+pub fn pool_error_action(db_type: Option<DatabaseType>, err: &str) -> PoolErrorAction {
+    let lower = err.to_lowercase();
+    if db::sqlserver::is_driver_panic_error(err)
+        || (db_type == Some(DatabaseType::SqlServer) && is_dbx_query_timeout_error(&lower))
+        || (db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type))
+            && should_discard_agent_pool_after_error(err)
+            && !is_connection_error(err))
+    {
+        return PoolErrorAction::Discard;
+    }
+
+    if is_connection_error(err) {
+        PoolErrorAction::ReconnectAndRetry
+    } else {
+        PoolErrorAction::Keep
+    }
+}
+
+pub fn should_discard_pool_after_error(db_type: Option<DatabaseType>, err: &str) -> bool {
+    matches!(pool_error_action(db_type, err), PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)
+}
+
 fn is_os_connection_error(lower: &str) -> bool {
     let os_error_codes = ["10053", "10054", "10057", "10058", "10060", "10061"];
     if let Some(pos) = lower.find("os error ") {
@@ -905,13 +935,18 @@ pub async fn do_execute(
                 },
                 None => client.lock().await,
             };
-            wait_for_query_opt(
+            let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
                 db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows),
             )
             .await
-            .map(|result| truncate_result_with_max_rows(result, max_rows))
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            drop(client);
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
@@ -957,7 +992,7 @@ pub async fn do_execute(
             })
             .await
             .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)));
-            if matches!(result.as_ref(), Err(err) if should_discard_agent_pool_after_error(err)) {
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
                 state.remove_pool_by_key(pool_key).await;
             }
             result
@@ -1103,7 +1138,9 @@ pub async fn execute_sql_statement_with_options(
             .await;
 
     match &result {
-        Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
+        Err(e)
+            if pool_error_action(db_type, e) == PoolErrorAction::ReconnectAndRetry && !is_canceled(&cancel_token) =>
+        {
             let db_opt = if database.is_empty() { None } else { Some(database) };
             let new_key =
                 state.reconnect_pool_for_session(connection_id, db_opt, options.client_session_id.as_deref()).await?;
@@ -1452,9 +1489,13 @@ async fn execute_multi_sqlserver(
             None => client.lock().await,
         };
 
-        match db::sqlserver::execute_batch_with_max_rows(&mut client, batch, max_rows).await {
+        let result = db::sqlserver::execute_batch_with_max_rows(&mut client, batch, max_rows).await;
+        drop(client);
+
+        match result {
             Ok(results) => all_results.extend(results),
             Err(e) => {
+                let action = pool_error_action(Some(DatabaseType::SqlServer), &e);
                 all_results.push(db::QueryResult {
                     columns: vec!["Error".to_string()],
                     column_types: Vec::new(),
@@ -1466,6 +1507,10 @@ async fn execute_multi_sqlserver(
                     session_id: None,
                     has_more: false,
                 });
+                if matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
+                    state.remove_pool_by_key(pool_key).await;
+                    break;
+                }
             }
         }
     }
@@ -1522,9 +1567,15 @@ pub async fn execute_statements(
                 total_affected += result.affected_rows;
             }
             Err(e) => {
-                if is_connection_error(&e) {
-                    let db_opt = if database.is_empty() { None } else { Some(database) };
-                    let _ = state.reconnect_pool(connection_id, db_opt).await;
+                match pool_error_action(connection_database_type(state, connection_id).await, &e) {
+                    PoolErrorAction::ReconnectAndRetry => {
+                        let db_opt = if database.is_empty() { None } else { Some(database) };
+                        let _ = state.reconnect_pool(connection_id, db_opt).await;
+                    }
+                    PoolErrorAction::Discard => {
+                        let _ = state.remove_pool_by_key(&pool_key).await;
+                    }
+                    PoolErrorAction::Keep => {}
                 }
                 return Err(format!(
                     "Statement {} failed: {}. Previous {} statement(s) may have been committed.",
@@ -2013,6 +2064,31 @@ mod tests {
         assert!(!is_connection_error("os error 13"));
     }
 
+    #[test]
+    fn pool_error_action_discards_sqlserver_driver_panic_without_retry() {
+        let err = format!("{} the current client will be rebuilt.", db::sqlserver::SQLSERVER_DRIVER_PANIC_ERROR_PREFIX);
+
+        assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), &err), PoolErrorAction::Discard);
+        assert!(should_discard_pool_after_error(Some(DatabaseType::SqlServer), &err));
+        assert!(!is_connection_error(&err));
+    }
+
+    #[test]
+    fn pool_error_action_discards_sqlserver_timeout_without_retry() {
+        let err = "Query timed out after 30 seconds";
+
+        assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), err), PoolErrorAction::Discard);
+        assert_eq!(pool_error_action(Some(DatabaseType::Mysql), err), PoolErrorAction::Keep);
+    }
+
+    #[test]
+    fn pool_error_action_reconnects_connection_errors() {
+        let err = "connection reset by peer";
+
+        assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), err), PoolErrorAction::ReconnectAndRetry);
+        assert_eq!(pool_error_action(Some(DatabaseType::Postgres), err), PoolErrorAction::ReconnectAndRetry);
+    }
+
     #[cfg(feature = "duckdb-bundled")]
     #[test]
     fn duckdb_execute_preserves_double_precision() {
@@ -2196,6 +2272,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -2396,6 +2473,10 @@ mod tests {
         assert!(should_discard_agent_pool_after_error("Query timed out after 30 seconds"));
         assert!(should_discard_agent_pool_after_error("Agent RPC call timed out (30s)"));
         assert!(!is_connection_error("Agent RPC call timed out (30s)"));
+        assert_eq!(
+            pool_error_action(Some(DatabaseType::Oracle), "Agent RPC call timed out (30s)"),
+            PoolErrorAction::Discard
+        );
     }
 
     #[test]
@@ -2404,6 +2485,10 @@ mod tests {
         assert!(should_discard_agent_pool_after_error("Agent stdout not available"));
         assert!(is_connection_error("Agent stdin not available"));
         assert!(is_connection_error("Agent stdout not available"));
+        assert_eq!(
+            pool_error_action(Some(DatabaseType::Oracle), "Agent stdin not available"),
+            PoolErrorAction::ReconnectAndRetry
+        );
     }
 
     #[test]

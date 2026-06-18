@@ -251,8 +251,9 @@ body.dbx-table-reference-dragging * {
     overscroll-behavior: none;
   }
   body {
-    @apply bg-background text-foreground;
-    @apply font-sans;
+    @apply font-sans bg-background text-foreground;
+    text-rendering: geometricPrecision;
+    font-synthesis: none;
   }
   button,
   [role="button"],

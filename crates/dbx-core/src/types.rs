@@ -6,6 +6,14 @@ pub struct DatabaseInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedServerInfo {
+    pub name: String,
+    pub product: Option<String>,
+    pub provider: Option<String>,
+    pub data_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
     pub table_type: String, // "TABLE" or "VIEW"

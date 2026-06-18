@@ -1,7 +1,7 @@
 use crate::connection::{connection_url_for_endpoint, database_connection_config, AppState, MysqlMode, PoolKind};
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -272,6 +272,68 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+pub async fn list_sqlserver_linked_servers_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<Vec<db::LinkedServerInfo>, String> {
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_linked_servers(&mut client).await;
+    }
+    Ok(vec![])
+}
+
+pub async fn list_sqlserver_linked_server_catalogs_core(
+    state: &AppState,
+    connection_id: &str,
+    server: &str,
+) -> Result<Vec<db::DatabaseInfo>, String> {
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_linked_server_catalogs(&mut client, server).await;
+    }
+    Ok(vec![])
+}
+
+pub async fn list_sqlserver_linked_server_schemas_core(
+    state: &AppState,
+    connection_id: &str,
+    server: &str,
+    catalog: &str,
+) -> Result<Vec<String>, String> {
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_linked_server_schemas(&mut client, server, catalog).await;
+    }
+    Ok(vec![])
+}
+
+pub async fn list_sqlserver_linked_server_tables_core(
+    state: &AppState,
+    connection_id: &str,
+    server: &str,
+    catalog: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<db::TableInfo>, String> {
+    let connections = state.connections.read().await;
+    if let Some(client) = extract_pool!(&connections, connection_id, SqlServer) {
+        drop(connections);
+        let mut client = client.lock().await;
+        return db::sqlserver::list_linked_server_tables(&mut client, server, catalog, schema, filter, limit, offset)
+            .await;
+    }
+    Ok(vec![])
+}
+
 async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     log::info!("[list_databases] connection_id={connection_id}");
     {
@@ -423,9 +485,10 @@ pub async fn list_tables_core(
     filter: Option<&str>,
     limit: Option<usize>,
     offset: Option<usize>,
+    object_types: Option<&[String]>,
 ) -> Result<Vec<db::TableInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || {
-        list_tables_once(state, connection_id, database, schema, filter, limit, offset)
+        list_tables_once(state, connection_id, database, schema, filter, limit, offset, object_types)
     })
     .await
 }
@@ -438,6 +501,7 @@ async fn list_tables_once(
     filter: Option<&str>,
     limit: Option<usize>,
     offset: Option<usize>,
+    object_types: Option<&[String]>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     #[cfg(feature = "duckdb-bundled")]
@@ -456,7 +520,7 @@ async fn list_tables_once(
             })
             .await
             .map_err(|e| e.to_string())?
-            .map(|tables| filter_table_infos(tables, filter, limit, offset));
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
         }
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
@@ -468,26 +532,52 @@ async fn list_tables_once(
                     serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema }),
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
         }
         #[cfg(feature = "duckdb-bundled")]
         if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
             drop(connections);
             let con = con.lock().map_err(|e| e.to_string())?;
             return duckdb_query_tables_in_database_with_attached(&con, database, schema, &duckdb_attached_names)
-                .map(|tables| filter_table_infos(tables, filter, limit, offset));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
             return db::clickhouse_driver::list_tables(&client, clickhouse_metadata_database(database, schema))
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
             drop(connections);
             return db::influxdb_driver::list_tables(&client, database)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+        }
+        if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
+            if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
+                drop(connections);
+                let mut client = client.lock().await;
+                return db::sqlserver::list_linked_server_tables(
+                    &mut client,
+                    &linked.server,
+                    &linked.catalog,
+                    &linked.schema,
+                    filter,
+                    None,
+                    None,
+                )
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+            }
+        }
+        if object_types.is_some() {
+            if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
+                drop(connections);
+                let mut client = client.lock().await;
+                return db::sqlserver::list_tables(&mut client, schema, filter, None, None)
+                    .await
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+            }
         }
         try_sqlserver!(connections, &pool_key, list_tables, schema, filter, limit, offset);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
@@ -495,14 +585,22 @@ async fn list_tables_once(
             drop(connections);
             let mut client = client.lock().await;
             match client.list_tables::<Vec<db::TableInfo>>(database, schema).await {
-                Ok(tables) if !tables.is_empty() => return Ok(filter_table_infos(tables, filter, limit, offset)),
+                Ok(tables) if !tables.is_empty() => {
+                    return Ok(filter_table_infos(tables, filter, limit, offset, object_types))
+                }
                 Ok(tables) => {
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await;
+                                return if object_types.is_some() {
+                                    db::postgres::list_tables_filtered(&pool, schema, filter, None, None)
+                                        .await
+                                        .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                                } else {
+                                    db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await
+                                };
                             }
-                            Ok(None) => return Ok(filter_table_infos(tables, filter, limit, offset)),
+                            Ok(None) => return Ok(filter_table_infos(tables, filter, limit, offset, object_types)),
                             Err(error) => {
                                 log::warn!(
                                     "[schema][agent:list_tables:fallback-failed] connection_id={} database={} schema={} error={}",
@@ -514,20 +612,23 @@ async fn list_tables_once(
                             }
                         }
                     }
-                    return Ok(filter_table_infos(tables, filter, limit, offset));
+                    return Ok(filter_table_infos(tables, filter, limit, offset, object_types));
                 }
                 Err(agent_error) => {
                     if let Some(config) = fallback_config.as_ref() {
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset)
-                                .await
-                                .map_err(|fallback_error| {
-                                    format!(
-                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
-                                    )
-                                });
+                            let result = if object_types.is_some() {
+                                db::postgres::list_tables_filtered(&pool, schema, filter, None, None)
+                                    .await
+                                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                            } else {
+                                db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await
+                            };
+                            return result.map_err(|fallback_error| {
+                                format!("{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}")
+                            });
                         }
                     }
                     return Err(agent_error);
@@ -543,30 +644,40 @@ async fn list_tables_once(
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
             db::mysql::list_tables_show(p, database)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset))
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
         }
         PoolKind::Mysql(p, mode) => {
             dispatch_mysql!(p, mode, db::mysql::list_tables, db::ob_oracle::list_tables, schema)
-                .map(|tables| filter_table_infos(tables, filter, limit, offset))
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
-            db::questdb::list_tables(p, schema).await.map(|tables| filter_table_infos(tables, filter, limit, offset))
+            db::questdb::list_tables(p, schema)
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
         }
-        PoolKind::Postgres(p) => db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await,
-        PoolKind::Sqlite(p) => {
-            db::sqlite::list_tables(p, schema).await.map(|tables| filter_table_infos(tables, filter, limit, offset))
+        PoolKind::Postgres(p) => {
+            if object_types.is_some() {
+                db::postgres::list_tables_filtered(p, schema, filter, None, None)
+                    .await
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+            } else {
+                db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await
+            }
         }
+        PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema)
+            .await
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema)
             .await
-            .map(|tables| filter_table_infos(tables, filter, limit, offset)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
         PoolKind::MongoDb(client) => db::mongo_driver::list_collections(client, database)
             .await
             .map(|names| collection_names_to_tables(names, "COLLECTION"))
-            .map(|tables| filter_table_infos(tables, filter, limit, offset)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::list_indices(client)
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
-            .map(|tables| filter_table_infos(tables, filter, limit, offset)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
         _ => Ok(vec![]),
     }
 }
@@ -589,6 +700,7 @@ fn filter_table_infos(
     filter: Option<&str>,
     limit: Option<usize>,
     offset: Option<usize>,
+    object_types: Option<&[String]>,
 ) -> Vec<db::TableInfo> {
     let filter = filter.unwrap_or("").to_lowercase();
     let limit = limit.unwrap_or(usize::MAX);
@@ -596,9 +708,38 @@ fn filter_table_infos(
     tables
         .into_iter()
         .filter(|table| filter.is_empty() || table.name.to_lowercase().contains(&filter))
+        .filter(|table| table_info_matches_object_types(table, object_types))
         .skip(offset)
         .take(limit)
         .collect()
+}
+
+fn table_info_matches_object_types(table: &db::TableInfo, object_types: Option<&[String]>) -> bool {
+    let Some(object_types) = object_types else {
+        return true;
+    };
+    if object_types.is_empty() {
+        return true;
+    }
+    let table_type = normalize_table_info_object_type(&table.table_type);
+    object_types.iter().any(|object_type| normalize_table_info_object_type(object_type) == table_type)
+}
+
+fn normalize_table_info_object_type(value: &str) -> String {
+    let upper = value.to_ascii_uppercase().replace(' ', "_");
+    if upper.contains("MATERIALIZED") && upper.contains("VIEW") {
+        return "MATERIALIZED_VIEW".to_string();
+    }
+    if upper.contains("VIEW") {
+        return "VIEW".to_string();
+    }
+    if upper.contains("COLLECTION") {
+        return "COLLECTION".to_string();
+    }
+    if upper.contains("INDEX") {
+        return "INDEX".to_string();
+    }
+    "TABLE".to_string()
 }
 
 #[cfg(test)]
@@ -664,6 +805,7 @@ mod tests {
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -738,10 +880,38 @@ mod tests {
             test_table_info("users"),
         ];
 
-        let filtered = filter_table_infos(tables, Some("audit"), Some(1), Some(1));
+        let filtered = filter_table_infos(tables, Some("audit"), Some(1), Some(1), None);
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
+    }
+
+    #[test]
+    fn filter_table_infos_filters_object_type_before_offset_and_limit() {
+        let tables = vec![
+            test_table_info("orders"),
+            super::db::TableInfo {
+                name: "active_orders".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            test_table_info("users"),
+            super::db::TableInfo {
+                name: "active_users".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let object_types = vec!["VIEW".to_string()];
+
+        let filtered = filter_table_infos(tables, None, Some(1), Some(1), Some(&object_types));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "active_users");
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -954,7 +1124,7 @@ async fn list_objects_once(
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await,
         _ => {
             drop(connections);
-            Ok(list_tables_core(state, connection_id, database, schema, None, None, None)
+            Ok(list_tables_core(state, connection_id, database, schema, None, None, None, None)
                 .await?
                 .into_iter()
                 .map(|table| db::ObjectInfo {
@@ -1186,6 +1356,21 @@ pub async fn get_columns_core(
             drop(connections);
             return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
         }
+        if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
+            if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
+                drop(connections);
+                let mut client = client.lock().await;
+                return db::sqlserver::get_linked_server_columns(
+                    &mut client,
+                    &linked.server,
+                    &linked.catalog,
+                    &linked.schema,
+                    table,
+                )
+                .await
+                .map(deduplicate_column_infos);
+            }
+        }
         try_sqlserver!(connections, &pool_key, get_columns, schema, table);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let fallback_config = db_config.clone();
@@ -1315,6 +1500,9 @@ pub async fn list_indexes_core(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Ok(vec![]);
+    }
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
 
@@ -1351,6 +1539,9 @@ pub async fn list_foreign_keys_core(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Ok(vec![]);
+    }
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
 
     {
@@ -1380,6 +1571,9 @@ pub async fn list_triggers_core(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::TriggerInfo>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Ok(vec![]);
+    }
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
 
     {
@@ -1473,7 +1667,23 @@ pub async fn get_table_ddl_core(
     database: &str,
     schema: &str,
     table: &str,
+    object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Err("DDL is not supported for SQL Server linked server tables".to_string());
+    }
+    if matches!(object_type, Some(db::ObjectSourceKind::View)) {
+        let source =
+            get_object_source_core(state, connection_id, database, schema, table, db::ObjectSourceKind::View).await?;
+        let database_type = connection_config(state, connection_id).await.map(|config| config.db_type);
+        return Ok(crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
+            database_type,
+            schema: if schema.trim().is_empty() { None } else { Some(schema.to_string()) },
+            name: table.to_string(),
+            source: source.source,
+        }));
+    }
+
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
 
     {
@@ -1594,6 +1804,14 @@ fn sql_string(value: &str) -> String {
 
 fn pg_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn sqlserver_ident(value: &str) -> String {
+    format!("[{}]", value.replace(']', "]]"))
+}
+
+fn sqlserver_n_string(value: &str) -> String {
+    format!("N'{}'", value.replace('\'', "''"))
 }
 
 fn mysql_ident(value: &str) -> String {
@@ -1801,10 +2019,15 @@ pub async fn get_object_source_core(
         if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
             drop(connections);
             let mut client = client.lock().await;
-            first_string_cell(
+            let result =
                 db::sqlserver::execute_query(&mut client, &sqlserver_object_source_sql(schema, name, &object_type))
-                    .await?,
-            )?
+                    .await;
+            drop(client);
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(Some(DatabaseType::SqlServer), err))
+            {
+                state.remove_pool_by_key(&pool_key).await;
+            }
+            first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             drop(connections);
             if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle)
@@ -2047,6 +2270,20 @@ mod ddl_tests {
     }
 
     #[test]
+    fn sqlserver_table_ddl_includes_column_comments() {
+        let mut display_name = column("display]name", "nvarchar(100)");
+        display_name.comment = Some("User's display name".to_string());
+        let columns = vec![display_name];
+
+        let ddl = render_sqlserver_table_ddl("dbo", "users", &columns, &[], &[]);
+
+        assert!(ddl.contains("CREATE TABLE [dbo].[users] (\n  [display]]name] nvarchar(100)\n);"));
+        assert!(ddl.contains(
+            "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'User''s display name', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'users', @level2type=N'COLUMN', @level2name=N'display]name';"
+        ));
+    }
+
+    #[test]
     fn opengauss_table_ddl_uses_native_tabledef_function() {
         assert_eq!(
             opengauss_table_ddl_sql("tenant's schema", "active users"),
@@ -2194,11 +2431,22 @@ pub async fn build_sqlserver_ddl(
     let indexes = db::sqlserver::list_indexes(client, schema, table).await?;
     let fkeys = db::sqlserver::list_foreign_keys(client, schema, table).await?;
 
-    let mut ddl = format!("CREATE TABLE [{schema}].[{table}] (\n");
+    Ok(render_sqlserver_table_ddl(schema, table, &columns, &indexes, &fkeys))
+}
+
+pub fn render_sqlserver_table_ddl(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+) -> String {
+    let table_name = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table));
+    let mut ddl = format!("CREATE TABLE {table_name} (\n");
     let col_lines: Vec<String> = columns
         .iter()
         .map(|c| {
-            let mut line = format!("  [{}] {}", c.name, c.data_type);
+            let mut line = format!("  {} {}", sqlserver_ident(&c.name), c.data_type);
             if !c.is_nullable {
                 line.push_str(" NOT NULL");
             }
@@ -2214,35 +2462,52 @@ pub async fn build_sqlserver_ddl(
     if !pks.is_empty() {
         ddl.push_str(&format!(
             ",\n  PRIMARY KEY ({})",
-            pks.iter().map(|k| format!("[{k}]")).collect::<Vec<_>>().join(", ")
+            pks.iter().map(|k| sqlserver_ident(k)).collect::<Vec<_>>().join(", ")
         ));
     }
-    for fk in &fkeys {
+    for fk in fkeys {
         ddl.push_str(&format!(
-            ",\n  CONSTRAINT [{}] FOREIGN KEY ([{}]) REFERENCES [{}]([{}])",
-            fk.name, fk.column, fk.ref_table, fk.ref_column
+            ",\n  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
+            sqlserver_ident(&fk.name),
+            sqlserver_ident(&fk.column),
+            sqlserver_ident(&fk.ref_table),
+            sqlserver_ident(&fk.ref_column)
         ));
     }
     ddl.push_str("\n);\n");
 
-    for idx in &indexes {
+    for column in columns {
+        if let Some(comment) = column.comment.as_deref().map(str::trim).filter(|comment| !comment.is_empty()) {
+            ddl.push_str(&format!(
+                "\nEXEC sys.sp_addextendedproperty @name=N'MS_Description', @value={}, @level0type=N'SCHEMA', @level0name={}, @level1type=N'TABLE', @level1name={}, @level2type=N'COLUMN', @level2name={};",
+                sqlserver_n_string(comment),
+                sqlserver_n_string(schema),
+                sqlserver_n_string(table),
+                sqlserver_n_string(&column.name)
+            ));
+        }
+    }
+
+    for idx in indexes {
         if idx.is_primary {
             continue;
         }
         let unique = if idx.is_unique { "UNIQUE " } else { "" };
         let idx_type = idx.index_type.as_deref().map(|t| format!("{t} ")).unwrap_or_default();
-        let cols = idx.columns.iter().map(|c| format!("[{c}]")).collect::<Vec<_>>().join(", ");
+        let cols = idx.columns.iter().map(|c| sqlserver_ident(c)).collect::<Vec<_>>().join(", ");
         let include = idx
             .included_columns
             .as_deref()
             .filter(|c| !c.is_empty())
-            .map(|cols| format!(" INCLUDE ({})", cols.iter().map(|c| format!("[{c}]")).collect::<Vec<_>>().join(", ")))
+            .map(|cols| {
+                format!(" INCLUDE ({})", cols.iter().map(|c| sqlserver_ident(c)).collect::<Vec<_>>().join(", "))
+            })
             .unwrap_or_default();
         let filter = idx.filter.as_deref().map(|f| format!(" WHERE {f}")).unwrap_or_default();
         ddl.push_str(&format!(
-            "\nCREATE {unique}{idx_type}INDEX [{}] ON [{schema}].[{table}] ({cols}){include}{filter};",
-            idx.name
+            "\nCREATE {unique}{idx_type}INDEX {} ON {table_name} ({cols}){include}{filter};",
+            sqlserver_ident(&idx.name)
         ));
     }
-    Ok(ddl)
+    ddl
 }

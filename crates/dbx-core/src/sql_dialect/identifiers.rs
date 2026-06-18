@@ -1,6 +1,40 @@
 use crate::models::connection::DatabaseType;
+use percent_encoding::percent_decode_str;
 
 use super::capabilities::{is_schema_aware, is_simple_informix_identifier};
+
+pub const SQLSERVER_LINKED_SCHEMA_PREFIX: &str = "__dbx_sqlserver_linked__:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlServerLinkedSchemaRef {
+    pub server: String,
+    pub catalog: String,
+    pub schema: String,
+}
+
+pub fn parse_sqlserver_linked_schema_ref(schema: &str) -> Option<SqlServerLinkedSchemaRef> {
+    let payload = schema.strip_prefix(SQLSERVER_LINKED_SCHEMA_PREFIX)?;
+    let mut parts = payload.split('|');
+    let server = decode_linked_schema_part(parts.next()?)?;
+    let catalog = decode_linked_schema_part(parts.next()?)?;
+    let schema = decode_linked_schema_part(parts.next()?)?;
+    if parts.next().is_some() || server.trim().is_empty() || catalog.trim().is_empty() || schema.trim().is_empty() {
+        return None;
+    }
+    Some(SqlServerLinkedSchemaRef { server, catalog, schema })
+}
+
+pub fn sqlserver_linked_table_name(linked: &SqlServerLinkedSchemaRef, table_name: &str) -> String {
+    [linked.server.as_str(), linked.catalog.as_str(), linked.schema.as_str(), table_name]
+        .into_iter()
+        .map(|part| quote_table_identifier(Some(DatabaseType::SqlServer), part))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn decode_linked_schema_part(value: &str) -> Option<String> {
+    percent_decode_str(value).decode_utf8().ok().map(|value| value.into_owned())
+}
 
 pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
     if database_type == Some(DatabaseType::Iotdb) {
@@ -18,6 +52,11 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
         && database_type != Some(DatabaseType::Jdbc)
         && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
+        if database_type == Some(DatabaseType::SqlServer) {
+            if let Some(linked) = schema.and_then(parse_sqlserver_linked_schema_ref) {
+                return sqlserver_linked_table_name(&linked, table_name);
+            }
+        }
         return format!(
             "{}.{}",
             quote_table_identifier(database_type, schema.unwrap()),

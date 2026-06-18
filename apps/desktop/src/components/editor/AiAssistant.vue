@@ -858,7 +858,11 @@ const markedInstance = new Marked({
 });
 
 function formatInlineText(text: string): string {
-  return markedInstance.parse(text) as string;
+  try {
+    return markedInstance.parse(text) as string;
+  } catch {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
 }
 
 const messageRenderer = computed(() => {
@@ -922,7 +926,7 @@ const messageRenderer = computed(() => {
       <div class="flex flex-col gap-3 p-3">
         <template v-for="(msg, i) in visibleMessages" :key="i">
           <div v-if="msg.role === 'user'" class="flex justify-end">
-            <div class="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+            <div class="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
               {{ msg.content }}
             </div>
           </div>

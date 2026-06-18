@@ -357,7 +357,7 @@ async function loadTables(side: "source" | "target") {
   const database = side === "source" ? sourceDatabase.value : targetDatabase.value;
   if (!connectionId || !database) return;
   const schema = side === "source" ? sourceSchema.value || (await resolveSchema(connectionId, database, props.prefillSchema)) : targetSchema.value || (await resolveSchema(connectionId, database));
-  const tables = (await api.listTables(connectionId, database, schema)).filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED VIEW").map((table) => table.name);
+  const tables = (await api.listTables(connectionId, database, schema)).filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").map((table) => table.name);
 
   if (side === "source") {
     const preferredSelection = props.prefillTable && tables.includes(props.prefillTable) ? [props.prefillTable] : [...selectedSourceTables.value].filter((table) => tables.includes(table));

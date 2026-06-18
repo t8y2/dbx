@@ -358,7 +358,12 @@ pub fn openai_stream_text(event: &serde_json::Value) -> Option<String> {
 pub fn openai_stream_reasoning(event: &serde_json::Value) -> Option<&str> {
     event["choices"]
         .get(0)
-        .and_then(|choice| choice["delta"]["reasoning_content"].as_str())
+        .and_then(|choice| {
+            choice["delta"]["reasoning_content"]
+                .as_str()
+                .or_else(|| choice["delta"]["reasoning"].as_str())
+                .or_else(|| choice["delta"]["thinking"].as_str())
+        })
         .filter(|text| !text.is_empty())
 }
 
@@ -379,8 +384,29 @@ fn is_openai_reasoning_model(model: &str) -> bool {
     model.starts_with("gpt-5") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
 }
 
+/// Kimi K2.5+ models (including K2.7-Code) require fixed sampling parameters:
+/// temperature=1.0, top_p=0.95, n=1. Any other value returns an error.
+///
+/// Matches `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`, K3+, and future versions,
+/// while excluding older K2 variants (`kimi-k2`, `kimi-k2-thinking`, etc.).
+/// Regex equivalent: /kimi-k(?:2\.[5-9]\d*|[3-9]\d*)/
+fn is_kimi_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    if let Some(rest) = model.strip_prefix("kimi-k") {
+        if rest.starts_with("2.") && rest.len() > 2 {
+            // K2.x — the digit after "2." must be >= 5 (so K2.5+)
+            rest[2..].chars().next().map_or(false, |c| c.is_ascii_digit() && c >= '5')
+        } else {
+            // K3+ — first char must be digit >= 3
+            rest.chars().next().map_or(false, |c| c.is_ascii_digit() && c >= '3')
+        }
+    } else {
+        false
+    }
+}
+
 pub fn supports_temperature(config: &AiConfig) -> bool {
-    !(is_openai_api_config(config) && is_openai_reasoning_model(&config.model))
+    !(is_openai_api_config(config) && is_openai_reasoning_model(&config.model)) && !is_kimi_model(&config.model)
 }
 
 pub fn add_temperature_if_supported(body: &mut serde_json::Value, request: &AiCompletionRequest) {
@@ -649,7 +675,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "max_tokens": request.max_tokens.unwrap_or(2048),
     });
     add_temperature_if_supported(&mut body_obj, &request);
-    if !request.config.enable_thinking {
+    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
         });
@@ -1097,7 +1123,7 @@ async fn stream_openai(
         "stream": true,
     });
     add_temperature_if_supported(&mut body_obj, request);
-    if !request.config.enable_thinking {
+    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
         });
@@ -1996,10 +2022,11 @@ pub fn load_config(path: &Path) -> Result<Option<AiConfig>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ai_http_client, claude_headers, claude_system_prompt, gemini_text, openai_response_text,
-        openai_stream_text, parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint,
-        responses_max_output_tokens, responses_text, supports_temperature, validate_config, AiApiStyle, AiAuthMethod,
-        AiConfig, AiModelInfo, AiProvider, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM,
+        build_ai_http_client, claude_headers, claude_system_prompt, gemini_text, is_kimi_model, openai_response_text,
+        openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
+        resolve_model_list_endpoint, responses_max_output_tokens, responses_text, supports_temperature,
+        validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM,
     };
 
     #[test]
@@ -2293,6 +2320,41 @@ mod tests {
         config.endpoint = "http://localhost:11434/v1".to_string();
         config.model = "gpt-5-local".to_string();
         assert!(supports_temperature(&config));
+
+        // Kimi K2.5+ models: temperature is forced to 1.0 by the API
+        config.model = "kimi-k2.7-code".to_string();
+        assert!(!supports_temperature(&config));
+        assert!(is_kimi_model(&config.model));
+
+        config.model = "kimi-k2.6".to_string();
+        assert!(!supports_temperature(&config));
+        assert!(is_kimi_model(&config.model));
+
+        config.model = "kimi-k2.5".to_string();
+        assert!(!supports_temperature(&config));
+        assert!(is_kimi_model(&config.model));
+
+        // K3+ should also be matched
+        config.model = "kimi-k3".to_string();
+        assert!(!supports_temperature(&config));
+        assert!(is_kimi_model(&config.model));
+
+        // Older K2 variants should NOT be matched (they support custom temperature)
+        config.model = "kimi-k2".to_string();
+        assert!(supports_temperature(&config));
+        assert!(!is_kimi_model(&config.model));
+
+        config.model = "kimi-k2-thinking".to_string();
+        assert!(supports_temperature(&config));
+        assert!(!is_kimi_model(&config.model));
+
+        config.model = "kimi-k2-0711-preview".to_string();
+        assert!(supports_temperature(&config));
+        assert!(!is_kimi_model(&config.model));
+
+        config.model = "kimi-k2.4".to_string();
+        assert!(supports_temperature(&config));
+        assert!(!is_kimi_model(&config.model));
     }
 
     #[test]
@@ -2337,6 +2399,22 @@ mod tests {
             }))
             .as_deref(),
             Some("SELECT 2;")
+        );
+    }
+
+    #[test]
+    fn parses_ollama_openai_reasoning_stream_chunks() {
+        assert_eq!(
+            openai_stream_reasoning(&serde_json::json!({
+                "choices": [{ "delta": { "reasoning": "thinking..." } }]
+            })),
+            Some("thinking...")
+        );
+        assert_eq!(
+            openai_stream_reasoning(&serde_json::json!({
+                "choices": [{ "delta": { "thinking": "planning..." } }]
+            })),
+            Some("planning...")
         );
     }
 

@@ -14,6 +14,7 @@ import DataGrid from "@/components/grid/DataGrid.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/api";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
+import { documentViewerFontStyle } from "@/lib/documentViewerFontStyle";
 import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, defaultDocumentFilterRule, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/documentStoreProvider";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -73,6 +74,7 @@ const tableFindPaneStyle = computed(() => {
   if (tableFindPaneWidth.value == null) return {};
   return { flex: `0 0 ${tableFindPaneWidth.value}px` };
 });
+const documentFontStyle = computed(() => documentViewerFontStyle(settingsStore.editorSettings));
 const documentStoreLabels = computed(() => ({
   documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value, t }),
   queryPreview: documentQueryPreview.value,
@@ -1108,7 +1110,7 @@ function resetTableSearchSplitWidth() {
             </div>
 
             <div v-if="isEditing" class="flex-1 overflow-auto bg-muted/10">
-              <div class="json-edit min-w-fit p-5 font-mono text-[13px] leading-6" :style="{ '--mongo-key-width': editKeyWidth }">
+              <div class="json-edit min-w-fit p-5" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }">
                 <div class="json-edit-brace">{</div>
 
                 <JsonEditNode v-for="(field, idx) in editFields" :key="field.key" :node="field" parent-kind="root" :removable="!field.readonlyValue" @remove="requestRemoveField(idx)" />
@@ -1120,7 +1122,7 @@ function resetTableSearchSplitWidth() {
             </div>
 
             <div v-else class="flex-1 overflow-auto bg-muted/10">
-              <pre class="json-viewer min-w-fit p-5 font-mono text-[13px] leading-6" v-html="highlightedJson(editJson)" />
+              <pre class="json-viewer min-w-fit p-5" :style="documentFontStyle" v-html="highlightedJson(editJson)" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">
@@ -1137,12 +1139,18 @@ function resetTableSearchSplitWidth() {
 
 <style scoped>
 .json-viewer {
+  font-family: var(--dbx-editor-font-family);
+  font-size: var(--dbx-editor-font-size);
+  line-height: 1.6;
   tab-size: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .json-edit {
+  font-family: var(--dbx-editor-font-family);
+  font-size: var(--dbx-editor-font-size);
+  line-height: 1.6;
   tab-size: 2;
   color: var(--foreground);
   white-space: pre-wrap;

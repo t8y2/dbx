@@ -42,6 +42,14 @@ fn qualifies_schema_only_for_schema_aware_databases() {
         qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "root.test.device2"),
         "root.test.device2"
     );
+    assert_eq!(
+        qualified_table_name(
+            Some(DatabaseType::SqlServer),
+            Some("__dbx_sqlserver_linked__:ERP%5D01|Finance%20DB|dbo"),
+            "Orders]2026"
+        ),
+        "[ERP]]01].[Finance DB].[dbo].[Orders]]2026]"
+    );
 }
 
 #[test]

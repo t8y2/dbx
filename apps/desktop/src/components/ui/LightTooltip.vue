@@ -8,6 +8,7 @@ const props = withDefaults(
     side?: "top" | "right" | "bottom" | "left";
     sideOffset?: number;
     delay?: number;
+    closeDelay?: number;
     openOnFocus?: boolean;
   }>(),
   {
@@ -15,6 +16,7 @@ const props = withDefaults(
     side: "top",
     sideOffset: 8,
     delay: 300,
+    closeDelay: 100,
     openOnFocus: true,
   },
 );
@@ -126,11 +128,15 @@ function closeIfTriggerInactive() {
 }
 
 function scheduleClose() {
+  if (props.closeDelay <= 0) {
+    if (!isTriggerActive()) close();
+    return;
+  }
   if (closeTimer) return;
   closeTimer = setTimeout(() => {
     closeTimer = null;
     if (!isTriggerActive()) close();
-  }, 100);
+  }, props.closeDelay);
 }
 
 function onPointerDown(e: PointerEvent) {

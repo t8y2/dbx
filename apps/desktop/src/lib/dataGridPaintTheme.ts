@@ -12,6 +12,8 @@ export interface DataGridPaintTheme {
   cellSelected: string;
   cellSelectedDirty: string;
   cellSelectedBorder: string;
+  cellSelectedSingle: string;
+  cellSelectedSingleBorder: string;
   cellHover: string;
   cellSearch: string;
   cellCurrentSearch: string;
@@ -223,6 +225,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const cellSelected = isDark ? "rgb(66, 67, 70)" : "rgb(226, 226, 226)";
   const cellSelectedDirty = isDark ? "rgb(94, 75, 26)" : "rgb(244, 229, 186)";
   const cellSelectedBorder = isDark ? "rgb(170, 170, 175)" : "rgb(90, 90, 90)";
+  const cellSelectedSingle = isDark ? "rgb(17, 24, 39)" : "rgb(209, 213, 219)";
   const cellHover = accent;
   const cellSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.match : "rgb(253, 245, 184)";
   const cellCurrentSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.current : "rgba(253, 224, 71, 0.52)";
@@ -232,7 +235,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNumberEdited = isDark ? DATA_GRID_DARK_ROW_NUMBER_EDITED_BG : DATA_GRID_LIGHT_ROW_NUMBER_EDITED_BG;
   const rowNumberDeleted = isDark ? DATA_GRID_DARK_ROW_NUMBER_DELETED_BG : DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG;
   const rowNumberActive = activeSurface;
-  const rowNumberSelected = cellSelected;
+  const rowNumberSelected = isDark ? "rgb(31, 41, 55)" : "rgb(209, 213, 219)";
 
   return {
     background,
@@ -248,6 +251,8 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
     cellSelected: paintToken(getVar, "--data-grid-cell-selected-bg", cellSelected),
     cellSelectedDirty: paintToken(getVar, "--data-grid-cell-selected-dirty-bg", cellSelectedDirty),
     cellSelectedBorder: paintToken(getVar, "--data-grid-cell-selected-border", cellSelectedBorder),
+    cellSelectedSingle: paintToken(getVar, "--data-grid-cell-selected-single-bg", cellSelectedSingle),
+    cellSelectedSingleBorder: paintToken(getVar, "--data-grid-cell-selected-single-border", primary),
     cellHover: paintToken(getVar, "--data-grid-cell-hover-bg", cellHover),
     cellSearch: paintToken(getVar, "--data-grid-cell-search-bg", cellSearch),
     cellCurrentSearch: paintToken(getVar, "--data-grid-cell-current-search-bg", cellCurrentSearch),

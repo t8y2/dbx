@@ -1,6 +1,7 @@
 ﻿import type {
   ConnectionConfig,
   DatabaseInfo,
+  LinkedServerInfo,
   TableInfo,
   ObjectInfo,
   ObjectSource,
@@ -90,10 +91,23 @@ import type { DatabaseNameSqlOptions, DropTableChildObjectSqlOptions, DropObject
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/databaseExport";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataCompare";
 import type { DataGridSavePreparation } from "./tauri";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const DESKTOP_SETTINGS_STORAGE_KEY = "dbx-desktop-settings";
+const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
+  show_tray_icon: true,
+  icon_theme: "default",
+  debug_logging_enabled: false,
+  saved_sql_sync_dir: null,
+  driver_store_dir: null,
+  plugin_store_dir: null,
+  agent_store_dir: null,
+  sidebar_table_page_size: 1000,
+};
 
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -392,6 +406,22 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
 }
 
+export async function listSqlServerLinkedServers(connectionId: string): Promise<LinkedServerInfo[]> {
+  return get(`/api/schema/sqlserver/linked-servers?${qs({ connection_id: connectionId })}`);
+}
+
+export async function listSqlServerLinkedServerCatalogs(connectionId: string, server: string): Promise<DatabaseInfo[]> {
+  return get(`/api/schema/sqlserver/linked-server-catalogs?${qs({ connection_id: connectionId, server })}`);
+}
+
+export async function listSqlServerLinkedServerSchemas(connectionId: string, server: string, catalog: string): Promise<string[]> {
+  return get(`/api/schema/sqlserver/linked-server-schemas?${qs({ connection_id: connectionId, server, catalog })}`);
+}
+
+export async function listSqlServerLinkedServerTables(connectionId: string, server: string, catalog: string, schema: string, filter?: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return get(`/api/schema/sqlserver/linked-server-tables?${qs({ connection_id: connectionId, server, catalog, schema, filter, limit, offset })}`);
+}
+
 export async function saveSchemaCache(cacheKey: string, payload: unknown): Promise<void> {
   return post("/api/schema/cache", { cacheKey, payload });
 }
@@ -408,8 +438,8 @@ export async function listSchemas(connectionId: string, database: string): Promi
   return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database })}`);
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number): Promise<TableInfo[]> {
-  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset })}`);
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[]): Promise<TableInfo[]> {
+  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(",") })}`);
 }
 
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
@@ -447,8 +477,8 @@ export async function listTriggers(connectionId: string, database: string, schem
   return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table })}`);
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType })}`);
 }
 
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
@@ -655,6 +685,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
   return post("/api/query/build-executable-object-source-sql", { input });
 }
 
+export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return post("/api/query/build-editable-object-source", { input });
+}
+
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return post("/api/query/build-routine-rename-object-source-statements", { input });
 }
@@ -856,11 +890,16 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
 }
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
-  return { show_tray_icon: true, icon_theme: "default", debug_logging_enabled: false, saved_sql_sync_dir: null, driver_store_dir: null, plugin_store_dir: null, agent_store_dir: null };
+  try {
+    const raw = safeLocalStorageGet(DESKTOP_SETTINGS_STORAGE_KEY);
+    return raw ? { ...DEFAULT_DESKTOP_SETTINGS, ...(JSON.parse(raw) as Partial<DesktopSettings>) } : { ...DEFAULT_DESKTOP_SETTINGS };
+  } catch {
+    return { ...DEFAULT_DESKTOP_SETTINGS };
+  }
 }
 
-export async function saveDesktopSettings(_settings: DesktopSettings): Promise<void> {
-  return;
+export async function saveDesktopSettings(settings: DesktopSettings): Promise<void> {
+  safeLocalStorageSet(DESKTOP_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_DESKTOP_SETTINGS, ...settings }));
 }
 
 export interface DriverStoreMigrationResult {
@@ -1050,6 +1089,18 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
 
 export async function cancelTransfer(transferId: string): Promise<void> {
   return post("/api/transfer/cancel", { transferId });
+}
+
+export interface SortTablesByFkOptions {
+  connectionId: string;
+  database: string;
+  schema: string;
+  tables: string[];
+  parentsFirst: boolean;
+}
+
+export async function sortTablesByFkDependency(options: SortTablesByFkOptions): Promise<string[]> {
+  return post("/api/transfer/sort-tables-by-fk", options);
 }
 
 // ---------------------------------------------------------------------------

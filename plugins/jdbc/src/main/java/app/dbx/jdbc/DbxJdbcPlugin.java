@@ -60,7 +60,7 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
-        StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
+        StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
     private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
@@ -973,7 +973,7 @@ public final class DbxJdbcPlugin {
             appendColumns(result, meta, null, schemaPattern, table, primaryKeys);
         }
         if (quirks.useCatalogFallbackSql()) {
-            mergeShowFullColumnComments(conn, result, schemaPattern, table);
+            mergeShowFullColumnMetadata(conn, result, schemaPattern, table);
         }
         return result;
     }
@@ -1148,19 +1148,29 @@ public final class DbxJdbcPlugin {
         }
     }
 
-    private static void mergeShowFullColumnComments(Connection conn, ArrayNode result, String schema, String table) {
+    private static void mergeShowFullColumnMetadata(Connection conn, ArrayNode result, String schema, String table) {
         String target = qualifiedJdbcTableName(schema, table);
         try (Statement statement = conn.createStatement(); ResultSet rs = statement.executeQuery("SHOW FULL COLUMNS FROM " + target)) {
             int fieldIndex = resultSetColumnIndex(rs, "Field");
+            int typeIndex = resultSetColumnIndex(rs, "Type");
+            int extraIndex = resultSetColumnIndex(rs, "Extra");
             int commentIndex = resultSetColumnIndex(rs, "Comment");
-            if (fieldIndex <= 0 || commentIndex <= 0) {
+            if (fieldIndex <= 0) {
                 return;
             }
             while (rs.next()) {
                 String name = rs.getString(fieldIndex);
-                String comment = rs.getString(commentIndex);
                 if (name != null) {
-                    putNullablePreferValue(columnNode(result, name), "comment", comment);
+                    ObjectNode item = columnNode(result, name);
+                    if (typeIndex > 0) {
+                        putNullablePreferValue(item, "data_type", rs.getString(typeIndex));
+                    }
+                    if (extraIndex > 0) {
+                        putNullablePreferValue(item, "extra", rs.getString(extraIndex));
+                    }
+                    if (commentIndex > 0) {
+                        putNullablePreferValue(item, "comment", rs.getString(commentIndex));
+                    }
                 }
             }
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {

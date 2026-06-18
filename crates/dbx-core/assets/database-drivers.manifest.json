@@ -939,7 +939,7 @@
         "fieldLineage": false,
         "sqlExplain": true,
         "userAdmin": false,
-        "driverManagement": true
+        "driverManagement": false
       }
     },
     {

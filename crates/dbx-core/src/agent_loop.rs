@@ -370,6 +370,7 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
         None,
         Some(50), // smaller limit for prompt injection
         None,
+        None,
     )
     .await;
 

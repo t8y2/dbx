@@ -26,6 +26,9 @@ export interface BuildDatabaseSqlExportOptions {
   tables: ExportedTableSql[];
   rowLimitPerTable?: number;
   insertBatchSize?: number;
+  connectionId?: string;
+  database?: string;
+  schema?: string;
 }
 
 export interface BuildExportInsertStatementsOptions {

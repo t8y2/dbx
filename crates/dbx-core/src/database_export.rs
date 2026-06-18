@@ -119,6 +119,15 @@ pub struct BuildDatabaseSqlExportOptions {
     pub row_limit_per_table: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insert_batch_size: Option<usize>,
+    /// Optional connection info for FK-aware table ordering.
+    /// When set, the caller should sort tables by dependency before passing them
+    /// to `build_database_sql_export`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 pub fn format_export_sql_literal(value: &Value) -> String {
@@ -383,6 +392,7 @@ pub async fn export_database_sql_core(
         None,
         None,
         None,
+        None,
     )
     .await?;
     let all_tables = filter_selected_table_infos(all_tables, &request.selected_tables);
@@ -403,8 +413,26 @@ pub async fn export_database_sql_core(
     }
 
     // 7. Separate tables and views
-    let tables: Vec<_> = all_tables.iter().filter(|t| t.table_type != "VIEW").collect();
+    let mut tables: Vec<_> = all_tables.iter().filter(|t| t.table_type != "VIEW").collect();
     let views: Vec<_> = all_tables.iter().filter(|t| t.table_type == "VIEW").collect();
+
+    // Sort tables by foreign key dependency so referenced (parent) tables are
+    // exported before referencing (child) tables.
+    if tables.len() > 1 {
+        let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
+        if let Ok(sorted_names) = crate::transfer::sort_tables_by_fk_dependency(
+            state,
+            &request.connection_id,
+            &request.database,
+            &request.schema,
+            &table_names,
+            true,
+        )
+        .await
+        {
+            tables.sort_by_key(|t| sorted_names.iter().position(|n| n == &t.name).unwrap_or(usize::MAX));
+        }
+    }
 
     // 8. Calculate total objects
     let mut total_objects = tables.len() + views.len();
@@ -476,6 +504,7 @@ pub async fn export_database_sql_core(
                 &request.database,
                 &request.schema,
                 table_name,
+                None,
             )
             .await
             {
@@ -908,6 +937,9 @@ mod tests {
             }],
             row_limit_per_table: Some(DATABASE_EXPORT_ROW_LIMIT),
             insert_batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            connection_id: None,
+            database: None,
+            schema: None,
         })
         .unwrap();
 

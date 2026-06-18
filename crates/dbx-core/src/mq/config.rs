@@ -133,6 +133,7 @@ mod tests {
             redis_key_separator: String::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: Some(value),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),

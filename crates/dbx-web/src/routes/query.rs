@@ -615,6 +615,10 @@ pub async fn build_executable_object_source_sql(
     dbx_core::object_source_sql::build_executable_object_source_sql(req.input).map(Json).map_err(AppError)
 }
 
+pub async fn build_editable_object_source(Json(req): Json<BuildExecutableObjectSourceRequest>) -> Json<String> {
+    Json(dbx_core::object_source_sql::build_editable_object_source(req.input))
+}
+
 pub async fn build_routine_rename_object_source_statements(
     Json(req): Json<BuildRoutineRenameObjectSourceRequest>,
 ) -> Result<Json<Vec<String>>, AppError> {
@@ -698,7 +702,36 @@ pub async fn build_export_sql_insert(Json(req): Json<BuildExportSqlInsertRequest
 }
 
 pub async fn build_database_sql_export(
+    State(state): State<Arc<WebState>>,
     Json(req): Json<BuildDatabaseSqlExportRequest>,
 ) -> Result<Json<String>, AppError> {
-    dbx_core::database_export::build_database_sql_export(req.options).map(Json).map_err(AppError)
+    let mut options = req.options;
+    // Sort tables by FK dependency when connection info is available.
+    if let (Some(ref conn_id), Some(ref database), Some(ref schema)) =
+        (&options.connection_id, &options.database, &options.schema)
+    {
+        if options.tables.len() > 1 {
+            let table_names: Vec<String> = options.tables.iter().filter_map(|t| t.table_name.clone()).collect();
+            if table_names.len() > 1 {
+                if let Ok(sorted_names) = dbx_core::transfer::sort_tables_by_fk_dependency(
+                    &state.app,
+                    conn_id,
+                    database,
+                    schema,
+                    &table_names,
+                    true,
+                )
+                .await
+                {
+                    options.tables.sort_by_key(|t| {
+                        sorted_names
+                            .iter()
+                            .position(|n| Some(n.as_str()) == t.table_name.as_deref())
+                            .unwrap_or(usize::MAX)
+                    });
+                }
+            }
+        }
+    }
+    dbx_core::database_export::build_database_sql_export(options).map(Json).map_err(AppError)
 }

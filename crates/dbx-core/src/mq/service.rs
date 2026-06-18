@@ -527,6 +527,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: Some(serde_json::json!({
                 "systemKind": "pulsar",
                 "adminUrl": "http://127.0.0.1:8080",

@@ -25,7 +25,7 @@ import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, f
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
-import { formatRedisCommandResult, formatRedisStringValue } from "@/lib/redisValuePresentation";
+import { formatRedisConsoleValue, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
@@ -434,7 +434,7 @@ async function runRedisCommand(command: string) {
     appendCommandHistory({
       prompt,
       command,
-      output: formatRedisCommandResult(result.value),
+      output: formatRedisConsoleValue(result.value),
       error: false,
     });
     // The db this command ran on — capture before nextRedisCommandDb() advances it.

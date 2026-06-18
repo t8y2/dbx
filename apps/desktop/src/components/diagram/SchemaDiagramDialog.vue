@@ -393,7 +393,7 @@ async function loadDiagram() {
     await store.ensureConnected(connectionId.value);
     const querySchema = schema.value || database.value;
     const tableInfos = await api.listTables(connectionId.value, database.value, querySchema);
-    const baseTables = tableInfos.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED VIEW").sort((a, b) => a.name.localeCompare(b.name));
+    const baseTables = tableInfos.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").sort((a, b) => a.name.localeCompare(b.name));
     totalTableCount.value = baseTables.length;
 
     const loadedTables: DiagramTable[] = [];

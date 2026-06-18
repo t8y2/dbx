@@ -134,9 +134,9 @@ test("defaults sidebar horizontal scroll to off", () => {
 });
 
 test("defaults data grid header display settings", () => {
-  assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader, true);
   assert.equal(DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions, true);
-  assert.equal(normalizeEditorSettings({}).showColumnCommentsInHeader, false);
+  assert.equal(normalizeEditorSettings({}).showColumnCommentsInHeader, true);
   assert.equal(normalizeEditorSettings({}).compactColumnHeaderActions, true);
 });
 

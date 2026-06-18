@@ -3,6 +3,9 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::path_utils::expand_tilde;
 
+const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY: &str = "compatibleOjdbcVersion";
+const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM: &str = "compatibleOjdbcVersion=8";
+
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
@@ -49,6 +52,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "client_key_path": config.client_key_path,
         "etcd_endpoints": etcd_endpoints,
         "gbase_server": config.gbase_server,
+        "informix_server": config.informix_server,
         "jdbc_driver_class": config.jdbc_driver_class.as_deref().unwrap_or(""),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
     })
@@ -334,10 +338,15 @@ fn oracle_descriptor_jdbc_url(host: &str, port: u16, database: &str, key: &str) 
 fn oceanbase_oracle_jdbc_connection_string(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> String {
     if let Some(connection_string) = config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
         let connection_string = connection_string.trim();
-        if host == config.host && port == config.port {
-            return connection_string.to_string();
+        let url = if host == config.host && port == config.port {
+            connection_string.to_string()
+        } else {
+            crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port)
+        };
+        if url_has_query_key(&url, OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY) {
+            return url;
         }
-        return crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port);
+        return append_agent_url_params(url, Some(OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM));
     }
 
     let database = database.trim();
@@ -345,7 +354,20 @@ fn oceanbase_oracle_jdbc_connection_string(config: &ConnectionConfig, host: &str
         return String::new();
     }
 
-    append_agent_url_params(format!("jdbc:oceanbase://{host}:{port}/{database}"), config.url_params.as_deref())
+    let base = format!("jdbc:oceanbase://{host}:{port}/{database}");
+    append_agent_url_params(base, Some(&oceanbase_oracle_jdbc_params(config)))
+}
+
+fn oceanbase_oracle_jdbc_params(config: &ConnectionConfig) -> String {
+    let user_params = normalize_agent_url_params(config.url_params.as_deref());
+    let mut params = Vec::new();
+    if !user_params.is_empty() {
+        params.push(user_params.to_string());
+    }
+    if !url_params_has_key(user_params, OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY) {
+        params.push(OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM.to_string());
+    }
+    params.join("&")
 }
 
 fn postgres_like_agent_jdbc_connection_string(
@@ -564,6 +586,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
@@ -715,7 +738,10 @@ mod tests {
 
         assert_eq!(params["database"], "sys");
         assert_eq!(params["sysdba"], false);
-        assert_eq!(params["connection_string"], "jdbc:oceanbase://oceanbase.example.com:2881/sys");
+        assert_eq!(
+            params["connection_string"],
+            "jdbc:oceanbase://oceanbase.example.com:2881/sys?compatibleOjdbcVersion=8"
+        );
     }
 
     #[test]
@@ -727,7 +753,40 @@ mod tests {
 
         let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys");
 
-        assert_eq!(params["connection_string"], "jdbc:oceanbase://127.0.0.1:12881/sys?useSSL=false");
+        assert_eq!(
+            params["connection_string"],
+            "jdbc:oceanbase://127.0.0.1:12881/sys?useSSL=false&compatibleOjdbcVersion=8"
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_jdbc_url_keeps_explicit_compatible_ojdbc_version() {
+        let mut cfg = config(DatabaseType::OceanbaseOracle, Some("sys"));
+        cfg.host = "oceanbase.example.com".to_string();
+        cfg.port = 2881;
+        cfg.url_params = Some("compatibleOjdbcVersion=6&useSSL=false".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys");
+
+        assert_eq!(
+            params["connection_string"],
+            "jdbc:oceanbase://127.0.0.1:12881/sys?compatibleOjdbcVersion=6&useSSL=false"
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_custom_jdbc_url_gets_compatible_ojdbc_version_and_forwarded_host() {
+        let mut cfg = config(DatabaseType::OceanbaseOracle, Some("sys"));
+        cfg.host = "oceanbase.example.com".to_string();
+        cfg.port = 2881;
+        cfg.connection_string = Some("jdbc:oceanbase://oceanbase.example.com:2881/sys?useSSL=false".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys");
+
+        assert_eq!(
+            params["connection_string"],
+            "jdbc:oceanbase://127.0.0.1:12881/sys?useSSL=false&compatibleOjdbcVersion=8"
+        );
     }
 
     #[test]

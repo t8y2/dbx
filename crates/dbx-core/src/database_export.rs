@@ -937,6 +937,9 @@ mod tests {
             }],
             row_limit_per_table: Some(DATABASE_EXPORT_ROW_LIMIT),
             insert_batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            connection_id: None,
+            database: None,
+            schema: None,
         })
         .unwrap();
 

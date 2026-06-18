@@ -51,7 +51,7 @@ pub struct DesktopSettings {
 }
 
 fn default_sidebar_table_page_size() -> usize {
-    500
+    1000
 }
 
 impl Default for DesktopSettings {
@@ -64,7 +64,7 @@ impl Default for DesktopSettings {
             driver_store_dir: None,
             plugin_store_dir: None,
             agent_store_dir: None,
-            sidebar_table_page_size: 500,
+            sidebar_table_page_size: default_sidebar_table_page_size(),
         }
     }
 }
@@ -593,6 +593,10 @@ impl Storage {
                 settings.remove("agent_store_dir");
             }
         }
+        settings.insert(
+            "sidebar_table_page_size".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
+        );
         self.save_app_settings_json(&settings).await
     }
 
@@ -2127,6 +2131,23 @@ mod tests {
         assert_eq!(settings.get("show_tray_icon").and_then(|value| value.as_bool()), Some(true));
         assert_eq!(settings.get("icon_theme").and_then(|value| value.as_str()), Some("black"));
         assert_eq!(settings.get("debug_logging_enabled").and_then(|value| value.as_bool()), Some(false));
+        assert_eq!(
+            settings.get("sidebar_table_page_size").and_then(|value| value.as_u64()),
+            Some(DesktopSettings::default().sidebar_table_page_size as u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_settings_persist_sidebar_table_page_size() {
+        let path = temp_db_path("desktop-settings-sidebar-page-size");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage
+            .save_desktop_settings(&DesktopSettings { sidebar_table_page_size: 1234, ..DesktopSettings::default() })
+            .await
+            .unwrap();
+
+        assert_eq!(storage.load_desktop_settings().await.unwrap().sidebar_table_page_size, 1234);
     }
 
     #[tokio::test]

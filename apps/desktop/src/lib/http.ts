@@ -91,10 +91,23 @@ import type { DatabaseNameSqlOptions, DropTableChildObjectSqlOptions, DropObject
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/databaseExport";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataCompare";
 import type { DataGridSavePreparation } from "./tauri";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const DESKTOP_SETTINGS_STORAGE_KEY = "dbx-desktop-settings";
+const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
+  show_tray_icon: true,
+  icon_theme: "default",
+  debug_logging_enabled: false,
+  saved_sql_sync_dir: null,
+  driver_store_dir: null,
+  plugin_store_dir: null,
+  agent_store_dir: null,
+  sidebar_table_page_size: 1000,
+};
 
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -877,11 +890,16 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
 }
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
-  return { show_tray_icon: true, icon_theme: "default", debug_logging_enabled: false, saved_sql_sync_dir: null, driver_store_dir: null, plugin_store_dir: null, agent_store_dir: null };
+  try {
+    const raw = safeLocalStorageGet(DESKTOP_SETTINGS_STORAGE_KEY);
+    return raw ? { ...DEFAULT_DESKTOP_SETTINGS, ...(JSON.parse(raw) as Partial<DesktopSettings>) } : { ...DEFAULT_DESKTOP_SETTINGS };
+  } catch {
+    return { ...DEFAULT_DESKTOP_SETTINGS };
+  }
 }
 
-export async function saveDesktopSettings(_settings: DesktopSettings): Promise<void> {
-  return;
+export async function saveDesktopSettings(settings: DesktopSettings): Promise<void> {
+  safeLocalStorageSet(DESKTOP_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_DESKTOP_SETTINGS, ...settings }));
 }
 
 export interface DriverStoreMigrationResult {

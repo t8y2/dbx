@@ -130,6 +130,7 @@ export interface DesktopSettings {
   driver_store_dir?: string | null;
   plugin_store_dir?: string | null;
   agent_store_dir?: string | null;
+  sidebar_table_page_size?: number | null;
 }
 
 export interface SavedSqlSyncEntry {

@@ -1,10 +1,11 @@
-export type CellDetailTab = "details" | "valueEditor";
+export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
 export type ValueEditorAction = "formatJson" | "setNull" | "restoreOriginal";
 
 export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 50_000;
 
 export interface CellDetailPresentationOptions {
   isEditable: boolean;
+  hasBinaryHexViewer?: boolean;
 }
 
 export interface LinkedCellDetailOptions {
@@ -25,6 +26,9 @@ export function defaultCellDetailTab(): CellDetailTab {
 
 export function visibleCellDetailTabs(options: CellDetailPresentationOptions): CellDetailTab[] {
   const tabs: CellDetailTab[] = ["details"];
+  if (options.hasBinaryHexViewer) {
+    tabs.push("hexViewer");
+  }
   if (options.isEditable) {
     tabs.push("valueEditor");
   }

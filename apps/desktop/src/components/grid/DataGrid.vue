@@ -105,7 +105,8 @@ import { matchesRowStatusFilter, type RowStatus, type RowStatusFilter } from "@/
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
 import { getApplicablePreviewActions } from "@/lib/resultPreviewRegistry";
 import "@/lib/previewHandlers/geometryMapPreview";
-import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, type BinaryCellDownloadMode } from "@/lib/binaryCellDownload";
+import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, isBinaryCellColumnType, parseBinaryCellBytes, type BinaryCellDownloadMode } from "@/lib/binaryCellDownload";
+import { buildBinaryHexViewRows } from "@/lib/binaryHexViewer";
 import { canFormatCellDetailJson, cellDetailEditorText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/cellDetailPresentation";
 import { renderWktOnCanvas, isHexGeometry } from "@/lib/geometryPreview";
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "@/lib/dataGridDetail";
@@ -3134,7 +3135,26 @@ watch(dialogGeometryPreviewOpen, async (open) => {
 
 const activeCellDetailTabs = computed(() => {
   const detail = activeCellDetail.value;
-  return visibleCellDetailTabs({ isEditable: !!detail?.isEditable });
+  return visibleCellDetailTabs({
+    isEditable: !!detail?.isEditable,
+    hasBinaryHexViewer: isBinaryCellColumnType(detail?.type),
+  });
+});
+
+const activeBinaryHexBytes = computed(() => {
+  if (activeCellDetailTab.value !== "hexViewer") return null;
+  const detail = activeCellDetail.value;
+  return detail ? parseBinaryCellBytes(detail.value, detail.type) : null;
+});
+
+const activeBinaryHexRows = computed(() => (activeBinaryHexBytes.value ? buildBinaryHexViewRows(activeBinaryHexBytes.value) : []));
+const activeBinaryHexByteCount = computed(() => activeBinaryHexBytes.value?.length ?? 0);
+
+const activeCellDetailTabsGridClass = computed(() => {
+  const count = activeCellDetailTabs.value.length;
+  if (count >= 3) return "grid-cols-3";
+  if (count === 2) return "grid-cols-2";
+  return "grid-cols-1";
 });
 
 watch(activeCellDetailTabs, (tabs) => {
@@ -7466,8 +7486,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
             <Tabs v-model="activeCellDetailTab" class="flex-1 min-h-0 gap-0">
               <div class="shrink-0 border-b px-3 py-2">
-                <TabsList class="grid h-7 w-full p-0.5" :class="activeCellDetailTabs.length > 1 ? 'grid-cols-2' : 'grid-cols-1'">
+                <TabsList class="grid h-7 w-full p-0.5" :class="activeCellDetailTabsGridClass">
                   <TabsTrigger value="details" class="h-6 text-xs">{{ t("grid.cellDetails") }}</TabsTrigger>
+                  <TabsTrigger v-if="activeCellDetailTabs.includes('hexViewer')" value="hexViewer" class="h-6 text-xs">
+                    {{ t("grid.hexViewer") }}
+                  </TabsTrigger>
                   <TabsTrigger v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="h-6 text-xs">
                     {{ t("grid.valueEditor") }}
                   </TabsTrigger>
@@ -7614,6 +7637,28 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <Button v-if="activeCellDetail.isEditable && activeCellDetail.value !== null" variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="setDetailNull"> <X class="w-3 h-3 mr-2" /> {{ t("grid.setNull") }} </Button>
                   <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" @click="copyDetailColumnName"> <Copy class="w-3 h-3 mr-2" /> {{ t("grid.copyColumnName") }} </Button>
                   <Button variant="ghost" size="sm" class="h-7 justify-start text-xs" :disabled="!canCopyPreparedDetailSqlCondition()" @click="copyDetailSqlCondition"> <Code2 class="w-3 h-3 mr-2" /> {{ t("grid.copySqlCondition") }} </Button>
+                </div>
+              </TabsContent>
+
+              <TabsContent v-if="activeCellDetailTabs.includes('hexViewer')" value="hexViewer" class="m-0 min-h-0 flex-1 flex flex-col p-3 text-xs">
+                <div class="mb-2 min-w-0 shrink-0">
+                  <div class="font-medium">{{ t("grid.hexViewer") }}</div>
+                  <div class="text-[11px] text-muted-foreground">{{ t("grid.hexViewerByteCount", { count: activeBinaryHexByteCount }) }}</div>
+                </div>
+                <div class="min-h-0 flex-1 overflow-auto rounded border bg-muted/20 font-mono text-[11px]">
+                  <div class="sticky top-0 grid grid-cols-[5.5rem_minmax(24rem,1fr)_8rem] gap-3 border-b bg-muted px-2 py-1 font-semibold text-muted-foreground">
+                    <div>{{ t("grid.hexViewerOffset") }}</div>
+                    <div>{{ t("grid.hexViewerHex") }}</div>
+                    <div>{{ t("grid.hexViewerAscii") }}</div>
+                  </div>
+                  <div v-for="row in activeBinaryHexRows" :key="row.offset" class="grid grid-cols-[5.5rem_minmax(24rem,1fr)_8rem] gap-3 border-b border-border/50 px-2 py-1 last:border-b-0">
+                    <div class="select-all text-muted-foreground">{{ row.offset }}</div>
+                    <div class="select-all whitespace-pre">{{ row.hex }}</div>
+                    <div class="select-all whitespace-pre">{{ row.ascii }}</div>
+                  </div>
+                  <div v-if="activeBinaryHexRows.length === 0" class="px-2 py-6 text-center font-sans text-muted-foreground">
+                    {{ t("grid.hexViewerEmpty") }}
+                  </div>
                 </div>
               </TabsContent>
 

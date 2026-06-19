@@ -89,6 +89,7 @@ const internalOpen = ref(false);
 const x = ref(0);
 const y = ref(0);
 const minWidth = ref(0);
+let listenersAttached = false;
 
 const isOpen = computed(() => props.open ?? internalOpen.value);
 
@@ -108,10 +109,12 @@ function setOpen(value: boolean) {
 }
 
 function removeMenuListeners() {
+  if (!listenersAttached) return;
   document.removeEventListener("pointerdown", onOutsidePointerDown, true);
   document.removeEventListener("keydown", onKeydown);
   window.removeEventListener("scroll", close, true);
   window.removeEventListener("resize", close);
+  listenersAttached = false;
 }
 
 function close() {
@@ -152,10 +155,12 @@ function openMenu() {
   updatePosition();
   setOpen(true);
   nextTick(fitPositionToViewport);
+  removeMenuListeners();
   document.addEventListener("pointerdown", onOutsidePointerDown, true);
   document.addEventListener("keydown", onKeydown);
   window.addEventListener("scroll", close, true);
   window.addEventListener("resize", close);
+  listenersAttached = true;
 }
 
 function toggle() {
@@ -227,7 +232,9 @@ function selectItem(item: LightDropdownMenuItem) {
   }
 }
 
-onBeforeUnmount(close);
+onBeforeUnmount(() => {
+  removeMenuListeners();
+});
 
 watch(
   () => props.open,

@@ -330,3 +330,22 @@ pub async fn redis_pubsub_publish(
     ensure_connection_writable(&state, &connection_id, "PUBLISH").await?;
     dbx_core::redis_ops::redis_publish_core(&state, &connection_id, db, &channel, &message).await
 }
+
+#[tauri::command]
+pub async fn redis_slowlog_get(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    count: usize,
+    node_host: Option<String>,
+    node_port: Option<u16>,
+) -> Result<Vec<dbx_core::db::redis_driver::RedisSlowlogEntry>, String> {
+    dbx_core::redis_ops::redis_slowlog_get_core(&state, &connection_id, count, node_host, node_port).await
+}
+
+#[tauri::command]
+pub async fn redis_cluster_master_nodes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<dbx_core::db::redis_driver::RedisNodeEndpoint>, String> {
+    dbx_core::redis_ops::redis_cluster_master_nodes_core(&state, &connection_id).await
+}

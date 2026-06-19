@@ -100,6 +100,16 @@ pub struct RedisClusterAuth {
     pub password: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisSlowlogEntry {
+    pub id: u64,
+    pub timestamp: i64,
+    pub duration_micros: u64,
+    pub command: String,
+    pub client_addr: Option<String>,
+    pub client_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedisNodeRoute {
     pub advertised: RedisNodeEndpoint,
@@ -1016,7 +1026,7 @@ pub async fn cluster_key_connection<'a>(
     connect_cluster_node(pool, &endpoint).await.map(RedisClusterConnectionGuard::Direct)
 }
 
-async fn connect_cluster_node(
+pub async fn connect_cluster_node(
     pool: &RedisClusterPool,
     advertised_endpoint: &RedisNodeEndpoint,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
@@ -1242,6 +1252,107 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     redis::cmd("FLUSHDB").query_async::<()>(con).await.map_err(|e| e.to_string())
+}
+
+/// Retrieve slowlog entries via `SLOWLOG GET <count>`.
+/// The response is a nested array where each entry has the structure:
+///   [id, timestamp_unix_secs, duration_micros, [arg1, arg2, ...], client_addr, client_name, ...]
+pub async fn get_slowlog<C>(con: &mut C, count: usize) -> Result<Vec<RedisSlowlogEntry>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue = redis::cmd("SLOWLOG")
+        .arg("GET")
+        .arg(count as u64)
+        .query_async(con)
+        .await
+        .map_err(|e| format!("SLOWLOG GET failed: {e}"))?;
+
+    let RedisRawValue::Array(entries) = raw else {
+        return Err("SLOWLOG GET returned non-array response".to_string());
+    };
+
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let RedisRawValue::Array(fields) = entry else {
+            continue;
+        };
+        if fields.len() < 5 {
+            continue;
+        }
+
+        let id = redis_value_to_u64(&fields[0]).unwrap_or(0);
+        let timestamp = fields[1].clone();
+        let duration = fields[2].clone();
+        let args_raw = fields[3].clone();
+        let client_addr = redis_raw_value_to_optional_string(&fields[4]);
+        let client_name = if fields.len() > 5 { redis_raw_value_to_optional_string(&fields[5]) } else { None };
+
+        let command = match args_raw {
+            RedisRawValue::Array(args) => {
+                let mut parts = Vec::with_capacity(args.len());
+                for arg in args {
+                    if let Some(s) = redis_raw_value_to_optional_string(&arg) {
+                        parts.push(s);
+                    }
+                }
+                parts.join(" ")
+            }
+            _ => String::new(),
+        };
+
+        let timestamp_secs = match timestamp {
+            RedisRawValue::Int(i) => i,
+            RedisRawValue::BulkString(ref bytes) => {
+                std::str::from_utf8(bytes).ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0)
+            }
+            _ => 0,
+        };
+
+        let duration_micros = match duration {
+            RedisRawValue::Int(i) => i as u64,
+            RedisRawValue::BulkString(ref bytes) => {
+                std::str::from_utf8(bytes).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+            }
+            _ => 0,
+        };
+
+        result.push(RedisSlowlogEntry {
+            id,
+            timestamp: timestamp_secs,
+            duration_micros,
+            command,
+            client_addr,
+            client_name,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Try to convert a RedisRawValue to an optional string (None for Nil).
+fn redis_raw_value_to_optional_string(v: &RedisRawValue) -> Option<String> {
+    match v {
+        RedisRawValue::BulkString(bytes) => {
+            if bytes.is_empty() {
+                None
+            } else {
+                std::str::from_utf8(bytes).ok().map(|s| s.to_string())
+            }
+        }
+        RedisRawValue::SimpleString(s) => Some(s.clone()),
+        RedisRawValue::Nil => None,
+        _ => None,
+    }
+}
+
+/// Try to convert a RedisRawValue to a u64.
+fn redis_value_to_u64(v: &RedisRawValue) -> Option<u64> {
+    match v {
+        RedisRawValue::Int(i) => Some(*i as u64),
+        RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).ok().and_then(|s| s.parse().ok()),
+        _ => None,
+    }
 }
 
 /// Extract a string reference from a `RedisRawValue` if it is a BulkString or SimpleString.

@@ -49,6 +49,8 @@ import type {
   RedisValue,
   RedisScanResult,
   RedisCommandResult,
+  RedisSlowlogEntry,
+  RedisNodeEndpoint,
   KvValue,
   KvListPrefixResponse,
   KvGetResponse,
@@ -1442,6 +1444,14 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
   return post("/api/redis/pubsub/publish", { connectionId, db, channel, message });
+}
+
+export async function redisSlowlogGet(connectionId: string, count: number, nodeHost?: string, nodePort?: number): Promise<RedisSlowlogEntry[]> {
+  return post("/api/redis/slowlog-get", { connectionId, count, nodeHost, nodePort });
+}
+
+export async function redisClusterMasterNodes(connectionId: string): Promise<RedisNodeEndpoint[]> {
+  return post("/api/redis/cluster-master-nodes", { connectionId });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult, RedisValue,
+    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisNodeEndpoint, RedisScanResult,
+    RedisSlowlogEntry, RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -835,4 +836,50 @@ pub async fn redis_create_pubsub_core(state: &AppState, connection_id: &str) -> 
     let (host, port) = state.connection_host_port(connection_id, &config).await?;
     let timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
     redis_driver::connect_pubsub(&config, &host, port, timeout).await
+}
+
+pub async fn redis_slowlog_get_core(
+    state: &AppState,
+    connection_id: &str,
+    count: usize,
+    node_host: Option<String>,
+    node_port: Option<u16>,
+) -> Result<Vec<redis_driver::RedisSlowlogEntry>, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => match redis {
+            RedisConnection::Direct(con) => {
+                let mut con = con.lock().await;
+                // SLOWLOG is a server-level command, no select_db needed
+                redis_driver::get_slowlog(&mut *con, count).await
+            }
+            RedisConnection::Cluster(cluster) => {
+                if let (Some(host), Some(port)) = (node_host.as_ref(), node_port) {
+                    let endpoint = redis_driver::RedisNodeEndpoint { host: host.clone(), port };
+                    let mut con = redis_driver::connect_cluster_node(cluster, &endpoint).await?;
+                    redis_driver::get_slowlog(&mut con, count).await
+                } else {
+                    // No node specified — return empty (frontend enforces selection)
+                    Ok(Vec::new())
+                }
+            }
+        },
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_cluster_master_nodes_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<Vec<redis_driver::RedisNodeEndpoint>, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => match redis {
+            RedisConnection::Cluster(cluster) => redis_driver::cluster_master_nodes(cluster).await,
+            _ => Ok(Vec::new()),
+        },
+        _ => Err("Not a Redis connection".to_string()),
+    }
 }

@@ -1129,6 +1129,20 @@ export interface RedisCommandResult {
   value: any;
 }
 
+export interface RedisSlowlogEntry {
+  id: number;
+  timestamp: number;
+  duration_micros: number;
+  command: string;
+  client_addr: string | null;
+  client_name: string | null;
+}
+
+export interface RedisNodeEndpoint {
+  host: string;
+  port: number;
+}
+
 export async function redisListDatabases(connectionId: string): Promise<RedisDatabaseInfo[]> {
   return invoke("redis_list_databases", { connectionId });
 }
@@ -1227,6 +1241,14 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
   return invoke("redis_pubsub_publish", { connectionId, db, channel, message });
+}
+
+export async function redisSlowlogGet(connectionId: string, count: number, nodeHost?: string, nodePort?: number): Promise<RedisSlowlogEntry[]> {
+  return invoke("redis_slowlog_get", { connectionId, count, nodeHost, nodePort });
+}
+
+export async function redisClusterMasterNodes(connectionId: string): Promise<RedisNodeEndpoint[]> {
+  return invoke("redis_cluster_master_nodes", { connectionId });
 }
 
 // --- etcd ---

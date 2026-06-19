@@ -324,6 +324,9 @@ async fn main() {
         .route("/redis/execute-command", post(routes::redis::execute_command))
         .route("/redis/pubsub/publish", post(routes::redis::publish_message))
         .route("/redis/pubsub/ws", get(routes::redis_pubsub_ws::ws_handler))
+        // Redis Slowlog
+        .route("/redis/slowlog-get", post(routes::redis::slowlog_get))
+        .route("/redis/cluster-master-nodes", post(routes::redis::cluster_master_nodes))
         // etcd
         .route("/etcd/list-prefix", post(routes::etcd::list_prefix))
         .route("/etcd/get", post(routes::etcd::get))

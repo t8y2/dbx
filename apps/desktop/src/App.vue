@@ -1485,7 +1485,7 @@ onUnmounted(() => {
           <div v-if="showSqlLibraryPanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden">
-              <SqlLibraryPanel @close="showSqlLibraryPanel = false" />
+              <SqlLibraryPanel @close="toggleSqlLibrary" />
             </div>
           </div>
         </div>

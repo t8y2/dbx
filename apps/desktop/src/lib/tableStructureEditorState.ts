@@ -374,6 +374,53 @@ export const QUESTDB_TYPE_LENGTHS: Record<string, string> = {
 
 export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
 
+export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
+  "bigint",
+  "int8",
+  "bigserial",
+  "serial8",
+  "boolean",
+  "bool",
+  "box",
+  "bytea",
+  "cidr",
+  "circle",
+  "date",
+  "double precision",
+  "float",
+  "float8",
+  "inet",
+  "integer",
+  "int",
+  "int4",
+  "json",
+  "jsonb",
+  "line",
+  "lseg",
+  "macaddr",
+  "macaddr8",
+  "money",
+  "path",
+  "pg_lsn",
+  "pg_snapshot",
+  "point",
+  "polygon",
+  "real",
+  "float4",
+  "smallint",
+  "int2",
+  "smallserial",
+  "serial2",
+  "serial",
+  "serial4",
+  "text",
+  "tsquery",
+  "tsvector",
+  "txid_snapshot",
+  "uuid",
+  "xml",
+];
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -610,6 +657,9 @@ export function combineDataType(baseType: string, params: string): string {
 }
 
 export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, baseType: string, params: string): string {
+  if (isDataTypeLengthDisabled(dbType, baseType)) {
+    return baseType;
+  }
   return combineDataType(baseType, normalizeDataTypeParams(dbType, baseType, params));
 }
 
@@ -673,6 +723,8 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     return key !== "geohash" && key !== "decimal";
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";
+  } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "vastbase" || _dbType === "kingbase") {
+    return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
   } else {
     return DEFAULT_TYPE_LENGTH_DISABLES.includes(key);
   }

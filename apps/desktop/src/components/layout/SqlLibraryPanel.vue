@@ -779,6 +779,7 @@ function showDropInside(targetId: string) {
         <template #default="{ onContextMenu }">
           <div
             class="h-full"
+            @contextmenu.capture="contextTarget = 'panel'"
             @contextmenu.prevent="
               contextTarget = 'panel';
               onContextMenu($event);
@@ -794,6 +795,7 @@ function showDropInside(targetId: string) {
                 @mousemove="updateDropTarget($event, row.folder.id, 'folder')"
                 @mouseleave="clearDropTarget(row.folder.id)"
                 @click="toggleFolder(row.folder.id)"
+                @contextmenu.capture="contextTarget = row.folder"
                 @contextmenu.prevent="
                   contextTarget = row.folder;
                   onContextMenu($event);
@@ -829,6 +831,7 @@ function showDropInside(targetId: string) {
                 @mousemove="updateDropTarget($event, row.file.id, 'file')"
                 @mouseleave="clearDropTarget(row.file.id)"
                 @click="openFile(row.file)"
+                @contextmenu.capture="contextTarget = row.file"
                 @contextmenu.prevent="
                   contextTarget = row.file;
                   onContextMenu($event);
@@ -872,6 +875,7 @@ function showDropInside(targetId: string) {
                 @mousemove="updateDropTarget($event, file.id, 'file')"
                 @mouseleave="clearDropTarget(file.id)"
                 @click="openFile(file)"
+                @contextmenu.capture="contextTarget = file"
                 @contextmenu.prevent="
                   contextTarget = file;
                   onContextMenu($event);

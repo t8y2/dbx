@@ -18,6 +18,7 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "sqlite", patterns: [/jdbc:sqlite:/i, /sqlite/i] },
   { type: "db2", patterns: [/jdbc:db2:/i, /\bdb2\b/i] },
   { type: "informix", patterns: [/jdbc:informix/i, /informix/i] },
+  { type: "iris", patterns: [/jdbc:(?:iris|cache):/i, /com\.intersystems\.jdbc\.(?:IRIS|Cache)Driver/i, /intersystems-jdbc/i] },
 ];
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {

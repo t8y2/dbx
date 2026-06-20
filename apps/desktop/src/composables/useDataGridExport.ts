@@ -337,6 +337,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await copyText(formatSelectionAsTsv(selectedCells.value));
   }
 
+  async function copySelectionTsvWithHeaders() {
+    if (!hasCellSelection.value) return;
+    await copyText(formatSelectionAsTsv(selectedCells.value, true));
+  }
+
   async function copySelectionCsv() {
     if (!hasCellSelection.value) return;
     await copyText(formatSelectionAsCsv(selectedCells.value));
@@ -356,6 +361,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (!hasRowSelection.value || selectedRowIds.value.size === 0) return;
     const rows = displayItems.value.filter((item) => selectedRowIds.value.has(item.id)).map((item) => item.data);
     await copyText(formatSelectionAsTsv({ columns: columns.value, rows }));
+  }
+
+  async function copyColumnNames() {
+    if (columns.value.length === 0) return;
+    await copyText(columns.value.join("\t"));
   }
 
   function rowToJsonObject(item: RowItem): Record<string, unknown> {
@@ -775,10 +785,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     canCopyRowAsUpdate,
     copyAll,
     copySelectionTsv,
+    copySelectionTsvWithHeaders,
     copySelectionCsv,
     copySelectionJson,
     copySelectionSqlInList,
     copySelectedRowsTsv,
+    copyColumnNames,
     exportCsv,
     exportJson,
     exportMarkdown,

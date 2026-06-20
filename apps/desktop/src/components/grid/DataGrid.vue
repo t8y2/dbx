@@ -4267,10 +4267,12 @@ const {
   canCopyRowAsUpdate,
   copyAll,
   copySelectionTsv,
+  copySelectionTsvWithHeaders,
   copySelectionCsv,
   copySelectionJson,
   copySelectionSqlInList,
   copySelectedRowsTsv,
+  copyColumnNames,
   exportCsv,
   exportJson,
   exportMarkdown,
@@ -6018,6 +6020,7 @@ function copySubmenu(): ContextMenuItem {
     items.push({ label: labels.update, action: copyRowAsUpdate, disabled: !canCopyPreparedUpdate() });
   }
   items.push({ label: t("grid.copyAll"), action: copyAll });
+  items.push({ label: t("grid.copyColumnNames"), action: copyColumnNames });
   return { label: t("grid.copy"), icon: Copy, children: items };
 }
 
@@ -6027,6 +6030,7 @@ function selectionSubmenu(): ContextMenuItem {
     icon: SquareDashed,
     children: [
       { label: t("grid.copySelectionTsv"), action: copySelectionTsv },
+      { label: t("grid.copySelectionTsvWithHeaders"), action: copySelectionTsvWithHeaders },
       { label: t("grid.copySelectionCsv"), action: copySelectionCsv },
       { label: t("grid.copySelectionJson"), action: copySelectionJson },
       { label: t("grid.copySelectionSql"), action: copySelectionSqlInList },
@@ -6063,6 +6067,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   // 1. Copy column name
   if (contextHeaderColumn.value) {
     items.push({ label: t("grid.copyColumnName"), action: copyHeaderColumn, icon: Copy });
+    items.push({ label: t("grid.copyColumnNames"), action: copyColumnNames, icon: Copy });
     items.push({
       label: t("grid.openColumnDetailsDialog"),
       action: openContextColumnDetailDialog,

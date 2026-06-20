@@ -104,8 +104,10 @@ function sqlValue(value: GridCellValue): string {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-export function formatSelectionAsTsv(selection: SelectionData): string {
-  return selection.rows.map((row) => row.map(displayValue).join("\t")).join("\n");
+export function formatSelectionAsTsv(selection: SelectionData, includeHeader = false): string {
+  const body = selection.rows.map((row) => row.map(displayValue).join("\t")).join("\n");
+  if (!includeHeader) return body;
+  return [selection.columns.join("\t"), body].filter(Boolean).join("\n");
 }
 
 export function formatSelectionAsCsv(selection: SelectionData): string {

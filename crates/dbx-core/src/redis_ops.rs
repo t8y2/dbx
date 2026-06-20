@@ -1,7 +1,6 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisNodeEndpoint, RedisScanResult,
-    RedisSlowlogEntry, RedisValue,
+    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult, RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {

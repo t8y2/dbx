@@ -1277,7 +1277,7 @@ where
         let RedisRawValue::Array(fields) = entry else {
             continue;
         };
-        if fields.len() < 5 {
+        if fields.len() < 4 {
             continue;
         }
 
@@ -1285,14 +1285,14 @@ where
         let timestamp = fields[1].clone();
         let duration = fields[2].clone();
         let args_raw = fields[3].clone();
-        let client_addr = redis_raw_value_to_optional_string(&fields[4]);
+        let client_addr = if fields.len() > 4 { redis_raw_value_to_optional_string(&fields[4]) } else { None };
         let client_name = if fields.len() > 5 { redis_raw_value_to_optional_string(&fields[5]) } else { None };
 
         let command = match args_raw {
             RedisRawValue::Array(args) => {
                 let mut parts = Vec::with_capacity(args.len());
                 for arg in args {
-                    if let Some(s) = redis_raw_value_to_optional_string(&arg) {
+                    if let Some(s) = redis_raw_value_to_command_arg(&arg) {
                         parts.push(s);
                     }
                 }
@@ -1340,6 +1340,18 @@ fn redis_raw_value_to_optional_string(v: &RedisRawValue) -> Option<String> {
                 std::str::from_utf8(bytes).ok().map(|s| s.to_string())
             }
         }
+        RedisRawValue::SimpleString(s) => Some(s.clone()),
+        RedisRawValue::Nil => None,
+        _ => None,
+    }
+}
+
+/// Convert a RedisRawValue to an command argument string.
+/// Unlike `redis_raw_value_to_optional_string`, this preserves empty strings
+/// and uses `redis_bytes_to_display` to handle non-UTF-8 binary data.
+fn redis_raw_value_to_command_arg(v: &RedisRawValue) -> Option<String> {
+    match v {
+        RedisRawValue::BulkString(bytes) => Some(redis_bytes_to_display(bytes)),
         RedisRawValue::SimpleString(s) => Some(s.clone()),
         RedisRawValue::Nil => None,
         _ => None,

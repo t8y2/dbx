@@ -24,7 +24,7 @@ const connectionStore = useConnectionStore();
 // --- State ---
 const count = ref(100);
 const nodes = ref<RedisNodeEndpoint[]>([]);
-const selectedNode = ref<string>("");
+const selectedNodeIndex = ref(-1);
 const entries = ref<RedisSlowlogEntry[]>([]);
 const sortField = ref<keyof RedisSlowlogEntry>("id");
 const sortOrder = ref<"asc" | "desc">("asc");
@@ -44,6 +44,15 @@ const showNodeSelector = computed(() => {
 
 const nodeOptions = computed(() => {
   return nodes.value.map((n) => `${n.host}:${n.port}`);
+});
+
+const selectedEndpoint = computed(() => {
+  if (selectedNodeIndex.value < 0) return null;
+  return nodes.value[selectedNodeIndex.value] ?? null;
+});
+
+const showClientColumns = computed(() => {
+  return entries.value.some((e) => e.client_addr != null || e.client_name != null);
 });
 
 // --- Load cluster nodes on mount ---
@@ -101,7 +110,7 @@ function displayValue(val: string | null): string {
 }
 
 async function querySlowlog() {
-  if (showNodeSelector.value && !selectedNode.value) {
+  if (showNodeSelector.value && selectedNodeIndex.value < 0) {
     toast(t("redis.slowlogNodeRequired"), 3000);
     return;
   }
@@ -109,10 +118,8 @@ async function querySlowlog() {
   loading.value = true;
   try {
     let result: RedisSlowlogEntry[];
-    if (showNodeSelector.value && selectedNode.value) {
-      const [host, portStr] = selectedNode.value.split(":");
-      const port = parseInt(portStr, 10);
-      result = await api.redisSlowlogGet(props.connectionId, count.value, host, isNaN(port) ? undefined : port);
+    if (showNodeSelector.value && selectedEndpoint.value) {
+      result = await api.redisSlowlogGet(props.connectionId, count.value, selectedEndpoint.value.host, selectedEndpoint.value.port);
     } else {
       result = await api.redisSlowlogGet(props.connectionId, count.value);
     }
@@ -136,12 +143,12 @@ async function querySlowlog() {
       <Input v-model.number="count" type="number" min="1" max="10000" class="h-7 w-20 text-xs" :placeholder="t('redis.slowlogCount')" />
       <template v-if="showNodeSelector">
         <label class="text-xs font-medium whitespace-nowrap shrink-0 ml-1">{{ t("redis.slowlogNode") }}</label>
-        <Select v-model="selectedNode">
+        <Select v-model="selectedNodeIndex">
           <SelectTrigger class="h-7 w-auto min-w-[140px] text-xs">
             <SelectValue :placeholder="t('redis.slowlogSelectNode')" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem v-for="node in nodeOptions" :key="node" :value="node" class="text-xs">
+            <SelectItem v-for="(node, idx) in nodeOptions" :key="idx" :value="idx" class="text-xs">
               {{ node }}
             </SelectItem>
           </SelectContent>
@@ -174,8 +181,8 @@ async function querySlowlog() {
         <button class="w-40 shrink-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('timestamp')">{{ t("redis.slowlogColumnTimestamp") }}<span v-html="sortIndicator('timestamp')"></span></button>
         <button class="w-24 shrink-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('duration_micros')">{{ t("redis.slowlogColumnDuration") }}<span v-html="sortIndicator('duration_micros')"></span></button>
         <button class="flex-1 min-w-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('command')">{{ t("redis.slowlogColumnCommand") }}<span v-html="sortIndicator('command')"></span></button>
-        <button class="w-32 shrink-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('client_addr')">{{ t("redis.slowlogColumnClientAddr") }}<span v-html="sortIndicator('client_addr')"></span></button>
-        <button class="w-32 shrink-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('client_name')">{{ t("redis.slowlogColumnClientName") }}<span v-html="sortIndicator('client_name')"></span></button>
+        <button v-if="showClientColumns" class="w-32 shrink-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('client_addr')">{{ t("redis.slowlogColumnClientAddr") }}<span v-html="sortIndicator('client_addr')"></span></button>
+        <button v-if="showClientColumns" class="w-32 shrink-0 text-left hover:text-foreground transition-colors text-xs font-medium" @click="sortBy('client_name')">{{ t("redis.slowlogColumnClientName") }}<span v-html="sortIndicator('client_name')"></span></button>
       </div>
 
       <!-- Table with virtual scrolling -->
@@ -193,8 +200,8 @@ async function querySlowlog() {
             <span class="w-40 shrink-0 font-mono tabular-nums">{{ formatTimestamp(item.timestamp) }}</span>
             <span class="w-24 shrink-0 font-mono tabular-nums text-muted-foreground">{{ item.duration_micros }}</span>
             <span class="flex-1 min-w-0 truncate font-mono" :title="item.command">{{ item.command }}</span>
-            <span class="w-32 shrink-0 text-muted-foreground truncate" :title="displayValue(item.client_addr)">{{ displayValue(item.client_addr) }}</span>
-            <span class="w-32 shrink-0 text-muted-foreground truncate" :title="displayValue(item.client_name)">{{ displayValue(item.client_name) }}</span>
+            <span v-if="showClientColumns" class="w-32 shrink-0 text-muted-foreground truncate" :title="displayValue(item.client_addr)">{{ displayValue(item.client_addr) }}</span>
+            <span v-if="showClientColumns" class="w-32 shrink-0 text-muted-foreground truncate" :title="displayValue(item.client_name)">{{ displayValue(item.client_name) }}</span>
           </div>
         </RecycleScroller>
       </div>

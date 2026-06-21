@@ -7921,7 +7921,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <ErrorBanner v-if="saveError" :message="saveError" copy-mode="label" dismissible @dismiss="saveError = ''" />
 
     <!-- Bottom status bar -->
-    <div v-if="!isErrorResult" class="grid grid-cols-[minmax(0,1fr)_minmax(0,38%)_minmax(0,1fr)] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0">
+    <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_max-content] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0">
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
           {{ t("grid.totalRows", { count: result.rows.length }) }}
@@ -7956,7 +7956,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       </Tooltip>
       <span v-else class="min-w-0" />
 
-      <div class="flex min-w-0 items-center justify-end gap-1">
+      <div class="flex min-w-max items-center justify-end gap-1">
         <Loader2 v-if="loading" class="w-3 h-3 animate-spin text-muted-foreground" />
         <template v-if="infiniteScrollEnabled">
           <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">
@@ -7968,7 +7968,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             :model-value="String(pageSize)"
             :items="pageSizeMenuItems"
             :trigger-label="`${pageSize}${t('grid.rowsPerPageShort')}`"
-            trigger-class="inline-flex h-5 items-center justify-center rounded-md px-1.5 text-xs hover:bg-accent hover:text-accent-foreground"
+            trigger-class="inline-flex h-5 shrink-0 items-center justify-center whitespace-nowrap rounded-md px-1.5 text-xs hover:bg-accent hover:text-accent-foreground"
             content-class="w-36"
             :highlight-selected="false"
             check-position="none"
@@ -7997,17 +7997,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </Tooltip>
             </div>
           </LightDropdown>
-          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="currentPage <= 1" @click="firstPage">
+          <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="currentPage <= 1" @click="firstPage">
             <ChevronsLeft class="h-3 w-3" />
           </Button>
-          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="currentPage <= 1" @click="prevPage">
+          <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="currentPage <= 1" @click="prevPage">
             <ChevronLeft class="h-3 w-3" />
           </Button>
-          <span>{{ currentPage }}</span>
-          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canGoNextPage" @click="nextPage">
+          <span class="shrink-0 tabular-nums">{{ currentPage }}</span>
+          <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="!canGoNextPage" @click="nextPage">
             <ChevronRight class="h-3 w-3" />
           </Button>
-          <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canJumpLastPage" @click="lastPage">
+          <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="!canJumpLastPage" @click="lastPage">
             <ChevronsRight class="h-3 w-3" />
           </Button>
         </template>
@@ -8017,7 +8017,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           :aria-label="t('grid.export')"
           :trigger-icon="Download"
           :trigger-label="t('grid.export')"
-          trigger-class="inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-foreground/80 hover:bg-accent hover:text-accent-foreground"
+          trigger-class="inline-flex h-6 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md px-2 text-foreground/80 hover:bg-accent hover:text-accent-foreground"
           trigger-icon-class="h-3.5 w-3.5"
           :show-trigger-label="true"
           :show-chevron="true"

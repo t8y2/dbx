@@ -120,15 +120,19 @@ pub(crate) fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
         .or_else(|| installed_mcp_bin_script().map(|script| ("node".to_string(), vec![script])))
 }
 
-fn locate_mcp_bin() -> Option<String> {
+pub(crate) fn locate_command(command: &str) -> Option<String> {
     #[cfg(windows)]
     {
-        return locate_windows_command("dbx-mcp-server");
+        return locate_windows_command(command);
     }
     #[cfg(not(windows))]
     {
-        command_stdout("which", &["dbx-mcp-server"]).ok().and_then(first_non_empty_line)
+        command_stdout("which", &[command]).ok().and_then(first_non_empty_line)
     }
+}
+
+fn locate_mcp_bin() -> Option<String> {
+    locate_command("dbx-mcp-server")
 }
 
 fn installed_mcp_bin_script() -> Option<String> {

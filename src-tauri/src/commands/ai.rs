@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
@@ -6,11 +7,13 @@ pub use dbx_core::ai::*;
 
 #[tauri::command]
 pub async fn ai_test_connection(config: AiConfig) -> Result<AiTestConnectionResult, String> {
+    let config = resolve_codex_cli_config(config);
     dbx_core::ai::test_connection_core(&config).await
 }
 
 #[tauri::command]
 pub async fn ai_list_models(config: AiConfig) -> Result<Vec<AiModelInfo>, String> {
+    let config = resolve_codex_cli_config(config);
     dbx_core::ai::list_models_core(&config).await
 }
 
@@ -64,6 +67,7 @@ pub async fn ai_agent_stream(
     db_type: String,
     mode: Option<String>,
 ) -> Result<String, String> {
+    let request = resolve_codex_cli_request(request);
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
 
     let parsed_db_type: DatabaseType =
@@ -103,6 +107,32 @@ pub async fn ai_agent_stream(
 
     dbx_core::ai::unregister_stream(&session_id).await;
     result
+}
+
+fn resolve_codex_cli_request(mut request: AiCompletionRequest) -> AiCompletionRequest {
+    request.config = resolve_codex_cli_config(request.config);
+    request
+}
+
+fn resolve_codex_cli_config(mut config: AiConfig) -> AiConfig {
+    if !matches!(config.provider, AiProvider::CodexCli) {
+        return config;
+    }
+
+    let command = config.codex_cli_path.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or("codex");
+    if is_explicit_cli_path(command) {
+        return config;
+    }
+
+    if let Some(path) = super::mcp::locate_command(command) {
+        config.codex_cli_path = Some(path);
+    }
+    config
+}
+
+fn is_explicit_cli_path(command: &str) -> bool {
+    let path = Path::new(command);
+    path.is_absolute() || command.contains('/') || command.contains('\\')
 }
 
 #[tauri::command]

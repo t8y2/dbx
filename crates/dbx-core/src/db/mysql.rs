@@ -417,9 +417,13 @@ fn create_pool(url: &str, ca_cert_path: Option<&str>, max_connections: usize) ->
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
     let base_ssl_opts = opts.ssl_opts().cloned();
     let max_connections = max_connections.max(1);
+    // Single-connection pools (max_connections == 1) are client session pools that
+    // must preserve session state (e.g. TEMPORARY TABLEs) across queries.
+    // Disable COM_RESET_CONNECTION for these pools to avoid clearing that state.
     let pool_opts = mysql_async::PoolOpts::new()
         .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
-        .with_inactive_connection_ttl(Duration::from_secs(300));
+        .with_inactive_connection_ttl(Duration::from_secs(300))
+        .with_reset_connection(max_connections > 1);
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .stmt_cache_size(0)
         .prefer_socket(false)

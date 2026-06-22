@@ -138,6 +138,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { nextDataGridSortState, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGridConditionHistory";
+import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 
@@ -426,6 +427,7 @@ const orderBySuggestionPosition = ref({ left: 0, top: 0 });
 const orderByInput = ref(props.initialOrderByInput ?? "");
 const hasOrderByInput = computed(() => orderByInput.value.trim().length > 0);
 const whereFilterInput = ref(props.initialWhereInput ?? "");
+let previousWhereFilterInputValue = whereFilterInput.value;
 const hasWhereFilterInput = computed(() => whereFilterInput.value.trim().length > 0);
 const conditionHistoryScope = computed(() => ({
   connectionId: props.connectionId,
@@ -1299,9 +1301,38 @@ function deleteWhereHistorySuggestion(value: string) {
   whereSuggestionIndex.value = whereSuggestions.value.length ? Math.min(whereSuggestionIndex.value, whereSuggestions.value.length - 1) : -1;
 }
 
+function onWhereFilterInput(event: Event) {
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  if (!input) return;
+  const nextValue = input.value;
+  if (
+    insertedSqlSingleQuoteAtCaret({
+      previousValue: previousWhereFilterInputValue,
+      nextValue,
+      selectionStart: input.selectionStart,
+    })
+  ) {
+    const caret = input.selectionStart ?? nextValue.length;
+    const pairedValue = `${nextValue.slice(0, caret)}'${nextValue.slice(caret)}`;
+    whereFilterInput.value = pairedValue;
+    previousWhereFilterInputValue = pairedValue;
+    nextTick(() => input.setSelectionRange(caret, caret));
+    return;
+  }
+  const nextCaret = caretPositionInsideInsertedSqlSingleQuotes({
+    previousValue: previousWhereFilterInputValue,
+    nextValue,
+    selectionStart: input.selectionStart,
+  });
+  previousWhereFilterInputValue = nextValue;
+  if (nextCaret == null) return;
+  nextTick(() => input.setSelectionRange(nextCaret, nextCaret));
+}
+
 watch(whereFilterInput, (val) => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
+  previousWhereFilterInputValue = val;
   whereSuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
@@ -6359,6 +6390,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     spellcheck="false"
                     class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
                     placeholder=""
+                    @input="onWhereFilterInput"
                     @keydown="onWhereFilterKeydown"
                     @focus="showWhereHistorySuggestions"
                     @click="updateWhereSuggestionPosition"

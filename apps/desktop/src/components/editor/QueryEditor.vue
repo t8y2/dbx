@@ -287,6 +287,19 @@ function handleTab(view: EditorViewType): boolean {
   return true;
 }
 
+function handleSqlSingleQuote(view: EditorViewType): boolean {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (!sel.empty || sel.from === 0 || state.readOnly) return false;
+  if (state.doc.sliceString(sel.from - 1, sel.from) !== "'") return false;
+  view.dispatch({
+    changes: { from: sel.from, insert: "'" },
+    selection: { anchor: sel.from },
+    userEvent: "input.type",
+  });
+  return true;
+}
+
 function executeCurrentSql() {
   if (view.value) emit("execute", sqlExecutionSnapshotFromView(view.value));
   return true;
@@ -1741,6 +1754,7 @@ onMounted(async () => {
       diagnosticComp.of(buildSqlDiagnosticExtension()),
       Prec.highest(
         keymap.of([
+          { key: "'", run: handleSqlSingleQuote },
           ...closeBracketsKeymap,
           { key: "Tab", run: handleTab },
           {

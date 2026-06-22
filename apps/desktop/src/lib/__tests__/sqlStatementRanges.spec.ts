@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildExecutionCandidates, fullSqlRange, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "../sqlStatementRanges";
+import { buildExecutionCandidates, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "../sqlStatementRanges";
 
 function indexOf(sql: string, needle: string, occurrence = 1): number {
   let from = 0;
@@ -282,6 +282,25 @@ describe("buildExecutionCandidates", () => {
     const sql = "SELECT 1;\nSELECT 2;\n";
     const candidates = buildExecutionCandidates(sql, sql.length);
     expect(candidateKinds(candidates)).toEqual(["all"]);
+  });
+});
+
+describe("hasMultipleExecutionTargets", () => {
+  it("returns false for a single SQL statement", () => {
+    expect(hasMultipleExecutionTargets("SELECT 1;")).toBe(false);
+  });
+
+  it("returns true for multiple SQL statements", () => {
+    expect(hasMultipleExecutionTargets("SELECT 1;\nSELECT 2;")).toBe(true);
+  });
+
+  it("ignores comments when counting SQL statements", () => {
+    expect(hasMultipleExecutionTargets("-- check one thing\nSELECT 1;")).toBe(false);
+  });
+
+  it("counts executable Redis command lines", () => {
+    expect(hasMultipleExecutionTargets("GET user:1", "redis")).toBe(false);
+    expect(hasMultipleExecutionTargets("GET user:1\n# comment\nDEL user:2", "redis")).toBe(true);
   });
 });
 

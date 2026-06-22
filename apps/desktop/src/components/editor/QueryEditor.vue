@@ -10,7 +10,7 @@ import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard } from "@/lib/clipboard";
 import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sqlExecutionTarget";
-import { buildExecutionCandidates, supportsExecutionTargetPicker } from "@/lib/sqlStatementRanges";
+import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker } from "@/lib/sqlStatementRanges";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { formatMongoShellText } from "@/lib/mongoFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -319,7 +319,7 @@ function requestExecute() {
   const cursorPos = selection.head;
   const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType);
   if (candidates.length === 0) return false;
-  if (!settingsStore.editorSettings.showExecutionTargetPicker) {
+  if (!settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType)) {
     const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
     const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
     emit("execute", candidate.sql);

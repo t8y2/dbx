@@ -20,6 +20,7 @@ const props = withDefaults(
     allowCustom?: boolean;
     triggerClass?: HTMLAttributes["class"];
     contentClass?: HTMLAttributes["class"];
+    itemClass?: HTMLAttributes["class"];
     displayName?: (option: string) => string;
     normalizeCustom?: (value: string) => string;
   }>(),
@@ -51,6 +52,11 @@ const filteredOptions = computed(() => filterDatabaseOptions(props.options, sear
 const customOptionValue = computed(() => props.normalizeCustom(searchText.value.trim()));
 const canSelectCustom = computed(() => props.allowCustom && !!customOptionValue.value && !props.options.includes(customOptionValue.value));
 
+function highlightSelectedOption() {
+  const selectedIndex = filteredOptions.value.findIndex((option) => option === props.modelValue);
+  highlightIndex.value = selectedIndex >= 0 ? selectedIndex : 0;
+}
+
 watch(open, async (value) => {
   emit("update:open", value);
   if (!value) {
@@ -61,11 +67,21 @@ watch(open, async (value) => {
   await nextTick();
   const input = searchInput.value?.$el as HTMLInputElement | undefined;
   input?.focus();
+  highlightSelectedOption();
 });
 
 watch(searchText, () => {
   highlightIndex.value = 0;
 });
+
+watch(
+  () => [props.modelValue, props.options],
+  () => {
+    if (!open.value || searchText.value) return;
+    highlightSelectedOption();
+  },
+  { deep: true },
+);
 
 watch(highlightIndex, async () => {
   await nextTick();
@@ -84,6 +100,11 @@ function selectOption(option: string) {
 function selectCustomOption() {
   if (!canSelectCustom.value) return;
   selectOption(customOptionValue.value);
+}
+
+function optionTitle(option: string) {
+  const label = props.displayName(option);
+  return label === option ? option : `${label}\n${option}`;
 }
 
 function optionCount() {
@@ -118,7 +139,7 @@ function handleKeydown(event: KeyboardEvent) {
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" variant="ghost" :class="cn('h-6 w-auto max-w-56 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
+      <Button type="button" variant="ghost" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
           <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
         </slot>
@@ -139,7 +160,14 @@ function handleKeydown(event: KeyboardEvent) {
             v-for="(option, index) in filteredOptions"
             :key="option"
             type="button"
-            :class="cn('flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none', index === highlightIndex && 'bg-accent text-accent-foreground')"
+            :title="optionTitle(option)"
+            :class="
+              cn(
+                'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                props.itemClass,
+                index === highlightIndex && 'bg-accent text-accent-foreground',
+              )
+            "
             @click="selectOption(option)"
           >
             <Check :class="cn('h-3.5 w-3.5 shrink-0', option === modelValue ? 'opacity-100' : 'opacity-0')" />
@@ -150,9 +178,11 @@ function handleKeydown(event: KeyboardEvent) {
           <button
             v-if="canSelectCustom"
             type="button"
+            :title="customOptionValue"
             :class="
               cn(
                 'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                props.itemClass,
                 filteredOptions.length === highlightIndex && 'bg-accent text-accent-foreground',
               )
             "
@@ -167,7 +197,14 @@ function handleKeydown(event: KeyboardEvent) {
         <button
           v-else-if="canSelectCustom"
           type="button"
-          :class="cn('flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none', 0 === highlightIndex && 'bg-accent text-accent-foreground')"
+          :title="customOptionValue"
+          :class="
+            cn(
+              'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+              props.itemClass,
+              0 === highlightIndex && 'bg-accent text-accent-foreground',
+            )
+          "
           @click="selectCustomOption"
         >
           <Check class="h-3.5 w-3.5 shrink-0 opacity-0" />

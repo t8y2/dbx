@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -88,14 +89,6 @@ const modelOptions = ref<AiModelInfo[]>([]);
 const modelLoading = ref(false);
 let modelRequestToken = 0;
 
-const currentModelLabel = computed(() => {
-  const currentModel = settings.aiConfig.model;
-  const found = modelOptions.value.find((m) => m.id === currentModel);
-  const raw = found?.displayName || currentModel;
-  if (!raw) return t("ai.model");
-  return raw.length > 20 ? raw.slice(0, 18) + "…" : raw;
-});
-
 function normalizeModelOptions(models: AiModelInfo[]): AiModelInfo[] {
   const seen = new Set<string>();
   const normalized: AiModelInfo[] = [];
@@ -129,18 +122,18 @@ function handleModelSelect(modelId: string) {
   settings.updateAiConfig({ model: modelId });
 }
 
-const modelDropdownItems = computed(() => {
+const modelOptionIds = computed(() => {
   const currentModel = settings.aiConfig.model;
-  const items = modelOptions.value.map((m) => ({
-    value: m.id,
-    label: m.displayName || m.id,
-    title: m.id,
-  }));
-  if (currentModel && !items.some((item) => item.value === currentModel)) {
-    items.unshift({ value: currentModel, label: currentModel, title: currentModel });
+  const ids = modelOptions.value.map((model) => model.id);
+  if (currentModel && !ids.includes(currentModel)) {
+    return [currentModel, ...ids];
   }
-  return items;
+  return ids;
 });
+
+function displayModelName(modelId: string) {
+  return modelOptions.value.find((model) => model.id === modelId)?.displayName || modelId;
+}
 
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
 const pendingCompaction = ref<{ summary: string; compactedMessages: number } | null>(null);
@@ -1240,20 +1233,32 @@ const messageRenderer = computed(() => {
             <LightDropdown v-model="assistantMode" :items="assistantModeItems" :aria-label="activeModeHint" item-class="text-xs px-2" />
             <LightDropdown :model-value="activeAction" :items="actionMenuItems" content-class="w-max min-w-0" item-class="text-xs px-2" @update:model-value="(value) => selectAction(value as AiAction)" />
             <span class="flex-1" />
-            <LightDropdown
+            <SearchableSelect
               v-if="settings.isConfigured()"
               :model-value="settings.aiConfig.model"
-              :items="modelDropdownItems"
-              :trigger-title="settings.aiConfig.model"
-              :aria-label="t('ai.model')"
-              :trigger-label="currentModelLabel"
-              trigger-class="flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground truncate max-w-[130px]"
+              :options="modelOptionIds"
+              :placeholder="t('ai.browseModels')"
+              :search-placeholder="t('ai.searchModels')"
+              :empty-text="t('ai.modelListHint')"
+              :loading-text="t('ai.loadingModels')"
+              :loading="modelLoading"
+              :display-name="displayModelName"
+              trigger-class="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground truncate max-w-[130px]"
+              content-class="w-72"
               item-class="text-xs px-2"
-              :match-trigger-width="false"
-              content-class="w-max min-w-36 max-w-64"
-              check-position="right"
               @update:model-value="handleModelSelect"
-            />
+              @update:open="(open: boolean) => open && fetchModelOptions()"
+            >
+              <template #trigger-label="{ label, loading }">
+                <span class="truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
+              </template>
+              <template #option-label="{ option, label }">
+                <span class="flex min-w-0 flex-col">
+                  <span class="truncate">{{ label }}</span>
+                  <span v-if="label !== option" class="truncate text-[11px] text-muted-foreground">{{ option }}</span>
+                </span>
+              </template>
+            </SearchableSelect>
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>

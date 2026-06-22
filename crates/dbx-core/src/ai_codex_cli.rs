@@ -1,8 +1,8 @@
 use crate::agent_events::AgentEvent;
 use crate::ai::{AiConfig, AiModelInfo, AiTestConnectionResult};
 use crate::ai_cli_agent::{
-    append_config_overrides, build_cli_agent_prompt, dbx_mcp_enabled_tools, dbx_mcp_scope_env, model_infos,
-    parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
+    append_config_overrides, build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env,
+    model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
     CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
 use serde_json::Value;
@@ -285,7 +285,7 @@ pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]
 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     let command = resolve_codex_command(config).await;
-    let output = Command::new(&command.program)
+    let output = cli_command(&command.program)
         .args(["debug", "models"])
         .envs(command_env(&command).iter().map(|(key, value)| (key.as_str(), value.as_str())))
         .output()
@@ -336,7 +336,7 @@ fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
 pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
     let start = Instant::now();
     let codex_command = resolve_codex_command(config).await;
-    let mut command = Command::new(&codex_command.program);
+    let mut command = cli_command(&codex_command.program);
     command.args(["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]);
     command.envs(command_env(&codex_command).iter().map(|(key, value)| (key.as_str(), value.as_str())));
 
@@ -545,11 +545,26 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn merged_path_deduplicates_codex_dir() {
-        let path = merged_path_with_dir("/opt/homebrew/bin");
+        let path = merged_path_with_dir("/opt/homebrew/bin", None);
         let dirs = std::env::split_paths(&path).collect::<Vec<_>>();
         let count = dirs.iter().filter(|dir| *dir == std::path::Path::new("/opt/homebrew/bin")).count();
 
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn codex_process_env_keeps_resolved_program_dir_before_user_path() {
+        let mut config = codex_config("default");
+        config.codex_cli_env.insert("PATH".to_string(), "/custom/bin:/usr/bin".to_string());
+        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
+
+        let env = codex_process_env(&config, &command).unwrap();
+        let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
+        let dirs = std::env::split_paths(path).collect::<Vec<_>>();
+
+        assert_eq!(dirs.first().unwrap(), std::path::Path::new("/opt/homebrew/bin"));
+        assert!(dirs.iter().any(|dir| dir == std::path::Path::new("/custom/bin")));
     }
 
     #[test]

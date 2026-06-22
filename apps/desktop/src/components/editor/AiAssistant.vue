@@ -79,6 +79,9 @@ const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
 const agentTokens = ref<{ input: number; output: number } | null>(null);
+const promptHistory = ref<string[]>([]);
+const historyIndex = ref(-1);
+const draftBeforeHistory = ref("");
 
 // Inline model selector
 const modelOptions = ref<AiModelInfo[]>([]);
@@ -622,6 +625,43 @@ function onPromptKeydown(event: KeyboardEvent) {
     }
   }
 
+  // Prompt history navigation (↑/↓ when not in @mention dropdown)
+  if (event.key === "ArrowUp" && promptHistory.value.length > 0) {
+    const textarea = promptTextareaRef.value;
+    // Only enter history when cursor is on the first line
+    if (textarea && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+      event.preventDefault();
+      if (historyIndex.value === -1) {
+        draftBeforeHistory.value = prompt.value;
+      }
+      const nextIndex = historyIndex.value + 1;
+      if (nextIndex < promptHistory.value.length) {
+        historyIndex.value = nextIndex;
+        prompt.value = promptHistory.value[nextIndex];
+        nextTick(() => {
+          textarea.selectionStart = textarea.selectionEnd = prompt.value.length;
+        });
+      }
+      return;
+    }
+  }
+  if (event.key === "ArrowDown" && historyIndex.value >= 0) {
+    event.preventDefault();
+    const nextIndex = historyIndex.value - 1;
+    if (nextIndex >= 0) {
+      historyIndex.value = nextIndex;
+      prompt.value = promptHistory.value[nextIndex];
+    } else {
+      historyIndex.value = -1;
+      prompt.value = draftBeforeHistory.value;
+    }
+    nextTick(() => {
+      const textarea = promptTextareaRef.value;
+      if (textarea) textarea.selectionStart = textarea.selectionEnd = prompt.value.length;
+    });
+    return;
+  }
+
   if (shouldSubmitAiPromptOnKeydown(event, promptCompositionActive.value)) {
     event.preventDefault();
     send();
@@ -642,6 +682,13 @@ async function send() {
   const displayText = [selectedMentions.value.map((mention) => mention.raw).join(" "), text].filter(Boolean).join(" ");
 
   messages.value.push({ role: "user", content: displayText });
+  // Save to prompt history (deduplicate consecutive duplicates)
+  if (displayText && promptHistory.value[0] !== displayText) {
+    promptHistory.value.unshift(displayText);
+    if (promptHistory.value.length > 100) promptHistory.value.length = 100;
+  }
+  historyIndex.value = -1;
+  draftBeforeHistory.value = "";
   prompt.value = "";
   selectedMentions.value = [];
   scrollToBottom();
@@ -781,6 +828,8 @@ async function copyCode(code: string, key: string) {
 function clearMessages() {
   messages.value = [];
   conversationId.value = "";
+  historyIndex.value = -1;
+  draftBeforeHistory.value = "";
 }
 
 async function persistConversation() {

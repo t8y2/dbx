@@ -608,11 +608,7 @@ impl AppState {
                     })
                     .collect();
                 PoolKind::Sqlite(
-                    db::sqlite::connect_path_create_if_missing_with_extensions(
-                        &expand_tilde(&db_config.host),
-                        extensions,
-                    )
-                    .await?,
+                    db::sqlite::connect_path_with_extensions(&expand_tilde(&db_config.host), extensions).await?,
                 )
             }
             DatabaseType::Rqlite => {
@@ -3035,6 +3031,26 @@ mod tests {
         let databases = schema::list_databases_core(&state, "sqlite-conn").await.unwrap();
         assert_eq!(databases.len(), 1);
         assert_eq!(databases[0].name, "main");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlite_get_or_create_pool_rejects_missing_database_file() {
+        let (state, dir) = test_app_state().await;
+        let db_path = dir.join("missing.db");
+        let mut config = mysql_config(None);
+        config.id = "sqlite-missing".to_string();
+        config.name = "SQLite".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.host = db_path.to_string_lossy().to_string();
+        config.port = 0;
+
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let result = state.get_or_create_pool("sqlite-missing", None).await;
+        assert!(result.is_err());
+        assert!(!db_path.exists());
 
         let _ = std::fs::remove_dir_all(dir);
     }

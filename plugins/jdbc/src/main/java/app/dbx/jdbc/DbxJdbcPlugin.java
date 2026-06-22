@@ -1409,7 +1409,14 @@ public final class DbxJdbcPlugin {
                 String name = rs.getString("COLUMN_NAME");
                 ObjectNode item = columnNode(result, name);
                 item.put("data_type", rs.getString("TYPE_NAME"));
-                item.put("is_nullable", rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls);
+                String isNullableStr = rs.getString("IS_NULLABLE");
+                if ("YES".equalsIgnoreCase(isNullableStr)) {
+                    item.put("is_nullable", true);
+                } else if ("NO".equalsIgnoreCase(isNullableStr)) {
+                    item.put("is_nullable", false);
+                } else {
+                    item.put("is_nullable", rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls);
+                }
                 putNullablePreferValue(item, "column_default", rs.getString("COLUMN_DEF"));
                 item.put("is_primary_key", primaryKeys.contains(name));
                 item.putNull("extra");

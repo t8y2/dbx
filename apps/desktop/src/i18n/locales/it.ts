@@ -993,6 +993,9 @@ export default {
     truncated: "Contesto troncato",
     contextSummary: "{database} · {tables} tabelle",
     autoSqlBlocked: "L'SQL generato dall'AI è sembrato troppo rischioso per l'esecuzione automatica. Rivedilo manualmente prima di eseguirlo.",
+    proposalConfirmYes: "Sì, procedi",
+    proposalConfirmNo: "No, grazie",
+    proposalConfirmTitle: "Conferma azione richiesta",
     agentSteps: {
       generated: "SQL generato",
       noSql: "Nessun SQL trovato",

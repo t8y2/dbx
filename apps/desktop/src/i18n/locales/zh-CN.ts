@@ -1039,6 +1039,9 @@ export default {
     truncated: "上下文已截断",
     contextSummary: "{database} · {tables} 张表",
     autoSqlBlocked: "AI 生成的 SQL 风险较高，已阻止自动执行，请手动检查后再运行。",
+    proposalConfirmYes: "是，请继续",
+    proposalConfirmNo: "不用了",
+    proposalConfirmTitle: "需要确认是否执行以下操作",
     agentSteps: {
       generated: "已生成 SQL",
       noSql: "未找到 SQL",

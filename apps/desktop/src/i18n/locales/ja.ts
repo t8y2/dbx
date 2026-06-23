@@ -1045,6 +1045,9 @@ export default {
     truncated: "コンテキストが切り詰められました",
     contextSummary: "{database} · {tables}テーブル",
     autoSqlBlocked: "AIが生成したSQLは自動実行するにはリスクが高すぎると判断されました。実行前に手動で確認してください。",
+    proposalConfirmYes: "はい、続行",
+    proposalConfirmNo: "いいえ",
+    proposalConfirmTitle: "操作の確認",
     agentSteps: {
       generated: "SQL生成完了",
       noSql: "SQLが見つかりません",

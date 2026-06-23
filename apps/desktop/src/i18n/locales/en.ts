@@ -1040,6 +1040,9 @@ export default {
     truncated: "Context truncated",
     contextSummary: "{database} · {tables} tables",
     autoSqlBlocked: "The AI-generated SQL looked too risky to auto-execute. Review it manually before running.",
+    proposalConfirmYes: "Yes, proceed",
+    proposalConfirmNo: "No thanks",
+    proposalConfirmTitle: "Action confirmation required",
     agentSteps: {
       generated: "SQL generated",
       noSql: "No SQL found",

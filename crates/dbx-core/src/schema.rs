@@ -2047,6 +2047,35 @@ pub async fn get_table_ddl_core(
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             drop(connections);
+            if let Some(config) = db_config.as_ref().filter(|config| is_agent_postgres_metadata_fallback_config(config))
+            {
+                match native_postgres_metadata_pool(state, connection_id, database, config).await {
+                    Ok(Some(pool)) => match pg_ddl(&pool, schema, table).await {
+                        Ok(ddl) => return Ok(ddl),
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][agent:get_table_ddl:postgres-compatible-native-fallback-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "[schema][agent:get_table_ddl:postgres-compatible-native-pool-failed] connection_id={} database={} schema={} table={} error={}",
+                            connection_id,
+                            database,
+                            schema,
+                            table,
+                            error
+                        );
+                    }
+                }
+            }
             let mut client = client.lock().await;
             return client.get_table_ddl(database, schema, table, agent_metadata_timeout(db_config.as_ref())).await;
         }

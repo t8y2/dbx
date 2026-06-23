@@ -759,6 +759,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     let config = config.canonicalized();
     let id = config.id.clone();
     let db_config = metadata_connection_config(&config);
+    let attempt = state.begin_connection_attempt(&id).await;
 
     state.remove_connection_pools_detached(&id).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
@@ -846,8 +847,16 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                         .await
                         {
                             Ok(()) => {
+                                state
+                                    .insert_connection_pool_for_attempt(
+                                        &id,
+                                        attempt,
+                                        id.clone(),
+                                        PoolKind::MongoDb(client),
+                                        &db_config,
+                                    )
+                                    .await?;
                                 state.configs.write().await.insert(id.clone(), config);
-                                state.insert_connection_pool(id.clone(), PoolKind::MongoDb(client), &db_config).await;
                                 return Ok(id);
                             }
                             Err(e) => e,
@@ -999,7 +1008,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
-    state.insert_connection_pool(id.clone(), pool, &db_config).await;
+    state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &db_config).await?;
     state.configs.write().await.insert(id.clone(), config);
 
     Ok(id)
@@ -1025,6 +1034,7 @@ pub async fn connection_final_proxy_port(
 
 #[tauri::command]
 pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
+    state.supersede_connection_attempt(&connection_id).await;
     state.remove_connection_pools_detached(&connection_id).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     state.reset_connection_transport(&connection_id).await;

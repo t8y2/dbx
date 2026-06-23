@@ -367,3 +367,50 @@ test("hanging database metadata load times out and clears loading state", async 
     restoreStorage();
   }
 });
+
+test.each([
+  ["redis", "loadRedisDatabases", "/api/redis/list-databases", "Redis databases"],
+  ["mq", "loadMqTenants", "/api/mq/tenants/list", "message queue tenants"],
+  ["mongodb", "loadMongoDatabases", "/api/mongo/list-databases", "MongoDB databases"],
+  ["elasticsearch", "loadElasticsearchIndices", "/api/mongo/list-collections", "Elasticsearch indices"],
+  ["qdrant", "loadVectorCollections", "/api/mongo/list-collections", "vector collections"],
+] as const)("hanging %s root metadata load times out and clears loading state", async (dbType, loader, endpoint, label) => {
+  vi.useFakeTimers();
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input) === endpoint) {
+      return new Promise<Response>(() => {});
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection({ ...conn("conn-1"), db_type: dbType });
+    store.activeConnectionId = "conn-1";
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      children: [],
+    });
+
+    const loadPromise = store[loader]("conn-1");
+    const timeoutRejection = assert.rejects(() => loadPromise, new RegExp(`Connection timed out while loading ${label} after 35s`));
+
+    await vi.advanceTimersByTimeAsync(35000);
+    await timeoutRejection;
+
+    assert.equal(store.treeNodes[0].isLoading, false);
+    assert.equal(store.connectedIds.has("conn-1"), false);
+    assert.equal(store.activeConnectionId, null);
+    assert.match(store.connectionErrors["conn-1"], new RegExp(`Connection timed out while loading ${label}`));
+  } finally {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});

@@ -131,6 +131,8 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const { toast } = useToast();
+const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
+const DEFAULT_QUERY_EDITOR_PANE_SIZE = 100 - DEFAULT_QUERY_RESULTS_PANE_SIZE;
 
 onMounted(() => {
   const preload = () => preloadDataGridComponent();
@@ -529,7 +531,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden">
-        <Pane class="min-h-0" :size="resultsPaneOpen ? 40 : 100" :min-size="resultsPaneOpen ? 15 : 100">
+        <Pane class="min-h-0" :size="resultsPaneOpen ? DEFAULT_QUERY_EDITOR_PANE_SIZE : 100" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
             <QueryEditor
               ref="queryEditorRef"
@@ -565,7 +567,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
             </Button>
           </div>
         </Pane>
-        <Pane v-if="resultsPaneOpen" class="min-h-0" :size="60" :min-size="20">
+        <Pane v-if="resultsPaneOpen" class="min-h-0" :size="DEFAULT_QUERY_RESULTS_PANE_SIZE" :min-size="20">
           <div class="h-full flex flex-col">
             <div v-if="hasQueryOutput" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
               <div class="flex shrink-0 items-center gap-1">

@@ -167,10 +167,10 @@ test("normalizes table structure editor density", () => {
 
 test("normalizes grid drawer widths", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth, 320);
-  assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth, 320);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth, 380);
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout, "bottom");
   assert.equal(normalizeEditorSettings({}).tableInfoDrawerWidth, 320);
-  assert.equal(normalizeEditorSettings({}).cellDetailDrawerWidth, 320);
+  assert.equal(normalizeEditorSettings({}).cellDetailDrawerWidth, 380);
   assert.equal(normalizeEditorSettings({}).cellDetailPanelLayout, "bottom");
   assert.equal(normalizeEditorSettings({ tableInfoDrawerWidth: 200 } as any).tableInfoDrawerWidth, 240);
   assert.equal(normalizeEditorSettings({ cellDetailDrawerWidth: 200 } as any).cellDetailDrawerWidth, 260);

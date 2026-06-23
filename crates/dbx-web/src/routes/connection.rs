@@ -68,7 +68,7 @@ pub async fn connect_db(
     let app = &state.app;
     let connection_id = config.id.clone();
 
-    app.remove_connection_pools(&connection_id).await;
+    app.remove_connection_pools_detached(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &config).await;
     app.configs.write().await.insert(connection_id.clone(), config.clone());
 
@@ -101,7 +101,7 @@ pub async fn disconnect_db(
 ) -> Result<Json<()>, AppError> {
     let app = &state.app;
 
-    app.remove_connection_pools(&body.connection_id).await;
+    app.remove_connection_pools_detached(&body.connection_id).await;
     app.reset_connection_transport(&body.connection_id).await;
     if body.connection_id.starts_with("__visible_draft_") {
         app.configs.write().await.remove(&body.connection_id);
@@ -202,7 +202,7 @@ async fn drop_mq_adapters_for_connection_ids(_state: &WebState, _connection_ids:
 
 async fn remove_connection_pools_for_connection_ids(state: &WebState, connection_ids: &[String]) {
     for connection_id in connection_ids {
-        state.app.remove_connection_pools(connection_id).await;
+        state.app.remove_connection_pools_detached(connection_id).await;
     }
 }
 

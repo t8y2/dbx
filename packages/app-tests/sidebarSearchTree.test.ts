@@ -145,3 +145,29 @@ test("connection search results stay visible before connecting", () => {
     ["conn:1"],
   );
 });
+
+test("connection search copies do not keep stale loading state", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "Orders local",
+      type: "connection",
+      connectionId: "conn:1",
+      isLoading: true,
+      children: [
+        {
+          id: "conn:1:db",
+          label: "orders",
+          type: "database",
+          connectionId: "conn:1",
+          database: "orders",
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "orders", new Set());
+
+  assert.equal(filtered[0]?.type, "connection");
+  assert.equal(filtered[0]?.isLoading, false);
+});

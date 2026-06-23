@@ -446,7 +446,7 @@ async fn drop_mq_adapters_for_connection_ids(_state: &AppState, _connection_ids:
 
 async fn remove_connection_pools_for_connection_ids(state: &AppState, connection_ids: &[String]) {
     for connection_id in connection_ids {
-        state.remove_connection_pools(connection_id).await;
+        state.remove_connection_pools_detached(connection_id).await;
     }
 }
 
@@ -760,7 +760,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     let id = config.id.clone();
     let db_config = metadata_connection_config(&config);
 
-    state.remove_connection_pools(&id).await;
+    state.remove_connection_pools_detached(&id).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
     let (host, port) = state.connection_host_port(&id, &db_config).await?;
@@ -1025,7 +1025,7 @@ pub async fn connection_final_proxy_port(
 
 #[tauri::command]
 pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
-    state.remove_connection_pools(&connection_id).await;
+    state.remove_connection_pools_detached(&connection_id).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     state.reset_connection_transport(&connection_id).await;
     if connection_id.starts_with("__visible_draft_") {

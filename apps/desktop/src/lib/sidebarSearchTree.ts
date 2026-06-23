@@ -51,6 +51,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
           node: {
             ...node,
             children,
+            isLoading: node.type === "connection" ? false : node.isLoading,
             isExpanded: children.length > 0 && !collapsedIds.has(node.id),
           },
           score: selfMatch?.score ?? 0,

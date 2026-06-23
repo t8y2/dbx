@@ -56,6 +56,9 @@ import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/compl
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
 const CONNECTION_HEALTH_CHECK_TTL_MS = 2000;
+const METADATA_LOAD_MIN_TIMEOUT_MS = 15_000;
+const METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS = 60_000;
+const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
 function sidebarObjectGroupPageSize(): number {
   const settingsStore = useSettingsStore();
   const size = settingsStore.desktopSettings.sidebar_table_page_size;
@@ -271,6 +274,57 @@ export const useConnectionStore = defineStore("connection", () => {
     return typeof checkedAt === "number" && Date.now() - checkedAt < CONNECTION_HEALTH_CHECK_TTL_MS;
   }
 
+  function clearConnectionNodeLoading(connectionId: string) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (node) node.isLoading = false;
+  }
+
+  function metadataLoadTimeoutMs(config?: ConnectionConfig): number {
+    const queryTimeoutSecs = Number(config?.query_timeout_secs);
+    if (queryTimeoutSecs === 0) return METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS;
+    const boundedTimeoutSecs = Number.isFinite(queryTimeoutSecs) && queryTimeoutSecs > 0 ? queryTimeoutSecs + 5 : 35;
+    return Math.max(METADATA_LOAD_MIN_TIMEOUT_MS, boundedTimeoutSecs * 1000);
+  }
+
+  async function withMetadataLoadTimeout<T>(connectionId: string, promise: Promise<T>, label: string): Promise<T> {
+    const timeoutMs = metadataLoadTimeoutMs(getConfig(connectionId));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`Connection timed out while loading ${label} after ${Math.ceil(timeoutMs / 1000)}s. Please check the network or VPN and try again.`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function withDisconnectRequestTimeout(connectionId: string, promise: Promise<void>): Promise<void> {
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    void promise.catch((error) => {
+      if (timedOut) console.warn("[DBX][connection:disconnect-late-error]", { connectionId, error });
+    });
+    try {
+      await Promise.race([
+        promise,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            console.warn("[DBX][connection:disconnect-timeout]", { connectionId, timeoutMs: DISCONNECT_REQUEST_TIMEOUT_MS });
+            resolve();
+          }, DISCONNECT_REQUEST_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   function recordConnectionError(connectionId: string, error: unknown): string {
     const message = connectionErrorMessage(error);
     setConnectionError(connectionId, message);
@@ -279,6 +333,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function markConnectionLost(connectionId: string, error: unknown) {
     connectedIds.value.delete(connectionId);
+    clearConnectionNodeLoading(connectionId);
     clearConnectionHealthCheck(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
     recordConnectionError(connectionId, error);
@@ -303,12 +358,22 @@ export const useConnectionStore = defineStore("connection", () => {
     const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    void promise.catch((error) => {
-      if (!timedOut) return;
-      const current = connectionErrors.value[config.id];
-      if (current !== timeoutMessage) return;
-      setConnectionError(config.id, connectionAttemptOriginalErrorMessage(timeoutMessage, connectionErrorMessage(error)));
-    });
+    void promise.then(
+      (connectionId) => {
+        if (!timedOut) return;
+        const cleanupConnectionId = typeof connectionId === "string" && connectionId ? connectionId : config.id;
+        if (connectedIds.value.has(cleanupConnectionId)) return;
+        void api.disconnectDb(cleanupConnectionId).catch((error) => {
+          console.warn("[DBX][connection:timeout-cleanup-failed]", { connectionId: cleanupConnectionId, error });
+        });
+      },
+      (error) => {
+        if (!timedOut) return;
+        const current = connectionErrors.value[config.id];
+        if (current !== timeoutMessage) return;
+        setConnectionError(config.id, connectionAttemptOriginalErrorMessage(timeoutMessage, connectionErrorMessage(error)));
+      },
+    );
     try {
       return await Promise.race([
         promise,
@@ -902,7 +967,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function disconnect(connectionId: string) {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
-    await api.disconnectDb(connectionId);
+    await withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId));
     clearConnectionError(connectionId);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
@@ -920,6 +985,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionHealthCheck(connectionId);
     const node = findNode(treeNodes.value, connectionId);
     if (node) {
+      node.isLoading = false;
       node.isExpanded = false;
       node.children = [];
     }
@@ -1016,7 +1082,7 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
         }
-        const [databases, schemas] = await Promise.all([api.listDatabases(connectionId), api.listSchemas(connectionId, "main")]);
+        const [databases, schemas] = await Promise.all([withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases"), withMetadataLoadTimeout(connectionId, api.listSchemas(connectionId, "main"), "schemas")]);
         const children = withSavedSqlRoot(connectionId, buildDuckDbConnectionTreeNodes(connectionId, databases, schemas), node);
         setChildren(node, children);
         await savePersistedTreeChildren(cacheKey, children);
@@ -1030,7 +1096,7 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
         }
-        const schemas = await api.listSchemas(connectionId, effectiveDb);
+        const schemas = await withMetadataLoadTimeout(connectionId, api.listSchemas(connectionId, effectiveDb), "schemas");
         const visibleSchemas = filterDatabaseNamesForConnection(schemas, config);
         const schemaNodes: TreeNode[] = sortSidebarNames(visibleSchemas).map((s) => ({
           id: `${connectionId}:${s}:${s}`,
@@ -1053,7 +1119,7 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
         }
-        const databases = await api.listDatabases(connectionId);
+        const databases = await withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases");
         const visibleNames = filterDatabaseNamesForConnection(
           databases.map((database) => database.name),
           config,
@@ -1065,7 +1131,7 @@ export const useConnectionStore = defineStore("connection", () => {
           includeDefaultWhenEmpty: usesTreeSchemaMode(effectiveDbType) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
         });
         if (config?.db_type === "sqlserver") {
-          const linkedServers = await api.listSqlServerLinkedServers(connectionId).catch(() => []);
+          const linkedServers = await withMetadataLoadTimeout(connectionId, api.listSqlServerLinkedServers(connectionId), "linked servers").catch(() => []);
           const linkedDatabase = sqlServerLinkedRuntimeDatabase(config);
           databaseNodes.push({
             ...sqlServerLinkedRootNode(connectionId, linkedDatabase),

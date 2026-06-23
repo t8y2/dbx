@@ -84,6 +84,50 @@ test("failed disconnect keeps the existing connection error", async () => {
   }
 });
 
+test("hanging disconnect request still clears local connection state", async () => {
+  vi.useFakeTimers();
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input) === "/api/connection/disconnect") {
+      return new Promise<Response>(() => {});
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    store.activeConnectionId = "conn-1";
+    store.recordConnectionError("conn-1", new Error("metadata failed"));
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      isLoading: true,
+      isExpanded: true,
+      children: [{ id: "conn-1:db", label: "db", type: "database", connectionId: "conn-1", database: "db" }],
+    });
+
+    const disconnectPromise = store.disconnect("conn-1");
+    await vi.advanceTimersByTimeAsync(5000);
+    await disconnectPromise;
+
+    assert.equal(store.connectionErrors["conn-1"], undefined);
+    assert.equal(store.connectedIds.has("conn-1"), false);
+    assert.equal(store.activeConnectionId, null);
+    assert.equal(store.treeNodes[0].isLoading, false);
+    assert.equal(store.treeNodes[0].isExpanded, false);
+    assert.deepEqual(store.treeNodes[0].children, []);
+  } finally {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("query errors mentioning connection do not mark the connection disconnected", async () => {
   const restoreStorage = installMemoryStorage();
   try {
@@ -142,11 +186,20 @@ test("explicit lost-connection marker clears state without relying on error text
     const store = useConnectionStore();
     store.addEphemeralConnection(conn("conn-1"));
     store.activeConnectionId = "conn-1";
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      isLoading: true,
+      children: [],
+    });
 
     store.markConnectionLost("conn-1", new Error("连接可能已断开，请刷新数据重试"));
 
     assert.equal(store.connectedIds.has("conn-1"), false);
     assert.equal(store.activeConnectionId, null);
+    assert.equal(store.treeNodes[0].isLoading, false);
     assert.equal(store.connectionErrors["conn-1"], "连接可能已断开，请刷新数据重试");
     await new Promise((resolve) => setTimeout(resolve, 0));
   } finally {
@@ -183,6 +236,131 @@ test("late original connect errors replace the generic timeout detail", async ()
 
     assert.match(store.connectionErrors["conn-1"], /Original database error returned after the UI timeout/);
     assert.match(store.connectionErrors["conn-1"], /MySQL connection failed: raw socket timeout/);
+  } finally {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("late original connect success is disconnected after the UI timeout", async () => {
+  vi.useFakeTimers();
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  const disconnected: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/connection/connect") {
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(new Response(JSON.stringify("conn-1"), { status: 200, headers: { "Content-Type": "application/json" } })), 3500);
+      });
+    }
+    if (String(input) === "/api/connection/disconnect") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { connectionId?: string };
+      if (body.connectionId) disconnected.push(body.connectionId);
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    const config = { ...conn("conn-1"), connect_timeout_secs: 1 };
+    const connectPromise = store.connect(config);
+    const timeoutRejection = assert.rejects(() => connectPromise, /Connection attempt timed out after 3s/);
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await timeoutRejection;
+    assert.equal(store.connectedIds.has("conn-1"), false);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await Promise.resolve();
+
+    assert.deepEqual(disconnected, ["conn-1"]);
+    assert.equal(store.connectedIds.has("conn-1"), false);
+  } finally {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("late original connect success does not disconnect a newer connected state", async () => {
+  vi.useFakeTimers();
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  const disconnected: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/connection/connect") {
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(new Response(JSON.stringify("conn-1"), { status: 200, headers: { "Content-Type": "application/json" } })), 3500);
+      });
+    }
+    if (String(input) === "/api/connection/disconnect") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { connectionId?: string };
+      if (body.connectionId) disconnected.push(body.connectionId);
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    const config = { ...conn("conn-1"), connect_timeout_secs: 1 };
+    const connectPromise = store.connect(config);
+    const timeoutRejection = assert.rejects(() => connectPromise, /Connection attempt timed out after 3s/);
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await timeoutRejection;
+    store.connectedIds.add("conn-1");
+
+    await vi.advanceTimersByTimeAsync(500);
+    await Promise.resolve();
+
+    assert.deepEqual(disconnected, []);
+    assert.equal(store.connectedIds.has("conn-1"), true);
+  } finally {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("hanging database metadata load times out and clears loading state", async () => {
+  vi.useFakeTimers();
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).startsWith("/api/schema/databases?")) {
+      return new Promise<Response>(() => {});
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    store.activeConnectionId = "conn-1";
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      children: [],
+    });
+
+    const loadPromise = store.loadDatabases("conn-1");
+    const timeoutRejection = assert.rejects(() => loadPromise, /Connection timed out while loading databases after 35s/);
+
+    await vi.advanceTimersByTimeAsync(35000);
+    await timeoutRejection;
+
+    assert.equal(store.treeNodes[0].isLoading, false);
+    assert.equal(store.connectedIds.has("conn-1"), false);
+    assert.equal(store.activeConnectionId, null);
+    assert.match(store.connectionErrors["conn-1"], /Connection timed out while loading databases/);
   } finally {
     vi.useRealTimers();
     globalThis.fetch = originalFetch;

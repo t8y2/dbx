@@ -138,6 +138,14 @@ pub async fn list_completion_objects(
 }
 
 #[tauri::command]
+pub async fn completion_assistant_search(
+    state: State<'_, Arc<AppState>>,
+    request: db::CompletionAssistantRequest,
+) -> Result<db::CompletionAssistantResponse, String> {
+    dbx_core::schema::completion_assistant_search_core(&state, request).await
+}
+
+#[tauri::command]
 pub async fn get_object_source(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

@@ -24,6 +24,10 @@ public interface DatabaseAgent {
         return result;
     }
 
+    default CompletionAssistantResponse completionAssistantSearch(CompletionAssistantRequest request) {
+        throw new UnsupportedOperationException("Completion assistant search is not supported by this agent");
+    }
+
     List<ColumnInfo> getColumns(String schema, String table);
 
     default ObjectSource getObjectSource(String schema, String name, String objectType) {

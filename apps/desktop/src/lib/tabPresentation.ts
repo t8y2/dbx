@@ -181,6 +181,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "vector") return t("tabs.vector");
   if (tab.mode === "redis") return t("tabs.redis");
   if (tab.mode === "etcd") return t("tabs.etcd");
+  if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   return tab.mode;

@@ -24,6 +24,10 @@ describe("quickConnectionOpenTarget", () => {
     expect(quickConnectionOpenTarget(connection("mq"))).toEqual({ kind: "mq-admin" });
   });
 
+  it("opens Nacos connections in the Nacos admin console", () => {
+    expect(quickConnectionOpenTarget(connection("nacos"))).toEqual({ kind: "nacos-admin" });
+  });
+
   it("opens regular connections in a query tab", () => {
     expect(quickConnectionOpenTarget({ ...connection("postgresql"), database: "app" })).toEqual({
       kind: "query",

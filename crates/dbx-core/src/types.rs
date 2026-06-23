@@ -75,6 +75,91 @@ pub struct ColumnInfo {
     pub character_maximum_length: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAssistantObjectKind {
+    Database,
+    Schema,
+    Table,
+    View,
+    Routine,
+    Procedure,
+    Function,
+    Column,
+}
+
+impl CompletionAssistantObjectKind {
+    pub fn is_table_like(&self) -> bool {
+        matches!(self, Self::Table | Self::View)
+    }
+
+    pub fn is_routine_like(&self) -> bool {
+        matches!(self, Self::Routine | Self::Procedure | Self::Function)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAssistantCandidateKind {
+    Database,
+    Schema,
+    Table,
+    View,
+    Procedure,
+    Function,
+    Column,
+    Object,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAssistantMatchMode {
+    Prefix,
+    Contains,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionAssistantRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub object_kinds: Vec<CompletionAssistantObjectKind>,
+    #[serde(default)]
+    pub mask: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub global_search: bool,
+    pub max_results: Option<usize>,
+    #[serde(default)]
+    pub search_in_comments: bool,
+    #[serde(default)]
+    pub search_in_definitions: bool,
+    pub parent_schema: Option<String>,
+    pub parent_name: Option<String>,
+    pub match_mode: Option<CompletionAssistantMatchMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionAssistantCandidate {
+    pub name: String,
+    pub kind: CompletionAssistantCandidateKind,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub parent_schema: Option<String>,
+    pub parent_name: Option<String>,
+    pub comment: Option<String>,
+    pub data_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionAssistantResponse {
+    pub candidates: Vec<CompletionAssistantCandidate>,
+    pub incomplete: bool,
+    pub fallback_used: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,

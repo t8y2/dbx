@@ -21,6 +21,11 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
     }
 
     @Override
+    public CompletionAssistantResponse completionAssistantSearch(CompletionAssistantRequest request) {
+        throw new UnsupportedOperationException("Completion assistant search is not supported by this agent");
+    }
+
+    @Override
     public String getTableDdl(String schema, String table) {
         List<IndexInfo> indexes;
         try {

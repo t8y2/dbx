@@ -43,6 +43,7 @@
     "list_schemas",
     "list_tables",
     "list_objects",
+    "completion_assistant_search_v1",
     "get_object_source",
     "get_table_ddl",
     "get_columns",

@@ -60,6 +60,18 @@ Requires JDK 8 and 21 (Gradle toolchain auto-downloads if needed).
 
 Output JARs are in `drivers/{module}/build/libs/`. Native agents build from `drivers/oracle-go` and `drivers/xugu`.
 
+### Local DBX Runtime Test
+
+When changing `agents/drivers/<db_type>/` or shared Java agent protocol code, rebuild the target agent and replace the runtime JAR used by the local DBX app:
+
+```bash
+./gradlew :<db_type>:shadowJar
+cp ~/.dbx/agents/drivers/<db_type>/agent.jar ~/.dbx/agents/drivers/<db_type>/agent.jar.bak
+cp agents/drivers/<db_type>/build/libs/*-all.jar ~/.dbx/agents/drivers/<db_type>/agent.jar
+```
+
+Restart DBX or disconnect and reconnect the database so the new agent process loads the replacement JAR.
+
 ## Development
 
 - Agent authoring guide: [docs/agent-authoring.md](docs/agent-authoring.md)

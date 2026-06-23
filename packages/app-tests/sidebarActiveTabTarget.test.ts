@@ -86,6 +86,34 @@ test("MQ tabs with a selected tenant target the matching tenant node", () => {
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(tenant)])?.id, "tenant-node");
 });
 
+test("Nacos tabs target the matching namespace node", () => {
+  const tab: QueryTab = {
+    id: "tab-1",
+    title: "Nacos:dev",
+    connectionId: "conn-1",
+    database: "",
+    sql: "",
+    isExecuting: false,
+    mode: "nacos",
+    nacosNamespace: "dev",
+    nacosNamespaceName: "Development",
+  };
+  const namespace: TreeNode = {
+    id: "namespace-node",
+    label: "Development",
+    type: "nacos-namespace",
+    connectionId: "conn-1",
+    nacosNamespace: "dev",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "nacos-namespace",
+    connectionId: "conn-1",
+    namespace: "dev",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(namespace)])?.id, "namespace-node");
+});
+
 test("saved SQL tabs target the matching visible saved SQL file node", () => {
   const tab: QueryTab = {
     id: "tab-1",

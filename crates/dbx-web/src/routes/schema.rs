@@ -153,6 +153,14 @@ pub async fn list_completion_objects(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 
+pub async fn completion_assistant_search(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::db::CompletionAssistantRequest>,
+) -> Result<Json<dbx_core::db::CompletionAssistantResponse>, AppError> {
+    let result = dbx_core::schema::completion_assistant_search_core(&state.app, request).await.map_err(AppError)?;
+    Ok(Json(result))
+}
+
 pub async fn get_object_source(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

@@ -1063,6 +1063,8 @@ export interface SqlCompletionReferencedTable {
 
 export type SqlStatementKind = "select" | "insert" | "update" | "delete" | "create" | "alter" | "drop" | "unknown";
 
+export type SqlCompletionContextKind = "table" | "schema" | "catalog" | "routine" | "column" | "alias_column" | "insert_target" | "update_target" | "exec" | "join" | "keyword";
+
 export interface SqlCompletionContext {
   prefix: string;
   qualifier?: string;
@@ -1090,6 +1092,7 @@ export interface SqlCompletionContext {
   updateTarget?: { table: string; schema?: string };
   deleteTarget?: { table: string; schema?: string };
   oracleTableFunctionContext?: boolean;
+  contextKind: SqlCompletionContextKind;
 }
 
 export interface SqlFunctionSignatureHelp {
@@ -1553,6 +1556,19 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
   const preferredKeywords = preferredKeywordsForCompletion(updateInfo, deleteInfo);
+  const contextKind = detectCompletionContextKind({
+    qualifier,
+    exclusiveTableSuggestions,
+    exclusiveColumnSuggestions,
+    insertInfo,
+    updateInfo,
+    inCallRoutineContext,
+    oracleTableFunctionContext,
+    afterTableTrigger,
+    lastWord,
+    suggestColumns,
+    suggestRoutines,
+  });
 
   return {
     prefix,
@@ -1581,7 +1597,31 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
     updateTarget: updateInfo?.target,
     deleteTarget: deleteInfo?.target,
     oracleTableFunctionContext,
+    contextKind,
   };
+}
+
+function detectCompletionContextKind(options: {
+  qualifier?: string;
+  exclusiveTableSuggestions: boolean;
+  exclusiveColumnSuggestions: boolean;
+  insertInfo: ReturnType<typeof detectInsertColumnListContext>;
+  updateInfo: ReturnType<typeof detectUpdateCompletionContext>;
+  inCallRoutineContext: boolean;
+  oracleTableFunctionContext: boolean;
+  afterTableTrigger: boolean;
+  lastWord: string;
+  suggestColumns: boolean;
+  suggestRoutines: boolean;
+}): SqlCompletionContextKind {
+  if (options.insertInfo) return "column";
+  if (options.updateInfo?.inSetClause) return "column";
+  if (options.inCallRoutineContext) return "exec";
+  if (options.qualifier && options.exclusiveColumnSuggestions) return "alias_column";
+  if (options.oracleTableFunctionContext || options.suggestRoutines) return "routine";
+  if (options.exclusiveTableSuggestions || options.afterTableTrigger) return options.lastWord === "join" ? "join" : "table";
+  if (options.suggestColumns) return options.qualifier ? "alias_column" : "column";
+  return "keyword";
 }
 
 function parseTrailingIdentifierContext(input: string): { start: number; prefix: string; qualifier?: string; qualifierParts?: string[] } | null {

@@ -22,7 +22,7 @@ import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/
 import { uuid } from "@/lib/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
+import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
@@ -108,6 +108,7 @@ const valueQuery = computed(() => searchPattern.value.trim());
 const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
 const effectivePattern = computed(() => (searchMode.value === "key" ? redisKeySearchPattern(searchPattern.value, fuzzyKeySearch.value) : "*"));
 const isSearchMode = computed(() => (searchMode.value === "key" ? effectivePattern.value !== "*" : valueQuery.value !== ""));
+const useFlatKeySearchRows = computed(() => searchMode.value === "key" && isSearchMode.value);
 const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
@@ -150,12 +151,13 @@ const createKeyTypeOptions = computed<{ value: RedisCreateKeyType; label: string
   { value: "stream", label: "Stream" },
   { value: "json", label: "JSON" },
 ]);
-const visibleRows = computed(() =>
-  flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value).map((row) => ({
+const visibleRows = computed(() => {
+  const rows = useFlatKeySearchRows.value ? flatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value);
+  return rows.map((row) => ({
     ...row,
     id: row.node.id,
-  })),
-);
+  }));
+});
 let commandHistoryId = 0;
 
 function countLeaves(node: RedisKeyTreeNode): number {
@@ -236,7 +238,10 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
   }
 
   if (options.updateTree ?? true) {
-    if (treeKeys.value.length === 0) {
+    if (useFlatKeySearchRows.value) {
+      treeKeys.value = [];
+      expandedGroupIds.value = new Set();
+    } else if (treeKeys.value.length === 0) {
       rebuildTree(isSearchMode.value);
     } else {
       mergeTree(newKeys);
@@ -345,7 +350,7 @@ async function fetchAll() {
     }
   } finally {
     if (requestId === searchRequestId) {
-      if (changed) rebuildTree(isSearchMode.value);
+      if (changed && !useFlatKeySearchRows.value) rebuildTree(isSearchMode.value);
       isFetchingAll.value = false;
     }
   }
@@ -1012,7 +1017,7 @@ defineExpose({ focusSearch });
                 </div>
 
                 <div class="flex shrink-0 items-center justify-end gap-1">
-                  <Badge v-if="row.node.kind === 'leaf' && row.node.keyType !== 'unknown'" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
+                  <Badge v-if="row.node.kind === 'leaf' && row.node.keyType" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
                   <Button v-if="row.node.kind === 'group'" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" @click="requestGroupDelete(row.node, $event)">
                     <Trash2 class="h-3 w-3" />
                   </Button>

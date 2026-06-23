@@ -90,6 +90,40 @@ public final class StandardJdbcMetadata {
         return result;
     }
 
+    public CompletionAssistantResponse completionAssistantSearch(
+        Connection conn,
+        JdbcAgentProfile profile,
+        String configuredDatabase,
+        CompletionAssistantRequest request
+    ) {
+        return unchecked(() -> {
+            int limit = boundedLimit(request.getMax_results());
+            List<CompletionAssistantCandidate> candidates = new ArrayList<>();
+            List<CompletionAssistantObjectKind> kinds = normalizedObjectKinds(request);
+            DatabaseMetaData meta = conn.getMetaData();
+            String catalog = blankToNull(request.getDatabase());
+            String schema = completionSchema(request);
+
+            if (containsKind(kinds, CompletionAssistantObjectKind.SCHEMA)) {
+                appendCompletionSchemas(candidates, meta, profile, request, limit);
+            }
+            if (candidates.size() < limit && containsTableLike(kinds)) {
+                appendCompletionTables(candidates, meta, profile, catalog, schema, request, kinds, limit);
+                if (candidates.isEmpty() && profile.getCatalogFallbackEnabled() && configuredDatabase != null && !configuredDatabase.trim().isEmpty()) {
+                    appendCompletionTables(candidates, meta, profile, configuredDatabase, schema, request, kinds, limit);
+                }
+            }
+            if (candidates.size() < limit && containsKind(kinds, CompletionAssistantObjectKind.COLUMN)) {
+                appendCompletionColumns(candidates, meta, catalog, schema, request, limit);
+                if (candidates.isEmpty() && profile.getCatalogFallbackEnabled() && configuredDatabase != null && !configuredDatabase.trim().isEmpty()) {
+                    appendCompletionColumns(candidates, meta, configuredDatabase, schema, request, limit);
+                }
+            }
+
+            return new CompletionAssistantResponse(candidates, candidates.size() >= limit, false);
+        });
+    }
+
     public List<ColumnInfo> getColumns(Connection conn, JdbcAgentProfile profile, String configuredDatabase, String schema, String table) {
         return unchecked(() -> {
             DatabaseMetaData meta = conn.getMetaData();
@@ -227,6 +261,188 @@ public final class StandardJdbcMetadata {
                 ));
             }
         }
+    }
+
+    private void appendCompletionSchemas(
+        List<CompletionAssistantCandidate> result,
+        DatabaseMetaData meta,
+        JdbcAgentProfile profile,
+        CompletionAssistantRequest request,
+        int limit
+    ) throws Exception {
+        Set<String> names = new LinkedHashSet<>();
+        try {
+            appendSchemas(names, meta.getSchemas(null, null));
+        } catch (Exception | AbstractMethodError first) {
+            try {
+                appendSchemas(names, meta.getSchemas());
+            } catch (Exception | AbstractMethodError ignored) {
+            }
+        }
+        List<String> sorted = new ArrayList<>(names);
+        Collections.sort(sorted);
+        for (String name : sorted) {
+            if (result.size() >= limit) {
+                return;
+            }
+            if (profile.getExcludedSchemas().contains(name.toUpperCase(Locale.ROOT)) || !completionNameMatches(name, request)) {
+                continue;
+            }
+            result.add(new CompletionAssistantCandidate(
+                name,
+                CompletionAssistantCandidateKind.SCHEMA,
+                request.getDatabase(),
+                name,
+                null,
+                null,
+                null,
+                null
+            ));
+        }
+    }
+
+    private void appendCompletionTables(
+        List<CompletionAssistantCandidate> result,
+        DatabaseMetaData meta,
+        JdbcAgentProfile profile,
+        String catalog,
+        String schema,
+        CompletionAssistantRequest request,
+        List<CompletionAssistantObjectKind> kinds,
+        int limit
+    ) throws Exception {
+        String[] tableTypes = getDriverTableTypes(meta, profile);
+        try (ResultSet rs = meta.getTables(catalog, blankToNull(schema), completionPattern(request), tableTypes)) {
+            while (rs.next() && result.size() < limit) {
+                String name = rs.getString("TABLE_NAME");
+                String type = normalizeTableType(rs.getString("TABLE_TYPE"));
+                CompletionAssistantCandidateKind kind = completionTableKind(type);
+                if (!completionTableKindAllowed(kind, kinds) || !completionNameMatches(name, request)) {
+                    continue;
+                }
+                result.add(new CompletionAssistantCandidate(
+                    name,
+                    kind,
+                    request.getDatabase(),
+                    schema,
+                    null,
+                    null,
+                    rs.getString("REMARKS"),
+                    null
+                ));
+            }
+        }
+        result.sort(Comparator.comparing(CompletionAssistantCandidate::getName));
+    }
+
+    private void appendCompletionColumns(
+        List<CompletionAssistantCandidate> result,
+        DatabaseMetaData meta,
+        String catalog,
+        String schema,
+        CompletionAssistantRequest request,
+        int limit
+    ) throws Exception {
+        String table = request.getParent_name();
+        if (table == null || table.trim().isEmpty()) {
+            return;
+        }
+        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), table, completionPattern(request))) {
+            while (rs.next() && result.size() < limit) {
+                String name = rs.getString("COLUMN_NAME");
+                if (!completionNameMatches(name, request)) {
+                    continue;
+                }
+                result.add(new CompletionAssistantCandidate(
+                    name,
+                    CompletionAssistantCandidateKind.COLUMN,
+                    request.getDatabase(),
+                    schema,
+                    schema,
+                    table,
+                    rs.getString("REMARKS"),
+                    rs.getString("TYPE_NAME")
+                ));
+            }
+        }
+    }
+
+    private static List<CompletionAssistantObjectKind> normalizedObjectKinds(CompletionAssistantRequest request) {
+        List<CompletionAssistantObjectKind> kinds = request.getObject_kinds();
+        if (kinds.isEmpty()) {
+            kinds = new ArrayList<>();
+            kinds.add(CompletionAssistantObjectKind.TABLE);
+            kinds.add(CompletionAssistantObjectKind.VIEW);
+        }
+        return kinds;
+    }
+
+    private static String completionSchema(CompletionAssistantRequest request) {
+        String parentSchema = request.getParent_schema();
+        if (parentSchema != null && !parentSchema.trim().isEmpty()) {
+            return parentSchema;
+        }
+        return request.getSchema();
+    }
+
+    private static String completionPattern(CompletionAssistantRequest request) {
+        String mask = request.getMask();
+        if (mask.trim().isEmpty()) {
+            return "%";
+        }
+        String escaped = mask.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        if (request.getMatch_mode() == CompletionAssistantMatchMode.CONTAINS) {
+            return "%" + escaped + "%";
+        }
+        return escaped + "%";
+    }
+
+    private static boolean completionNameMatches(String name, CompletionAssistantRequest request) {
+        if (name == null) {
+            return false;
+        }
+        String mask = request.getMask();
+        if (mask.trim().isEmpty()) {
+            return true;
+        }
+        String candidate = request.getCase_sensitive() ? name : name.toLowerCase(Locale.ROOT);
+        String expected = request.getCase_sensitive() ? mask : mask.toLowerCase(Locale.ROOT);
+        if (request.getMatch_mode() == CompletionAssistantMatchMode.CONTAINS) {
+            return candidate.contains(expected);
+        }
+        return candidate.startsWith(expected);
+    }
+
+    private static int boundedLimit(Integer requested) {
+        if (requested == null) {
+            return 100;
+        }
+        return Math.max(1, Math.min(1000, requested));
+    }
+
+    private static boolean containsKind(List<CompletionAssistantObjectKind> kinds, CompletionAssistantObjectKind kind) {
+        return kinds.contains(kind);
+    }
+
+    private static boolean containsTableLike(List<CompletionAssistantObjectKind> kinds) {
+        return kinds.contains(CompletionAssistantObjectKind.TABLE) || kinds.contains(CompletionAssistantObjectKind.VIEW);
+    }
+
+    private static CompletionAssistantCandidateKind completionTableKind(String type) {
+        if ("VIEW".equalsIgnoreCase(type)) {
+            return CompletionAssistantCandidateKind.VIEW;
+        }
+        return CompletionAssistantCandidateKind.TABLE;
+    }
+
+    private static boolean completionTableKindAllowed(
+        CompletionAssistantCandidateKind kind,
+        List<CompletionAssistantObjectKind> requestedKinds
+    ) {
+        if (kind == CompletionAssistantCandidateKind.VIEW) {
+            return requestedKinds.contains(CompletionAssistantObjectKind.VIEW);
+        }
+        return requestedKinds.contains(CompletionAssistantObjectKind.TABLE);
     }
 
     private Set<String> primaryKeys(DatabaseMetaData meta, String catalog, String schema, String table) {

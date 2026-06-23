@@ -29,6 +29,7 @@ pub mod models;
 pub mod mongo_ops;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
+pub mod nacos;
 pub mod object_source_sql;
 pub mod path_utils;
 pub mod plugins;

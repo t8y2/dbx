@@ -603,6 +603,37 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openNacosAdmin(connectionId: string, target?: { namespace?: string; namespaceName?: string }) {
+    const namespace = target?.namespace ?? "";
+    const namespaceName = target?.namespaceName || (namespace ? namespace : "public");
+    const existing = tabs.value.find((tab) => tab.mode === "nacos" && tab.connectionId === connectionId && (tab.nacosNamespace || "") === namespace);
+    if (existing) {
+      existing.nacosNamespaceName = namespaceName;
+      if (!existing.customTitle) existing.title = `${useConnectionStore().getConfig(connectionId)?.name || "Nacos"}:${namespaceName}`;
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${conn?.name || "Nacos"}:${namespaceName}`,
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "nacos",
+      nacosNamespace: namespace,
+      nacosNamespaceName: namespaceName,
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
@@ -769,6 +800,8 @@ export const useQueryStore = defineStore("query", () => {
       explainExecutionId: undefined,
       mode: original.mode,
       mqTenant: original.mqTenant,
+      nacosNamespace: original.nacosNamespace,
+      nacosNamespaceName: original.nacosNamespaceName,
       structureTableName: original.structureTableName,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
@@ -2189,6 +2222,7 @@ export const useQueryStore = defineStore("query", () => {
     openObjectBrowser,
     openUserAdmin,
     openMqAdmin,
+    openNacosAdmin,
     openTableStructure,
     linkSavedSql,
     openSavedSql,

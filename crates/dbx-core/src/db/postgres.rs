@@ -22,8 +22,10 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo,
-    QueryResult, RuleInfo, SequenceInfo, TableInfo, TriggerInfo,
+    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
+    ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, QueryResult, RuleInfo,
+    SequenceInfo, TableInfo, TriggerInfo,
 };
 
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
@@ -964,6 +966,199 @@ pub async fn list_tables_filtered(
         .collect())
 }
 
+pub async fn completion_assistant_search(
+    pool: &Pool,
+    request: &CompletionAssistantRequest,
+) -> Result<CompletionAssistantResponse, String> {
+    let schema = request.schema.as_deref().or(request.parent_schema.as_deref()).unwrap_or("public");
+    let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
+    let kinds = if request.object_kinds.is_empty() {
+        vec![CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View]
+    } else {
+        request.object_kinds.clone()
+    };
+    let pattern = postgres_completion_like_pattern(&request.mask, request.match_mode.as_ref());
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let mut candidates = Vec::new();
+
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Schema)) {
+        let stmt = client
+            .prepare_cached(
+                "SELECT nspname FROM pg_catalog.pg_namespace \
+                 WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' \
+                   AND ($1 = '%%' OR nspname ILIKE $1 ESCAPE '~') \
+                 ORDER BY nspname LIMIT $2",
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        for row in client.query(&stmt, &[&pattern, &(limit as i64)]).await.map_err(|e| e.to_string())? {
+            let schema_name: String = row.get(0);
+            candidates.push(CompletionAssistantCandidate {
+                name: schema_name.clone(),
+                kind: CompletionAssistantCandidateKind::Schema,
+                database: Some(request.database.clone()),
+                schema: Some(schema_name),
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: None,
+            });
+        }
+    }
+
+    if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
+        let relkinds = postgres_completion_relkinds(&kinds);
+        let stmt = client.prepare_cached(postgres_completion_tables_sql()).await.map_err(|e| e.to_string())?;
+        let rows = client
+            .query(&stmt, &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)])
+            .await
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let table_type: String = row.get(2);
+            candidates.push(CompletionAssistantCandidate {
+                name: row.get(0),
+                kind: if table_type == "VIEW" {
+                    CompletionAssistantCandidateKind::View
+                } else {
+                    CompletionAssistantCandidateKind::Table
+                },
+                database: Some(request.database.clone()),
+                schema: Some(row.get(1)),
+                parent_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
+                parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
+                comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
+                data_type: None,
+            });
+        }
+    }
+
+    if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
+        let prokinds = postgres_completion_prokinds(&kinds);
+        let stmt = client.prepare_cached(postgres_completion_routines_sql()).await.map_err(|e| e.to_string())?;
+        let rows = client
+            .query(&stmt, &[&schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)])
+            .await
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let routine_type: String = row.get(2);
+            candidates.push(CompletionAssistantCandidate {
+                name: row.get(0),
+                kind: if routine_type == "PROCEDURE" {
+                    CompletionAssistantCandidateKind::Procedure
+                } else {
+                    CompletionAssistantCandidateKind::Function
+                },
+                database: Some(request.database.clone()),
+                schema: Some(row.get(1)),
+                parent_schema: None,
+                parent_name: None,
+                comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
+                data_type: row.try_get::<_, Option<String>>(4).ok().flatten(),
+            });
+        }
+    }
+
+    if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
+        let table = request.parent_name.as_deref().unwrap_or("");
+        if !table.is_empty() {
+            let stmt = client.prepare_cached(postgres_completion_columns_sql()).await.map_err(|e| e.to_string())?;
+            let rows = client
+                .query(&stmt, &[&schema, &table, &pattern, &((limit - candidates.len()) as i64)])
+                .await
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                candidates.push(CompletionAssistantCandidate {
+                    name: row.get(0),
+                    kind: CompletionAssistantCandidateKind::Column,
+                    database: Some(request.database.clone()),
+                    schema: Some(schema.to_string()),
+                    parent_schema: Some(schema.to_string()),
+                    parent_name: Some(table.to_string()),
+                    comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
+                    data_type: Some(row.get(1)),
+                });
+            }
+        }
+    }
+
+    Ok(CompletionAssistantResponse { incomplete: candidates.len() >= limit, candidates, fallback_used: false })
+}
+
+fn postgres_completion_tables_sql() -> &'static str {
+    "SELECT c.relname, n.nspname, \
+            CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'VIEW' ELSE 'TABLE' END AS table_type, \
+            obj_description(c.oid) AS table_comment, \
+            CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
+            CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
+     WHERE n.nspname = $1 AND c.relkind = ANY($3) \
+       AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
+     ORDER BY c.relname LIMIT $4"
+}
+
+fn postgres_completion_routines_sql() -> &'static str {
+    "SELECT p.proname, n.nspname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
+            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND p.prokind = ANY($3) \
+       AND ($2 = '%%' OR p.proname ILIKE $2 ESCAPE '~') \
+     ORDER BY p.proname LIMIT $4"
+}
+
+fn postgres_completion_columns_sql() -> &'static str {
+    "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), col_description(c.oid, a.attnum) \
+     FROM pg_catalog.pg_attribute a \
+     JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
+       AND ($3 = '%%' OR a.attname ILIKE $3 ESCAPE '~') \
+     ORDER BY a.attnum LIMIT $4"
+}
+
+fn postgres_completion_relkinds(kinds: &[CompletionAssistantObjectKind]) -> Vec<String> {
+    let mut relkinds = Vec::new();
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Table)) {
+        relkinds.extend(["r", "p", "f"].into_iter().map(str::to_string));
+    }
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::View)) {
+        relkinds.extend(["v", "m"].into_iter().map(str::to_string));
+    }
+    relkinds
+}
+
+fn postgres_completion_prokinds(kinds: &[CompletionAssistantObjectKind]) -> Vec<String> {
+    let mut prokinds = Vec::new();
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, CompletionAssistantObjectKind::Procedure | CompletionAssistantObjectKind::Routine))
+    {
+        prokinds.push("p".to_string());
+    }
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, CompletionAssistantObjectKind::Function | CompletionAssistantObjectKind::Routine))
+    {
+        prokinds.push("f".to_string());
+    }
+    prokinds
+}
+
+fn postgres_completion_like_pattern(value: &str, mode: Option<&CompletionAssistantMatchMode>) -> String {
+    if value.trim().is_empty() || value == "%" {
+        return "%%".to_string();
+    }
+    let escaped = value.trim().replace('~', "~~").replace('%', "~%").replace('_', "~_");
+    match mode.unwrap_or(&CompletionAssistantMatchMode::Prefix) {
+        CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
+        CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
+    }
+}
+
 pub async fn get_table_comment(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = pool.get().await.map_err(|e| e.to_string())?;
@@ -1166,7 +1361,7 @@ pub async fn list_schemas(pool: &Pool) -> Result<Vec<String>, String> {
 
 const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              format_type(a.atttypid, a.atttypmod) AS full_type, \
-             NOT a.attnotnull AS is_nullable, \
+             COALESCE(c.is_nullable = 'YES', NOT a.attnotnull) AS is_nullable, \
              CASE WHEN a.attgenerated <> '' THEN NULL ELSE pg_get_expr(ad.adbin, ad.adrelid) END AS column_default, \
              EXISTS ( \
                SELECT 1 FROM pg_constraint co \
@@ -1195,13 +1390,15 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_depend dep ON dep.refobjid = a.attrelid AND dep.refobjsubid = a.attnum AND dep.deptype = 'i' \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
+             LEFT JOIN information_schema.columns c \
+               ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
              WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
 const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              format_type(a.atttypid, a.atttypmod) AS full_type, \
-             NOT a.attnotnull AS is_nullable, \
+             COALESCE(c.is_nullable = 'YES', NOT a.attnotnull) AS is_nullable, \
              pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
              EXISTS ( \
                SELECT 1 FROM pg_constraint co \
@@ -1220,6 +1417,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+             LEFT JOIN information_schema.columns c \
+               ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
              WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
@@ -2325,6 +2524,8 @@ mod tests {
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_sequence"));
         assert!(POSTGRES_COLUMNS_SQL.contains("generated by default as identity"));
         assert!(POSTGRES_COLUMNS_SQL.contains("generated always as identity"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("LEFT JOIN information_schema.columns"));
     }
 
     #[test]
@@ -2333,6 +2534,8 @@ mod tests {
         assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("pg_sequence"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("NULL::text AS column_extra"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("col_description"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("LEFT JOIN information_schema.columns"));
     }
 
     #[test]
@@ -2517,5 +2720,23 @@ mod tests {
         let sql = postgres_tables_sql();
 
         assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
+    }
+
+    #[test]
+    fn postgres_completion_like_pattern_uses_prefix_by_default() {
+        assert_eq!(postgres_completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Prefix)), "Temp%");
+        assert_eq!(postgres_completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Contains)), "%Temp%");
+        assert_eq!(
+            postgres_completion_like_pattern("order_100%", Some(&CompletionAssistantMatchMode::Prefix)),
+            "order~_100~%%"
+        );
+    }
+
+    #[test]
+    fn postgres_completion_sql_filters_before_limit() {
+        assert!(postgres_completion_tables_sql().contains("c.relname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
+        assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
     }
 }

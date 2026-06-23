@@ -30,6 +30,11 @@ export type ActiveTabSidebarTarget =
       tenant: string;
     }
   | {
+      type: "nacos-namespace";
+      connectionId: string;
+      namespace: string;
+    }
+  | {
       type: "query-context";
       connectionId: string;
       database: string;
@@ -84,6 +89,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "mq-tenant", connectionId: tab.connectionId, tenant: tab.mqTenant };
   }
 
+  if (tab.mode === "nacos") {
+    return { type: "nacos-namespace", connectionId: tab.connectionId, namespace: tab.nacosNamespace || "" };
+  }
+
   if (tab.savedSqlId) {
     return { type: "saved-sql-file", savedSqlId: tab.savedSqlId };
   }
@@ -131,6 +140,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "mq-tenant") {
     return node.type === "mq-tenant" && node.connectionId === target.connectionId && (node.mqTenant || node.label) === target.tenant;
+  }
+
+  if (target.type === "nacos-namespace") {
+    return node.type === "nacos-namespace" && node.connectionId === target.connectionId && (node.nacosNamespace || "") === target.namespace;
   }
 
   if (target.type === "saved-sql-file") {

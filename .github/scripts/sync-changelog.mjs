@@ -98,7 +98,7 @@ export function buildReleasesJson(releases, now = new Date()) {
   return {
     updatedAt: now.toISOString(),
     releases: releases
-      .filter((r) => !r.draft && !r.prerelease)
+      .filter((r) => !r.draft && !r.prerelease && !r.tag_name.startsWith("agents-"))
       .sort((a, b) => new Date(b.published_at) - new Date(a.published_at))
       .map((r) => ({
         tag: r.tag_name,

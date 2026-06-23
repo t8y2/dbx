@@ -307,6 +307,7 @@ pub enum DatabaseType {
     Xugu,
     Iotdb,
     Etcd,
+    Nacos,
     #[serde(rename = "iris")]
     Iris,
     #[serde(rename = "turso")]
@@ -793,6 +794,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Nacos => self.nacos_admin_url(),
         }
     }
 
@@ -998,6 +1000,7 @@ impl ConnectionConfig {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
             }
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Nacos => self.nacos_admin_url(),
         }
     }
 
@@ -1009,6 +1012,17 @@ impl ConnectionConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("mq://")
+            .to_string()
+    }
+
+    fn nacos_admin_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("serverAddr").or_else(|| value.get("server_addr")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("nacos://")
             .to_string()
     }
 

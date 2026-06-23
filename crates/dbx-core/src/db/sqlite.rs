@@ -9,7 +9,11 @@ use std::time::Instant;
 
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
-use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+use crate::types::{
+    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
+    ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo,
+};
 
 const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
@@ -567,6 +571,68 @@ mod tests {
         let id = cols.iter().find(|c| c.name == "id").expect("id col");
         assert!(id.extra.is_none());
     }
+
+    #[tokio::test]
+    async fn completion_assistant_searches_sqlite_tables_and_columns_with_limit() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+        execute_query(
+            &pool,
+            "CREATE TABLE account(id INTEGER PRIMARY KEY, display_name TEXT); CREATE VIEW account_view AS SELECT id FROM account; CREATE TABLE audit_log(id INTEGER);",
+        )
+        .await
+        .expect("setup schema");
+
+        let tables = completion_assistant_search(
+            &pool,
+            &CompletionAssistantRequest {
+                connection_id: "c1".to_string(),
+                database: "main".to_string(),
+                schema: Some("main".to_string()),
+                object_kinds: vec![CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View],
+                mask: "account".to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(1),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: Some("main".to_string()),
+                parent_name: None,
+                match_mode: Some(CompletionAssistantMatchMode::Prefix),
+            },
+        )
+        .await
+        .expect("table completion");
+
+        assert_eq!(tables.candidates.len(), 1);
+        assert!(tables.incomplete);
+        assert!(!tables.fallback_used);
+        assert_eq!(tables.candidates[0].name, "account");
+
+        let columns = completion_assistant_search(
+            &pool,
+            &CompletionAssistantRequest {
+                connection_id: "c1".to_string(),
+                database: "main".to_string(),
+                schema: Some("main".to_string()),
+                object_kinds: vec![CompletionAssistantObjectKind::Column],
+                mask: "name".to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(10),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: Some("main".to_string()),
+                parent_name: Some("account".to_string()),
+                match_mode: Some(CompletionAssistantMatchMode::Contains),
+            },
+        )
+        .await
+        .expect("column completion");
+
+        assert_eq!(columns.candidates.len(), 1);
+        assert_eq!(columns.candidates[0].name, "display_name");
+        assert_eq!(columns.candidates[0].data_type.as_deref(), Some("TEXT"));
+    }
 }
 
 pub async fn list_databases(_pool: &SqliteHandle) -> Result<Vec<DatabaseInfo>, String> {
@@ -638,6 +704,240 @@ pub async fn get_columns(pool: &SqliteHandle, _schema: &str, table: &str) -> Res
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn completion_assistant_search(
+    pool: &SqliteHandle,
+    request: &CompletionAssistantRequest,
+) -> Result<CompletionAssistantResponse, String> {
+    let pool = pool.clone();
+    let request = request.clone();
+    tokio::task::spawn_blocking(move || pool.with_connection(|conn| sqlite_completion_assistant_search(conn, &request)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn sqlite_completion_assistant_search(
+    conn: &mut Connection,
+    request: &CompletionAssistantRequest,
+) -> Result<CompletionAssistantResponse, String> {
+    let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
+    let kinds = completion_object_kinds(request);
+    let mut candidates = Vec::new();
+
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Schema)) {
+        for schema in sqlite_completion_schemas(conn, request, limit - candidates.len())? {
+            candidates.push(schema);
+            if candidates.len() >= limit {
+                return Ok(CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
+            }
+        }
+    }
+
+    if kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
+        for table in sqlite_completion_tables(conn, request, &kinds, limit - candidates.len())? {
+            candidates.push(table);
+            if candidates.len() >= limit {
+                return Ok(CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
+            }
+        }
+    }
+
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
+        for column in sqlite_completion_columns(conn, request, limit - candidates.len())? {
+            candidates.push(column);
+            if candidates.len() >= limit {
+                return Ok(CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
+            }
+        }
+    }
+
+    Ok(CompletionAssistantResponse { candidates, incomplete: false, fallback_used: false })
+}
+
+fn completion_object_kinds(request: &CompletionAssistantRequest) -> Vec<CompletionAssistantObjectKind> {
+    if request.object_kinds.is_empty() {
+        vec![CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View]
+    } else {
+        request.object_kinds.clone()
+    }
+}
+
+fn sqlite_completion_schemas(
+    conn: &mut Connection,
+    request: &CompletionAssistantRequest,
+    limit: usize,
+) -> Result<Vec<CompletionAssistantCandidate>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare("PRAGMA database_list").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
+    let mut schemas = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    schemas.sort_by_key(|schema| schema.to_lowercase());
+    Ok(schemas
+        .into_iter()
+        .filter(|schema| sqlite_completion_name_matches(schema, request))
+        .take(limit)
+        .map(|schema| CompletionAssistantCandidate {
+            name: schema.clone(),
+            kind: CompletionAssistantCandidateKind::Schema,
+            database: Some(request.database.clone()),
+            schema: Some(schema),
+            parent_schema: None,
+            parent_name: None,
+            comment: None,
+            data_type: None,
+        })
+        .collect())
+}
+
+fn sqlite_completion_tables(
+    conn: &mut Connection,
+    request: &CompletionAssistantRequest,
+    kinds: &[CompletionAssistantObjectKind],
+    limit: usize,
+) -> Result<Vec<CompletionAssistantCandidate>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let schema = sqlite_completion_schema(request);
+    let mut type_filters = Vec::new();
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Table)) {
+        type_filters.push("table");
+    }
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::View)) {
+        type_filters.push("view");
+    }
+    if type_filters.is_empty() {
+        type_filters.extend(["table", "view"]);
+    }
+    let placeholders = std::iter::repeat("?").take(type_filters.len()).collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT name, type FROM {}.sqlite_master WHERE type IN ({}) AND name NOT LIKE 'sqlite_%' AND {} ORDER BY name LIMIT ?",
+        sqlite_quote_ident(&schema),
+        placeholders,
+        sqlite_completion_filter_sql("name", request)
+    );
+    let pattern = sqlite_completion_like_pattern(request);
+    let mut params: Vec<&dyn rusqlite::ToSql> =
+        type_filters.iter().map(|value| value as &dyn rusqlite::ToSql).collect();
+    params.push(&pattern);
+    params.push(&limit);
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params.as_slice(), |row| {
+            let object_type = row.get::<_, String>(1)?;
+            Ok(CompletionAssistantCandidate {
+                name: row.get(0)?,
+                kind: if object_type.eq_ignore_ascii_case("view") {
+                    CompletionAssistantCandidateKind::View
+                } else {
+                    CompletionAssistantCandidateKind::Table
+                },
+                database: Some(request.database.clone()),
+                schema: Some(schema.clone()),
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: None,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+fn sqlite_completion_columns(
+    conn: &mut Connection,
+    request: &CompletionAssistantRequest,
+    limit: usize,
+) -> Result<Vec<CompletionAssistantCandidate>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let schema = sqlite_completion_schema(request);
+    let sql = format!("PRAGMA {}.table_info({})", sqlite_quote_ident(&schema), sqlite_quote_string(table));
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>("name")?, row.get::<_, String>("type")?)))
+        .map_err(|e| e.to_string())?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (name, data_type) = row.map_err(|e| e.to_string())?;
+        if !sqlite_completion_name_matches(&name, request) {
+            continue;
+        }
+        candidates.push(CompletionAssistantCandidate {
+            name,
+            kind: CompletionAssistantCandidateKind::Column,
+            database: Some(request.database.clone()),
+            schema: Some(schema.clone()),
+            parent_schema: Some(schema.clone()),
+            parent_name: Some(table.to_string()),
+            comment: None,
+            data_type: Some(data_type),
+        });
+        if candidates.len() >= limit {
+            break;
+        }
+    }
+    Ok(candidates)
+}
+
+fn sqlite_completion_schema(request: &CompletionAssistantRequest) -> String {
+    request
+        .parent_schema
+        .as_deref()
+        .or(request.schema.as_deref())
+        .filter(|schema| !schema.trim().is_empty())
+        .unwrap_or("main")
+        .to_string()
+}
+
+fn sqlite_completion_name_matches(name: &str, request: &CompletionAssistantRequest) -> bool {
+    let mask = request.mask.trim().trim_matches('%');
+    if mask.is_empty() {
+        return true;
+    }
+    let (name, mask) = if request.case_sensitive {
+        (name.to_string(), mask.to_string())
+    } else {
+        (name.to_lowercase(), mask.to_lowercase())
+    };
+    match request.match_mode.as_ref().unwrap_or(&CompletionAssistantMatchMode::Prefix) {
+        CompletionAssistantMatchMode::Prefix => name.starts_with(&mask),
+        CompletionAssistantMatchMode::Contains => name.contains(&mask),
+    }
+}
+
+fn sqlite_completion_filter_sql(column: &str, request: &CompletionAssistantRequest) -> String {
+    if request.case_sensitive {
+        format!("{column} GLOB ?")
+    } else {
+        format!("LOWER({column}) LIKE LOWER(?) ESCAPE '\\'")
+    }
+}
+
+fn sqlite_completion_like_pattern(request: &CompletionAssistantRequest) -> String {
+    let mask = request.mask.trim().trim_matches('%');
+    let escaped = mask.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    match request.match_mode.as_ref().unwrap_or(&CompletionAssistantMatchMode::Prefix) {
+        CompletionAssistantMatchMode::Prefix if request.case_sensitive => format!("{}*", mask.replace('[', "[[]")),
+        CompletionAssistantMatchMode::Contains if request.case_sensitive => format!("*{}*", mask.replace('[', "[[]")),
+        CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
+        CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
+    }
+}
+
+fn sqlite_quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn sqlite_quote_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Read `sqlite_master.sql` for `table` and return the lowercase column names that

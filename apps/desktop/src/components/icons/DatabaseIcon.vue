@@ -81,6 +81,7 @@ const assetIcons: Record<string, string> = {
   milvus: "milvus.png",
   mq: "pulsar",
   pulsar: "pulsar",
+  nacos: "nacos.png",
   iris: "iris.png",
   influxdb: "influxdb",
 };

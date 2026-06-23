@@ -61,6 +61,11 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public CompletionAssistantResponse completionAssistantSearch(CompletionAssistantRequest request) {
+        return StandardJdbcMetadata.INSTANCE.completionAssistantSearch(requireConnection(), profile, configuredDatabase, request);
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         throw new UnsupportedOperationException("Object source is not supported");
     }

@@ -117,7 +117,7 @@ export async function fetchGitHubChangelog(): Promise<ChangelogData> {
     return {
       updatedAt: new Date().toISOString(),
       releases: releases
-        .filter((release) => !release.draft && !release.prerelease)
+        .filter((release) => !release.draft && !release.prerelease && !release.tag_name.startsWith("agents-"))
         .map((release) => ({
           tag: release.tag_name,
           name: release.name || release.tag_name,

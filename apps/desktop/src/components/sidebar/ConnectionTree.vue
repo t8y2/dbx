@@ -81,7 +81,7 @@ const isFiltering = computed(() => !!searchQuery.value.trim() || hasSearchScopeF
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mq-tenant", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "mongo-db"],
   schema: ["schema"],
   table: ["table", "mongo-collection", "vector-collection", "elasticsearch-index"],
   view: ["view"],
@@ -340,6 +340,8 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadVectorCollections(connId);
       } else if (config.db_type === "mq") {
         await store.loadMqTenants(connId, loadOptions);
+      } else if (config.db_type === "nacos") {
+        await store.loadNacosNamespaces(connId, loadOptions);
       } else {
         await store.loadDatabases(connId, loadOptions);
       }
@@ -348,7 +350,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
-  if (config.db_type === "mq") return;
+  if (config.db_type === "mq" || config.db_type === "nacos") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node

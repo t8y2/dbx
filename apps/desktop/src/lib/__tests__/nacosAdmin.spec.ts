@@ -1,0 +1,51 @@
+import { describe, expect, it } from "vitest";
+import { buildNacosConfigDeleteConfirm, buildNacosInlineDiff, buildNacosInstanceConfirm, buildNacosRawRequest, buildNacosSideBySideDiff, isNacosRawMutation, parseNacosRawBody, parseNacosRawQuery, summarizeNacosConfigDiff } from "../nacosAdmin";
+
+describe("nacosAdmin helpers", () => {
+  it("parses raw query and body text", () => {
+    expect(parseNacosRawQuery("?dataId=a&group=DEFAULT_GROUP")).toEqual({ dataId: "a", group: "DEFAULT_GROUP" });
+    expect(parseNacosRawQuery("")).toBeUndefined();
+    expect(parseNacosRawBody('{"enabled":false}')).toEqual({ enabled: false });
+    expect(parseNacosRawBody("plain text")).toBe("plain text");
+  });
+
+  it("builds raw requests and detects mutations", () => {
+    const req = buildNacosRawRequest("post", " /v1/cs/configs ", "a=1", '{"b":2}');
+    expect(req).toEqual({ method: "post", path: "/v1/cs/configs", query: { a: "1" }, body: { b: 2 } });
+    expect(isNacosRawMutation("GET")).toBe(false);
+    expect(isNacosRawMutation("DELETE")).toBe(true);
+  });
+
+  it("summarizes config diffs", () => {
+    const diff = summarizeNacosConfigDiff("a\nb", "a\nc\nd");
+    expect(diff.changed).toBe(true);
+    expect(diff.removedLines).toBe(1);
+    expect(diff.addedLines).toBe(2);
+    expect(diff.preview).toContain("- b");
+    expect(diff.preview).toContain("+ c");
+  });
+
+  it("builds side-by-side config diff rows with inline segments", () => {
+    const rows = buildNacosSideBySideDiff('cloud:\n  secret: "aaa"\n', 'cloud:\n  secret: "aaa1"\n  enabled: true\n');
+    expect(rows[0]).toMatchObject({ leftLineNumber: 1, rightLineNumber: 1, leftType: "equal", rightType: "equal" });
+    expect(rows[1]).toMatchObject({ leftLineNumber: 2, rightLineNumber: 2, leftType: "modify", rightType: "modify" });
+    expect(rows[1].rightInline.some((segment) => segment.changed && segment.value === "1")).toBe(true);
+    expect(rows[2]).toMatchObject({ leftLineNumber: null, rightLineNumber: 3, leftType: "padding", rightType: "insert" });
+  });
+
+  it("builds inline config diff rows with character-level changed segments", () => {
+    const rows = buildNacosInlineDiff('secretId: "aaa1"\n', 'secretId: "aaa2"\n');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ lineNumber: 1, type: "delete" });
+    expect(rows[1]).toMatchObject({ lineNumber: 1, type: "insert" });
+    expect(rows[0].segments.some((segment) => segment.changed && segment.value === "1")).toBe(true);
+    expect(rows[1].segments.some((segment) => segment.changed && segment.value === "2")).toBe(true);
+  });
+
+  it("includes identifying fields in confirmations", () => {
+    expect(buildNacosConfigDeleteConfirm({ namespace: "", dataId: "app.yaml", group: "DEFAULT_GROUP" })).toContain("dataId=app.yaml");
+    const details = buildNacosInstanceConfirm({ serviceName: "DEFAULT_GROUP@@svc", groupName: "DEFAULT_GROUP" }, { ip: "127.0.0.1", port: 8080, enabled: true, metadata: null }, { enabled: false }, "", "public");
+    expect(details).toContain("serviceName=DEFAULT_GROUP@@svc");
+    expect(details).toContain("targetEnabled=false");
+  });
+});

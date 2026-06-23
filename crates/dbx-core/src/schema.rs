@@ -4,7 +4,7 @@ use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 macro_rules! extract_pool {
     ($connections:expr, $key:expr, $variant:ident) => {
@@ -237,6 +237,190 @@ pub fn duckdb_query_columns_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[cfg(feature = "duckdb-bundled")]
+pub fn duckdb_completion_assistant_search(
+    con: &duckdb::Connection,
+    request: &db::CompletionAssistantRequest,
+    attached_names: &[String],
+) -> Result<db::CompletionAssistantResponse, String> {
+    let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
+    let kinds = if request.object_kinds.is_empty() {
+        vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View]
+    } else {
+        request.object_kinds.clone()
+    };
+    let mut candidates = Vec::new();
+
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Schema)) {
+        candidates.extend(duckdb_completion_schemas(con, request, attached_names, limit)?);
+        if candidates.len() >= limit {
+            return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
+        }
+    }
+
+    if kinds.iter().any(db::CompletionAssistantObjectKind::is_table_like) {
+        candidates.extend(duckdb_completion_tables(con, request, &kinds, attached_names, limit - candidates.len())?);
+        if candidates.len() >= limit {
+            return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
+        }
+    }
+
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Column)) {
+        candidates.extend(duckdb_completion_columns(con, request, attached_names, limit - candidates.len())?);
+        if candidates.len() >= limit {
+            return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: false });
+        }
+    }
+
+    Ok(db::CompletionAssistantResponse { candidates, incomplete: false, fallback_used: false })
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_completion_schemas(
+    con: &duckdb::Connection,
+    request: &db::CompletionAssistantRequest,
+    attached_names: &[String],
+    limit: usize,
+) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let database = duckdb_catalog_name(con, &request.database, attached_names)?;
+    let pattern = duckdb_completion_like_pattern(request);
+    let mut stmt = con
+        .prepare(
+            "SELECT schema_name
+             FROM information_schema.schemata
+             WHERE catalog_name = ?
+               AND schema_name NOT IN ('information_schema', 'pg_catalog')
+               AND lower(schema_name) LIKE lower(?) ESCAPE '\\'
+             ORDER BY schema_name
+             LIMIT ?",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map((database.as_str(), pattern.as_str(), limit as i64), |row| {
+            let schema = row.get::<_, String>(0)?;
+            Ok(db::CompletionAssistantCandidate {
+                name: schema.clone(),
+                kind: db::CompletionAssistantCandidateKind::Schema,
+                database: Some(request.database.clone()),
+                schema: Some(schema),
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: None,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_completion_tables(
+    con: &duckdb::Connection,
+    request: &db::CompletionAssistantRequest,
+    kinds: &[db::CompletionAssistantObjectKind],
+    attached_names: &[String],
+    limit: usize,
+) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let database = duckdb_catalog_name(con, &request.database, attached_names)?;
+    let schema = request.parent_schema.as_deref().or(request.schema.as_deref()).unwrap_or("main");
+    let include_tables = kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Table));
+    let include_views = kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::View));
+    let pattern = duckdb_completion_like_pattern(request);
+    let mut stmt = con
+        .prepare(
+            "SELECT table_name, table_type
+             FROM information_schema.tables
+             WHERE table_catalog = ?
+               AND table_schema = ?
+               AND ((? AND table_type = 'BASE TABLE') OR (? AND table_type = 'VIEW'))
+               AND lower(table_name) LIKE lower(?) ESCAPE '\\'
+             ORDER BY table_name
+             LIMIT ?",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map((database.as_str(), schema, include_tables, include_views, pattern.as_str(), limit as i64), |row| {
+            let table_type = row.get::<_, String>(1)?;
+            Ok(db::CompletionAssistantCandidate {
+                name: row.get(0)?,
+                kind: if table_type.eq_ignore_ascii_case("VIEW") {
+                    db::CompletionAssistantCandidateKind::View
+                } else {
+                    db::CompletionAssistantCandidateKind::Table
+                },
+                database: Some(request.database.clone()),
+                schema: Some(schema.to_string()),
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: None,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_completion_columns(
+    con: &duckdb::Connection,
+    request: &db::CompletionAssistantRequest,
+    attached_names: &[String],
+    limit: usize,
+) -> Result<Vec<db::CompletionAssistantCandidate>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let database = duckdb_catalog_name(con, &request.database, attached_names)?;
+    let schema = request.parent_schema.as_deref().or(request.schema.as_deref()).unwrap_or("main");
+    let pattern = duckdb_completion_like_pattern(request);
+    let mut stmt = con
+        .prepare(
+            "SELECT column_name, data_type
+             FROM information_schema.columns
+             WHERE table_catalog = ?
+               AND table_schema = ?
+               AND table_name = ?
+               AND lower(column_name) LIKE lower(?) ESCAPE '\\'
+             ORDER BY ordinal_position
+             LIMIT ?",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map((database.as_str(), schema, table, pattern.as_str(), limit as i64), |row| {
+            Ok(db::CompletionAssistantCandidate {
+                name: row.get(0)?,
+                kind: db::CompletionAssistantCandidateKind::Column,
+                database: Some(request.database.clone()),
+                schema: Some(schema.to_string()),
+                parent_schema: Some(schema.to_string()),
+                parent_name: Some(table.to_string()),
+                comment: None,
+                data_type: Some(row.get(1)?),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_completion_like_pattern(request: &db::CompletionAssistantRequest) -> String {
+    let mask = request.mask.trim().trim_matches('%');
+    let escaped = mask.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    match request.match_mode.as_ref().unwrap_or(&db::CompletionAssistantMatchMode::Prefix) {
+        db::CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
+        db::CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
+    }
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -1164,6 +1348,65 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(feature = "duckdb-bundled")]
+    #[test]
+    fn duckdb_completion_assistant_searches_catalog_metadata_with_limit() {
+        let con = duckdb::Connection::open_in_memory().unwrap();
+        con.execute_batch(
+            "CREATE TABLE account(id INTEGER, display_name VARCHAR); CREATE VIEW account_view AS SELECT id FROM account;",
+        )
+        .unwrap();
+
+        let request = db::CompletionAssistantRequest {
+            connection_id: "c1".to_string(),
+            database: "main".to_string(),
+            schema: Some("main".to_string()),
+            object_kinds: vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View],
+            mask: "account".to_string(),
+            case_sensitive: false,
+            global_search: false,
+            max_results: Some(1),
+            search_in_comments: false,
+            search_in_definitions: false,
+            parent_schema: Some("main".to_string()),
+            parent_name: None,
+            match_mode: Some(db::CompletionAssistantMatchMode::Prefix),
+        };
+
+        let tables = duckdb_completion_assistant_search(&con, &request, &[]).unwrap();
+        assert_eq!(tables.candidates.len(), 1);
+        assert!(tables.incomplete);
+        assert!(!tables.fallback_used);
+        assert_eq!(tables.candidates[0].name, "account");
+
+        let columns = duckdb_completion_assistant_search(
+            &con,
+            &db::CompletionAssistantRequest {
+                object_kinds: vec![db::CompletionAssistantObjectKind::Column],
+                mask: "name".to_string(),
+                max_results: Some(10),
+                parent_name: Some("account".to_string()),
+                match_mode: Some(db::CompletionAssistantMatchMode::Contains),
+                ..request
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(columns.candidates.len(), 1);
+        assert_eq!(columns.candidates[0].name, "display_name");
+    }
+
+    #[test]
+    fn detects_unsupported_agent_completion_assistant_errors() {
+        assert!(super::is_agent_completion_assistant_unsupported(
+            "Agent RPC error (-1): Unknown method: completion_assistant_search_v1"
+        ));
+        assert!(super::is_agent_completion_assistant_unsupported(
+            "Agent RPC error (-1): Completion assistant search is not supported by this agent"
+        ));
+        assert!(!super::is_agent_completion_assistant_unsupported("Agent RPC error (-1): Connection failed"));
+    }
+
     #[test]
     fn clickhouse_metadata_uses_schema_when_database_is_empty() {
         assert_eq!(clickhouse_metadata_database("", "testdb"), "testdb");
@@ -1246,6 +1489,248 @@ pub async fn list_completion_objects_core(
         list_completion_objects_once(state, connection_id, database, schema)
     })
     .await
+}
+
+pub async fn completion_assistant_search_core(
+    state: &AppState,
+    request: db::CompletionAssistantRequest,
+) -> Result<db::CompletionAssistantResponse, String> {
+    let started_at = Instant::now();
+    let request_summary = format!(
+        "connection_id={} database={} schema={:?} kinds={:?} mask={} limit={:?}",
+        request.connection_id,
+        request.database,
+        request.schema,
+        request.object_kinds,
+        request.mask,
+        request.max_results
+    );
+    retry_metadata_connection(state, &request.connection_id, Some(&request.database), || async {
+        let pool_key = state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
+        log::debug!("[schema][completion_assistant:start] {request_summary}");
+        {
+            let connections = state.connections.read().await;
+            try_sqlserver!(connections, &pool_key, completion_assistant_search, &request);
+        }
+
+        {
+            let connections = state.connections.read().await;
+            if let Some(pool) = connections.get(&pool_key).and_then(|pool| match pool {
+                PoolKind::Sqlite(pool) => Some(pool.clone()),
+                _ => None,
+            }) {
+                drop(connections);
+                return db::sqlite::completion_assistant_search(&pool, &request).await;
+            }
+        }
+
+        #[cfg(feature = "duckdb-bundled")]
+        {
+            let duckdb_attached_names = duckdb_attached_database_names(state, &request.connection_id).await;
+            let connections = state.connections.read().await;
+            if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
+                drop(connections);
+                let con = con.lock().map_err(|e| e.to_string())?;
+                return duckdb_completion_assistant_search(&con, &request, &duckdb_attached_names);
+            }
+        }
+
+        {
+            let connections = state.connections.read().await;
+            if let Some(pool) = connections.get(&pool_key).and_then(|pool| match pool {
+                PoolKind::Postgres(pool) => Some(pool.clone()),
+                _ => None,
+            }) {
+                drop(connections);
+                return db::postgres::completion_assistant_search(&pool, &request).await;
+            }
+        }
+
+        {
+            let connections = state.connections.read().await;
+            if let Some(pool) = connections.get(&pool_key).and_then(|pool| match pool {
+                PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => Some(pool.clone()),
+                _ => None,
+            }) {
+                drop(connections);
+                return db::mysql::completion_assistant_search(&pool, &request).await;
+            }
+        }
+
+        {
+            let connections = state.connections.read().await;
+            if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+                let db_config = connection_config(state, &request.connection_id).await;
+                drop(connections);
+                let mut client = client.lock().await;
+                match client
+                    .completion_assistant_search::<db::CompletionAssistantResponse>(
+                        &request,
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
+                    .await
+                {
+                    Ok(mut response) => {
+                        response.fallback_used = false;
+                        return Ok(response);
+                    }
+                    Err(error) if is_agent_completion_assistant_unsupported(&error) => {
+                        log::debug!(
+                            "[schema][completion_assistant:agent-fallback] {} reason={}",
+                            request_summary,
+                            error
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        let response = completion_assistant_fallback_core(state, &request).await;
+        if let Ok(response) = &response {
+            log::debug!(
+                "[schema][completion_assistant:done] {} elapsed_ms={} candidates={} fallback_used={}",
+                request_summary,
+                started_at.elapsed().as_millis(),
+                response.candidates.len(),
+                response.fallback_used
+            );
+        }
+        response
+    })
+    .await
+}
+
+fn is_agent_completion_assistant_unsupported(error: &str) -> bool {
+    error.contains("Unknown method: completion_assistant_search_v1")
+        || error.contains("Method not found: completion_assistant_search_v1")
+        || error.contains("method not found: completion_assistant_search_v1")
+        || error.contains("Completion assistant search is not supported")
+}
+
+async fn completion_assistant_fallback_core(
+    state: &AppState,
+    request: &db::CompletionAssistantRequest,
+) -> Result<db::CompletionAssistantResponse, String> {
+    let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
+    let kinds = if request.object_kinds.is_empty() {
+        vec![db::CompletionAssistantObjectKind::Table, db::CompletionAssistantObjectKind::View]
+    } else {
+        request.object_kinds.clone()
+    };
+    let mut candidates = Vec::new();
+    let schema = request.parent_schema.as_deref().or(request.schema.as_deref()).unwrap_or("");
+    let filter = request.mask.trim().trim_matches('%');
+
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Schema)) {
+        let schemas = list_schemas_core(state, &request.connection_id, &request.database).await?;
+        for schema_name in schemas {
+            if completion_name_matches(&schema_name, filter, request.match_mode.as_ref()) {
+                candidates.push(db::CompletionAssistantCandidate {
+                    name: schema_name.clone(),
+                    kind: db::CompletionAssistantCandidateKind::Schema,
+                    database: Some(request.database.clone()),
+                    schema: Some(schema_name),
+                    parent_schema: None,
+                    parent_name: None,
+                    comment: None,
+                    data_type: None,
+                });
+            }
+            if candidates.len() >= limit {
+                return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: true });
+            }
+        }
+    }
+
+    if kinds.iter().any(db::CompletionAssistantObjectKind::is_table_like) {
+        let object_types = completion_table_object_types(&kinds);
+        let tables = list_tables_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            schema,
+            if filter.is_empty() { None } else { Some(filter) },
+            Some(limit),
+            None,
+            object_types.as_deref(),
+        )
+        .await?;
+        for table in tables {
+            let kind = if table.table_type.eq_ignore_ascii_case("VIEW")
+                || table.table_type.eq_ignore_ascii_case("MATERIALIZED_VIEW")
+            {
+                db::CompletionAssistantCandidateKind::View
+            } else {
+                db::CompletionAssistantCandidateKind::Table
+            };
+            candidates.push(db::CompletionAssistantCandidate {
+                name: table.name,
+                kind,
+                database: Some(request.database.clone()),
+                schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                parent_schema: table.parent_schema,
+                parent_name: table.parent_name,
+                comment: table.comment,
+                data_type: None,
+            });
+            if candidates.len() >= limit {
+                return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: true });
+            }
+        }
+    }
+
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Column)) {
+        if let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) {
+            let columns = get_columns_core(state, &request.connection_id, &request.database, schema, table).await?;
+            for column in columns {
+                if completion_name_matches(&column.name, filter, request.match_mode.as_ref()) {
+                    candidates.push(db::CompletionAssistantCandidate {
+                        name: column.name,
+                        kind: db::CompletionAssistantCandidateKind::Column,
+                        database: Some(request.database.clone()),
+                        schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                        parent_schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                        parent_name: Some(table.to_string()),
+                        comment: column.comment,
+                        data_type: Some(column.data_type),
+                    });
+                }
+                if candidates.len() >= limit {
+                    return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: true });
+                }
+            }
+        }
+    }
+
+    Ok(db::CompletionAssistantResponse { candidates, incomplete: false, fallback_used: true })
+}
+
+fn completion_table_object_types(kinds: &[db::CompletionAssistantObjectKind]) -> Option<Vec<String>> {
+    let mut object_types = Vec::new();
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::Table)) {
+        object_types.push("table".to_string());
+    }
+    if kinds.iter().any(|kind| matches!(kind, db::CompletionAssistantObjectKind::View)) {
+        object_types.push("view".to_string());
+    }
+    if object_types.is_empty() {
+        None
+    } else {
+        Some(object_types)
+    }
+}
+
+fn completion_name_matches(name: &str, filter: &str, mode: Option<&db::CompletionAssistantMatchMode>) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let name = name.to_lowercase();
+    let filter = filter.to_lowercase();
+    match mode.unwrap_or(&db::CompletionAssistantMatchMode::Prefix) {
+        db::CompletionAssistantMatchMode::Prefix => name.starts_with(&filter),
+        db::CompletionAssistantMatchMode::Contains => name.contains(&filter),
+    }
 }
 
 async fn list_object_statistics_once(
@@ -2047,6 +2532,35 @@ pub async fn get_table_ddl_core(
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             drop(connections);
+            if let Some(config) = db_config.as_ref().filter(|config| is_agent_postgres_metadata_fallback_config(config))
+            {
+                match native_postgres_metadata_pool(state, connection_id, database, config).await {
+                    Ok(Some(pool)) => match pg_ddl(&pool, schema, table).await {
+                        Ok(ddl) => return Ok(ddl),
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][agent:get_table_ddl:postgres-compatible-native-fallback-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "[schema][agent:get_table_ddl:postgres-compatible-native-pool-failed] connection_id={} database={} schema={} table={} error={}",
+                            connection_id,
+                            database,
+                            schema,
+                            table,
+                            error
+                        );
+                    }
+                }
+            }
             let mut client = client.lock().await;
             return client.get_table_ddl(database, schema, table, agent_metadata_timeout(db_config.as_ref())).await;
         }

@@ -118,6 +118,7 @@ export const getTableComment = forward("getTableComment");
 export const listObjects = forward("listObjects");
 export const listObjectStatistics = forward("listObjectStatistics");
 export const listCompletionObjects = forward("listCompletionObjects");
+export const completionAssistantSearch = forward("completionAssistantSearch");
 export const getObjectSource = forward("getObjectSource");
 export const getColumns = forward("getColumns");
 export const listIndexes = forward("listIndexes");
@@ -226,6 +227,23 @@ export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
 export const pendingOpenConnectionLinks = forward("pendingOpenConnectionLinks");
 export const readExternalSqlFile = forward("readExternalSqlFile");
+
+// Nacos
+export const nacosTestConnection = forward("nacosTestConnection");
+export const nacosListNamespaces = forward("nacosListNamespaces");
+export const nacosCreateNamespace = forward("nacosCreateNamespace");
+export const nacosUpdateNamespace = forward("nacosUpdateNamespace");
+export const nacosListConfigs = forward("nacosListConfigs");
+export const nacosGetConfig = forward("nacosGetConfig");
+export const nacosPublishConfig = forward("nacosPublishConfig");
+export const nacosDeleteConfig = forward("nacosDeleteConfig");
+export const nacosListConfigHistory = forward("nacosListConfigHistory");
+export const nacosGetConfigHistory = forward("nacosGetConfigHistory");
+export const nacosRollbackConfig = forward("nacosRollbackConfig");
+export const nacosListServices = forward("nacosListServices");
+export const nacosListInstances = forward("nacosListInstances");
+export const nacosUpdateInstance = forward("nacosUpdateInstance");
+export const nacosRawRequest = forward("nacosRawRequest");
 
 // Data Transfer
 export const startTransfer = forward("startTransfer");

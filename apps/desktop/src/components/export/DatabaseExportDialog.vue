@@ -65,7 +65,7 @@ const exportCancelled = ref(false);
 const pendingPrefillTable = ref("");
 const pendingPrefillTables = ref<string[]>([]);
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "etcd"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "etcd", "mq", "nacos"].includes(c.db_type)));
 
 const canExport = computed(() => connectionId.value && database.value && schema.value && !loadingTables.value && !tableError.value && (tables.value.length === 0 || selectedTables.value.length > 0) && (includeStructure.value || includeData.value || includeObjects.value) && !isExporting.value);
 

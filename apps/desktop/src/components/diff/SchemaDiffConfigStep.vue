@@ -53,7 +53,7 @@ const targetSchemas = ref<string[]>([]);
 const sourceDbVersion = ref<string | null>(null);
 const targetDbVersion = ref<string | null>(null);
 
-const sqlConnections = computed(() => store.connections.filter((c: any) => c.db_type !== "mongodb" && c.db_type !== "redis"));
+const sqlConnections = computed(() => store.connections.filter((c: any) => !["mongodb", "redis", "elasticsearch", "etcd", "mq", "nacos"].includes(c.db_type)));
 
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));

@@ -639,6 +639,26 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void columnIsNullablePrefersIsNullableStringWhenNullableCodeIsWrong() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("columnIsNullable", ResultSet.class);
+        method.setAccessible(true);
+
+        ResultSet rs = columnNullableResultSet("YES", DatabaseMetaData.columnNoNulls);
+
+        assertEquals(true, method.invoke(null, rs));
+    }
+
+    @Test
+    void columnIsNullableFallsBackToNullableCodeWhenStringIsMissing() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("columnIsNullable", ResultSet.class);
+        method.setAccessible(true);
+
+        ResultSet rs = columnNullableResultSet(null, DatabaseMetaData.columnNullable);
+
+        assertEquals(true, method.invoke(null, rs));
+    }
+
+    @Test
     void showFullColumnsMetadataCompletesMysqlCompatibleTypesAndComments() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
             "mergeShowFullColumnMetadata",
@@ -893,6 +913,25 @@ final class DbxJdbcPluginTest {
                 case "isClosed" -> false;
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet columnNullableResultSet(String isNullable, int nullableCode) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> {
+                if ("getString".equals(method.getName()) && "IS_NULLABLE".equals(args[0])) {
+                    if (isNullable == null) {
+                        throw new SQLException("Column not found: IS_NULLABLE");
+                    }
+                    return isNullable;
+                }
+                if ("getInt".equals(method.getName()) && "NULLABLE".equals(args[0])) {
+                    return nullableCode;
+                }
+                return defaultValue(method.getReturnType());
             }
         );
     }

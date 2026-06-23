@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redisKeyTree.ts";
+import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redisKeyTree.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/api.ts";
 
 function makeKey(key_display: string, key_raw: string, key_type = "string", ttl = -1): RedisKeyInfo {
@@ -66,6 +66,34 @@ test("collectExpandedGroupIds and flattenVisibleRedisKeyTree expand all search p
     rows.map(({ node, depth }) => `${depth}:${node.kind}:${node.label}`),
     ["0:group:user", "1:group:profile", "2:leaf:name", "1:leaf:settings"],
   );
+});
+
+test("flattenVisibleRedisKeyTree handles very large expanded groups without stack overflow", () => {
+  const keys = Array.from({ length: 150_000 }, (_, index) => {
+    const id = String(index).padStart(6, "0");
+    return makeKey(`user:${id}`, `user:${id}`);
+  });
+  const tree = buildRedisKeyTree(keys, 0);
+  const expanded = collectExpandedGroupIds(tree);
+
+  const rows = flattenVisibleRedisKeyTree(tree, expanded);
+
+  assert.equal(rows.length, keys.length + 1);
+  assert.equal(rows[0]?.node.kind, "group");
+  assert.equal(rows[0]?.node.label, "user");
+  assert.equal(rows[1]?.depth, 1);
+  assert.equal(rows.at(-1)?.depth, 1);
+});
+
+test("redisKeyToFlatTreeRow keeps search results flat with the full key label", () => {
+  const row = redisKeyToFlatTreeRow(makeKey("user:profile:1", "user:profile:1", ""), 0);
+
+  assert.equal(row.depth, 0);
+  assert.equal(row.node.kind, "leaf");
+  if (row.node.kind !== "leaf") return;
+  assert.equal(row.node.label, "user:profile:1");
+  assert.deepEqual(row.node.pathSegments, ["user:profile:1"]);
+  assert.equal(row.node.keyType, "");
 });
 
 test("collectRedisGroupKeyRaws returns every leaf key under a group", () => {

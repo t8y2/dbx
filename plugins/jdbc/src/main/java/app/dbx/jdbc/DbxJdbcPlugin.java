@@ -1409,7 +1409,7 @@ public final class DbxJdbcPlugin {
                 String name = rs.getString("COLUMN_NAME");
                 ObjectNode item = columnNode(result, name);
                 item.put("data_type", rs.getString("TYPE_NAME"));
-                item.put("is_nullable", rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls);
+                item.put("is_nullable", columnIsNullable(rs));
                 putNullablePreferValue(item, "column_default", rs.getString("COLUMN_DEF"));
                 item.put("is_primary_key", primaryKeys.contains(name));
                 item.putNull("extra");
@@ -1419,6 +1419,20 @@ public final class DbxJdbcPlugin {
                 putNullableInt(item, "character_maximum_length", rs.getObject("COLUMN_SIZE"));
             }
         }
+    }
+
+    private static boolean columnIsNullable(ResultSet rs) throws SQLException {
+        try {
+            String isNullableStr = rs.getString("IS_NULLABLE");
+            if ("YES".equalsIgnoreCase(isNullableStr)) {
+                return true;
+            }
+            if ("NO".equalsIgnoreCase(isNullableStr)) {
+                return false;
+            }
+        } catch (SQLException ignored) {
+        }
+        return rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls;
     }
 
     private static void mergeShowFullColumnMetadata(Connection conn, ArrayNode result, String schema, String table) {

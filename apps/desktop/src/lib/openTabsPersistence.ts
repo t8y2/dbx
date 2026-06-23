@@ -33,6 +33,8 @@ export interface SavedOpenTab {
   pinned?: boolean;
   mode?: QueryTab["mode"];
   mqTenant?: string;
+  nacosNamespace?: string;
+  nacosNamespaceName?: string;
   structureTableName?: string;
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
@@ -72,6 +74,8 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     pinned: tab.pinned,
     mode: tab.mode,
     ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
+    ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
+    ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,

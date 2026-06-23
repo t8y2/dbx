@@ -182,12 +182,13 @@ const isBinaryStringValue = computed(() => data.value?.key_type === "string" && 
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const metadataSizeLabel = computed(() => {
   const metadata = props.metadata;
-  if (!metadata || metadata.size <= 0) return "";
+  const size = metadata?.size ?? 0;
+  if (!metadata || size <= 0) return "";
   if (metadata.key_type === "string") {
-    if (metadata.size >= 1024) return `${(metadata.size / 1024).toFixed(1)} KB`;
-    return `${metadata.size} B`;
+    if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${size} B`;
   }
-  return String(metadata.size);
+  return String(size);
 });
 
 function collectionCountLabel(kind: "items" | "fields" | "members", loaded: number, total?: number | null) {

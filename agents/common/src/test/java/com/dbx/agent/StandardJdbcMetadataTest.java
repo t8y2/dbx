@@ -247,6 +247,44 @@ class StandardJdbcMetadataTest {
         assertEquals(Collections.emptyList(), StandardJdbcMetadata.INSTANCE.listTriggers("APP", "ORDERS"));
     }
 
+    @Test
+    void completionAssistantSearchesTablesAndColumnsWithServerSideMasks() {
+        AtomicReference<Object[]> capturedTableArgs = new AtomicReference<>();
+        AtomicReference<Object[]> capturedColumnArgs = new AtomicReference<>();
+        Connection conn = connection(
+            rows(),
+            rows(
+                row("TABLE_NAME", "ACCOUNTS", "TABLE_TYPE", "TABLE", "REMARKS", "account table"),
+                row("TABLE_NAME", "ACCOUNT_VIEW", "TABLE_TYPE", "VIEW", "REMARKS", null)
+            ),
+            rows(),
+            rows(row("COLUMN_NAME", "DISPLAY_NAME", "TYPE_NAME", "VARCHAR", "NULLABLE", DatabaseMetaData.columnNullable, "COLUMN_DEF", null, "REMARKS", "display")),
+            rows(),
+            rows(),
+            UnsupportedSchemaCall.NONE,
+            rows(row("TABLE_TYPE", "TABLE"), row("TABLE_TYPE", "VIEW")),
+            null,
+            capturedTableArgs,
+            capturedColumnArgs
+        );
+
+        CompletionAssistantRequest tablesRequest = request("sales", "APP", "ACC", Arrays.asList(CompletionAssistantObjectKind.TABLE, CompletionAssistantObjectKind.VIEW), null);
+        CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", tablesRequest);
+
+        assertEquals(2, tables.getCandidates().size());
+        assertEquals(CompletionAssistantCandidateKind.TABLE, tables.getCandidates().get(0).getKind());
+        assertEquals("ACC%", capturedTableArgs.get()[2]);
+
+        CompletionAssistantRequest columnsRequest = request("sales", "APP", "DISPLAY", Collections.singletonList(CompletionAssistantObjectKind.COLUMN), "ACCOUNTS");
+        CompletionAssistantResponse columns = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", columnsRequest);
+
+        assertEquals(1, columns.getCandidates().size());
+        assertEquals("DISPLAY_NAME", columns.getCandidates().get(0).getName());
+        assertEquals("VARCHAR", columns.getCandidates().get(0).getData_type());
+        assertEquals("ACCOUNTS", capturedColumnArgs.get()[2]);
+        assertEquals("DISPLAY%", capturedColumnArgs.get()[3]);
+    }
+
     private static Connection connection(
         ResultSet schemas,
         ResultSet tables,
@@ -316,6 +354,22 @@ class StandardJdbcMetadataTest {
         ResultSet tableTypes,
         AtomicReference<String[]> capturedTableTypes
     ) {
+        return connection(schemas, tables, primaryKeys, columns, indexes, foreignKeys, unsupportedSchemaCall, tableTypes, capturedTableTypes, null, null);
+    }
+
+    private static Connection connection(
+        ResultSet schemas,
+        ResultSet tables,
+        ResultSet primaryKeys,
+        ResultSet columns,
+        ResultSet indexes,
+        ResultSet foreignKeys,
+        UnsupportedSchemaCall unsupportedSchemaCall,
+        ResultSet tableTypes,
+        AtomicReference<String[]> capturedTableTypes,
+        AtomicReference<Object[]> capturedTableArgs,
+        AtomicReference<Object[]> capturedColumnArgs
+    ) {
         DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
             @Override
             public Object handle(Method method, Object[] args) {
@@ -327,6 +381,9 @@ class StandardJdbcMetadataTest {
                     return schemas;
                 }
                 if ("getTables".equals(name)) {
+                    if (capturedTableArgs != null) {
+                        capturedTableArgs.set(args);
+                    }
                     if (capturedTableTypes != null && args != null && args.length > 3) {
                         capturedTableTypes.set((String[]) args[3]);
                     }
@@ -339,6 +396,9 @@ class StandardJdbcMetadataTest {
                     return primaryKeys;
                 }
                 if ("getColumns".equals(name)) {
+                    if (capturedColumnArgs != null) {
+                        capturedColumnArgs.set(args);
+                    }
                     return columns;
                 }
                 if ("getIndexInfo".equals(name)) {
@@ -418,6 +478,35 @@ class StandardJdbcMetadataTest {
             row.put(String.valueOf(values[i]), values[i + 1]);
         }
         return row;
+    }
+
+    private static CompletionAssistantRequest request(
+        String database,
+        String schema,
+        String mask,
+        List<CompletionAssistantObjectKind> kinds,
+        String parentName
+    ) {
+        CompletionAssistantRequest request = new CompletionAssistantRequest();
+        setField(request, "database", database);
+        setField(request, "schema", schema);
+        setField(request, "mask", mask);
+        setField(request, "object_kinds", kinds);
+        setField(request, "parent_schema", schema);
+        setField(request, "parent_name", parentName);
+        setField(request, "max_results", 10);
+        setField(request, "match_mode", CompletionAssistantMatchMode.PREFIX);
+        return request;
+    }
+
+    private static void setField(Object target, String name, Object value) {
+        try {
+            java.lang.reflect.Field field = target.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static <T> T proxy(Class<T> type, final MethodHandler handler) {

@@ -30,10 +30,26 @@ pub struct RedisDatabaseInfo {
 pub struct RedisKeyInfo {
     pub key_display: String,
     pub key_raw: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key_type: String,
+    #[serde(default = "default_missing_ttl", skip_serializing_if = "is_missing_ttl")]
     pub ttl: i64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub size: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub value_preview: String,
+}
+
+fn default_missing_ttl() -> i64 {
+    -2
+}
+
+fn is_missing_ttl(ttl: &i64) -> bool {
+    *ttl == -2
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1510,7 +1526,7 @@ where
                 let key_type = if include_types {
                     key_types.get(index).cloned().unwrap_or_else(|| "unknown".to_string())
                 } else {
-                    "unknown".to_string()
+                    String::new()
                 };
                 let value_preview = if include_types {
                     redis_key_value_preview(key_types.get(index).map(String::as_str).unwrap_or("unknown"))

@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/utils";
 import { ref, computed, watch } from "vue";
-import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SidebarLayout, TableInfo, TreeNode } from "@/types/database";
+import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SidebarLayout, TableInfo, TreeNode } from "@/types/database";
 import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/pinnedItems";
 import {
   reconcileLayout,
@@ -944,6 +944,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadVectorCollections(connectionId);
     } else if (config.db_type === "mq") {
       await loadMqTenants(connectionId, { force: true });
+    } else if (config.db_type === "nacos") {
+      await loadNacosNamespaces(connectionId, { force: true });
     } else {
       await loadDatabases(connectionId, { force: true });
     }
@@ -1284,6 +1286,47 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId,
           mqTenant: tenant,
         })),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadNacosNamespaces(connectionId: string, options?: LoadTreeOptions) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node, options)) return;
+
+      const namespaces = await api.nacosListNamespaces(connectionId);
+      const sorted = [...namespaces].sort((left, right) => {
+        const leftLabel = left.namespaceShowName || left.namespace || "public";
+        const rightLabel = right.namespaceShowName || right.namespace || "public";
+        return leftLabel.localeCompare(rightLabel);
+      });
+      setChildren(
+        node,
+        sorted.map((namespace) => {
+          const value = namespace.namespace || "";
+          const label = namespace.namespaceShowName || value || "public";
+          return {
+            id: schemaCacheKey(connectionId, "nacos-namespace", value || "public"),
+            label,
+            type: "nacos-namespace" as const,
+            connectionId,
+            nacosNamespace: value,
+            nacosNamespaceName: label,
+            comment: namespace.namespaceDesc || null,
+            objectCount: namespace.configCount,
+          };
+        }),
       );
       node.isExpanded = true;
     } catch (e) {
@@ -2062,6 +2105,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await loadMqTenants(node.connectionId, options);
+      } else if (config?.db_type === "nacos") {
+        await loadNacosNamespaces(node.connectionId, options);
       } else {
         await loadDatabases(node.connectionId, options);
       }
@@ -2207,6 +2252,87 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     completionInFlight.set(key, promise);
     return promise;
+  }
+
+  function completionAssistantRequestKey(request: CompletionAssistantRequest): string {
+    return JSON.stringify({
+      connection_id: request.connection_id,
+      database: request.database,
+      schema: request.schema ?? "",
+      object_kinds: [...(request.object_kinds ?? [])].sort(),
+      mask: request.mask ?? "",
+      case_sensitive: !!request.case_sensitive,
+      global_search: !!request.global_search,
+      max_results: request.max_results ?? null,
+      search_in_comments: !!request.search_in_comments,
+      search_in_definitions: !!request.search_in_definitions,
+      parent_schema: request.parent_schema ?? "",
+      parent_name: request.parent_name ?? "",
+      match_mode: request.match_mode ?? "prefix",
+    });
+  }
+
+  async function completionAssistantSearch(request: CompletionAssistantRequest) {
+    return withCompletionInFlight(`assistant:${completionAssistantRequestKey(request)}`, async () => {
+      await ensureConnected(request.connection_id);
+      return api.completionAssistantSearch(request);
+    });
+  }
+
+  function completionAssistantTables(candidates: CompletionAssistantCandidate[]): SqlCompletionTable[] {
+    return candidates
+      .filter((candidate) => candidate.kind === "table" || candidate.kind === "view")
+      .map((candidate) => ({
+        name: candidate.name,
+        schema: candidate.schema ?? undefined,
+        type: candidate.kind === "view" ? ("view" as const) : ("table" as const),
+      }));
+  }
+
+  function completionAssistantColumns(candidates: CompletionAssistantCandidate[], table: string, schema?: string): SqlCompletionColumn[] {
+    return candidates
+      .filter((candidate) => candidate.kind === "column")
+      .map((candidate) => ({
+        name: candidate.name,
+        table: candidate.parent_name ?? table,
+        schema: candidate.parent_schema ?? candidate.schema ?? schema,
+        dataType: candidate.data_type ?? undefined,
+        comment: candidate.comment ?? null,
+      }));
+  }
+
+  async function listCompletionAssistantTables(connectionId: string, database: string, filter: string, limit?: number, schema?: string): Promise<SqlCompletionTable[]> {
+    const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
+    const response = await completionAssistantSearch({
+      connection_id: connectionId,
+      database,
+      schema: schema ?? null,
+      object_kinds: objectKinds,
+      mask: filter.trim(),
+      max_results: limit ?? 200,
+      parent_schema: schema ?? null,
+      match_mode: "prefix",
+    });
+    const tables = completionAssistantTables(response.candidates);
+    indexCompletionTables(connectionId, database, schema, tables);
+    return tables;
+  }
+
+  async function listCompletionAssistantColumns(connectionId: string, database: string, table: string, schema?: string): Promise<SqlCompletionColumn[]> {
+    const response = await completionAssistantSearch({
+      connection_id: connectionId,
+      database,
+      schema: schema ?? null,
+      object_kinds: ["column"],
+      mask: "",
+      max_results: 500,
+      parent_schema: schema ?? null,
+      parent_name: table,
+      match_mode: "prefix",
+    });
+    const columns = completionAssistantColumns(response.candidates, table, schema);
+    if (columns.length > 0) indexCompletionColumns(connectionId, database, table, schema, columns);
+    return columns;
   }
 
   function completionNameSegments(name: string): string[] {
@@ -2498,53 +2624,36 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(connectionId);
 
       if (isSchemaAwareDatabase(connectionId)) {
-        const schemas = schema ? [schema] : await listCompletionSchemas(connectionId, database);
         if (normalizedFilter || limit) {
-          const batchSize = 5;
-          const results: SqlCompletionTable[] = [];
-          const maxResults = limit ?? Infinity;
-          for (let i = 0; i < schemas.length && results.length < maxResults; i += batchSize) {
-            const batch = schemas.slice(i, i + batchSize);
-            const batchResults = await Promise.all(
-              batch.map(async (s) => {
-                try {
-                  const tables = await api.listTables(connectionId, database, s, normalizedFilter, limit);
-                  return tables.map((table) => ({
-                    name: table.name,
-                    schema: s,
-                    type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
-                  })) as SqlCompletionTable[];
-                } catch {
-                  return [] as SqlCompletionTable[];
-                }
-              }),
-            );
-            for (const group of batchResults) {
-              results.push(...group);
-              indexCompletionTables(connectionId, database, undefined, group);
+          let results: SqlCompletionTable[] = [];
+          try {
+            results = await listCompletionAssistantTables(connectionId, database, normalizedFilter, limit, schema);
+          } catch {
+            if (schema) {
+              const tables = await api.listTables(connectionId, database, schema, normalizedFilter, limit);
+              results = tables.map((table) => ({
+                name: table.name,
+                schema,
+                type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
+              }));
+            } else {
+              results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit);
             }
           }
           if (results.length === 0 && relaxedFilter) {
-            for (let i = 0; i < schemas.length && results.length < maxResults; i += batchSize) {
-              const batch = schemas.slice(i, i + batchSize);
-              const batchResults = await Promise.all(
-                batch.map(async (s) => {
-                  try {
-                    const tables = await api.listTables(connectionId, database, s, relaxedFilter, expandedCompletionLimit(limit));
-                    return tables.map((table) => ({
-                      name: table.name,
-                      schema: s,
-                      type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
-                    })) as SqlCompletionTable[];
-                  } catch {
-                    return [] as SqlCompletionTable[];
-                  }
-                }),
-              );
-              for (const group of batchResults) {
-                results.push(...group);
-                indexCompletionTables(connectionId, database, undefined, group);
+            if (schema) {
+              try {
+                const tables = await api.listTables(connectionId, database, schema, relaxedFilter, expandedCompletionLimit(limit));
+                results = tables.map((table) => ({
+                  name: table.name,
+                  schema,
+                  type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
+                }));
+              } catch {
+                results = [];
               }
+            } else {
+              results = lookupLocalCompletionTables(connectionId, database, relaxedFilter, expandedCompletionLimit(limit));
             }
           }
           const limitedTables = limit ? dedupeCompletionTables(results).slice(0, limit) : results;
@@ -2554,21 +2663,16 @@ export const useConnectionStore = defineStore("connection", () => {
           return completionTablesCache.value[cacheKey];
         }
 
-        const tableGroups = await Promise.all(
-          schemas.map(async (schema) => {
-            try {
-              const tables = await api.listTables(connectionId, database, schema);
-              return tables.map((table) => ({
-                name: table.name,
-                schema,
-                type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
-              }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        completionTablesCache.value[cacheKey] = tableGroups.flat();
+        if (schema) {
+          const tables = await api.listTables(connectionId, database, schema);
+          completionTablesCache.value[cacheKey] = tables.map((table) => ({
+            name: table.name,
+            schema,
+            type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW" ? ("view" as const) : ("table" as const),
+          }));
+        } else {
+          completionTablesCache.value[cacheKey] = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit);
+        }
         indexCompletionTables(connectionId, database, undefined, completionTablesCache.value[cacheKey]);
         evictOldestCacheEntries(completionTablesCache.value, COMPLETION_CACHE_MAX);
         return completionTablesCache.value[cacheKey];
@@ -2699,6 +2803,27 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!completionColumnsCache.value[cacheKey]) {
       await withCompletionInFlight(`${cacheKey}:columns`, async () => {
         await ensureConnected(connectionId);
+        try {
+          const assistantColumns = await listCompletionAssistantColumns(connectionId, database, table, schema);
+          if (assistantColumns.length > 0) {
+            completionColumnsCache.value[cacheKey] = assistantColumns.map((column) => ({
+              name: column.name,
+              data_type: column.dataType ?? "",
+              is_nullable: column.isNullable ?? true,
+              column_default: null,
+              is_primary_key: false,
+              extra: null,
+              comment: column.comment ?? null,
+              numeric_precision: null,
+              numeric_scale: null,
+              character_maximum_length: null,
+            }));
+            evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
+            return;
+          }
+        } catch {
+          // Fall back to the existing metadata path below.
+        }
         const querySchema = metadataQuerySchema(connectionId, database, schema);
         completionColumnsCache.value[cacheKey] = await api.getColumns(connectionId, database, querySchema, table);
         evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
@@ -3252,6 +3377,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshRedisDbKeyCounts,
     loadEtcdRoot,
     loadMqTenants,
+    loadNacosNamespaces,
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadElasticsearchIndices,

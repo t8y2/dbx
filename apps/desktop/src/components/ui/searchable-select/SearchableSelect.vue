@@ -57,6 +57,20 @@ function highlightSelectedOption() {
   highlightIndex.value = selectedIndex >= 0 ? selectedIndex : 0;
 }
 
+async function scrollHighlightedOptionIntoView() {
+  await nextTick();
+  const container = listContainer.value;
+  if (!container || highlightIndex.value < 0) return;
+  const buttons = container.querySelectorAll("button");
+  const target = buttons[highlightIndex.value];
+  target?.scrollIntoView({ block: "nearest" });
+}
+
+function highlightAndScrollSelectedOption() {
+  highlightSelectedOption();
+  void scrollHighlightedOptionIntoView();
+}
+
 watch(open, async (value) => {
   emit("update:open", value);
   if (!value) {
@@ -67,7 +81,7 @@ watch(open, async (value) => {
   await nextTick();
   const input = searchInput.value?.$el as HTMLInputElement | undefined;
   input?.focus();
-  highlightSelectedOption();
+  highlightAndScrollSelectedOption();
 });
 
 watch(searchText, () => {
@@ -78,19 +92,12 @@ watch(
   () => [props.modelValue, props.options],
   () => {
     if (!open.value || searchText.value) return;
-    highlightSelectedOption();
+    highlightAndScrollSelectedOption();
   },
   { deep: true },
 );
 
-watch(highlightIndex, async () => {
-  await nextTick();
-  const container = listContainer.value;
-  if (!container || highlightIndex.value < 0) return;
-  const buttons = container.querySelectorAll("button");
-  const target = buttons[highlightIndex.value];
-  target?.scrollIntoView({ block: "nearest" });
-});
+watch(highlightIndex, scrollHighlightedOptionIntoView);
 
 function selectOption(option: string) {
   emit("update:modelValue", option);

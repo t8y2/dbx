@@ -1287,6 +1287,7 @@ const messageRenderer = computed(() => {
               item-class="text-xs px-2"
               @update:model-value="(value) => selectAction(value as AiAction)"
             />
+            <span class="min-w-0 flex-1" />
             <SearchableSelect
               v-if="settings.isConfigured()"
               :model-value="settings.aiConfig.model"
@@ -1297,7 +1298,7 @@ const messageRenderer = computed(() => {
               :loading-text="t('ai.loadingModels')"
               :loading="modelLoading"
               :display-name="displayModelName"
-              trigger-class="min-w-0 flex-1 shrink justify-end rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              trigger-class="min-w-0 w-auto max-w-[220px] shrink justify-end rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               content-class="w-72"
               item-class="text-xs px-2"
               @update:model-value="handleModelSelect"

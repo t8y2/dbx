@@ -1271,10 +1271,22 @@ const messageRenderer = computed(() => {
             @compositionend="promptCompositionActive = false"
             @keydown="onPromptKeydown"
           />
-          <div class="flex items-center gap-1.5">
-            <LightDropdown v-model="assistantMode" :items="assistantModeItems" :aria-label="activeModeHint" item-class="text-xs px-2" />
-            <LightDropdown :model-value="activeAction" :items="actionMenuItems" content-class="w-max min-w-0" item-class="text-xs px-2" @update:model-value="(value) => selectAction(value as AiAction)" />
-            <span class="flex-1" />
+          <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
+            <LightDropdown
+              v-model="assistantMode"
+              :items="assistantModeItems"
+              :aria-label="activeModeHint"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              item-class="text-xs px-2"
+            />
+            <LightDropdown
+              :model-value="activeAction"
+              :items="actionMenuItems"
+              content-class="w-max min-w-0"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              item-class="text-xs px-2"
+              @update:model-value="(value) => selectAction(value as AiAction)"
+            />
             <SearchableSelect
               v-if="settings.isConfigured()"
               :model-value="settings.aiConfig.model"
@@ -1285,14 +1297,14 @@ const messageRenderer = computed(() => {
               :loading-text="t('ai.loadingModels')"
               :loading="modelLoading"
               :display-name="displayModelName"
-              trigger-class="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground truncate max-w-[130px]"
+              trigger-class="min-w-0 flex-1 shrink justify-end rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               content-class="w-72"
               item-class="text-xs px-2"
               @update:model-value="handleModelSelect"
               @update:open="(open: boolean) => open && fetchModelOptions()"
             >
               <template #trigger-label="{ label, loading }">
-                <span class="truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
+                <span class="min-w-0 truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
               </template>
               <template #option-label="{ option, label }">
                 <span class="flex min-w-0 flex-col">

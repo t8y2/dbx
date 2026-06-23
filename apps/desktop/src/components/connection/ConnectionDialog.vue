@@ -2227,6 +2227,13 @@ async function createSqliteFilePath() {
   if (!selected) return;
 
   const path = ensureSqliteFileExtension(selected);
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("create_sqlite_database_file", { path });
+  } catch (e: any) {
+    toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+    return;
+  }
   form.value.host = path;
 }
 

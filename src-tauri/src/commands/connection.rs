@@ -199,7 +199,8 @@ async fn connect_agent_pool(
 #[cfg(test)]
 mod tests {
     use super::{
-        mark_mongo_legacy_driver, mongo_legacy_connect_params, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        create_sqlite_database_file, mark_mongo_legacy_driver, mongo_legacy_connect_params, MONGO_LEGACY_DRIVER_LABEL,
+        MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     #[cfg(feature = "mq-admin")]
@@ -304,6 +305,21 @@ mod tests {
         assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
         assert!(!mark_mongo_legacy_driver(&mut config));
+    }
+
+    #[tokio::test]
+    async fn create_sqlite_database_file_initializes_missing_file() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-create-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("created.db");
+        let path_str = path.to_string_lossy().to_string();
+
+        create_sqlite_database_file(path_str.clone()).await.unwrap();
+
+        assert!(path.is_file());
+        dbx_core::db::sqlite::connect_path(&path_str).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(feature = "mq-admin")]
@@ -519,6 +535,13 @@ pub async fn save_sidebar_layout(state: State<'_, Arc<AppState>>, layout: serde_
 #[tauri::command]
 pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_sidebar_layout().await
+}
+
+#[tauri::command]
+pub async fn create_sqlite_database_file(path: String) -> Result<(), String> {
+    let handle = db::sqlite::connect_path_create_if_missing(&expand_tilde(&path)).await?;
+    drop(handle);
+    Ok(())
 }
 
 #[tauri::command]

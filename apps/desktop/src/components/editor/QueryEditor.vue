@@ -223,6 +223,20 @@ const zoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
   settingsStore.updateEditorSettings({ fontSize });
 });
 
+const queryEditorAppearanceSettings = computed(() => {
+  const settings = settingsStore.editorSettings;
+  return {
+    fontFamily: settings.fontFamily,
+    fontSize: settings.fontSize,
+    theme: settings.theme,
+    customThemeColors: settings.customThemeColors,
+    customThemes: settings.customThemes,
+    activeCustomThemeId: settings.activeCustomThemeId,
+    wordWrap: settings.wordWrap,
+    shortcuts: settings.shortcuts,
+  };
+});
+
 function syncEditorFontCssVars(fontSize = liveFontSize.value, fontFamily = settingsStore.editorSettings.fontFamily) {
   if (!editorRef.value) return;
   editorRef.value.style.setProperty(EDITOR_FONT_SIZE_CSS_VAR, `${clampEditorFontSize(fontSize)}px`);
@@ -2221,7 +2235,7 @@ function getCurrentCustomThemeColors() {
 
 // Reactively apply editor settings changes
 watch(
-  [() => settingsStore.editorSettings, () => isDark.value],
+  [queryEditorAppearanceSettings, () => isDark.value],
   async ([ss]) => {
     if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !runKeymapComp || !editorViewModule) {
       return;

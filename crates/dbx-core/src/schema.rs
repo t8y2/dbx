@@ -494,6 +494,46 @@ pub async fn list_tables_core(
     .await
 }
 
+pub async fn get_table_comment_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Option<String>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Err("Table comments are not available for linked server tables".to_string());
+    }
+
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let db_config = connection_config(state, connection_id).await;
+
+        {
+            let connections = state.connections.read().await;
+            try_sqlserver!(connections, &pool_key, get_table_comment, schema, table);
+        }
+
+        let connections = state.connections.read().await;
+        let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+
+        match pool {
+            PoolKind::Mysql(p, mode)
+                if *mode != MysqlMode::OceanBaseOracle
+                    && !db_config.as_ref().is_some_and(is_doris_family_config)
+                    && !db_config.as_ref().is_some_and(is_manticoresearch_config) =>
+            {
+                db::mysql::get_table_comment(p, schema, table).await
+            }
+            PoolKind::Postgres(p) if !db_config.as_ref().is_some_and(is_questdb_config) => {
+                db::postgres::get_table_comment(p, schema, table).await
+            }
+            _ => Err("Table comment lookup is not supported for this connection".to_string()),
+        }
+    })
+    .await
+}
+
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,

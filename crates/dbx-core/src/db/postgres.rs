@@ -964,6 +964,22 @@ pub async fn list_tables_filtered(
         .collect())
 }
 
+pub async fn get_table_comment(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let stmt = client.prepare_cached(postgres_table_comment_sql()).await.map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[&schema, &table]).await.map_err(|e| e.to_string())?;
+    Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
+}
+
+fn postgres_table_comment_sql() -> &'static str {
+    "SELECT obj_description(c.oid) AS table_comment \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','m','f','p') \
+     LIMIT 1"
+}
+
 fn postgres_tables_sql() -> &'static str {
     "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
@@ -2290,6 +2306,17 @@ mod tests {
         assert!(sql.contains("VIEW"));
         assert!(sql.contains("MATERIALIZED_VIEW"));
         assert!(sql.contains("FOREIGN TABLE"));
+    }
+
+    #[test]
+    fn postgres_table_comment_sql_targets_single_table() {
+        let sql = postgres_table_comment_sql();
+
+        assert!(sql.contains("obj_description(c.oid)"));
+        assert!(sql.contains("n.nspname = $1"));
+        assert!(sql.contains("c.relname = $2"));
+        assert!(sql.contains("LIMIT 1"));
+        assert!(!sql.contains("ORDER BY"));
     }
 
     #[test]

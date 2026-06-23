@@ -446,6 +446,7 @@ pub fn run() {
             commands::schema::list_sqlserver_linked_server_schemas,
             commands::schema::list_sqlserver_linked_server_tables,
             commands::schema::list_tables,
+            commands::schema::get_table_comment,
             commands::schema::list_objects,
             commands::schema::list_object_statistics,
             commands::schema::list_completion_objects,

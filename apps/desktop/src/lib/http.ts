@@ -455,6 +455,10 @@ export async function listTables(connectionId: string, database: string, schema:
   return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(",") })}`);
 }
 
+export async function getTableComment(_connectionId: string, _database: string, _schema: string, _table: string): Promise<string | null> {
+  throw new Error("Table comment lookup is not available in the web backend");
+}
+
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
   return get(
     `/api/schema/objects?${qs({

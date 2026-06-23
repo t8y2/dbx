@@ -517,6 +517,10 @@ export async function listTables(connectionId: string, database: string, schema:
   return invoke("list_tables", { connectionId, database, schema, filter, limit, offset, objectTypes });
 }
 
+export async function getTableComment(connectionId: string, database: string, schema: string, table: string): Promise<string | null> {
+  return invoke("get_table_comment", { connectionId, database, schema, table });
+}
+
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
   return invoke("list_objects", { connectionId, database, schema, objectTypes });
 }

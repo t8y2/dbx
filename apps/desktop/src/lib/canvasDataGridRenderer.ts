@@ -54,6 +54,7 @@ export interface DrawCanvasDataGridOptions {
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
+  infiniteScrollEnabled: boolean;
   pageSize: number;
   currentPage: number;
 }
@@ -225,6 +226,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover,
+    infiniteScrollEnabled,
     pageSize,
     currentPage,
   } = options;
@@ -293,7 +295,11 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.font = item.status === "new" || item.status === "edited" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
-    ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
+    if (infiniteScrollEnabled) {
+      ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
+    } else {
+      ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
+    }
     ctx.font = normalFont;
 
     ctx.strokeStyle = theme.border;

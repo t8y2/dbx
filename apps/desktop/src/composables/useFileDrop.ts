@@ -6,15 +6,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/api";
 import type { ConnectionConfig } from "@/types/database";
-
-const DB_EXTENSIONS = [".db", ".db3", ".sqlite", ".sqlite3", ".duckdb"];
-
-function getDbType(path: string): "sqlite" | "duckdb" | null {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".duckdb")) return "duckdb";
-  if (DB_EXTENSIONS.some((ext) => lower.endsWith(ext))) return "sqlite";
-  return null;
-}
+import { detectDatabaseFileType } from "@/lib/databaseFileDetection";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -81,7 +73,7 @@ export function useFileDrop() {
             continue;
           }
 
-          const dbType = getDbType(path);
+          const dbType = await detectDatabaseFileType(path);
           if (!dbType) continue;
           const config: ConnectionConfig = {
             id: uuid(),

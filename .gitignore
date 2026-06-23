@@ -8,6 +8,7 @@ node_modules/
 openspec/
 .mcp.json
 AGENTS.md
+CLAUDE.md
 
 # Build output
 dist/

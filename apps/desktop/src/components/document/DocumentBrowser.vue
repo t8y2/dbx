@@ -88,6 +88,13 @@ type LocalFilterSummary = {
   values: string[];
   hiddenValueCount: number;
 };
+type DocumentGridChanges = {
+  dirtyRows: Map<number, Map<number, MongoInputValue>>;
+  deletedRows: Set<number>;
+  newRows: MongoInputValue[][];
+  columns: string[];
+  rows: MongoInputValue[][];
+};
 const documentFilterBuilderOpen = ref(false);
 const documentFilterRules = ref<DocumentFilterRule[]>([]);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
@@ -227,7 +234,15 @@ function clearDocumentFilters(clearLocalFilter?: (columnIndex?: number) => void)
   applyFilter();
 }
 
-async function gridSave(changes: { dirtyRows: Map<number, Map<number, MongoInputValue>>; deletedRows: Set<number>; columns: string[]; rows: MongoInputValue[][] }) {
+function documentIdFromGridValue(value: MongoInputValue | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = parseMongoDocumentInputValue(value);
+  if (parsed === null || parsed === undefined) return null;
+  const id = typeof parsed === "object" ? JSON.stringify(parsed) : String(parsed);
+  return id.trim() ? id : null;
+}
+
+async function gridSave(changes: DocumentGridChanges) {
   const cols = changes.columns;
   const idColIdx = cols.indexOf("_id");
   if (idColIdx < 0) throw new Error("No _id column");
@@ -267,6 +282,20 @@ async function gridSave(changes: { dirtyRows: Map<number, Map<number, MongoInput
     await api.mongoDeleteDocument(props.connectionId, props.database, props.collection, String(id));
   }
 
+  for (const newRow of changes.newRows) {
+    const doc = buildMongoInsertDocument(newRow, cols);
+    if (isEs) {
+      const id = documentIdFromGridValue(newRow[idColIdx]);
+      if (id) {
+        await api.mongoUpdateDocument(props.connectionId, props.database, props.collection, id, JSON.stringify(doc));
+      } else {
+        await api.mongoInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
+      }
+      continue;
+    }
+    await api.mongoInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
+  }
+
   await load();
 }
 
@@ -283,7 +312,11 @@ function mongoIdPreview(val: unknown): string {
   return formatMongoValue(val);
 }
 
-async function previewDocumentChanges(changes: { dirtyRows: Map<number, Map<number, MongoInputValue>>; deletedRows: Set<number>; newRows: MongoInputValue[][]; columns: string[]; rows: MongoInputValue[][] }): Promise<string[]> {
+function elasticsearchPathIdPreview(id: string): string {
+  return encodeURIComponent(id);
+}
+
+async function previewDocumentChanges(changes: DocumentGridChanges): Promise<string[]> {
   const { dirtyRows, deletedRows, newRows, columns, rows } = changes;
   const idColIdx = columns.indexOf("_id");
   const stmts: string[] = [];
@@ -296,7 +329,7 @@ async function previewDocumentChanges(changes: { dirtyRows: Map<number, Map<numb
     if (id == null) continue;
     if (isEs) {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns);
-      stmts.push(`POST /${coll}/_update/${JSON.stringify(String(id))}\n${JSON.stringify({ doc: updateDoc.$set ?? updateDoc }, null, 2)}`);
+      stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}\n${JSON.stringify({ doc: updateDoc.$set ?? updateDoc }, null, 2)}`);
     } else {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns);
       stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(id)}}, ${formatMongoShellLiteral(updateDoc)})`);
@@ -308,7 +341,7 @@ async function previewDocumentChanges(changes: { dirtyRows: Map<number, Map<numb
     const id = row?.[idColIdx];
     if (id == null) continue;
     if (isEs) {
-      stmts.push(`DELETE /${coll}/_doc/${JSON.stringify(String(id))}`);
+      stmts.push(`DELETE /${coll}/_doc/${elasticsearchPathIdPreview(String(id))}`);
     } else {
       stmts.push(`db.${coll}.deleteOne({_id: ${mongoIdPreview(id)}})`);
     }
@@ -317,7 +350,12 @@ async function previewDocumentChanges(changes: { dirtyRows: Map<number, Map<numb
   for (const newRow of newRows) {
     const doc = buildMongoInsertDocument(newRow, columns);
     if (isEs) {
-      stmts.push(`POST /${coll}/_doc\n${JSON.stringify(doc, null, 2)}`);
+      const id = idColIdx >= 0 ? documentIdFromGridValue(newRow[idColIdx]) : null;
+      if (id) {
+        stmts.push(`PUT /${coll}/_doc/${elasticsearchPathIdPreview(id)}\n${JSON.stringify(doc, null, 2)}`);
+      } else {
+        stmts.push(`POST /${coll}/_doc\n${JSON.stringify(doc, null, 2)}`);
+      }
     } else {
       stmts.push(`db.${coll}.insertOne(${formatMongoShellLiteral(doc)})`);
     }

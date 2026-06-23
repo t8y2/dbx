@@ -13,8 +13,14 @@ MongoDB databases and collections appear in the sidebar alongside relational dat
 - Listing collections within each database
 - Paginated document browsing within collections
 - Filter and sort support for document queries
+- **Database and collection deletion**: Right-click on a database or collection to delete it
+- **Collection metadata**: View collection statistics including document count, size, and indexes
 
 <Callout type="info">MongoDB connections support both standard connection strings and legacy connection formats. For replica sets, use the standard `mongodb://` connection URL with the replica set name.</Callout>
+
+## Switching Databases
+
+Use the `use <database>` command in the MongoDB command runner to switch the active database. This is equivalent to the MongoDB shell's `use` command and updates the current database context for subsequent operations.
 
 ## Table View
 
@@ -48,6 +54,7 @@ For complex edits that span nested fields, use the JSON editor:
 - Edit the full document as JSON
 - Syntax validation before saving
 - Useful for adding new nested fields or restructuring documents
+- **Date preservation**: Date values are preserved correctly during edits, maintaining their original type
 
 ## MongoDB Versions
 

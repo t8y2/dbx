@@ -35,6 +35,7 @@ import { parseExplainResult, type ParsedExplainPlan } from "@/lib/explainPlan";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/aiPromptKeyboard";
+import { looksLikeActionProposal, containsChinese } from "@/lib/aiProposalDetect";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -220,6 +221,37 @@ const isWaitingForFirstDelta = computed(() => {
   const last = messages.value[messages.value.length - 1];
   return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
 });
+
+/**
+ * The last assistant message whose final line looks like an action
+ * proposal question. Used to render an inline "Yes / No" confirmation bar
+ * so the user can answer without typing. `null` while the assistant is
+ * still generating or when no such message exists.
+ */
+const proposalConfirmMessage = computed<ChatMessage | null>(() => {
+  if (isGenerating.value) return null;
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const msg = messages.value[i];
+    if (msg.kind === "contextSummary") continue;
+    if (msg.role !== "assistant") return null;
+    if (!msg.content) return null;
+    return looksLikeActionProposal(msg.content) ? msg : null;
+  }
+  return null;
+});
+
+function sendProposalReply(positive: boolean) {
+  // Disable while a stream is in flight or no proposal is currently active.
+  if (isGenerating.value) return;
+  const target = proposalConfirmMessage.value;
+  if (!target) return;
+  const isZh = containsChinese(target.content || "");
+  const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
+  const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
+  prompt.value = isZh ? replyZh : replyEn;
+  // Use the existing send pipeline so the message is added to history, persisted, etc.
+  send();
+}
 
 const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
 const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
@@ -1106,6 +1138,16 @@ const messageRenderer = computed(() => {
                   <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
                 </div>
               </template>
+              <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">
+                <Button size="sm" variant="default" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(true)">
+                  <Check class="h-3 w-3" />
+                  {{ t("ai.proposalConfirmYes") }}
+                </Button>
+                <Button size="sm" variant="outline" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(false)">
+                  <X class="h-3 w-3" />
+                  {{ t("ai.proposalConfirmNo") }}
+                </Button>
+              </div>
             </div>
           </div>
         </template>
@@ -1229,10 +1271,23 @@ const messageRenderer = computed(() => {
             @compositionend="promptCompositionActive = false"
             @keydown="onPromptKeydown"
           />
-          <div class="flex items-center gap-1.5">
-            <LightDropdown v-model="assistantMode" :items="assistantModeItems" :aria-label="activeModeHint" item-class="text-xs px-2" />
-            <LightDropdown :model-value="activeAction" :items="actionMenuItems" content-class="w-max min-w-0" item-class="text-xs px-2" @update:model-value="(value) => selectAction(value as AiAction)" />
-            <span class="flex-1" />
+          <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
+            <LightDropdown
+              v-model="assistantMode"
+              :items="assistantModeItems"
+              :aria-label="activeModeHint"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              item-class="text-xs px-2"
+            />
+            <LightDropdown
+              :model-value="activeAction"
+              :items="actionMenuItems"
+              content-class="w-max min-w-0"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              item-class="text-xs px-2"
+              @update:model-value="(value) => selectAction(value as AiAction)"
+            />
+            <span class="min-w-0 flex-1" />
             <SearchableSelect
               v-if="settings.isConfigured()"
               :model-value="settings.aiConfig.model"
@@ -1243,14 +1298,14 @@ const messageRenderer = computed(() => {
               :loading-text="t('ai.loadingModels')"
               :loading="modelLoading"
               :display-name="displayModelName"
-              trigger-class="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground truncate max-w-[130px]"
+              trigger-class="min-w-0 w-auto max-w-[220px] shrink justify-end rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               content-class="w-72"
               item-class="text-xs px-2"
               @update:model-value="handleModelSelect"
               @update:open="(open: boolean) => open && fetchModelOptions()"
             >
               <template #trigger-label="{ label, loading }">
-                <span class="truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
+                <span class="min-w-0 truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
               </template>
               <template #option-label="{ option, label }">
                 <span class="flex min-w-0 flex-col">

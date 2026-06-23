@@ -18,7 +18,7 @@ import RedisValueViewer from "./RedisValueViewer.vue";
 import RedisPubSubPanel from "./RedisPubSubPanel.vue";
 import RedisSlowlogPanel from "./RedisSlowlogPanel.vue";
 import * as api from "@/lib/api";
-import type { RedisKeyInfo, RedisScanResult, HistoryEntry } from "@/lib/api";
+import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -102,6 +102,7 @@ let nextEntryId = 0;
 let searchRequestId = 0;
 let redisBrowserIsActive = true;
 let redisDbFlushedListenerRegistered = false;
+const loadedKeyRaws = new Set<string>();
 
 const valueQuery = computed(() => searchPattern.value.trim());
 const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
@@ -200,24 +201,30 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
 
 async function fetchScanPage(): Promise<RedisScanResult> {
   const pageSize = settingsStore.editorSettings.redisScanPageSize;
-  return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeys(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize);
+  return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, 1, false);
 }
 
 /// Batch-scan variant that performs multiple SCAN iterations server-side.
 /// Dramatically reduces frontend↔backend roundtrips for bulk loading.
-async function fetchScanBatchPage(maxIterations: number): Promise<RedisScanResult> {
-  const pageSize = settingsStore.editorSettings.redisScanPageSize;
+async function fetchScanBatchPage(maxIterations: number, options: { count?: number; includeTypes?: boolean } = {}): Promise<RedisScanResult> {
+  const pageSize = options.count ?? settingsStore.editorSettings.redisScanPageSize;
   // Value search cannot be batched because each key requires a GET.
   if (isValueSearchMode.value) {
     return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
   }
-  return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations);
+  return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations, options.includeTypes ?? false);
 }
 
-function appendScanResult(result: RedisScanResult) {
-  const existingKeys = new Set(flatKeys.value.map((key) => key.key_raw));
-  const newKeys = result.keys.filter((key) => !existingKeys.has(key.key_raw));
-  flatKeys.value = [...flatKeys.value, ...newKeys];
+function appendScanResult(result: RedisScanResult, options: { updateTree?: boolean } = {}) {
+  const newKeys: RedisKeyInfo[] = [];
+  for (const key of result.keys) {
+    if (loadedKeyRaws.has(key.key_raw)) continue;
+    loadedKeyRaws.add(key.key_raw);
+    newKeys.push(key);
+  }
+  if (newKeys.length > 0) {
+    flatKeys.value = [...flatKeys.value, ...newKeys];
+  }
   scanCursor.value = result.cursor;
   hasMore.value = result.cursor !== 0;
   // DBSIZE is only called on the first batch page (cursor==0); subsequent
@@ -228,10 +235,12 @@ function appendScanResult(result: RedisScanResult) {
     lastTotalKeys.value = result.total_keys;
   }
 
-  if (treeKeys.value.length === 0) {
-    rebuildTree(isSearchMode.value);
-  } else {
-    mergeTree(newKeys);
+  if (options.updateTree ?? true) {
+    if (treeKeys.value.length === 0) {
+      rebuildTree(isSearchMode.value);
+    } else {
+      mergeTree(newKeys);
+    }
   }
 
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
@@ -276,6 +285,7 @@ async function loadKeys() {
   const requestId = ++searchRequestId;
   isFetchingAll.value = false;
   loading.value = true;
+  loadedKeyRaws.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   selectedKeyRaw.value = null;
@@ -313,25 +323,29 @@ async function loadMore() {
   }
 }
 
-/// Fetch-all with server-side multi-SCAN batching.
-///
-/// Each call performs up to 15 SCAN→TYPE cycles server-side (~0.5s per
-/// batch at COUNT=1000). This keeps the UI responsive with frequent progress
-/// updates while still avoiding the per-page overhead of single-SCAN calls.
-const FETCH_ALL_BATCH_ITERATIONS = 15;
+// Fetch-all uses large key-only SCAN pages and rebuilds the tree once at the
+// end; per-page tree sorting dominates runtime on million-key pattern scans.
+const FETCH_ALL_SCAN_COUNT = 50000;
+const FETCH_ALL_BATCH_ITERATIONS = 1;
 
 async function fetchAll() {
   if (!hasMore.value || isFetchingAll.value) return;
   const requestId = searchRequestId;
   isFetchingAll.value = true;
+  let changed = false;
   try {
     while (requestId === searchRequestId && isFetchingAll.value && hasMore.value) {
-      const result = await fetchScanBatchPage(FETCH_ALL_BATCH_ITERATIONS);
+      const result = await fetchScanBatchPage(FETCH_ALL_BATCH_ITERATIONS, {
+        count: FETCH_ALL_SCAN_COUNT,
+        includeTypes: false,
+      });
       if (requestId !== searchRequestId) break;
-      appendScanResult(result);
+      appendScanResult(result, { updateTree: false });
+      changed = true;
     }
   } finally {
     if (requestId === searchRequestId) {
+      if (changed) rebuildTree(isSearchMode.value);
       isFetchingAll.value = false;
     }
   }
@@ -360,6 +374,7 @@ function onRowClick(node: RedisKeyTreeNode) {
 
 function onKeyDeleted() {
   if (!selectedKeyRaw.value) return;
+  loadedKeyRaws.delete(selectedKeyRaw.value);
   flatKeys.value = flatKeys.value.filter((key) => key.key_raw !== selectedKeyRaw.value);
   selectedKeyRaw.value = null;
   rebuildTree(false);
@@ -367,6 +382,26 @@ function onKeyDeleted() {
     loaded: isSearchMode.value ? undefined : flatKeys.value.length,
     totalDelta: -1,
   });
+}
+
+function redisValueToKeyInfo(value: RedisValue): RedisKeyInfo {
+  return {
+    key_display: value.key_display,
+    key_raw: value.key_raw,
+    key_type: value.key_type,
+    ttl: value.ttl,
+    size: typeof value.value === "string" ? value.value.length : (value.total ?? 0),
+    value_preview: createdKeyPreview(value.value),
+  };
+}
+
+function onKeyLoaded(value: RedisValue) {
+  const keyInfo = redisValueToKeyInfo(value);
+  const existingIndex = flatKeys.value.findIndex((key) => key.key_raw === keyInfo.key_raw);
+  if (existingIndex < 0) return;
+  flatKeys.value = flatKeys.value.map((key, index) => (index === existingIndex ? keyInfo : key));
+  loadedKeyRaws.add(keyInfo.key_raw);
+  rebuildTree(false);
 }
 
 function toggleCheck(keyRaw: string, event: Event) {
@@ -393,6 +428,7 @@ function requestGroupDelete(node: RedisKeyTreeNode, event: Event) {
 }
 
 function resetLoadedKeys() {
+  loadedKeyRaws.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   selectedKeyRaw.value = null;
@@ -404,6 +440,7 @@ function resetLoadedKeys() {
 async function deleteKeyRaws(keys: string[]) {
   const deletedCount = await api.redisDeleteKeys(props.connectionId, props.db, keys);
   const deleted = new Set(keys);
+  for (const key of deleted) loadedKeyRaws.delete(key);
   flatKeys.value = flatKeys.value.filter((k) => !deleted.has(k.key_raw));
   if (selectedKeyRaw.value && deleted.has(selectedKeyRaw.value)) {
     selectedKeyRaw.value = null;
@@ -601,6 +638,7 @@ function upsertCreatedKey(value: any) {
   } else {
     flatKeys.value = [keyInfo, ...flatKeys.value];
   }
+  loadedKeyRaws.add(keyInfo.key_raw);
   selectedKeyRaw.value = keyInfo.key_raw;
   rebuildTree(isSearchMode.value);
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
@@ -974,7 +1012,7 @@ defineExpose({ focusSearch });
                 </div>
 
                 <div class="flex shrink-0 items-center justify-end gap-1">
-                  <Badge v-if="row.node.kind === 'leaf'" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
+                  <Badge v-if="row.node.kind === 'leaf' && row.node.keyType !== 'unknown'" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
                   <Button v-if="row.node.kind === 'group'" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" @click="requestGroupDelete(row.node, $event)">
                     <Trash2 class="h-3 w-3" />
                   </Button>
@@ -1031,7 +1069,7 @@ defineExpose({ focusSearch });
             </div>
 
             <TabsContent value="detail" class="m-0 min-h-0 flex-1 flex flex-col">
-              <RedisValueViewer v-if="selectedKey" :key="selectedKey.key_raw" :connection-id="connectionId" :db="db" :key-display="selectedKey.key_display" :key-raw="selectedKey.key_raw" :metadata="selectedKey" @deleted="onKeyDeleted" />
+              <RedisValueViewer v-if="selectedKey" :key="selectedKey.key_raw" :connection-id="connectionId" :db="db" :key-display="selectedKey.key_display" :key-raw="selectedKey.key_raw" :metadata="selectedKey" @deleted="onKeyDeleted" @loaded="onKeyLoaded" />
               <div v-else class="flex-1 flex items-center justify-center text-xs text-muted-foreground">
                 {{ t("redis.selectKeyForDetail") }}
               </div>

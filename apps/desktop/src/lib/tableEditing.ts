@@ -1,4 +1,4 @@
-import type { ColumnInfo, DatabaseType } from "@/types/database";
+import type { ColumnInfo, DatabaseType, IndexInfo } from "@/types/database";
 import { getDatabaseCapability } from "./databaseCapabilities";
 
 export const DBX_ROWID_COLUMN = "__DBX_ROWID";
@@ -19,6 +19,13 @@ export function editablePrimaryKeys(databaseType: DatabaseType | undefined, colu
   return primaryKeys;
 }
 
+export function editableRowIdentifierColumns(databaseType: DatabaseType | undefined, columns: ColumnInfo[], indexes?: IndexInfo[], tableType?: string): string[] {
+  const primaryKeys = editablePrimaryKeys(databaseType, columns, tableType);
+  if (primaryKeys.length > 0) return primaryKeys;
+  const uniqueIndex = indexes?.filter((index) => !index.filter && index.columns.length > 0 && (index.is_primary || index.is_unique)).sort((left, right) => Number(right.is_primary) - Number(left.is_primary) || left.columns.length - right.columns.length)[0];
+  return uniqueIndex?.columns ?? [];
+}
+
 export function isTableDataEditable(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
   if (isViewTableType(tableType)) return false;
   const cap = getDatabaseCapability(databaseType).tableData;
@@ -33,6 +40,10 @@ export function supportsDataGridTransaction(databaseType: DatabaseType | undefin
 
 export function usesKeylessRowPredicate(databaseType: DatabaseType | undefined): boolean {
   return !!getDatabaseCapability(databaseType).tableData.keylessRowPredicate;
+}
+
+export function canUseKeylessRowPredicate(databaseType: DatabaseType | undefined, primaryKeys: readonly string[]): boolean {
+  return primaryKeys.length === 0 && usesKeylessRowPredicate(databaseType);
 }
 
 export function canEditExistingTableRows(databaseType: DatabaseType | undefined, hiveTableTransactional?: boolean, primaryKeys?: string[]): boolean {

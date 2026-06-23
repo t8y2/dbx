@@ -1,7 +1,7 @@
 import * as api from "@/lib/api";
 import { connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
+import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -55,7 +55,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     const querySchema = connectionObjectTreeQuerySchema(config, target.database, target.schema);
     if (config.db_type === "neo4j") {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
-      const primaryKeys = editablePrimaryKeys(effectiveDbType, columns);
+      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         schema: target.schema,
@@ -96,7 +96,8 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     const [columnsResult, dataResult] = await Promise.allSettled([columnsPromise, dataPromise]);
     if (columnsResult.status === "fulfilled") {
       const columns = columnsResult.value;
-      const primaryKeys = editablePrimaryKeys(effectiveDbType, columns);
+      const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName).catch(() => []);
+      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, indexes);
       const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
@@ -160,10 +161,11 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         const connection = connectionStore.getConfig(tab.connectionId);
         const metadataSchema = connectionObjectTreeQuerySchema(connection, tab.database, tab.tableMeta?.schema);
         const columns = await api.getColumns(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName);
+        const indexes = await api.listIndexes(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName).catch(() => []);
         queryStore.setTableMeta(tab.id, {
           ...tab.tableMeta!,
           columns,
-          primaryKeys: editablePrimaryKeys(effectiveDatabaseTypeForConnection(connection), columns, tab.tableMeta!.tableType),
+          primaryKeys: editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(connection), columns, indexes, tab.tableMeta!.tableType),
         });
         if (tab.id === queryStore.activeTabId) await reloadData();
       } catch (e: any) {

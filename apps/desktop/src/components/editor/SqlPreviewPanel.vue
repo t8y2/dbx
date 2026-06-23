@@ -182,10 +182,10 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- Shiki highlighted SQL -->
-      <div v-else-if="highlightedHtml" class="p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_code]:!font-mono [&_code]:text-xs" v-html="highlightedHtml" />
+      <div v-else-if="highlightedHtml" data-native-clipboard class="p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_code]:!font-mono [&_code]:text-xs" v-html="highlightedHtml" />
 
       <!-- Plain text fallback -->
-      <pre v-else class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>
+      <pre v-else data-native-clipboard class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>
     </div>
   </div>
 </template>

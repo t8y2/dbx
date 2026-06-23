@@ -37,6 +37,55 @@ export interface ClipboardEnvironment {
   document?: ClipboardDocument;
 }
 
+export interface ClipboardShortcutEvent {
+  key: string;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+  target?: EventTarget | null;
+}
+
+interface SelectionLike {
+  anchorNode: Node | null;
+  focusNode: Node | null;
+  isCollapsed: boolean;
+}
+
+interface NativeClipboardSelectionEnvironment {
+  getSelection?: () => SelectionLike | null;
+}
+
+const EDITABLE_CLIPBOARD_TARGET_SELECTOR = "input, textarea, [contenteditable='true'], [role='textbox']";
+const NATIVE_CLIPBOARD_REGION_SELECTOR = "[data-native-clipboard]";
+
+function closestElement(target: unknown, selector: string): unknown {
+  return (target as { closest?: (selector: string) => unknown } | null)?.closest?.(selector) ?? null;
+}
+
+function selectionNodeElement(node: Node | null): Element | null {
+  if (!node) return null;
+  if (typeof Element !== "undefined" && node instanceof Element) return node;
+  return (node as { parentElement?: Element | null }).parentElement ?? null;
+}
+
+export function isPlainClipboardShortcut(event: ClipboardShortcutEvent, key: string): boolean {
+  return !!(event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+}
+
+export function hasNativeClipboardSelection(env: NativeClipboardSelectionEnvironment = globalThis as unknown as NativeClipboardSelectionEnvironment): boolean {
+  const selection = env.getSelection?.();
+  if (!selection || selection.isCollapsed) return false;
+  const anchorRegion = selectionNodeElement(selection.anchorNode)?.closest(NATIVE_CLIPBOARD_REGION_SELECTOR);
+  const focusRegion = selectionNodeElement(selection.focusNode)?.closest(NATIVE_CLIPBOARD_REGION_SELECTOR);
+  return !!anchorRegion && anchorRegion === focusRegion;
+}
+
+export function eventTargetAllowsNativeClipboard(event: ClipboardShortcutEvent, env: NativeClipboardSelectionEnvironment = globalThis as unknown as NativeClipboardSelectionEnvironment): boolean {
+  if (closestElement(event.target, EDITABLE_CLIPBOARD_TARGET_SELECTOR)) return true;
+  return isPlainClipboardShortcut(event, "c") && hasNativeClipboardSelection(env);
+}
+
 export async function readTextFromClipboard(env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<string> {
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {

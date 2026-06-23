@@ -1397,6 +1397,8 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::ManticoreSearch
                 | DatabaseType::Postgres
                 | DatabaseType::Sqlite
+                | DatabaseType::Rqlite
+                | DatabaseType::Turso
                 | DatabaseType::DuckDb
                 | DatabaseType::SqlServer
                 | DatabaseType::Oracle
@@ -1428,6 +1430,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Informix
                 | DatabaseType::Bigquery
                 | DatabaseType::Sundb
+                | DatabaseType::Databend
                 | DatabaseType::Hive
                 | DatabaseType::Iris
         )
@@ -1652,6 +1655,33 @@ mod tests {
                 "UPDATE `default`.`people` SET `name` = 'Linus' WHERE `id` = 1;",
                 "DELETE FROM `default`.`people` WHERE `id` = 1;",
                 "INSERT INTO `default`.`people` (`id`, `name`) VALUES (2, 'Grace');",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_databend_keyless_save_statements_with_row_predicate() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Databend),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "int", true, None), column("name", "string", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `default`.`people` SET `name` = 'Linus' WHERE `id` = 1 AND `name` = 'Ada';",
+                "DELETE FROM `default`.`people` WHERE `id` = 1 AND `name` = 'Ada';",
             ]
         );
     }

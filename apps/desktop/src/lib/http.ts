@@ -403,6 +403,10 @@ export async function revealPathInFileManager(_path: string): Promise<void> {
   throw new Error("Reveal in file manager is only available in the desktop app.");
 }
 
+export async function isSqliteDatabaseFile(_path: string): Promise<boolean> {
+  return false;
+}
+
 export async function backupSqliteDatabase(_connectionId: string, _destinationPath: string): Promise<void> {
   throw new Error("SQLite backup is only available in the desktop app.");
 }
@@ -453,6 +457,10 @@ export async function listSchemas(connectionId: string, database: string): Promi
 
 export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[]): Promise<TableInfo[]> {
   return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(",") })}`);
+}
+
+export async function getTableComment(_connectionId: string, _database: string, _schema: string, _table: string): Promise<string | null> {
+  throw new Error("Table comment lookup is not available in the web backend");
 }
 
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
@@ -1366,8 +1374,8 @@ export async function redisScanKeys(connectionId: string, db: number, cursor: nu
   return post("/api/redis/scan-keys", { connectionId, db, cursor, pattern, count });
 }
 
-export async function redisScanKeysBatch(connectionId: string, db: number, cursor: number, pattern: string, count: number, maxIterations: number): Promise<RedisScanResult> {
-  return post("/api/redis/scan-keys-batch", { connectionId, db, cursor, pattern, count, maxIterations });
+export async function redisScanKeysBatch(connectionId: string, db: number, cursor: number, pattern: string, count: number, maxIterations: number, includeTypes = true): Promise<RedisScanResult> {
+  return post("/api/redis/scan-keys-batch", { connectionId, db, cursor, pattern, count, maxIterations, includeTypes });
 }
 
 export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number, includeKeyMatches = false): Promise<RedisScanResult> {

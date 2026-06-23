@@ -2,6 +2,7 @@ use percent_encoding::percent_decode_str;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, LoadExtensionGuard, OpenFlags};
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -9,6 +10,8 @@ use std::time::Instant;
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
+
+const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Clone)]
 pub struct SqliteHandle {
@@ -77,6 +80,9 @@ fn open_sqlite_handle(
     if !is_memory && create_if_missing {
         ensure_parent_dir(path)?;
     }
+    if !is_memory && !is_network_path(path) {
+        validate_existing_sqlite_file(path)?;
+    }
 
     let conn = if is_memory {
         Connection::open_in_memory().map_err(|e| format!("SQLite connection failed: {e}"))?
@@ -98,6 +104,31 @@ fn open_sqlite_handle(
     load_sqlite_extensions(&conn, &extensions)?;
 
     Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) })
+}
+
+pub fn path_has_sqlite_header(path: &Path) -> Result<bool, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("failed to open file: {e}"))?;
+    let mut header = [0_u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header == SQLITE_DATABASE_HEADER),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(format!("failed to read file header: {e}")),
+    }
+}
+
+fn validate_existing_sqlite_file(path: &str) -> Result<(), String> {
+    let path = Path::new(path);
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = path.metadata().map_err(|e| format!("failed to inspect SQLite database file: {e}"))?;
+    if metadata.len() == 0 {
+        return Ok(());
+    }
+    if path_has_sqlite_header(path)? {
+        return Ok(());
+    }
+    Err("Selected file is not a valid SQLite database file.".to_string())
 }
 
 fn load_sqlite_extensions(conn: &Connection, extensions: &[SqliteExtensionSpec]) -> Result<(), String> {
@@ -184,6 +215,48 @@ mod tests {
         let result = execute_query(&pool, "SELECT name FROM memory_probe WHERE id = 1;").await.expect("select row");
 
         assert_eq!(result.rows[0][0], serde_json::json!("Ada"));
+    }
+
+    #[tokio::test]
+    async fn create_if_missing_rejects_existing_non_sqlite_file() {
+        let path = std::env::temp_dir().join(format!("dbx-not-sqlite-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nnot sqlite").unwrap();
+
+        let err = match connect_path_create_if_missing(path.to_str().unwrap()).await {
+            Ok(_) => panic!("non-SQLite file should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("not a valid SQLite database"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn create_if_missing_allows_empty_custom_suffix_file() {
+        let path = std::env::temp_dir().join(format!("dbx-empty-sqlite-{}.conf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"").unwrap();
+
+        let pool = connect_path_create_if_missing(path.to_str().unwrap()).await.expect("empty file can become SQLite");
+        execute_query(&pool, "CREATE TABLE t (id INTEGER);").await.expect("write sqlite schema");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn create_if_missing_allows_sqlite_database_with_custom_suffix() {
+        let path = std::env::temp_dir().join(format!("dbx-custom-sqlite-{}.conf", uuid::Uuid::new_v4()));
+        {
+            let pool = connect_path_create_if_missing(path.to_str().unwrap()).await.expect("create sqlite");
+            execute_query(&pool, "CREATE TABLE t (id INTEGER);").await.expect("write sqlite schema");
+        }
+
+        let reopened = connect_path_create_if_missing(path.to_str().unwrap()).await.expect("reopen sqlite");
+        let result = execute_query(&reopened, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 't';")
+            .await
+            .expect("query sqlite schema");
+        assert_eq!(result.rows[0][0], serde_json::json!("t"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

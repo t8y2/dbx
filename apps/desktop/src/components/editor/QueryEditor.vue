@@ -223,6 +223,20 @@ const zoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
   settingsStore.updateEditorSettings({ fontSize });
 });
 
+const queryEditorAppearanceSettings = computed(() => {
+  const settings = settingsStore.editorSettings;
+  return {
+    fontFamily: settings.fontFamily,
+    fontSize: settings.fontSize,
+    theme: settings.theme,
+    customThemeColors: settings.customThemeColors,
+    customThemes: settings.customThemes,
+    activeCustomThemeId: settings.activeCustomThemeId,
+    wordWrap: settings.wordWrap,
+    shortcuts: settings.shortcuts,
+  };
+});
+
 function syncEditorFontCssVars(fontSize = liveFontSize.value, fontFamily = settingsStore.editorSettings.fontFamily) {
   if (!editorRef.value) return;
   editorRef.value.style.setProperty(EDITOR_FONT_SIZE_CSS_VAR, `${clampEditorFontSize(fontSize)}px`);
@@ -333,6 +347,18 @@ function requestExecute() {
   pickerAnchor.value = executionPickerAnchor(currentView, cursorPos, candidates.length);
   pickerVisible.value = true;
   setPreviewRange({ from: candidates[0].from, to: candidates[0].to });
+  return true;
+}
+
+function handleSqlSingleQuote(view: EditorViewType): boolean {
+  const { state } = view;
+  if (state.readOnly) return false;
+  if (state.selection.ranges.some((range) => !range.empty || range.from === 0 || state.doc.sliceString(range.from - 1, range.from) !== "'")) return false;
+  const transaction = state.changeByRange((range) => ({
+    changes: { from: range.from, insert: "'" },
+    range,
+  }));
+  view.dispatch(transaction, { userEvent: "input.type" });
   return true;
 }
 
@@ -1919,6 +1945,7 @@ onMounted(async () => {
       previewRangeComp.of(buildPreviewRangeExtension()),
       Prec.highest(
         keymap.of([
+          { key: "'", run: handleSqlSingleQuote },
           ...closeBracketsKeymap,
           { key: "Tab", run: handleTab },
           {
@@ -2221,7 +2248,7 @@ function getCurrentCustomThemeColors() {
 
 // Reactively apply editor settings changes
 watch(
-  [() => settingsStore.editorSettings, () => isDark.value],
+  [queryEditorAppearanceSettings, () => isDark.value],
   async ([ss]) => {
     if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !runKeymapComp || !editorViewModule) {
       return;

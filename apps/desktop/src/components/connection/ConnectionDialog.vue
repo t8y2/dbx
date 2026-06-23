@@ -31,6 +31,7 @@ import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/m
 import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/prestoSqlBuiltinDriver";
+import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/databaseFileDetection";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
@@ -392,6 +393,7 @@ const driverProfiles: Record<
   duckdb: { type: "duckdb", port: 0, user: "", label: "DuckDB", icon: "duckdb" },
   access: { type: "access", port: 0, user: "", label: "Microsoft Access", icon: "access" },
   mongodb: { type: "mongodb", port: 27017, user: "", label: "MongoDB", icon: "mongodb" },
+  "mongodb-legacy": { type: "mongodb", port: 27017, user: "", label: "MongoDB (Legacy)", icon: "mongodb" },
   clickhouse: {
     type: "clickhouse",
     port: 8123,
@@ -2157,18 +2159,11 @@ async function browseEtcdTlsFile(target: "ca" | "cert" | "key") {
 async function browseDbFilePath() {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const filters =
-      form.value.db_type === "duckdb"
-        ? [{ name: "DuckDB", extensions: ["duckdb", "db"] }]
-        : form.value.db_type === "access"
-          ? [{ name: "Microsoft Access", extensions: ["accdb", "mdb"] }]
-          : form.value.db_type === "h2"
-            ? [{ name: "H2", extensions: ["db"] }]
-            : [{ name: "SQLite", extensions: ["db", "db3", "sqlite", "sqlite3"] }];
+    const filters = form.value.db_type === "duckdb" ? [{ name: "DuckDB", extensions: ["duckdb", "db"] }] : form.value.db_type === "access" ? [{ name: "Microsoft Access", extensions: ["accdb", "mdb"] }] : form.value.db_type === "h2" ? [{ name: "H2", extensions: ["db"] }] : undefined;
     const selected = await open({
       title: "Select Database File",
       multiple: false,
-      filters,
+      ...(filters ? { filters } : {}),
     });
     if (selected && typeof selected === "string") {
       form.value.host = selected;
@@ -2217,7 +2212,8 @@ async function createDuckDbFilePath() {
 }
 
 function ensureSqliteFileExtension(path: string): string {
-  return /\.(db|db3|sqlite|sqlite3)$/i.test(path) ? path : `${path}.db`;
+  const extensionPattern = new RegExp(`\\.(${SQLITE_DATABASE_FILE_EXTENSIONS.join("|")})$`, "i");
+  return extensionPattern.test(path) ? path : `${path}.db`;
 }
 
 async function createSqliteFilePath() {
@@ -2226,7 +2222,7 @@ async function createSqliteFilePath() {
   const selected = await save({
     title: t("connection.createSqliteFile"),
     defaultPath: "database.db",
-    filters: [{ name: "SQLite", extensions: ["db", "db3", "sqlite", "sqlite3"] }],
+    filters: [{ name: "SQLite", extensions: SQLITE_DATABASE_FILE_EXTENSIONS }],
   });
   if (!selected) return;
 

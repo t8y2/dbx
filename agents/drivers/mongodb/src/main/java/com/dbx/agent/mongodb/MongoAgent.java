@@ -1,6 +1,7 @@
 package com.dbx.agent.mongodb;
 
 import com.dbx.agent.AgentProtocol;
+import com.dbx.agent.IndexInfo;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
@@ -297,6 +298,52 @@ public final class MongoAgent {
         return result;
     }
 
+    private static Object listIndexes(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("table").getAsString();
+        List<IndexInfo> result = new ArrayList<>();
+        for (Document index : c.getDatabase(database).getCollection(collection).listIndexes()) {
+            result.add(indexInfoFromDocument(index));
+        }
+        return result;
+    }
+
+    static IndexInfo indexInfoFromDocument(Document index) {
+        Document keys = index.get("key") instanceof Document document ? document : new Document();
+        String name = index.getString("name");
+        if (name == null || name.isBlank()) {
+            List<String> parts = new ArrayList<>();
+            for (Map.Entry<String, Object> entry : keys.entrySet()) {
+                parts.add(entry.getKey() + "_" + String.valueOf(entry.getValue()));
+            }
+            name = String.join("_", parts);
+        }
+
+        List<String> columns = new ArrayList<>(keys.keySet());
+        String indexType = null;
+        if (!keys.isEmpty()) {
+            List<String> parts = new ArrayList<>();
+            for (Map.Entry<String, Object> entry : keys.entrySet()) {
+                parts.add(entry.getKey() + ": " + String.valueOf(entry.getValue()));
+            }
+            indexType = String.join(", ", parts);
+        }
+
+        Object unique = index.get("unique");
+        Document filter = index.get("partialFilterExpression") instanceof Document document ? document : null;
+        return new IndexInfo(
+            name,
+            columns,
+            unique instanceof Boolean && (Boolean) unique,
+            "_id_".equals(name),
+            filter == null ? null : filter.toJson(),
+            indexType,
+            null,
+            null
+        );
+    }
+
     private static Object findDocuments(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -510,6 +557,7 @@ public final class MongoAgent {
             case AgentProtocol.METHOD_CONNECT -> connect(params);
             case AgentProtocol.MONGO_METHOD_LIST_DATABASES -> listDatabases();
             case AgentProtocol.MONGO_METHOD_LIST_COLLECTIONS -> listCollections(params);
+            case AgentProtocol.METHOD_LIST_INDEXES -> listIndexes(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS -> findDocuments(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);

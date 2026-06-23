@@ -28,7 +28,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { supportsDatabaseFeature } from "@/lib/databaseCapabilities";
-import { editablePrimaryKeys } from "@/lib/tableEditing";
+import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
@@ -1125,7 +1125,8 @@ export const useQueryStore = defineStore("query", () => {
         columnCount: columns.length,
         elapsed: elapsed?.(),
       });
-      const primaryKeys = editablePrimaryKeys(dbType as DatabaseType, columns);
+      const indexes = await api.listIndexes(tab.connectionId, tab.database, metadataSchema, metadataTableName).catch(() => []);
+      const primaryKeys = editableRowIdentifierColumns(dbType as DatabaseType, columns, indexes);
       const tableMeta = {
         schema: metadataSchema || undefined,
         tableName: metadataTableName,
@@ -1133,7 +1134,7 @@ export const useQueryStore = defineStore("query", () => {
         primaryKeys,
       };
 
-      if (primaryKeys.length === 0) {
+      if (primaryKeys.length === 0 && !canUseKeylessRowPredicate(dbType as DatabaseType, primaryKeys)) {
         return {
           queryAnalysis: undefined,
           querySourceColumns: undefined,
@@ -2039,7 +2040,7 @@ export const useQueryStore = defineStore("query", () => {
       const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
       const pageLimit = TABLE_DATA_EXPORT_PAGE_SIZE;
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
-      const primaryKeys = tab.tableMeta ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns, tab.tableMeta.tableType) : tableMeta.primaryKeys;
+      const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
       const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);

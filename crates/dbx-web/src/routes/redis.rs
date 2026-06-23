@@ -48,6 +48,7 @@ pub struct RedisScanBatchRequest {
     pub count: usize,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    pub include_types: Option<bool>,
 }
 
 fn default_max_iterations() -> usize {
@@ -234,6 +235,7 @@ pub async fn scan_keys_batch(
         &req.pattern,
         req.count,
         req.max_iterations,
+        req.include_types.unwrap_or(true),
     )
     .await
     .map_err(AppError)?;

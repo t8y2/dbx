@@ -105,6 +105,7 @@ export interface SchemaDiffPreparationOptions {
   targetSchema?: string;
   ignoreComments?: boolean;
   cascadeDelete?: boolean;
+  compareColumnOrder?: boolean;
 }
 
 export interface SchemaDiffPreparation {

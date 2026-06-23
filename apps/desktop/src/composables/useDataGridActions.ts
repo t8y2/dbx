@@ -4,7 +4,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
-import { editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/tableEditing";
+import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import * as api from "@/lib/api";
 import type { QueryTab } from "@/types/database";
@@ -30,10 +30,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
-    const primaryKeys = tab.tableMeta ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns, tab.tableMeta.tableType) : (tableMeta?.primaryKeys ?? []);
-    if (tab.tableMeta && primaryKeys.join("\0") !== tab.tableMeta.primaryKeys.join("\0")) {
-      tab.tableMeta.primaryKeys = primaryKeys;
-    }
+    const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
     const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
@@ -59,8 +56,9 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const querySchema = connectionObjectTreeQuerySchema(config, tab.database, tableMeta.schema);
     console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: tableMeta.tableName });
     const columns = await api.getColumns(tab.connectionId, tab.database, querySchema, tableMeta.tableName);
+    const indexes = await api.listIndexes(tab.connectionId, tab.database, querySchema, tableMeta.tableName).catch(() => []);
     console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
-    const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns, tableMeta.tableType);
+    const primaryKeys = editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(config), columns, indexes, tableMeta.tableType);
     queryStore.setTableMeta(tab.id, {
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,

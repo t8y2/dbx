@@ -1,11 +1,13 @@
 package com.dbx.agent.mongodb;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dbx.agent.AgentProtocol;
+import com.dbx.agent.IndexInfo;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -92,6 +94,35 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_CONNECT));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_QUERY));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_METADATA));
+    }
+
+    @Test
+    void listIndexesMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"list_indexes\","
+                + "\"params\":{\"database\":\"app\",\"schema\":\"\",\"table\":\"orders\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(8, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void convertsMongoIndexDocumentToIndexInfo() {
+        Document index = new Document("name", "idx_user_status")
+            .append("key", new Document("user_id", 1).append("status", -1))
+            .append("unique", true)
+            .append("partialFilterExpression", new Document("deleted", false));
+
+        IndexInfo info = MongoAgent.indexInfoFromDocument(index);
+
+        assertEquals("idx_user_status", info.getName());
+        assertEquals(java.util.List.of("user_id", "status"), info.getColumns());
+        assertEquals(true, info.getIs_unique());
+        assertEquals(false, info.getIs_primary());
+        assertEquals("user_id: 1, status: -1", info.getIndex_type());
+        assertTrue(info.getFilter().contains("\"deleted\""));
     }
 
     @Test

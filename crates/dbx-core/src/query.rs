@@ -828,7 +828,7 @@ pub async fn do_execute(
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
-    match pool {
+    let result = match pool {
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let con = con.clone();
@@ -1059,7 +1059,7 @@ pub async fn do_execute(
                 }
             }
             .await
-            .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)));
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
             if matches!(result.as_ref(), Err(err) if err == QUERY_CANCELED) {
                 state.remove_pool_by_key(pool_key).await;
             }
@@ -1122,9 +1122,10 @@ pub async fn do_execute(
                 }
             })
             .await
-            .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)))
+            .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
-    }
+    };
+    result.map(normalize_query_result_for_js)
 }
 
 fn external_driver_query_params(

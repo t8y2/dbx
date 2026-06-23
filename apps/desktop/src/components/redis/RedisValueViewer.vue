@@ -32,7 +32,7 @@ const props = defineProps<{
   metadata?: RedisKeyInfo | null;
 }>();
 
-const emit = defineEmits<{ deleted: [] }>();
+const emit = defineEmits<{ deleted: []; loaded: [value: RedisValue] }>();
 
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
@@ -199,7 +199,9 @@ async function load(options: { selectDefaultMember?: boolean } = {}) {
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   loading.value = true;
   try {
-    data.value = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    data.value = loadedValue;
+    emit("loaded", loadedValue);
     scanCursor.value = data.value.scan_cursor ?? undefined;
     if (data.value.key_type === "string") {
       const detail = formatRedisMemberDetail(data.value.value);

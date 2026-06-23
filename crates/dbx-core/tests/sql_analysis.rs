@@ -44,3 +44,16 @@ fn duckdb_parser_gap_queries_do_not_raise_syntax_errors() {
         assert!(analysis.columns.is_empty());
     }
 }
+
+#[test]
+fn clickhouse_strictness_first_left_joins_do_not_raise_syntax_errors() {
+    for strictness in ["ANY", "ALL", "SEMI", "ANTI"] {
+        let sql = format!("SELECT a.id FROM events a {strictness} LEFT JOIN wallets b ON a.wallet_id = b.id");
+        let analysis = analyze_sql_references(&sql, Some("clickhouse"))
+            .unwrap_or_else(|error| panic!("ClickHouse {strictness} LEFT JOIN should analyze: {error}"));
+
+        let tables: Vec<_> =
+            analysis.tables.iter().map(|table| (table.name.as_str(), table.alias.as_deref())).collect();
+        assert_eq!(tables, vec![("events", Some("a")), ("wallets", Some("b"))]);
+    }
+}

@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
+import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
@@ -2060,16 +2060,9 @@ watch(
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <Label>{{ t("settings.toolbarTitle") }}</Label>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <CircleHelp class="h-3.5 w-3.5 text-muted-foreground cursor-help" />
-                      </TooltipTrigger>
-                      <TooltipContent class="max-w-64">
-                        <p>{{ t("settings.toolbarHiddenHint") }}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <HelpTooltip :label="t('settings.toolbarTitle')" content-class="max-w-64">
+                    <p>{{ t("settings.toolbarHiddenHint") }}</p>
+                  </HelpTooltip>
                 </div>
                 <div class="grid grid-cols-3 gap-2 mt-2">
                   <div
@@ -2121,14 +2114,9 @@ watch(
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="reuse-data-tab">{{ t("settings.reuseDataTab") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.reuseDataTabDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.reuseDataTab')">
+                    {{ t("settings.reuseDataTabDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="reuse-data-tab" v-model="editReuseDataTab" />
               </div>
@@ -2174,28 +2162,18 @@ watch(
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.autoSelectActiveSidebarNode')">
+                    {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="disconnect-tab-handling-mode">{{ t("settings.disconnectTabHandlingMode") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.disconnectTabHandlingModeDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.disconnectTabHandlingMode')">
+                    {{ t("settings.disconnectTabHandlingModeDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Select :model-value="editDisconnectTabHandlingMode" @update:model-value="onDisconnectTabHandlingModeChange">
                   <SelectTrigger id="disconnect-tab-handling-mode" class="w-full">
@@ -2218,14 +2196,9 @@ watch(
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-hide-table-comments">{{ t("settings.sidebarHideTableComments") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.sidebarHideTableCommentsDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.sidebarHideTableComments')">
+                    {{ t("settings.sidebarHideTableCommentsDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="sidebar-hide-table-comments" v-model="editSidebarHideTableComments" />
               </div>
@@ -2234,14 +2207,9 @@ watch(
                   <Label for="sidebar-allow-horizontal-scroll">
                     {{ t("settings.sidebarAllowHorizontalScroll") }}
                   </Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.sidebarAllowHorizontalScrollDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.sidebarAllowHorizontalScroll')">
+                    {{ t("settings.sidebarAllowHorizontalScrollDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="sidebar-allow-horizontal-scroll" v-model="editSidebarAllowHorizontalScroll" />
               </div>
@@ -2480,21 +2448,18 @@ watch(
                       <X class="size-3.5" />
                     </button>
                   </div>
-                  <label class="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input v-model="webdavRememberPassword" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
-                    <span>
-                      {{ t("settings.syncRememberWebDavPassword") }}
-                      <span v-if="webdavHasSavedPassword">{{ t("settings.syncSavedPassword") }}</span>
-                    </span>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                      </TooltipTrigger>
-                      <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                        {{ t("settings.syncRememberWebDavPasswordDescription") }}
-                      </TooltipContent>
-                    </Tooltip>
-                  </label>
+                  <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                    <label class="flex items-center gap-2">
+                      <input v-model="webdavRememberPassword" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                      <span>
+                        {{ t("settings.syncRememberWebDavPassword") }}
+                        <span v-if="webdavHasSavedPassword">{{ t("settings.syncSavedPassword") }}</span>
+                      </span>
+                    </label>
+                    <HelpTooltip :label="t('settings.syncRememberWebDavPassword')">
+                      {{ t("settings.syncRememberWebDavPasswordDescription") }}
+                    </HelpTooltip>
+                  </div>
                 </div>
                 <div class="space-y-2 md:col-span-2">
                   <Label for="webdav-remote-path">{{ t("settings.syncRemotePath") }}</Label>
@@ -2741,14 +2706,9 @@ watch(
                     <div class="flex items-center gap-2">
                       <PackageSearch class="h-4 w-4 text-muted-foreground" />
                       <Label class="text-base">{{ t("settings.mcpTitle") }}</Label>
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                        </TooltipTrigger>
-                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                          {{ t("settings.mcpDescription") }}
-                        </TooltipContent>
-                      </Tooltip>
+                      <HelpTooltip :label="t('settings.mcpTitle')">
+                        {{ t("settings.mcpDescription") }}
+                      </HelpTooltip>
                     </div>
                   </div>
                   <Badge variant="outline" class="shrink-0 rounded-md" :class="mcpStatusTone === 'ok' ? 'border-green-500/40 text-green-600 dark:text-green-400' : mcpStatusTone === 'warning' ? 'border-amber-500/40 text-amber-600 dark:text-amber-400' : 'text-muted-foreground'">

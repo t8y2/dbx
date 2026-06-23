@@ -47,11 +47,16 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     public List<DatabaseInfo> listDatabases() {
         return unchecked(() -> {
-            try (PreparedStatement stmt = requireConnected().prepareStatement("SELECT current_database() AS database_name");
+            String sql = isMysqlCompatMode()
+                ? "SELECT current_database() AS database_name"
+                : "SELECT datname AS database_name FROM sys_database WHERE datistemplate = false ORDER BY datname";
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql);
                  ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    return Collections.singletonList(new DatabaseInfo(rs.getString("database_name")));
+                List<DatabaseInfo> result = new ArrayList<>();
+                while (rs.next()) {
+                    result.add(new DatabaseInfo(rs.getString("database_name")));
                 }
+                if (!result.isEmpty()) return result;
             }
             return Collections.singletonList(new DatabaseInfo(getConfiguredDatabase()));
         });
@@ -61,12 +66,18 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     public List<String> listSchemas() {
         return unchecked(() -> {
             List<String> result = new ArrayList<>();
-            String sql = "SELECT schema_name " +
-                "FROM information_schema.schemata " +
-                "WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' " +
-                "AND UPPER(schema_name) NOT LIKE 'SYS%' " +
-                "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
-                "ORDER BY schema_name";
+            String sql = isMysqlCompatMode()
+                ? "SELECT schema_name " +
+                    "FROM information_schema.schemata " +
+                    "WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' " +
+                    "AND UPPER(schema_name) NOT LIKE 'SYS%' " +
+                    "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
+                    "ORDER BY schema_name"
+                : "SELECT nspname AS schema_name " +
+                    "FROM sys_namespace " +
+                    "WHERE nspname NOT LIKE 'sys_temp_%' " +
+                    "AND nspname NOT LIKE 'sys_toast_temp_%' " +
+                    "ORDER BY nspname";
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql);
                  ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {

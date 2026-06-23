@@ -122,6 +122,17 @@ Column headers provide quick access to actions:
 - **Local column filter**: Filter values within the current result set by checking specific values
 - **Compact mode**: When enabled in Settings, header actions (sort, format, filter) collapse into a single dropdown menu, giving column names more space
 - **Compact filter builder**: Build complex client-side filters with multiple conditions in a compact UI
+- **Drag-and-drop column reordering**: Click and drag column headers to reorder them. Column order is saved per table/query and persists across sessions
+
+## Cell Detail Editor
+
+The cell detail panel provides a full editor for individual cell values:
+
+- **Value editor**: Edit cell content in a larger text area with syntax highlighting for JSON and SQL
+- **Set NULL**: Explicitly write NULL to a cell
+- **Image preview**: When a cell contains an image URL, the detail panel shows a rendered preview
+- **Temporal editor**: Date and time cells use a dedicated date/time picker
+- **Binary data hex viewer**: View binary data in hexadecimal format with both hex and ASCII representations, making it easy to inspect raw binary content
 
 ## Export and Copy
 
@@ -134,8 +145,22 @@ Column headers provide quick access to actions:
 | UPDATE   | Copy selected rows as executable `UPDATE` statements                     |
 | XLSX     | Export directly to Excel format from the table context menu              |
 
+### Copy with Headers
+
+DBX supports copying data with column headers included:
+
+- **Copy column names**: Copy just the column names from the current selection
+- **Copy selection with headers**: Copy selected cells along with their column headers
+- **Copy as TSV/CSV with headers**: Include headers in tab-separated or comma-separated output
+
+This is especially useful when pasting data into spreadsheets, documentation, or sharing query results where column context is important.
+
 Before exporting, check the active filters and sort order so the exported data matches what you expect.
 
 ## Pagination And Large Results
 
 DBX can page result sets and keep large grids responsive with virtual scrolling. For large tables, prefer database-side `WHERE` and `ORDER BY` clauses instead of relying only on client search, because the database can use indexes and return a smaller result set. Page size is configurable and persists across sessions.
+
+### Row Number Display
+
+The data grid shows row numbers in the leftmost column. When paging through large result sets, row numbers reflect the current page position and help you track which records you're viewing. Row numbers automatically adjust when you apply sorting or filtering.

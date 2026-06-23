@@ -1,6 +1,7 @@
 package com.dbx.agent.kingbase;
 
 import com.dbx.agent.DatabaseAgent;
+import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
@@ -16,6 +17,7 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
@@ -49,6 +51,36 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("TEST", agent.listDatabases().get(0).getName());
         Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(0));
+    }
+
+    @Test
+    void regularListDatabasesUsesKingbaseCatalog() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"database_name"},
+            new Object[][]{{"app"}, {"analytics"}}
+        )));
+
+        List<DatabaseInfo> databases = agent.listDatabases();
+        Assertions.assertEquals(2, databases.size());
+        Assertions.assertEquals("app", databases.get(0).getName());
+        Assertions.assertEquals("analytics", databases.get(1).getName());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_database"), sql.get(0));
+    }
+
+    @Test
+    void regularListSchemasKeepsKingbaseSystemSchemas() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"schema_name"},
+            new Object[][]{{"public"}, {"sys_catalog"}}
+        )));
+
+        Assertions.assertEquals(Arrays.asList("public", "sys_catalog"), agent.listSchemas());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_namespace"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("SYS%"), sql.get(0));
     }
 
     @Test

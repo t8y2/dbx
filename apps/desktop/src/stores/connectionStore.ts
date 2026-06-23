@@ -59,6 +59,8 @@ const CONNECTION_HEALTH_CHECK_TTL_MS = 2000;
 const METADATA_LOAD_MIN_TIMEOUT_MS = 15_000;
 const METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS = 60_000;
 const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
+const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
+const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
 function sidebarObjectGroupPageSize(): number {
   const settingsStore = useSettingsStore();
   const size = settingsStore.desktopSettings.sidebar_table_page_size;
@@ -401,6 +403,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sqlserver: "SQL Server",
       mongodb: "MongoDB",
       oracle: "Oracle",
+      "mongodb-legacy": MONGO_LEGACY_DRIVER_LABEL,
       elasticsearch: "Elasticsearch",
       qdrant: "Qdrant",
       milvus: "Milvus",
@@ -855,6 +858,26 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function syncMongoLegacyDriverFallback(connectionId: string, previousConfig: ConnectionConfig) {
+    if (!isDesktop || previousConfig.db_type !== "mongodb" || previousConfig.driver_profile === MONGO_LEGACY_DRIVER_PROFILE) {
+      return;
+    }
+
+    const savedConnections = await api.loadConnections().catch(() => null);
+    const savedConfig = savedConnections?.map((connection) => normalizeConnection(connection)).find((connection) => connection.id === connectionId && connection.driver_profile === MONGO_LEGACY_DRIVER_PROFILE);
+    if (!savedConfig) return;
+
+    const idx = connections.value.findIndex((connection) => connection.id === connectionId);
+    if (idx < 0) return;
+    const nextConnections = [...connections.value];
+    nextConnections[idx] = {
+      ...savedConfig,
+      driver_label: savedConfig.driver_label || MONGO_LEGACY_DRIVER_LABEL,
+    };
+    connections.value = nextConnections;
+    rebuildTreeNodes();
+  }
+
   async function setDefaultDatabase(connectionId: string, database: string) {
     const config = getConfig(connectionId);
     if (!config || config.database === database) return;
@@ -933,6 +956,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await beforeConnectHandler?.(config);
       const id = await withConnectionAttemptTimeout(api.connectDb(config), config);
+      await syncMongoLegacyDriverFallback(id, config);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
       markConnectionHealthChecked(id);
@@ -1050,6 +1074,7 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await beforeConnectHandler?.(config);
       await withConnectionAttemptTimeout(api.connectDb(config), config);
+      await syncMongoLegacyDriverFallback(connectionId, config);
       connectedIds.value.add(connectionId);
       markConnectionHealthChecked(connectionId);
       activeConnectionId.value = connectionId;
@@ -2424,7 +2449,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(connectionId);
       const pageSize = settingsStore.editorSettings.redisScanPageSize;
       // Bounded multi-round SCAN: trade coverage for latency/memory safety.
-      const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6);
+      const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6, false);
       const keys = result.keys.map((key) => key.key_display).slice(0, REDIS_COMPLETION_KEYS_MAX);
       redisCompletionKeysCache.value[cacheKey] = keys;
       evictOldestCacheEntries(redisCompletionKeysCache.value, COMPLETION_CACHE_MAX);

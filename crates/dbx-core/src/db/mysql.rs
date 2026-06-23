@@ -1025,6 +1025,29 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
     Ok(tables)
 }
 
+fn table_comment_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT TABLE_COMMENT \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} AND TABLE_TYPE <> 'VIEW' \
+         LIMIT 1",
+        quote_value(database),
+        quote_value(table),
+    )
+}
+
+pub async fn get_table_comment(pool: &MySqlPool, database: &str, table: &str) -> Result<Option<String>, String> {
+    let sql = table_comment_sql(database, table);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .first()
+        .and_then(|row| get_opt_str(row, "TABLE_COMMENT"))
+        .map(|s| fix_potential_double_encoding(&s))
+        .filter(|s| !s.is_empty()))
+}
+
 #[derive(Clone, Debug, Default)]
 struct TableStatusMeta {
     comment: Option<String>,
@@ -2072,6 +2095,18 @@ mod tests {
         assert!(!sql.contains("UNION"));
         assert!(sql.contains("CREATE_TIME"));
         assert!(sql.contains("UPDATE_TIME"));
+    }
+
+    #[test]
+    fn mysql_table_comment_sql_targets_single_table() {
+        let sql = table_comment_sql("app", "users");
+
+        assert!(sql.contains("SELECT TABLE_COMMENT"));
+        assert!(sql.contains("TABLE_SCHEMA = 'app'"));
+        assert!(sql.contains("TABLE_NAME = 'users'"));
+        assert!(sql.contains("TABLE_TYPE <> 'VIEW'"));
+        assert!(sql.contains("LIMIT 1"));
+        assert!(!sql.contains("ORDER BY"));
     }
 
     #[test]

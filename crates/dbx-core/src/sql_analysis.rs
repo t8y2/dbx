@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+
+use regex::Regex;
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
     ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
@@ -11,6 +14,11 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Span;
 
 use crate::sql::{starts_with_duckdb_result_sql_keyword, starts_with_executable_sql_keyword};
+
+static CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(ANY|ALL|SEMI|ANTI|ASOF)\s+(LEFT|RIGHT|FULL|INNER|CROSS)(\s+OUTER)?\s+JOIN\b")
+        .expect("valid ClickHouse join strictness regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlReferenceAnalysis {
@@ -63,15 +71,20 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     if normalized_dialect == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
         return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![] });
     }
+    let parser_sql = if normalized_dialect == "clickhouse" {
+        normalize_clickhouse_join_order_for_parser(sql)
+    } else {
+        sql.to_string()
+    };
 
     let statements = match normalized_dialect.as_str() {
-        "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, sql),
-        "mysql" => Parser::parse_sql(&MySqlDialect {}, sql),
-        "sqlite" => Parser::parse_sql(&SQLiteDialect {}, sql),
-        "sqlserver" => Parser::parse_sql(&MsSqlDialect {}, sql),
-        "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, sql),
-        "duckdb" => Parser::parse_sql(&DuckDbDialect {}, sql),
-        _ => Parser::parse_sql(&GenericDialect {}, sql),
+        "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
+        "mysql" => Parser::parse_sql(&MySqlDialect {}, &parser_sql),
+        "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
+        "sqlserver" => Parser::parse_sql(&MsSqlDialect {}, &parser_sql),
+        "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
+        "duckdb" => Parser::parse_sql(&DuckDbDialect {}, &parser_sql),
+        _ => Parser::parse_sql(&GenericDialect {}, &parser_sql),
     }
     .map_err(|err| err.to_string())?;
 
@@ -86,6 +99,25 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
 fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
     starts_with_duckdb_result_sql_keyword(sql)
         && starts_with_executable_sql_keyword(sql, &["FROM", "SUMMARIZE", "SUMMARISE", "PIVOT", "UNPIVOT"])
+}
+
+fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
+    CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE
+        .replace_all(sql, |captures: &regex::Captures<'_>| {
+            let matched_len = captures.get(0).map(|value| value.as_str().len()).unwrap_or(0);
+            let strictness = captures.get(1).map(|value| value.as_str()).unwrap_or("");
+            let join_type = captures.get(2).map(|value| value.as_str()).unwrap_or("");
+            let outer = captures.get(3).map(|value| value.as_str()).unwrap_or("");
+            let mut normalized = match strictness.to_ascii_uppercase().as_str() {
+                "SEMI" | "ANTI" => format!("{join_type}{outer} {strictness} JOIN"),
+                _ => format!("{join_type}{outer} JOIN"),
+            };
+            if normalized.len() < matched_len {
+                normalized.push_str(&" ".repeat(matched_len - normalized.len()));
+            }
+            normalized
+        })
+        .into_owned()
 }
 
 fn normalize_dialect(dialect: Option<&str>) -> String {

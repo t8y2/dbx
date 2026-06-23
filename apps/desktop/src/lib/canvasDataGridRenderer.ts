@@ -54,6 +54,9 @@ export interface DrawCanvasDataGridOptions {
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
+  infiniteScrollEnabled: boolean;
+  pageSize: number;
+  currentPage: number;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -101,14 +104,16 @@ function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
     fitCanvasTextCache.set(cacheKey, text);
     return text;
   }
+  const ellipsis = "...";
+  const ellipsisWidth = ctx.measureText(ellipsis).width;
   let low = 0;
   let high = text.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
-    if (ctx.measureText(text.slice(0, mid)).width <= maxWidth) low = mid;
+    if (ctx.measureText(text.slice(0, mid)).width + ellipsisWidth <= maxWidth) low = mid;
     else high = mid - 1;
   }
-  const result = text.slice(0, low);
+  const result = text.slice(0, low) + ellipsis;
   if (fitCanvasTextCache.size >= FIT_CANVAS_TEXT_CACHE_MAX) fitCanvasTextCache.clear();
   fitCanvasTextCache.set(cacheKey, result);
   return result;
@@ -221,6 +226,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover,
+    infiniteScrollEnabled,
+    pageSize,
+    currentPage,
   } = options;
   const dpr = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
   const pixelWidth = Math.max(1, Math.ceil(width * dpr));
@@ -287,7 +295,11 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.font = item.status === "new" || item.status === "edited" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
-    ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
+    if (infiniteScrollEnabled) {
+      ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
+    } else {
+      ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
+    }
     ctx.font = normalFont;
 
     ctx.strokeStyle = theme.border;
@@ -360,7 +372,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         const displayText = isEditingThisCell ? "" : formatCell(value, actualColIdx);
         const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
         const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
-        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth);
+        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
         ctx.fillText(text, textLeft, textY);
         if (item.isDeleted && text) {
           const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);

@@ -1,4 +1,4 @@
-import type { SchemaDiffOptionItem, SchemaDiffCompareOptions } from "@/types/schemaDiff";
+import type { BooleanSchemaDiffCompareOptionKey, SchemaDiffCompareOptions, SchemaDiffOptionItem } from "@/types/schemaDiff";
 
 export const POSTGRES_SCHEMA_DIFF_OPTIONS: SchemaDiffOptionItem[] = [
   {
@@ -22,6 +22,7 @@ export const POSTGRES_SCHEMA_DIFF_OPTIONS: SchemaDiffOptionItem[] = [
   { id: "owners", labelKey: "schemaDiff.options.owners", defaultChecked: true },
   { id: "cascadeDelete", labelKey: "schemaDiff.options.cascadeDelete", defaultChecked: false },
   { id: "sequenceLastValues", labelKey: "schemaDiff.options.sequenceLastValues", defaultChecked: true },
+  { id: "compareColumnOrder", labelKey: "schemaDiff.options.compareColumnOrder", defaultChecked: false },
 ];
 
 export const SCHEMA_DIFF_OPTIONS_BY_DB_TYPE: Record<string, SchemaDiffOptionItem[]> = {
@@ -35,8 +36,8 @@ export function getSchemaDiffOptionsForDbType(dbType: string): SchemaDiffOptionI
   return SCHEMA_DIFF_OPTIONS_BY_DB_TYPE[dbType] ?? POSTGRES_SCHEMA_DIFF_OPTIONS;
 }
 
-export function getOptionIdsFromTree(items: SchemaDiffOptionItem[]): (keyof SchemaDiffCompareOptions)[] {
-  const ids: (keyof SchemaDiffCompareOptions)[] = [];
+export function getOptionIdsFromTree(items: SchemaDiffOptionItem[]): BooleanSchemaDiffCompareOptionKey[] {
+  const ids: BooleanSchemaDiffCompareOptionKey[] = [];
   for (const item of items) {
     ids.push(item.id);
     if (item.children) {

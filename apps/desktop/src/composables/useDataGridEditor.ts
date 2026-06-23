@@ -142,6 +142,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const dirtyRows = ref<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
   const deletedRows = ref<Set<number>>(new Set());
+  const pendingChangesVersion = ref(0);
   let restoredEditingCell = false;
   let restoredTransactionActive = false;
   let suppressNextBlurCommit = false;
@@ -216,6 +217,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function enterTransaction() {
     transactionActive.value = true;
+  }
+
+  function touchPendingChanges() {
+    pendingChangesVersion.value++;
   }
 
   function exitTransaction() {
@@ -415,6 +420,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (newRows.value[item.newIndex]) {
         newRows.value[item.newIndex][col] = newVal;
       }
+      newRows.value = [...newRows.value];
+      touchPendingChanges();
       editingCell.value = null;
       isCommitting = false;
       return;
@@ -445,6 +452,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
     }
     dirtyRows.value = new Map(dirtyRows.value);
+    touchPendingChanges();
     editingCell.value = null;
     isCommitting = false;
   }
@@ -466,6 +474,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       const oldVal = newRows.value[item.newIndex]?.[col];
       newRows.value[item.newIndex][col] = value === null ? null : coerceCellValue(value, oldVal, col);
       newRows.value = [...newRows.value];
+      touchPendingChanges();
       return;
     }
 
@@ -486,6 +495,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
     }
     dirtyRows.value = new Map(dirtyRows.value);
+    touchPendingChanges();
   }
 
   function cancelEdit() {
@@ -511,6 +521,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function addRow() {
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(result.value.columns.map(() => null));
+    newRows.value = [...newRows.value];
+    touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
     }
@@ -545,6 +557,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const clonedData = clonedRowData(item);
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
+    newRows.value = [...newRows.value];
+    touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
     }
@@ -564,6 +578,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       const clonedData = clonedRowData(item);
       newRows.value.push(clonedData);
     }
+    newRows.value = [...newRows.value];
+    touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
     }
@@ -574,11 +590,15 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!item) return;
     if (item.isNew && item.newIndex !== undefined) {
       newRows.value.splice(item.newIndex, 1);
+      newRows.value = [...newRows.value];
     } else if (item.sourceIndex !== undefined) {
       if (!canEditExistingRows.value) return;
       dirtyRows.value.delete(item.sourceIndex);
       deletedRows.value.add(item.sourceIndex);
+      dirtyRows.value = new Map(dirtyRows.value);
+      deletedRows.value = new Set(deletedRows.value);
     }
+    touchPendingChanges();
     if (editingCell.value?.rowId === rowId) editingCell.value = null;
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -616,6 +636,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const item = getRowItem(rowId);
     if (item?.sourceIndex !== undefined) {
       deletedRows.value.delete(item.sourceIndex);
+      deletedRows.value = new Set(deletedRows.value);
+      touchPendingChanges();
     }
   }
 
@@ -725,6 +747,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows.value.clear();
       newRows.value = [];
       deletedRows.value.clear();
+      touchPendingChanges();
       exitTransaction();
       isSaving.value = false;
       if (shouldReloadAfterSave) {
@@ -808,6 +831,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     dirtyRows.value.clear();
     newRows.value = [];
     deletedRows.value.clear();
+    touchPendingChanges();
     exitTransaction();
     isSaving.value = false;
     if (shouldReloadAfterSave) {
@@ -819,6 +843,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     dirtyRows.value.clear();
     newRows.value = [];
     deletedRows.value.clear();
+    touchPendingChanges();
     editingCell.value = null;
     exitTransaction();
   }
@@ -939,6 +964,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     dirtyRows,
     newRows,
     deletedRows,
+    pendingChangesVersion,
     dirtyRowCount,
     newRowCount,
     deletedRowCount,

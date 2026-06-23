@@ -65,6 +65,17 @@ Use `@table` or `@schema.table` mentions in your prompt to tell the AI which tab
 
 Table mentions are the most reliable way to control schema context. They work even when the full schema is too large to include entirely.
 
+## Prompt Input History Navigation
+
+Navigate through your previous AI prompts using arrow keys:
+
+- Press **↑** (Up Arrow) to cycle through previous prompts
+- Press **↓** (Down Arrow) to move forward in prompt history
+- Works in both Ask and Agent modes
+- Saves time when iterating on similar queries or explanations
+
+The prompt history is preserved per session and helps you quickly reuse or modify previous AI requests without retyping.
+
 ## Schema Context
 
 AI prompts can include the current database type, connection name, database, current SQL, recent error, result preview, and schema context. Schema context contains tables, columns, indexes, and foreign keys.
@@ -143,9 +154,11 @@ When SQL fails, send the error and query to the assistant for diagnosis. Common 
 
 ## Supported Providers
 
+DBX features an improved **searchable model dropdown** that makes it easy to find and select from available models across all supported providers.
+
 <Tabs groupId="ai-provider" items={['Anthropic', 'OpenAI', 'Custom Endpoint']}>
   <Tab value="Anthropic">
-    Use this for Claude models. Enter your API key, then choose or type the model you want to use.
+    Use this for Claude models. Enter your API key, then choose or type the model you want to use from the searchable dropdown.
   </Tab>
   <Tab value="OpenAI">
     Use this for OpenAI models. Enter your API key, then choose or type the model you want to use.

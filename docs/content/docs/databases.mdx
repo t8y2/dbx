@@ -17,7 +17,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | PostgreSQL-compatible profiles | openGauss, KingBase, HighGo, Vastbase, CockroachDB, custom PostgreSQL                                                                                            | Reuse PostgreSQL-style connection handling where the engine speaks a compatible protocol       |
 | File-based engines             | SQLite, DuckDB, Microsoft Access, RQLite, Turso                                                                                                                  | Choose a local database file or HTTP endpoint instead of host and port                         |
 | Time-series and edge           | InfluxDB, IoTDB, TDengine, Databend, QuestDB                                                                                                                     | Optimized for time-series, IoT, or edge workloads                                              |
-| Agent/JDBC-oriented engines    | H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, XuguDB, Databricks, IRIS, JDBC                                              | Feature coverage depends on the driver path used by that engine                                |
+| Agent/JDBC-oriented engines    | H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, XuguDB, Databricks, IRIS, JDBC                                   | Feature coverage depends on the driver path used by that engine                                |
 
 ## Default Ports
 
@@ -57,6 +57,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | H2                                          |         9092 |
 | Snowflake                                   |          443 |
 | Trino                                       |         8080 |
+| PrestoSQL                                   |         8080 |
 | Hive                                        |        10000 |
 | DB2                                         |        50000 |
 | Informix                                    |         9088 |

@@ -18,10 +18,40 @@ use dbx_core::db::agent_driver::AgentMethod;
 use dbx_core::models::connection::{rewrite_jdbc_url_host, ConnectionConfig, DatabaseType};
 pub use dbx_core::path_utils::expand_tilde;
 
+const MONGO_LEGACY_DRIVER_PROFILE: &str = "mongodb-legacy";
+const MONGO_LEGACY_DRIVER_LABEL: &str = "MongoDB (Legacy)";
+
 fn mongo_legacy_connect_params(config: &ConnectionConfig, host: &str, port: u16) -> serde_json::Value {
     serde_json::json!({
         "connection": agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))
     })
+}
+
+fn mark_mongo_legacy_driver(config: &mut ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::MongoDb {
+        return false;
+    }
+    let changed = config.driver_profile.as_deref() != Some(MONGO_LEGACY_DRIVER_PROFILE)
+        || config.driver_label.as_deref() != Some(MONGO_LEGACY_DRIVER_LABEL);
+    config.driver_profile = Some(MONGO_LEGACY_DRIVER_PROFILE.to_string());
+    config.driver_label = Some(MONGO_LEGACY_DRIVER_LABEL.to_string());
+    changed
+}
+
+async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<(), String> {
+    if config.one_time {
+        return Ok(());
+    }
+
+    let mut configs: Vec<ConnectionConfig> =
+        state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
+    let Some(saved_config) = configs.iter_mut().find(|saved_config| saved_config.id == config.id) else {
+        return Ok(());
+    };
+    if !mark_mongo_legacy_driver(saved_config) {
+        return Ok(());
+    }
+    save_connection_configs(state, &configs).await
 }
 
 async fn test_agent_connection(
@@ -168,10 +198,16 @@ async fn connect_agent_pool(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_connection_configs, mongo_legacy_connect_params, save_connection_configs};
-    use dbx_core::connection::{AppState, PoolKind};
+    use super::{
+        mark_mongo_legacy_driver, mongo_legacy_connect_params, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+    };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-    use dbx_core::storage::Storage;
+    #[cfg(feature = "mq-admin")]
+    use {
+        super::{load_connection_configs, save_connection_configs},
+        dbx_core::connection::{AppState, PoolKind},
+        dbx_core::storage::Storage,
+    };
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -222,6 +258,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mq-admin")]
     fn mq_config(id: &str, admin_url: &str) -> ConnectionConfig {
         let mut config = mongodb_config();
         config.id = id.to_string();
@@ -257,6 +294,16 @@ mod tests {
             params["connection"]["connection_string"],
             "mongodb://mongouser:secret@172.22.4.42:27017/RestCloud_V45PUB_Gateway?authSource=admin"
         );
+    }
+
+    #[test]
+    fn mark_mongo_legacy_driver_updates_profile_and_label() {
+        let mut config = mongodb_config();
+
+        assert!(mark_mongo_legacy_driver(&mut config));
+        assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
+        assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
+        assert!(!mark_mongo_legacy_driver(&mut config));
     }
 
     #[cfg(feature = "mq-admin")]
@@ -760,6 +807,8 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     let id = config.id.clone();
     let db_config = metadata_connection_config(&config);
     let attempt = state.begin_connection_attempt(&id).await;
+    let mut connected_config = config.clone();
+    let mut connected_db_config = db_config.clone();
 
     state.remove_connection_pools_detached(&id).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
@@ -830,7 +879,8 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         DatabaseType::DuckDb => return Err("DuckDB support not compiled (enable duckdb-bundled feature)".to_string()),
         DatabaseType::MongoDb => {
             if mongo_uses_legacy_driver(&db_config) {
-                let mut client = state.agent_manager.spawn(&db_config.db_type, Some("mongodb-legacy")).await?;
+                let mut client =
+                    state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
                 client
                     .connect(mongo_legacy_connect_params(&db_config, &host, port))
                     .await
@@ -866,13 +916,17 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 };
                 if should_retry_mongo_with_legacy_driver(&native_err) {
                     log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
-                    let mut client = state.agent_manager.spawn(&db_config.db_type, Some("mongodb-legacy")).await?;
+                    let mut client =
+                        state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
                     client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await.map_err(|err| {
                         format!(
                             "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
                             mongo_legacy_error_with_auth_hint(&err)
                         )
                     })?;
+                    mark_mongo_legacy_driver(&mut connected_config);
+                    connected_db_config = metadata_connection_config(&connected_config);
+                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
                     PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
                 } else {
                     return Err(native_err);
@@ -1008,8 +1062,8 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
-    state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &db_config).await?;
-    state.configs.write().await.insert(id.clone(), config);
+    state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &connected_db_config).await?;
+    state.configs.write().await.insert(id.clone(), connected_config);
 
     Ok(id)
 }

@@ -197,6 +197,8 @@ pub struct SchemaDiffPreparationOptions {
     pub ignore_comments: bool,
     #[serde(default)]
     pub cascade_delete: bool,
+    #[serde(default)]
+    pub compare_column_order: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,7 +363,12 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     for name in common {
         let Some(source) = source_details.get(name.as_str()) else { continue };
         let Some(target) = target_details.get(name.as_str()) else { continue };
-        let column_diffs = diff_columns_with_options(&source.columns, &target.columns, options.ignore_comments);
+        let column_diffs = diff_columns_with_options(
+            &source.columns,
+            &target.columns,
+            options.ignore_comments,
+            options.compare_column_order,
+        );
         let index_diffs = diff_indexes(&source.indexes, &target.indexes);
         let foreign_key_diffs = diff_foreign_keys(&source.foreign_keys, &target.foreign_keys);
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
@@ -408,15 +415,25 @@ fn diff_names(source: &[String], target: &[String]) -> (Vec<String>, Vec<String>
 }
 
 pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnDiff> {
-    diff_columns_with_options(source, target, false)
+    diff_columns_with_options(source, target, false, false)
 }
 
-fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignore_comments: bool) -> Vec<ColumnDiff> {
+fn diff_columns_with_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_comments: bool,
+    compare_column_order: bool,
+) -> Vec<ColumnDiff> {
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &ColumnInfo> = target.iter().map(|column| (column.name.as_str(), column)).collect();
     let source_map: HashMap<&str, &ColumnInfo> = source.iter().map(|column| (column.name.as_str(), column)).collect();
+    let target_position_map: HashMap<&str, usize> =
+        target.iter().enumerate().map(|(index, column)| (column.name.as_str(), index)).collect();
+    let can_compare_order = compare_column_order
+        && source.len() == target.len()
+        && source.iter().all(|column| target_map.contains_key(column.name.as_str()));
 
-    for source_column in source {
+    for (source_index, source_column) in source.iter().enumerate() {
         if let Some(target_column) = target_map.get(source_column.name.as_str()) {
             let mut changes = Vec::new();
             if source_column.data_type.to_lowercase() != target_column.data_type.to_lowercase() {
@@ -447,6 +464,13 @@ fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignor
                     target_column.comment.as_deref().unwrap_or_default(),
                     source_column.comment.as_deref().unwrap_or_default()
                 ));
+            }
+            if can_compare_order {
+                if let Some(target_index) = target_position_map.get(source_column.name.as_str()) {
+                    if source_index != *target_index {
+                        changes.push(format!("order: {} → {}", *target_index + 1, source_index + 1));
+                    }
+                }
             }
             if !changes.is_empty() {
                 diffs.push(ColumnDiff {
@@ -1117,7 +1141,9 @@ pub fn generate_schema_sync_sql(
                     "modified" => {
                         if let Some(source) = &column.source {
                             if is_mysql {
-                                parts.push(format!("  MODIFY COLUMN {}", column_def(source, db_type)));
+                                if column.changes.iter().any(|change| !change.starts_with("order:")) {
+                                    parts.push(format!("  MODIFY COLUMN {}", column_def(source, db_type)));
+                                }
                             } else {
                                 let name = quote_id(&column.name, db_type);
                                 if column.changes.iter().any(|change| change.starts_with("type:")) {
@@ -1430,6 +1456,31 @@ mod tests {
     }
 
     #[test]
+    fn ignores_column_order_when_option_is_disabled() {
+        let diffs = diff_columns_with_options(
+            &[column("id", "int", None), column("name", "varchar(64)", None), column("status", "varchar(16)", None)],
+            &[column("status", "varchar(16)", None), column("id", "int", None), column("name", "varchar(64)", None)],
+            false,
+            false,
+        );
+
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn detects_column_order_when_option_is_enabled() {
+        let diffs = diff_columns_with_options(
+            &[column("id", "int", None), column("name", "varchar(64)", None), column("status", "varchar(16)", None)],
+            &[column("status", "varchar(16)", None), column("id", "int", None), column("name", "varchar(64)", None)],
+            false,
+            true,
+        );
+
+        assert_eq!(diffs.len(), 3);
+        assert_eq!(diffs[0].changes, vec!["order: 2 → 1"]);
+    }
+
+    #[test]
     fn detects_modified_indexes_not_only_added_or_removed_indexes() {
         let diffs = diff_indexes(
             &[index(IndexInfo {
@@ -1654,6 +1705,7 @@ mod tests {
             target_schema: None,
             ignore_comments: true,
             cascade_delete: false,
+            compare_column_order: false,
         };
 
         let result = prepare_schema_diff(options);
@@ -1706,6 +1758,7 @@ mod tests {
             target_schema: None,
             ignore_comments: false,
             cascade_delete: false,
+            compare_column_order: false,
         };
 
         let result = prepare_schema_diff(options);

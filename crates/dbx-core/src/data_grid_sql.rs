@@ -1833,9 +1833,9 @@ mod tests {
         assert_eq!(
             result.statements,
             vec![
-                "ALTER TABLE \"people\" UPDATE \"name\" = 'Linus' WHERE \"id\" = 1;",
-                "ALTER TABLE \"people\" DELETE WHERE \"id\" = 1;",
-                "INSERT INTO \"people\" (\"id\", \"name\") VALUES (2, 'Grace');",
+                "ALTER TABLE `people` UPDATE `name` = 'Linus' WHERE `id` = 1;",
+                "ALTER TABLE `people` DELETE WHERE `id` = 1;",
+                "INSERT INTO `people` (`id`, `name`) VALUES (2, 'Grace');",
             ]
         );
         assert!(result.rollback_statements.is_empty());
@@ -1896,7 +1896,7 @@ mod tests {
         });
 
         assert_eq!(result.validation_error, None);
-        assert_eq!(result.statements, vec!["ALTER TABLE \"events\" UPDATE \"name\" = 'Linus' WHERE \"id\" = 1;"]);
+        assert_eq!(result.statements, vec!["ALTER TABLE `events` UPDATE `name` = 'Linus' WHERE `id` = 1;"]);
     }
 
     #[test]
@@ -1946,7 +1946,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("Ada")]],
         });
 
-        assert_eq!(statements, vec!["ALTER TABLE \"people\" UPDATE \"name\" = 'Ada' WHERE \"id\" = 1;"]);
+        assert_eq!(statements, vec!["ALTER TABLE `people` UPDATE `name` = 'Ada' WHERE `id` = 1;"]);
     }
 
     #[test]

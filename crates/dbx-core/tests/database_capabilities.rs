@@ -112,6 +112,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
+    assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Postgres, None), None);
@@ -136,6 +137,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Access));
     assert!(is_agent_type(&DatabaseType::Databend));
     assert!(is_agent_type(&DatabaseType::InfluxDb));
+    assert!(is_agent_type(&DatabaseType::ZooKeeper));
     assert!(!is_agent_type(&DatabaseType::Mysql));
     assert!(!is_agent_type(&DatabaseType::Jdbc));
     assert!(!is_agent_type(&DatabaseType::Gaussdb));
@@ -189,6 +191,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::Databend));
     assert!(skips_tcp_probe(&DatabaseType::InfluxDb));
     assert!(skips_tcp_probe(&DatabaseType::MessageQueue));
+    assert!(skips_tcp_probe(&DatabaseType::ZooKeeper));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
@@ -298,4 +301,13 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert_eq!(redis.support_level, "connect");
     assert!(!redis.capabilities.object_browser);
     assert!(!redis.capabilities.sql_file_execution);
+
+    let zookeeper = find_driver(DatabaseType::ZooKeeper);
+    assert_eq!(zookeeper.label, "Apache ZooKeeper");
+    assert_eq!(zookeeper.runtime_mode, "agent");
+    assert_eq!(zookeeper.agent_key.as_deref(), Some("zookeeper"));
+    assert_eq!(zookeeper.support_level, "connect");
+    assert!(zookeeper.capabilities.query_execution);
+    assert!(zookeeper.capabilities.driver_management);
+    assert!(!zookeeper.capabilities.metadata_browse);
 }

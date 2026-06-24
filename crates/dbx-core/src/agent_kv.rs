@@ -25,6 +25,16 @@ pub struct KvKeyMetadata {
     pub version: Option<i64>,
     pub lease: Option<i64>,
     pub value_size: Option<u64>,
+    pub czxid: Option<i64>,
+    pub mzxid: Option<i64>,
+    pub pzxid: Option<i64>,
+    pub ctime: Option<i64>,
+    pub mtime: Option<i64>,
+    pub cversion: Option<i64>,
+    pub aversion: Option<i64>,
+    pub ephemeral_owner: Option<i64>,
+    pub data_length: Option<u64>,
+    pub num_children: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,12 +84,46 @@ pub struct KvPutRequest {
     pub value: KvValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_mode: Option<KvWriteMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_mode: Option<KvCreateMode>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvPutOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_mode: Option<KvWriteMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_mode: Option<KvCreateMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvWriteMode {
+    Upsert,
+    Create,
+    Update,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvCreateMode {
+    Persistent,
+    Ephemeral,
+    PersistentSequential,
+    EphemeralSequential,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvPutResponse {
     pub revision: Option<i64>,
+    pub key: Option<String>,
+    pub created_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,7 +153,18 @@ pub fn kv_get_params(key: &str) -> serde_json::Value {
 }
 
 pub fn kv_put_params(key: &str, value: KvValue, lease: Option<i64>) -> serde_json::Value {
-    serde_json::to_value(KvPutRequest { key: key.to_string(), value, lease }).expect("KV put request should serialize")
+    kv_put_params_with_options(key, value, KvPutOptions { lease, ..KvPutOptions::default() })
+}
+
+pub fn kv_put_params_with_options(key: &str, value: KvValue, options: KvPutOptions) -> serde_json::Value {
+    serde_json::to_value(KvPutRequest {
+        key: key.to_string(),
+        value,
+        lease: options.lease,
+        write_mode: options.write_mode,
+        create_mode: options.create_mode,
+    })
+    .expect("KV put request should serialize")
 }
 
 pub fn kv_delete_params(key: &str) -> serde_json::Value {
@@ -138,7 +193,17 @@ pub async fn kv_put_core(
     value: KvValue,
     lease: Option<i64>,
 ) -> Result<KvPutResponse, String> {
-    call_agent_kv(state, connection_id, AgentKvMethod::Put, kv_put_params(key, value, lease)).await
+    kv_put_core_with_options(state, connection_id, key, value, KvPutOptions { lease, ..KvPutOptions::default() }).await
+}
+
+pub async fn kv_put_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    key: &str,
+    value: KvValue,
+    options: KvPutOptions,
+) -> Result<KvPutResponse, String> {
+    call_agent_kv(state, connection_id, AgentKvMethod::Put, kv_put_params_with_options(key, value, options)).await
 }
 
 pub async fn kv_delete_core(state: &AppState, connection_id: &str, key: &str) -> Result<KvDeleteResponse, String> {
@@ -212,6 +277,41 @@ mod tests {
     }
 
     #[test]
+    fn serializes_kv_put_options_without_changing_default_shape() {
+        let value = KvValue { encoding: KvValueEncoding::Utf8, data: "dbx".to_string() };
+        assert_eq!(
+            kv_put_params("/app/name", value.clone(), None),
+            serde_json::json!({
+                "key": "/app/name",
+                "value": {
+                    "encoding": "utf8",
+                    "data": "dbx"
+                }
+            })
+        );
+        assert_eq!(
+            kv_put_params_with_options(
+                "/jobs/job-",
+                value,
+                KvPutOptions {
+                    write_mode: Some(KvWriteMode::Create),
+                    create_mode: Some(KvCreateMode::EphemeralSequential),
+                    ..KvPutOptions::default()
+                },
+            ),
+            serde_json::json!({
+                "key": "/jobs/job-",
+                "value": {
+                    "encoding": "utf8",
+                    "data": "dbx"
+                },
+                "writeMode": "create",
+                "createMode": "ephemeral_sequential"
+            })
+        );
+    }
+
+    #[test]
     fn decodes_kv_list_prefix_response() {
         let decoded: KvListPrefixResponse = serde_json::from_value(serde_json::json!({
             "keys": [{
@@ -231,5 +331,50 @@ mod tests {
         assert_eq!(decoded.keys[0].metadata.mod_revision, Some(2));
         assert_eq!(decoded.continuation.as_deref(), Some("next-token"));
         assert_eq!(decoded.revision, Some(9));
+    }
+
+    #[test]
+    fn decodes_kv_put_response_with_created_key() {
+        let decoded: KvPutResponse = serde_json::from_value(serde_json::json!({
+            "key": "/jobs/job-0000000001",
+            "createdKey": "/jobs/job-0000000001"
+        }))
+        .unwrap();
+
+        assert_eq!(decoded.revision, None);
+        assert_eq!(decoded.key.as_deref(), Some("/jobs/job-0000000001"));
+        assert_eq!(decoded.created_key.as_deref(), Some("/jobs/job-0000000001"));
+    }
+
+    #[test]
+    fn decodes_zookeeper_metadata_fields() {
+        let decoded: KvGetResponse = serde_json::from_value(serde_json::json!({
+            "found": true,
+            "key": "/admin",
+            "value": {
+                "encoding": "utf8",
+                "data": ""
+            },
+            "metadata": {
+                "czxid": 27,
+                "mzxid": 27,
+                "pzxid": 39825,
+                "ctime": 1780674584000_i64,
+                "mtime": 1780674585000_i64,
+                "cversion": 5,
+                "aversion": 0,
+                "ephemeralOwner": 0,
+                "dataLength": 0,
+                "numChildren": 5
+            }
+        }))
+        .unwrap();
+
+        let metadata = decoded.metadata.unwrap();
+        assert_eq!(metadata.czxid, Some(27));
+        assert_eq!(metadata.mzxid, Some(27));
+        assert_eq!(metadata.pzxid, Some(39825));
+        assert_eq!(metadata.ephemeral_owner, Some(0));
+        assert_eq!(metadata.num_children, Some(5));
     }
 }

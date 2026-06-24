@@ -1297,6 +1297,16 @@ export interface KvKeyMetadata {
   version?: number | null;
   lease?: number | null;
   valueSize?: number | null;
+  czxid?: number | null;
+  mzxid?: number | null;
+  pzxid?: number | null;
+  ctime?: number | null;
+  mtime?: number | null;
+  cversion?: number | null;
+  aversion?: number | null;
+  ephemeralOwner?: number | null;
+  dataLength?: number | null;
+  numChildren?: number | null;
 }
 
 export interface KvKeySummary extends KvKeyMetadata {
@@ -1318,6 +1328,18 @@ export interface KvGetResponse {
 
 export interface KvPutResponse {
   revision?: number | null;
+  version?: number | null;
+  mtime?: number | null;
+  key?: string | null;
+  createdKey?: string | null;
+}
+
+export type KvWriteMode = "upsert" | "create" | "update";
+export type KvCreateMode = "persistent" | "ephemeral" | "persistent_sequential" | "ephemeral_sequential";
+
+export interface KvPutOptions {
+  writeMode?: KvWriteMode | null;
+  createMode?: KvCreateMode | null;
 }
 
 export interface KvDeleteResponse {
@@ -1339,6 +1361,23 @@ export async function etcdPut(connectionId: string, key: string, value: KvValue,
 
 export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
   return invoke("etcd_delete", { connectionId, key });
+}
+
+// --- ZooKeeper ---
+export async function zookeeperListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
+  return invoke("zookeeper_list_prefix", { connectionId, prefix, limit, continuation });
+}
+
+export async function zookeeperGet(connectionId: string, key: string): Promise<KvGetResponse> {
+  return invoke("zookeeper_get", { connectionId, key });
+}
+
+export async function zookeeperPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null): Promise<KvPutResponse> {
+  return invoke("zookeeper_put", { connectionId, key, value, options: options ?? null });
+}
+
+export async function zookeeperDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
+  return invoke("zookeeper_delete", { connectionId, key });
 }
 
 // --- MongoDB ---

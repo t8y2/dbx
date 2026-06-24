@@ -25,6 +25,10 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "zookeeper-root";
+      connectionId: string;
+    }
+  | {
       type: "mq-tenant";
       connectionId: string;
       tenant: string;
@@ -85,6 +89,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "etcd-root", connectionId: tab.connectionId };
   }
 
+  if (tab.mode === "zookeeper") {
+    return { type: "zookeeper-root", connectionId: tab.connectionId };
+  }
+
   if (tab.mode === "mq" && tab.mqTenant) {
     return { type: "mq-tenant", connectionId: tab.connectionId, tenant: tab.mqTenant };
   }
@@ -136,6 +144,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "etcd-root") {
     return node.type === "etcd-root" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "zookeeper-root") {
+    return node.type === "zookeeper-root" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "mq-tenant") {

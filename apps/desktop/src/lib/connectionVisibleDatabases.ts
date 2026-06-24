@@ -3,7 +3,7 @@ import { filterDatabaseNamesForConnection, normalizeVisibleDatabaseSelection } f
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
-const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["elasticsearch", "qdrant", "milvus", "etcd"]);
+const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["elasticsearch", "qdrant", "milvus", "etcd", "zookeeper"]);
 
 type VisibleDatabaseConnectionFields = Pick<
   ConnectionConfig,

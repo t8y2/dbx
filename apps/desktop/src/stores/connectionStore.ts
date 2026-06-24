@@ -52,6 +52,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongoCompletion";
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/completionTreeIndex";
+import { kvRootNodeLabel } from "@/lib/kvRootPresentation";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -398,6 +399,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sqlite: "SQLite",
       redis: "Redis",
       etcd: "etcd",
+      zookeeper: "Apache ZooKeeper",
       duckdb: "DuckDB",
       clickhouse: "ClickHouse",
       sqlserver: "SQL Server",
@@ -946,6 +948,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadRedisDatabases(connectionId);
     } else if (config.db_type === "etcd") {
       await loadEtcdRoot(connectionId);
+    } else if (config.db_type === "zookeeper") {
+      await loadZooKeeperRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
@@ -1256,8 +1260,42 @@ export const useConnectionStore = defineStore("connection", () => {
           [
             {
               id: `${connectionId}:etcd`,
-              label: "Keys",
+              label: kvRootNodeLabel("etcd"),
               type: "etcd-root" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+          ],
+          node,
+        ),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadZooKeeperRoot(connectionId: string) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      setChildren(
+        node,
+        withSavedSqlRoot(
+          connectionId,
+          [
+            {
+              id: `${connectionId}:zookeeper`,
+              label: kvRootNodeLabel("zookeeper"),
+              type: "zookeeper-root" as const,
               connectionId,
               database: "",
               isExpanded: false,
@@ -2111,6 +2149,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadRedisDatabases(node.connectionId);
       } else if (config?.db_type === "etcd") {
         await loadEtcdRoot(node.connectionId);
+      } else if (config?.db_type === "zookeeper") {
+        await loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
@@ -3390,6 +3430,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadRedisDatabases,
     refreshRedisDbKeyCounts,
     loadEtcdRoot,
+    loadZooKeeperRoot,
     loadMqTenants,
     loadNacosNamespaces,
     updateRedisDbKeyStats,

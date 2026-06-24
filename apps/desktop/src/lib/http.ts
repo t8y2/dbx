@@ -57,6 +57,7 @@ import type {
   KvValue,
   KvListPrefixResponse,
   KvGetResponse,
+  KvPutOptions,
   KvPutResponse,
   KvDeleteResponse,
   MongoDocumentResult,
@@ -1585,6 +1586,26 @@ export async function etcdPut(connectionId: string, key: string, value: KvValue,
 
 export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
   return post("/api/etcd/delete", { connectionId, key });
+}
+
+// ---------------------------------------------------------------------------
+// ZooKeeper
+// ---------------------------------------------------------------------------
+
+export async function zookeeperListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
+  return post("/api/zookeeper/list-prefix", { connectionId, prefix, limit, continuation });
+}
+
+export async function zookeeperGet(connectionId: string, key: string): Promise<KvGetResponse> {
+  return post("/api/zookeeper/get", { connectionId, key });
+}
+
+export async function zookeeperPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null): Promise<KvPutResponse> {
+  return post("/api/zookeeper/put", { connectionId, key, value, options: options ?? null });
+}
+
+export async function zookeeperDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
+  return post("/api/zookeeper/delete", { connectionId, key });
 }
 
 // ---------------------------------------------------------------------------

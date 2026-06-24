@@ -29,3 +29,4 @@ pub mod table_import;
 pub mod text_export;
 pub mod transfer;
 pub mod update;
+pub mod zookeeper;

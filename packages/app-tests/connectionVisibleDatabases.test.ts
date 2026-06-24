@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDraftVisibleDatabasesConnectionId, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
+import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -46,6 +46,10 @@ test("initial selection uses configured visible databases when available", () =>
 
 test("initial selection uses default visible database names when no filter is configured", () => {
   assert.deepEqual(initialVisibleDatabaseSelection(["app", "mysql", "sys"], undefined, config()), ["app"]);
+});
+
+test("ZooKeeper connections do not offer visible database selection", () => {
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "zookeeper" })), false);
 });
 
 test("visible database selection is stale when connection target changes", () => {

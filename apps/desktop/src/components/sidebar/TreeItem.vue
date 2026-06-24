@@ -254,6 +254,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-sky-500" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
+    case "zookeeper-root":
+      return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
     case "mongo-collection":
@@ -470,6 +472,8 @@ async function toggle() {
         await connectionStore.loadRedisDatabases(node.connectionId);
       } else if (config?.db_type === "etcd") {
         await connectionStore.loadEtcdRoot(node.connectionId);
+      } else if (config?.db_type === "zookeeper") {
+        await connectionStore.loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
@@ -493,6 +497,11 @@ async function toggle() {
     } else if (node.type === "etcd-root" && node.connectionId) {
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd");
+      refreshActiveKvBrowserAfterOpen("etcd", node.connectionId);
+    } else if (node.type === "zookeeper-root" && node.connectionId) {
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "ZooKeeper"}:keys`;
+      queryStore.createTab(node.connectionId, "", tabTitle, "zookeeper");
+      refreshActiveKvBrowserAfterOpen("zookeeper", node.connectionId);
     } else if (node.type === "user-admin" && node.connectionId) {
       queryStore.openUserAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
@@ -569,6 +578,12 @@ function runRowClickAction() {
   } else if (action === "toggle") {
     toggle();
   }
+}
+
+function refreshActiveKvBrowserAfterOpen(mode: "etcd" | "zookeeper", connectionId: string) {
+  void nextTick(() => {
+    window.dispatchEvent(new CustomEvent("dbx-refresh-active-kv-browser", { detail: { mode, connectionId } }));
+  });
 }
 
 async function loadMoreObjectGroupChildren() {
@@ -3631,7 +3646,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
   }
 
   // 5. Redis DB / Mongo DB
-  if (node.type === "etcd-root") {
+  if (node.type === "etcd-root" || node.type === "zookeeper-root") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return items;
   }

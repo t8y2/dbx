@@ -9,6 +9,7 @@ import {
   resultGridCacheKey,
   resultRunItems,
   tabDisplayTitle,
+  tabModeLabel,
   tabularResultItems,
 } from "../../apps/desktop/src/lib/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
@@ -108,6 +109,26 @@ test("jdbc tabs use the connection target when database is empty", () => {
       ),
       "DBX_JDBC_TEST@XE.SYSTEM",
     );
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("zookeeper tabs use key browser labels", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    name: "ZK Prod",
+    db_type: "zookeeper",
+    port: 2181,
+  });
+  const t = (key: string) => (key === "tabs.zookeeper" ? "ZooKeeper" : key);
+
+  try {
+    const tab = queryTab({ mode: "zookeeper", database: "", title: "ZooKeeper Keys" });
+    assert.equal(tabDisplayTitle(tab, t), "ZK Prod@keys");
+    assert.equal(tabModeLabel(tab, t), "ZooKeeper");
   } finally {
     restoreStorage();
   }

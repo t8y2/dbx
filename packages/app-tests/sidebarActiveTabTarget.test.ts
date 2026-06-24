@@ -86,6 +86,30 @@ test("MQ tabs with a selected tenant target the matching tenant node", () => {
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(tenant)])?.id, "tenant-node");
 });
 
+test("ZooKeeper tabs target the matching visible zookeeper root node", () => {
+  const tab: QueryTab = {
+    id: "tab-1",
+    title: "ZooKeeper Keys",
+    connectionId: "conn-1",
+    database: "",
+    sql: "",
+    isExecuting: false,
+    mode: "zookeeper",
+  };
+  const root: TreeNode = {
+    id: "zookeeper-root",
+    label: "Keys",
+    type: "zookeeper-root",
+    connectionId: "conn-1",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "zookeeper-root",
+    connectionId: "conn-1",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(root)])?.id, "zookeeper-root");
+});
+
 test("Nacos tabs target the matching namespace node", () => {
   const tab: QueryTab = {
     id: "tab-1",

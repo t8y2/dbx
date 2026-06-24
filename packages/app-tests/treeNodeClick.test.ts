@@ -25,6 +25,8 @@ test("double click navigation mode toggles expandable rows on double click", () 
   assert.equal(treeNodeRowDoubleClickAction("connection", false, "double", true), "toggle");
   assert.equal(treeNodeRowDoubleClickAction("group-columns", false, "double", true), "toggle");
   assert.equal(treeNodeRowDoubleClickAction("redis-db", false, "double", false), "toggle");
+  assert.equal(treeNodeRowDoubleClickAction("etcd-root", false, "double", false), "toggle");
+  assert.equal(treeNodeRowDoubleClickAction("zookeeper-root", false, "double", false), "toggle");
 });
 
 test("expandable non-table rows still toggle from row clicks", () => {
@@ -36,6 +38,8 @@ test("expandable non-table rows still toggle from row clicks", () => {
 
 test("leaf data browser nodes keep their open behavior through toggle handler", () => {
   assert.equal(treeNodeRowAction("redis-db", false), "toggle");
+  assert.equal(treeNodeRowAction("etcd-root", false), "toggle");
+  assert.equal(treeNodeRowAction("zookeeper-root", false), "toggle");
   assert.equal(treeNodeRowAction("mongo-collection", false), "toggle");
 });
 

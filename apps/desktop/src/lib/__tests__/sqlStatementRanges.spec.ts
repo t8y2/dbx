@@ -317,6 +317,7 @@ describe("supportsExecutionTargetPicker", () => {
     expect(supportsExecutionTargetPicker("qdrant")).toBe(false);
     expect(supportsExecutionTargetPicker("milvus")).toBe(false);
     expect(supportsExecutionTargetPicker("etcd")).toBe(false);
+    expect(supportsExecutionTargetPicker("zookeeper")).toBe(false);
     expect(supportsExecutionTargetPicker("mq")).toBe(false);
     expect(supportsExecutionTargetPicker("neo4j")).toBe(false);
     expect(supportsExecutionTargetPicker(undefined)).toBe(false);

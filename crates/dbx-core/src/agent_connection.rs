@@ -35,6 +35,11 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
     };
     let etcd_endpoints =
         if config.db_type == DatabaseType::Etcd { normalize_etcd_endpoints(config, host, port) } else { String::new() };
+    let zookeeper_connect_string = if config.db_type == DatabaseType::ZooKeeper {
+        normalize_zookeeper_connect_string(config, host, port)
+    } else {
+        String::new()
+    };
     let (agent_host, agent_port) = if is_h2_file_connection(config) { ("", 0) } else { (host, port) };
 
     serde_json::json!({
@@ -51,6 +56,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "client_cert_path": config.client_cert_path,
         "client_key_path": config.client_key_path,
         "etcd_endpoints": etcd_endpoints,
+        "zookeeper_connect_string": zookeeper_connect_string,
         "gbase_server": config.gbase_server,
         "informix_server": config.informix_server,
         "jdbc_driver_class": config.jdbc_driver_class.as_deref().unwrap_or(""),
@@ -511,6 +517,16 @@ fn normalize_etcd_endpoints(config: &ConnectionConfig, host: &str, port: u16) ->
     format!("{scheme}://{host}:{port}")
 }
 
+fn normalize_zookeeper_connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
+    config
+        .connection_string
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{host}:{port}"))
+}
+
 fn normalize_agent_url_params(params: Option<&str>) -> &str {
     params.unwrap_or("").trim().trim_start_matches(['?', '&'])
 }
@@ -657,6 +673,27 @@ mod tests {
         assert_eq!(params["port"], 9092);
         assert_eq!(params["database"], "test");
         assert_eq!(params["connection_string"], "");
+    }
+
+    #[test]
+    fn zookeeper_agent_params_preserve_configured_connect_string() {
+        let mut cfg = config(DatabaseType::ZooKeeper, None);
+        cfg.connection_string = Some("zk-1:2181,zk-2:2181/app".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 2181, "");
+
+        assert_eq!(params["connection_string"], "zk-1:2181,zk-2:2181/app");
+        assert_eq!(params["zookeeper_connect_string"], "zk-1:2181,zk-2:2181/app");
+    }
+
+    #[test]
+    fn zookeeper_agent_params_fall_back_to_host_port_connect_string() {
+        let cfg = config(DatabaseType::ZooKeeper, None);
+
+        let params = agent_connect_params(&cfg, "zk.local", 2281, "");
+
+        assert_eq!(params["connection_string"], "");
+        assert_eq!(params["zookeeper_connect_string"], "zk.local:2281");
     }
 
     #[test]

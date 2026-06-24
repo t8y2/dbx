@@ -335,6 +335,11 @@ async fn main() {
         .route("/etcd/get", post(routes::etcd::get))
         .route("/etcd/put", post(routes::etcd::put))
         .route("/etcd/delete", post(routes::etcd::delete))
+        // ZooKeeper
+        .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
+        .route("/zookeeper/get", post(routes::zookeeper::get))
+        .route("/zookeeper/put", post(routes::zookeeper::put))
+        .route("/zookeeper/delete", post(routes::zookeeper::delete))
         // Nacos
         .route("/nacos/test-connection", post(routes::nacos::test_connection))
         .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))

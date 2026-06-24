@@ -990,6 +990,8 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadRedisDatabases(item.connectionId);
       } else if (config?.db_type === "etcd") {
         await connectionStore.loadEtcdRoot(item.connectionId);
+      } else if (config?.db_type === "zookeeper") {
+        await connectionStore.loadZooKeeperRoot(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch") {
@@ -1013,6 +1015,8 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadRedisDatabases(item.connectionId);
       } else if (config?.db_type === "etcd") {
         await connectionStore.loadEtcdRoot(item.connectionId);
+      } else if (config?.db_type === "zookeeper") {
+        await connectionStore.loadZooKeeperRoot(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch") {

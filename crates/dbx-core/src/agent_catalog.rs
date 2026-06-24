@@ -249,6 +249,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     },
     AgentCatalogEntry { db_type: DatabaseType::Etcd, key: "etcd", label: "etcd", store_visible: true, profiles: &[] },
     AgentCatalogEntry {
+        db_type: DatabaseType::ZooKeeper,
+        key: "zookeeper",
+        label: "Apache ZooKeeper",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::MongoDb,
         key: "mongodb",
         label: "MongoDB (Legacy)",

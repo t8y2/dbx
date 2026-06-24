@@ -37,6 +37,7 @@ const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/RedisDashboard.vue"));
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
+const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
@@ -94,6 +95,7 @@ type DataGridHandle = {
 
 type SearchableBrowserHandle = {
   focusSearch: () => boolean;
+  refresh?: () => boolean;
 };
 
 const props = defineProps<{
@@ -145,6 +147,7 @@ onMounted(() => {
   } else {
     setTimeout(preload, 300);
   }
+  window.addEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
 });
 
 watch(
@@ -167,6 +170,7 @@ const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
+const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
@@ -298,7 +302,10 @@ const queryRunningElapsedSeconds = computed(() => (queryRunningElapsed.value / 1
 
 watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt] as const, startQueryRunningElapsedTimer, { immediate: true });
 
-onUnmounted(stopQueryRunningElapsedTimer);
+onUnmounted(() => {
+  stopQueryRunningElapsedTimer();
+  window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+});
 
 watch(
   hasQueryOutput,
@@ -474,15 +481,24 @@ function onHandleCloseColumnPanel() {
 function focusSearch(): boolean {
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
 }
 
 function refreshData(): boolean {
+  if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
   if (!dataGridRef.value) return false;
   void dataGridRef.value.onToolbarRefresh();
   return true;
+}
+
+function onRefreshActiveKvBrowser(event: Event) {
+  const detail = (event as CustomEvent<{ mode?: string; connectionId?: string }>).detail;
+  if (!detail || props.activeTab.mode !== detail.mode || props.activeTab.connectionId !== detail.connectionId) return;
+  void nextTick(() => refreshData());
 }
 
 async function exportResultArchive() {
@@ -1031,6 +1047,13 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <template v-else-if="activeTab.mode === 'etcd'">
       <div class="flex-1 min-h-0">
         <EtcdKeyBrowser ref="etcdKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- ZooKeeper mode: znode browser -->
+    <template v-else-if="activeTab.mode === 'zookeeper'">
+      <div class="flex-1 min-h-0">
+        <ZooKeeperKeyBrowser ref="zookeeperKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

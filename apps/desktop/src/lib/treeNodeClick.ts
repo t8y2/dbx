@@ -7,7 +7,7 @@ export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
-const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "mongo-collection", "vector-collection", "elasticsearch-index", "user-admin"]);
+const toggleLeafNodeTypes = new Set<TreeNodeType>(["redis-db", "mq-tenant", "etcd-root", "zookeeper-root", "mongo-collection", "vector-collection", "elasticsearch-index", "user-admin"]);
 const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "sequence", "package", "package-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);

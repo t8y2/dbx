@@ -1136,6 +1136,7 @@ export default {
     userAdmin: "用户与权限",
     openUserAdmin: "打开用户与权限",
     newQuery: "新建查询",
+    instanceInfo: "实例信息",
     newInsert: "新建新增",
     newSql: "新建 SQL",
     generateSql: "生成 SQL",

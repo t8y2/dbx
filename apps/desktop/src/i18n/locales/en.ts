@@ -1137,6 +1137,7 @@ export default {
     openUserAdmin: "Open Users & Privileges",
     duplicateConnection: "Duplicate Connection",
     newQuery: "New Query",
+    instanceInfo: "Instance Info",
     newSql: "New SQL",
     generateSql: "Generate SQL",
     newInsert: "New Insert",

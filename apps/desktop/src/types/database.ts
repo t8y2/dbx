@@ -595,7 +595,7 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  mode: "data" | "query" | "redis" | "mongo" | "vector" | "etcd" | "mq" | "nacos" | "objects" | "structure" | "users";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "vector" | "etcd" | "mq" | "nacos" | "objects" | "structure" | "users";
   mqTenant?: string;
   nacosNamespace?: string;
   nacosNamespaceName?: string;

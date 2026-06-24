@@ -34,6 +34,7 @@ function preloadDataGridComponent() {
 
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
+const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/RedisDashboard.vue"));
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
@@ -1000,6 +1001,13 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <template v-else-if="activeTab.mode === 'redis'">
       <div class="flex-1 min-h-0">
         <RedisKeyBrowser ref="redisKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" />
+      </div>
+    </template>
+
+    <!-- Redis Dashboard: instance info -->
+    <template v-else-if="activeTab.mode === 'redis-dashboard'">
+      <div class="flex-1 min-h-0">
+        <RedisDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

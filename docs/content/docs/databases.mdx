@@ -12,7 +12,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | Group                          | Profiles                                                                                                                                                        | Notes                                                                                          |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Core SQL engines               | MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, Teradata, Vertica, Exasol, Firebird, SAP HANA, YashanDB, GBase   | Available directly in the DBX connection picker                                                |
-| Document and key-value engines | Redis, MongoDB, Elasticsearch, etcd                                                                                                                              | Use dedicated browsers or query flows instead of the generic relational grid where appropriate |
+| Document, key-value, and config services | Redis, MongoDB, Elasticsearch, etcd, Nacos                                                                                                                        | Use dedicated browsers, admin consoles, or query flows instead of the generic relational grid where appropriate |
 | MySQL-compatible profiles      | MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, TDSQL, PolarDB, GreatSQL, custom MySQL                                          | Reuse MySQL-style connection handling where the engine speaks a compatible protocol            |
 | PostgreSQL-compatible profiles | openGauss, KingBase, HighGo, Vastbase, CockroachDB, custom PostgreSQL                                                                                            | Reuse PostgreSQL-style connection handling where the engine speaks a compatible protocol       |
 | File-based engines             | SQLite, DuckDB, Microsoft Access, RQLite, Turso                                                                                                                  | Choose a local database file or HTTP endpoint instead of host and port                         |
@@ -52,6 +52,8 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | InfluxDB                                    |         8086 |
 | IoTDB                                       |         6667 |
 | etcd                                        |         2379 |
+| Nacos                                       |         8848 |
+| Nacos console/admin API                     |         8085 |
 | IRIS                                        |         1972 |
 | RQLite                                      |         4001 |
 | H2                                          |         9092 |
@@ -87,7 +89,7 @@ DBX intentionally enables advanced workflows only where the app has enough metad
 | Create database                | MySQL, PostgreSQL, SQL Server, ClickHouse, Oracle, DM, GaussDB, KWDB, Doris, StarRocks, Redshift, Teradata, Vertica                                                                                                                                                                   |
 | Field lineage                  | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB                                                                                                                                                                                                            |
 | Data transfer                  | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, ClickHouse, DuckDB, DM, GaussDB, KWDB                                                                                                                                                                                                  |
-| SQL file execution unavailable | Redis, MongoDB, Elasticsearch, etcd                                                                                                                                                                                                                                                   |
+| SQL file execution unavailable | Redis, MongoDB, Elasticsearch, etcd, Nacos                                                                                                                                                                                                                                            |
 
 <Callout type="warn">If a database can connect but does not appear in a feature row, that feature may be hidden or limited for that engine. This prevents DBX from generating SQL it cannot review reliably.</Callout>
 
@@ -95,7 +97,11 @@ DBX intentionally enables advanced workflows only where the app has enough metad
 
 Most network databases support host, port, username, password, default database, optional URL parameters, SSL, connection color, SSH tunnel, and proxy settings. File-based engines replace host and port with a file picker.
 
-DBX can also parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, DM, GaussDB, KWDB, openGauss, TDengine, XuguDB, Access, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB, SAP HANA, InfluxDB, QuestDB, IoTDB, etcd, RQLite, and Databricks.
+DBX can also parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, DM, GaussDB, KWDB, openGauss, TDengine, XuguDB, Access, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB, SAP HANA, InfluxDB, QuestDB, IoTDB, etcd, Nacos, RQLite, and Databricks.
+
+### Nacos Console
+
+Nacos connections open a dedicated admin console for namespaces, configs, services, instances, config history, and raw API requests. Use the Nacos console/admin API address when creating the connection. Nacos 3 Docker deployments usually expose that console on `8085`; older deployments may share `8848` with the service port.
 
 ### ClickHouse TLS
 

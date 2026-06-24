@@ -115,6 +115,7 @@ const databaseSupport = [
   { name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
   { name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
   { name: "etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
+  { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
   { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
   { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
   { name: "Your DB?", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },

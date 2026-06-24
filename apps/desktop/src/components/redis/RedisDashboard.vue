@@ -91,7 +91,7 @@ async function fetchInfo() {
   loading.value = true;
   error.value = null;
   try {
-    const result: RedisCommandResult = await api.redisExecuteCommand(props.connectionId, 0, "INFO");
+    const result: RedisCommandResult = await api.redisExecuteCommand(props.connectionId, 0, "INFO ALL");
 
     let infoText = "";
 

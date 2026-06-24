@@ -204,6 +204,12 @@ const testimonials = {
       quote: "DBX keeps query work, schema checks, and Redis inspection in one small app. It feels focused instead of overloaded.",
     },
     {
+      name: "eryajf",
+      role: "Database management",
+      avatar: "/avatars/eryajf.jpg",
+      quote: "Try it once and you can feel it: DBX is the database management client that ends the competition.",
+    },
+    {
       name: "@vbvb",
       role: "Daily reporting",
       avatar: "/avatars/vbvb.png",
@@ -276,6 +282,12 @@ const testimonials = {
       role: "PostgreSQL 与 Redis 工作流",
       avatar: "/avatars/dongxuyang85.jpg",
       quote: "DBX 把查询、结构检查和 Redis 查看放在一个轻量工具里，日常数据库工作不会被复杂界面打断。",
+    },
+    {
+      name: "二丫讲梵",
+      role: "数据库管理",
+      avatar: "/avatars/eryajf.jpg",
+      quote: "只需体验一次你就能感受到，DBX是一个杀死数据库管理客户端比赛的软件",
     },
     {
       name: "Husky明夋",

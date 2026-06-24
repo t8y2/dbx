@@ -119,8 +119,7 @@ test("external SQL file paths persist with open query tabs", async () => {
     const tabId = store.createTab("conn-1", "db", "draft.sql");
     store.updateSql(tabId, "select 1;");
     store.linkExternalSqlPath(tabId, "/tmp/draft.sql", "draft.sql");
-
-    await waitFor(() => !!globalThis.localStorage.getItem("dbx-open-tabs"), 1000);
+    store.flushPendingPersist();
 
     setActivePinia(createPinia());
     store = useQueryStore();

@@ -536,6 +536,18 @@ export const useQueryStore = defineStore("query", () => {
     { flush: "post" },
   );
 
+  // Immediately flush any pending debounced persist so the on-disk content
+  // reflects the latest in-memory tabs without waiting for the 300ms debounce.
+  // Lets callers (e.g. tests that reload the store) read back persisted state
+  // deterministically instead of racing the debounce timer.
+  function flushPendingPersist() {
+    if (_persistTimer) {
+      clearTimeout(_persistTimer);
+      _persistTimer = null;
+    }
+    saveTabs(tabs.value, activeTabId.value);
+  }
+
   function findTabByIdentity(connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string) {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || ""));
   }
@@ -2319,6 +2331,7 @@ export const useQueryStore = defineStore("query", () => {
     closeTab,
     forceClosePendingTab,
     cancelClosePendingTab,
+    flushPendingPersist,
     saveAndClosePendingTab,
     isTabDirty,
     markTabClean,

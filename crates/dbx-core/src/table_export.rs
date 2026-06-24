@@ -647,14 +647,15 @@ mod tests {
     use crate::database_export::{clear_export_cancelled, set_export_cancelled};
     use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
     use serde_json::json;
-    use std::io::{Cursor, Read};
+    use std::io::Read;
 
-    fn read_xlsx_entry(bytes: &[u8], path: &str) -> String {
-        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open xlsx as zip archive");
-        let mut file = archive.by_name(path).expect("xlsx entry exists");
-        let mut text = String::new();
-        file.read_to_string(&mut text).expect("read xlsx entry as utf-8");
-        text
+    /// Read and decompress a single entry from an in-memory XLSX (ZIP) buffer.
+    fn read_zip_entry(bytes: &[u8], path: &str) -> String {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("open xlsx as zip archive");
+        let mut entry = archive.by_name(path).unwrap_or_else(|_| panic!("missing zip entry: {path}"));
+        let mut content = String::new();
+        entry.read_to_string(&mut content).expect("read zip entry");
+        content
     }
 
     // -----------------------------------------------------------------------
@@ -775,18 +776,16 @@ mod tests {
             ],
         };
         let workbook = build_xlsx_workbook(&data).expect("XLSX build should succeed");
-        let text = String::from_utf8_lossy(&workbook);
 
         assert_eq!(workbook[0], 0x50, "Should be a ZIP (PK) archive");
         assert_eq!(workbook[1], 0x4b);
-        assert!(text.contains("[Content_Types].xml"));
 
-        let workbook_xml = read_xlsx_entry(&workbook, "xl/workbook.xml");
-        let worksheet_xml = read_xlsx_entry(&workbook, "xl/worksheets/sheet1.xml");
-
+        // Entries are Deflate-compressed; assert on their decompressed contents.
+        let workbook_xml = read_zip_entry(&workbook, "xl/workbook.xml");
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
         assert!(workbook_xml.contains("name=\"employees\""));
-        assert!(worksheet_xml.contains("<v>75000.5</v>"));
-        assert!(worksheet_xml.contains("Alice"));
+        assert!(sheet.contains("<v>75000.5</v>"));
+        assert!(sheet.contains("Alice"));
     }
 
     // -----------------------------------------------------------------------

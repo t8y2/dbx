@@ -97,6 +97,12 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   view: ["view"],
 };
 
+// Database-level container types. When browsing a large number of children
+// under one of these (e.g. hundreds of tables) and scrolling down, the row is
+// kept pinned at the top of the tree so the active database stays visible and
+// can be collapsed with one click. Mirrors the `database` search scope above.
+const DATABASE_LEVEL_TYPES = new Set<TreeNodeType>(SEARCH_SCOPE_TO_NODE_TYPES.database);
+
 const searchScopeOptions = computed(() => {
   return [
     { scope: "connection", label: t("sidebar.searchScopeConnection"), icon: Server },
@@ -178,6 +184,56 @@ const visibleNodeIndexById = computed(() => {
 });
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+
+// --- Sticky database header ---
+// RecycleScroller positions each row absolutely, so CSS `position: sticky` on
+// a database row can't work. Instead we overlay a pinned row from this parent
+// component, tracking scroll offset to find the topmost visible database-level
+// ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
+const stickyScrollTop = ref(0);
+
+function onTreeScroll() {
+  const scroller = (treeScrollerRef.value?.$el as HTMLElement | undefined) ?? null;
+  if (scroller) stickyScrollTop.value = scroller.scrollTop;
+}
+
+// RecycleScroller only emits scrollStart/scrollEnd, not continuous scroll, so
+// attach a native passive listener on its root element once it mounts.
+watch(
+  treeScrollerRef,
+  (scroller, _old, onCleanup) => {
+    const el = (scroller?.$el as HTMLElement | undefined) ?? null;
+    if (!el) return;
+    el.addEventListener("scroll", onTreeScroll, { passive: true });
+    onCleanup(() => el.removeEventListener("scroll", onTreeScroll));
+  },
+  { flush: "post" },
+);
+
+const stickyNode = computed<FlatTreeNode | null>(() => {
+  if (!useVirtualTree.value || isFiltering.value) return null;
+  const nodes = flatNodes.value;
+  const len = nodes.length;
+  if (len === 0) return null;
+
+  const topIndex = Math.min(Math.floor(stickyScrollTop.value / SIDEBAR_TREE_ROW_HEIGHT), len - 1);
+  // Walk UP from the topmost visible row to the nearest database-level ancestor.
+  // If the topmost row is itself a database node (it hasn't scrolled past the
+  // viewport yet), return null so the overlay doesn't duplicate the real row.
+  for (let i = topIndex; i >= 0; i--) {
+    const item = nodes[i];
+    if (!DATABASE_LEVEL_TYPES.has(item.type)) continue;
+    return i === topIndex ? null : item;
+  }
+  return null;
+});
+
+// Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
+// stale scrollTop doesn't keep the overlay mounted after a structural change.
+watch(flatNodes, () => {
+  stickyScrollTop.value = 0;
+});
+
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
 
 provide(sidebarTreeContextKey, {
@@ -601,6 +657,9 @@ defineExpose({ focusSearch, createNewGroup });
         />
       </div>
     </div>
+    <div v-if="stickyNode" class="sticky-database-header relative z-[5] border-b border-border/60">
+      <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" @search-toggle="onSearchToggle" />
+    </div>
     <RecycleScroller
       v-if="flatNodes.length > 0 && useVirtualTree"
       ref="treeScrollerRef"
@@ -640,6 +699,10 @@ defineExpose({ focusSearch, createNewGroup });
 </template>
 
 <style scoped>
+.sticky-database-header {
+  background-color: var(--background);
+}
+
 .connection-tree-scroller {
   will-change: scroll-position;
   contain: content;

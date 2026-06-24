@@ -33,6 +33,7 @@ const plainTreeScrollerRef = ref<HTMLElement | null>(null);
 type SearchScope = "connection" | "database" | "schema" | "table" | "view";
 const selectedSearchScopes = ref<SearchScope[]>([]);
 const searchCollapsedIds = ref<Set<string>>(new Set());
+const searchRefreshedGroupIds = new Set<string>();
 let searchTimer: number | undefined;
 
 watch(
@@ -53,25 +54,34 @@ watch(
   { flush: "sync" },
 );
 
-watch(deferredSearchQuery, (newQuery) => {
+watch(deferredSearchQuery, (newQuery, oldQuery) => {
   store.sidebarSearchQuery = newQuery;
   const tasks: Promise<void>[] = [];
   for (const root of store.treeNodes) {
-    findExpandedTableParents(root, tasks);
+    collectExpandedObjectGroups(root, tasks, newQuery ? searchRefreshedGroupIds : undefined);
+  }
+  if (!newQuery && oldQuery) {
+    searchRefreshedGroupIds.clear();
   }
   Promise.all(tasks).catch(() => {});
 });
 
-function findExpandedTableParents(node: TreeNode, tasks: Promise<void>[]) {
-  if (node.isExpanded && node.connectionId && (node.type === "database" || node.type === "schema")) {
-    const groupTypes = new Set(["group-tables", "group-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
-    if (node.children?.some((child) => groupTypes.has(child.type))) {
-      tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
+
+function collectExpandedObjectGroups(node: TreeNode, tasks: Promise<void>[], refreshedGroupIds?: Set<string>) {
+  if (refreshedGroupIds && node.isExpanded && node.children) {
+    for (const child of node.children) {
+      if (child.connectionId && searchableObjectGroupTypes.has(child.type)) {
+        refreshedGroupIds.add(child.id);
+        tasks.push(store.loadObjectGroupChildren(child, { force: true }));
+      }
     }
+  } else if (!refreshedGroupIds && searchRefreshedGroupIds.has(node.id)) {
+    tasks.push(store.loadObjectGroupChildren(node, { force: true }));
   }
   if (node.children) {
     for (const child of node.children) {
-      findExpandedTableParents(child, tasks);
+      collectExpandedObjectGroups(child, tasks, refreshedGroupIds);
     }
   }
 }

@@ -306,7 +306,11 @@ fn single_selectable_statement(original_sql: &str) -> Result<String, ()> {
         return Err(());
     }
     let upper = statement.trim_start_matches(';').trim_start().to_ascii_uppercase();
-    if !(upper.starts_with("SELECT") || upper.starts_with("WITH")) {
+    if upper.starts_with("WITH") {
+        if !cte_main_statement_is_select(&statement) {
+            return Err(());
+        }
+    } else if !upper.starts_with("SELECT") {
         return Err(());
     }
     if has_top_level_select_into(&statement) {
@@ -318,6 +322,46 @@ fn single_selectable_statement(original_sql: &str) -> Result<String, ()> {
 
 fn starts_with_cte(sql: &str) -> bool {
     sql.trim_start().trim_start_matches(';').trim_start().to_ascii_uppercase().starts_with("WITH")
+}
+
+fn cte_main_statement_is_select(sql: &str) -> bool {
+    let tokens = top_level_sql_tokens(sql);
+    let mut index = match tokens.iter().position(|token| token.text == "WITH") {
+        Some(index) => index + 1,
+        None => return false,
+    };
+
+    if tokens.get(index).is_some_and(|token| token.text == "RECURSIVE") {
+        index += 1;
+    }
+
+    loop {
+        if tokens.get(index).is_some_and(|token| token.text != "AS") {
+            index += 1;
+        }
+        if tokens.get(index).is_none_or(|token| token.text != "AS") {
+            return false;
+        }
+        index += 1;
+
+        if tokens.get(index).is_some_and(|token| token.text == "NOT") {
+            index += 1;
+            if tokens.get(index).is_none_or(|token| token.text != "MATERIALIZED") {
+                return false;
+            }
+            index += 1;
+        } else if tokens.get(index).is_some_and(|token| token.text == "MATERIALIZED") {
+            index += 1;
+        }
+
+        let Some(token) = tokens.get(index) else {
+            return false;
+        };
+        if tokens.get(index + 1).is_some_and(|next| next.text == "AS") {
+            continue;
+        }
+        return token.text == "SELECT";
+    }
 }
 
 fn single_statement_error_reason(original_sql: &str) -> &'static str {
@@ -851,6 +895,70 @@ mod tests {
 
         assert!(!result.ok);
         assert!(result.sql.is_none());
+    }
+
+    #[test]
+    fn postgres_cte_update_is_not_paginated() {
+        let sql = r#"
+WITH available AS (
+    SELECT id
+    FROM app_users
+    WHERE deleted_at IS NULL
+),
+picked AS (
+    SELECT id
+    FROM available
+    ORDER BY random()
+    LIMIT 10
+)
+UPDATE app_users AS u
+SET subscription_type = 1
+FROM picked
+WHERE u.id = picked.id;
+"#;
+
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(result, err("not_select"));
+    }
+
+    #[test]
+    fn postgres_cte_update_pagination_plan_executes_original_sql() {
+        let sql = "WITH picked AS (SELECT id FROM app_users LIMIT 10) UPDATE app_users SET subscription_type = 1 FROM picked WHERE app_users.id = picked.id".to_string();
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.clone(),
+            query_base_sql: sql.clone(),
+            database_type: Some(DatabaseType::Postgres),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, sql);
+        assert!(plan.page_sql.is_none());
+        assert!(plan.count_sql.is_none());
+        assert_eq!(plan.page_limit, None);
+        assert_eq!(plan.page_offset, None);
+    }
+
+    #[test]
+    fn postgres_cte_select_still_paginates() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "WITH picked AS (SELECT id FROM app_users LIMIT 10) SELECT * FROM picked".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "WITH picked AS (SELECT id FROM app_users LIMIT 10) SELECT * FROM picked LIMIT 100;"
+        );
     }
 
     #[test]

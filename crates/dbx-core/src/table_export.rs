@@ -647,6 +647,15 @@ mod tests {
     use crate::database_export::{clear_export_cancelled, set_export_cancelled};
     use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
     use serde_json::json;
+    use std::io::{Cursor, Read};
+
+    fn read_xlsx_entry(bytes: &[u8], path: &str) -> String {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open xlsx as zip archive");
+        let mut file = archive.by_name(path).expect("xlsx entry exists");
+        let mut text = String::new();
+        file.read_to_string(&mut text).expect("read xlsx entry as utf-8");
+        text
+    }
 
     // -----------------------------------------------------------------------
     // Helper: check that two CSV strings are equivalent by splitting lines
@@ -771,10 +780,13 @@ mod tests {
         assert_eq!(workbook[0], 0x50, "Should be a ZIP (PK) archive");
         assert_eq!(workbook[1], 0x4b);
         assert!(text.contains("[Content_Types].xml"));
-        assert!(text.contains("xl/worksheets/sheet1.xml"));
-        assert!(text.contains("name=\"employees\""));
-        assert!(text.contains("<v>75000.5</v>"));
-        assert!(text.contains("Alice"));
+
+        let workbook_xml = read_xlsx_entry(&workbook, "xl/workbook.xml");
+        let worksheet_xml = read_xlsx_entry(&workbook, "xl/worksheets/sheet1.xml");
+
+        assert!(workbook_xml.contains("name=\"employees\""));
+        assert!(worksheet_xml.contains("<v>75000.5</v>"));
+        assert!(worksheet_xml.contains("Alice"));
     }
 
     // -----------------------------------------------------------------------

@@ -299,7 +299,7 @@ fn codex_mcp_config_overrides(options: &CodexRunOptions) -> Vec<String> {
         "mcp_servers.dbx.required=true".to_string(),
         "mcp_servers.dbx.startup_timeout_sec=20".to_string(),
         "mcp_servers.dbx.tool_timeout_sec=120".to_string(),
-        "mcp_servers.dbx.default_tools_approval_mode=\"auto\"".to_string(),
+        "mcp_servers.dbx.default_tools_approval_mode=\"approve\"".to_string(),
         format!("mcp_servers.dbx.enabled_tools={}", toml_string_array(&dbx_mcp_enabled_tools(options.agent_mode))),
     ];
     if let Some(command) = options.mcp_server_command.as_ref().filter(|command| !command.args.is_empty()) {
@@ -536,6 +536,7 @@ mod tests {
         assert!(!spec.args.contains(&"--model".to_string()));
         assert!(!spec.args.contains(&"--ask-for-approval".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.command=\"dbx-mcp-server\"".to_string()));
+        assert!(spec.args.contains(&"mcp_servers.dbx.default_tools_approval_mode=\"approve\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_WRITES=\"0\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_SCOPE_CONNECTION_ID=\"conn-1\"".to_string()));
         assert!(spec.args.iter().any(|arg| arg.contains("dbx_execute_query")));
@@ -731,6 +732,30 @@ mod tests {
         .unwrap();
         assert!(
             matches!(&tool_done[0], AgentEvent::ToolCallEnd { tool_name, is_error, .. } if tool_name == "dbx_list_tables" && !is_error)
+        );
+
+        let current_started = parse_codex_jsonl_event(
+            r#"{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"dbx","tool":"dbx_execute_query","arguments":{"sql":"SELECT 1"},"result":null,"error":null,"status":"in_progress"}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&current_started[0], AgentEvent::ToolCallStart { tool_name, args, .. } if tool_name == "dbx_execute_query" && args["sql"] == "SELECT 1")
+        );
+
+        let current_tool_done = parse_codex_jsonl_event(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"dbx","tool":"dbx_execute_query","arguments":{"sql":"SELECT 1"},"result":{"content":[{"type":"text","text":"ok"}],"structured_content":null},"error":null,"status":"completed"}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&current_tool_done[0], AgentEvent::ToolCallEnd { tool_name, result, is_error, .. } if tool_name == "dbx_execute_query" && result["content"][0]["text"] == "ok" && !is_error)
+        );
+
+        let current_tool_error = parse_codex_jsonl_event(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"dbx","tool":"dbx_execute_query","arguments":{"sql":"SELECT 1"},"result":null,"error":{"message":"user cancelled MCP tool call"},"status":"failed"}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&current_tool_error[0], AgentEvent::ToolCallEnd { tool_name, result, is_error, .. } if tool_name == "dbx_execute_query" && result["message"] == "user cancelled MCP tool call" && *is_error)
         );
 
         let turn_done =

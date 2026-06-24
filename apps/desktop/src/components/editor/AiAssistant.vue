@@ -403,9 +403,19 @@ function agentStepClass(tone: AiAgentStepTone): string {
 function extractToolResultContent(result: unknown): string | undefined {
   if (!result) return undefined;
   if (typeof result === "string") return result;
+  if (Array.isArray(result)) return result.map(extractToolResultContent).filter(Boolean).join("\n");
   if (typeof result === "object" && result !== null && "content" in result) {
     const content = (result as Record<string, unknown>).content;
+    if (Array.isArray(content)) return content.map(extractToolResultContent).filter(Boolean).join("\n");
     return typeof content === "string" ? content : JSON.stringify(content);
+  }
+  if (typeof result === "object" && result !== null && "text" in result) {
+    const text = (result as Record<string, unknown>).text;
+    if (typeof text === "string") return text;
+  }
+  if (typeof result === "object" && result !== null && "message" in result) {
+    const message = (result as Record<string, unknown>).message;
+    if (typeof message === "string") return message;
   }
   return JSON.stringify(result);
 }
@@ -454,7 +464,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
     titleParams: { tool: event.tool_name || "" },
     toolName: event.tool_name,
     toolArgs: event.type === "tool_call_start" ? (event.args as Record<string, unknown>) : undefined,
-    toolResult: event.type === "tool_call_end" && !event.is_error ? extractToolResultContent(event.result) : undefined,
+    toolResult: event.type === "tool_call_end" ? extractToolResultContent(event.result) : undefined,
     explainData: event.type === "tool_call_end" ? extractExplainData(event.result) : undefined,
     isError: event.type === "tool_call_end" ? event.is_error : undefined,
   };

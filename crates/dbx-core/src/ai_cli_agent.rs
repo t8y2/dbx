@@ -305,6 +305,7 @@ fn cli_item_id(item: &Value) -> String {
 fn cli_tool_name(item: &Value) -> String {
     item.get("tool_name")
         .and_then(Value::as_str)
+        .or_else(|| item.get("tool").and_then(Value::as_str))
         .or_else(|| item.get("name").and_then(Value::as_str))
         .or_else(|| item.get("server_tool_name").and_then(Value::as_str))
         .unwrap_or("cli_tool")
@@ -320,7 +321,16 @@ fn cli_tool_args(item: &Value) -> Value {
 }
 
 fn cli_tool_result(item: &Value) -> Value {
-    item.get("result").or_else(|| item.get("output")).or_else(|| item.get("content")).cloned().unwrap_or(Value::Null)
+    non_null_field(item, "result")
+        .or_else(|| non_null_field(item, "output"))
+        .or_else(|| non_null_field(item, "content"))
+        .or_else(|| non_null_field(item, "error"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn non_null_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    value.get(key).filter(|field| !field.is_null())
 }
 
 fn cli_text(item: &Value) -> Option<String> {

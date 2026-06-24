@@ -7882,7 +7882,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </div>
                   </template>
-                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, isEditingDetail ? 'flex-1' : '']">
+                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, cellDetailPanelIsBottom && isEditingDetail ? 'flex-1' : '']">
                     <div class="flex min-h-5 items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
@@ -7928,9 +7928,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </a>
                     </div>
                     <template v-if="isEditingDetail">
-                      <div class="min-h-0 flex-1">
+                      <div class="min-h-0" :class="cellDetailPanelIsBottom ? 'flex-1' : 'h-40'">
                         <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelDetailEdit" @commit="commitDetailEdit" />
                         <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
+                      </div>
+                      <div v-if="!cellDetailPanelIsBottom" class="flex shrink-0 gap-1 mt-1">
+                        <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
+                          {{ t("dangerDialog.confirm") }}
+                        </Button>
+                        <Button variant="outline" size="sm" class="h-6 text-xs" @click="cancelDetailEdit">
+                          {{ t("dangerDialog.cancel") }}
+                        </Button>
                       </div>
                     </template>
                     <pre v-else class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50" :class="{ 'cursor-text': activeCellDetail.isEditable }" @dblclick="startDetailEdit">{{
@@ -7947,7 +7955,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </div>
 
                 <div class="border-t p-1.5 flex gap-1" :class="cellDetailPanelIsBottom ? 'items-center' : 'flex-col'">
-                  <div v-if="isEditingDetail" class="flex shrink-0 gap-1" :class="cellDetailPanelIsBottom ? 'mr-auto' : ''">
+                  <div v-if="isEditingDetail && cellDetailPanelIsBottom" class="flex shrink-0 gap-1 mr-auto">
                     <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
                       {{ t("dangerDialog.confirm") }}
                     </Button>

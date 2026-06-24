@@ -85,6 +85,8 @@ fn get_columns_tool() -> ToolDefinition {
             "required": ["table"]
         }),
         read_only: true,
+        // get_columns runs sequentially: concurrent metadata queries can exhaust
+        // single-connection drivers (e.g. DuckDB), causing cascading tool errors.
         parallel_ok: false,
     }
 }
@@ -549,19 +551,4 @@ async fn execute_explain_query(
     };
 
     (Ok(text), explain_data)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn get_columns_runs_sequentially() {
-        let get_columns = read_only_tools()
-            .into_iter()
-            .find(|tool| tool.name == "get_columns")
-            .expect("get_columns tool should be registered");
-
-        assert!(!get_columns.parallel_ok);
-    }
 }

@@ -15,17 +15,28 @@ use crate::models::connection::DatabaseType;
 use crate::token_usage::TokenUsage;
 
 /// Maximum number of agent loop turns to prevent infinite loops.
-const MAX_AGENT_TURNS: u32 = 20;
+const MAX_AGENT_TURNS: u32 = 30;
+const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
 const MAX_TOOL_RESULT_CONTEXT_CHARS: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
 const TOOL_RESULT_SAMPLE_ITEMS: usize = 5;
+
+fn take_text(m: &std::sync::Mutex<String>) -> String {
+    m.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 enum LoopExit {
     Completed,
     Cancelled,
     Interrupted(String),
     Exhausted,
+}
+
+impl LoopExit {
+    fn should_break_turns(&self) -> bool {
+        matches!(self, LoopExit::Cancelled | LoopExit::Interrupted(_))
+    }
 }
 
 enum CompactResult {
@@ -167,7 +178,7 @@ pub async fn run_agent_loop(
             let on_chunk = move |chunk: AiStreamChunk| {
                 if !chunk.delta.is_empty() {
                     emitted.store(true, Ordering::Relaxed);
-                    acc.lock().expect("agent accumulated text mutex poisoned").push_str(&chunk.delta);
+                    acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(&chunk.delta);
                     on_event2(AgentEvent::TextDelta { delta: chunk.delta.clone() });
                 }
                 if let Some(ref reasoning) = chunk.reasoning_delta {
@@ -178,8 +189,7 @@ pub async fn run_agent_loop(
 
             match stream_with_tools(config, &request, &session_id, &tools, cancelled, on_chunk).await {
                 Ok((tool_calls, usage)) => {
-                    let accumulated_text =
-                        accumulated_text.lock().expect("agent accumulated text mutex poisoned").clone();
+                    let accumulated_text = take_text(&accumulated_text);
                     stream_result = Some((tool_calls, usage, accumulated_text));
                     break;
                 }
@@ -204,28 +214,30 @@ pub async fn run_agent_loop(
                             loop_exit = LoopExit::Cancelled;
                             break;
                         }
-                        CompactResult::Skipped => {}
+                        CompactResult::Skipped => {
+                            final_text = take_text(&accumulated_text);
+                            loop_exit =
+                                LoopExit::Interrupted(last_stream_error.take().unwrap_or_else(|| {
+                                    "LLM request failed after context compaction retry".to_string()
+                                }));
+                        }
                     }
                     break;
                 }
-                Err(err) if err == "Agent loop cancelled" => {
-                    final_text = accumulated_text.lock().expect("agent accumulated text mutex poisoned").clone();
+                Err(err) if err == AGENT_CANCELLED_ERROR => {
+                    final_text = take_text(&accumulated_text);
                     loop_exit = LoopExit::Cancelled;
                     break;
                 }
                 Err(err) => {
-                    let accumulated = accumulated_text.lock().expect("agent accumulated text mutex poisoned").clone();
-                    if !accumulated.trim().is_empty() {
-                        final_text = accumulated;
-                        loop_exit = LoopExit::Interrupted(err);
-                        break;
-                    }
-                    return Err(err);
+                    final_text = take_text(&accumulated_text);
+                    loop_exit = LoopExit::Interrupted(err);
+                    break;
                 }
             }
         }
 
-        if matches!(loop_exit, LoopExit::Cancelled | LoopExit::Interrupted(_)) {
+        if loop_exit.should_break_turns() {
             break;
         }
 
@@ -348,8 +360,11 @@ pub async fn run_agent_loop(
             final_text.push_str(&message);
         }
         LoopExit::Interrupted(error) => {
-            let message =
-                format!("\n\nAgent stream stopped before completion: {error}. Partial output above was preserved.");
+            let message = if final_text.trim().is_empty() {
+                format!("Agent stream stopped before completion: {error}.")
+            } else {
+                format!("\n\nAgent stream stopped before completion: {error}. Partial output above was preserved.")
+            };
             on_event(AgentEvent::TextDelta { delta: message.clone() });
             final_text.push_str(&message);
         }
@@ -407,7 +422,7 @@ async fn stream_with_tools(
 ) -> Result<(Vec<ToolCall>, Option<TokenUsage>), String> {
     // Return early if the user cancelled before the LLM call started.
     if cancelled.notified().now_or_never().is_some() {
-        return Err("Agent loop cancelled".to_string());
+        return Err(AGENT_CANCELLED_ERROR.to_string());
     }
 
     ai::stream_with_tools(config, request, session_id, tools, cancelled, on_chunk).await

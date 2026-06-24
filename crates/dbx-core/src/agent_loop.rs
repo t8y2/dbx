@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 use futures::FutureExt;
@@ -13,14 +13,26 @@ use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::token_usage::TokenUsage;
-use tokio::sync::Mutex;
 
 /// Maximum number of agent loop turns to prevent infinite loops.
-const MAX_AGENT_TURNS: u32 = 10;
+const MAX_AGENT_TURNS: u32 = 20;
 const MAX_TOOL_RESULT_CONTEXT_CHARS: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
 const TOOL_RESULT_SAMPLE_ITEMS: usize = 5;
+
+enum LoopExit {
+    Completed,
+    Cancelled,
+    Interrupted(String),
+    Exhausted,
+}
+
+enum CompactResult {
+    Skipped,
+    Compacted,
+    Cancelled,
+}
 
 /// Context for an agent loop run.
 pub struct AgentLoopContext {
@@ -103,17 +115,34 @@ pub async fn run_agent_loop(
     let tools = if is_agent_mode { agent_tools::all_tools(agent_ctx.db_type) } else { agent_tools::read_only_tools() };
     let mut conversation_messages: Vec<AiMessage> = messages.to_vec();
     let mut final_text = String::new();
+    let mut loop_exit = LoopExit::Exhausted;
     let mut total_usage = TokenUsage::default();
 
     for turn in 0..MAX_AGENT_TURNS {
         // Check for cancellation before each turn
         if cancelled.notified().now_or_never().is_some() {
-            on_event(AgentEvent::Error { message: "Agent loop cancelled".to_string() });
+            loop_exit = LoopExit::Cancelled;
             break;
         }
 
         // Check and maybe compact context
-        maybe_compact(config, system_prompt, &tools, &mut conversation_messages, max_tokens, &on_event, false).await;
+        if matches!(
+            maybe_compact(
+                config,
+                system_prompt,
+                &tools,
+                &mut conversation_messages,
+                max_tokens,
+                &on_event,
+                cancelled,
+                false,
+            )
+            .await,
+            CompactResult::Cancelled
+        ) {
+            loop_exit = LoopExit::Cancelled;
+            break;
+        }
 
         on_event(AgentEvent::TurnStart { turn });
 
@@ -138,9 +167,7 @@ pub async fn run_agent_loop(
             let on_chunk = move |chunk: AiStreamChunk| {
                 if !chunk.delta.is_empty() {
                     emitted.store(true, Ordering::Relaxed);
-                    if let Ok(mut text) = acc.try_lock() {
-                        text.push_str(&chunk.delta);
-                    }
+                    acc.lock().expect("agent accumulated text mutex poisoned").push_str(&chunk.delta);
                     on_event2(AgentEvent::TextDelta { delta: chunk.delta.clone() });
                 }
                 if let Some(ref reasoning) = chunk.reasoning_delta {
@@ -151,7 +178,8 @@ pub async fn run_agent_loop(
 
             match stream_with_tools(config, &request, &session_id, &tools, cancelled, on_chunk).await {
                 Ok((tool_calls, usage)) => {
-                    let accumulated_text = accumulated_text.lock().await.clone();
+                    let accumulated_text =
+                        accumulated_text.lock().expect("agent accumulated text mutex poisoned").clone();
                     stream_result = Some((tool_calls, usage, accumulated_text));
                     break;
                 }
@@ -166,16 +194,39 @@ pub async fn run_agent_loop(
                         &mut conversation_messages,
                         max_tokens,
                         &on_event,
+                        cancelled,
                         true,
                     )
                     .await;
-                    if compacted.is_some() {
-                        continue;
+                    match compacted {
+                        CompactResult::Compacted => continue,
+                        CompactResult::Cancelled => {
+                            loop_exit = LoopExit::Cancelled;
+                            break;
+                        }
+                        CompactResult::Skipped => {}
                     }
                     break;
                 }
-                Err(err) => return Err(err),
+                Err(err) if err == "Agent loop cancelled" => {
+                    final_text = accumulated_text.lock().expect("agent accumulated text mutex poisoned").clone();
+                    loop_exit = LoopExit::Cancelled;
+                    break;
+                }
+                Err(err) => {
+                    let accumulated = accumulated_text.lock().expect("agent accumulated text mutex poisoned").clone();
+                    if !accumulated.trim().is_empty() {
+                        final_text = accumulated;
+                        loop_exit = LoopExit::Interrupted(err);
+                        break;
+                    }
+                    return Err(err);
+                }
             }
+        }
+
+        if matches!(loop_exit, LoopExit::Cancelled | LoopExit::Interrupted(_)) {
+            break;
         }
 
         let Some((collected_tool_calls, turn_usage, accumulated_text)) = stream_result else {
@@ -204,6 +255,7 @@ pub async fn run_agent_loop(
         if collected_tool_calls.is_empty() {
             // No tool calls -- we're done
             final_text = accumulated_text;
+            loop_exit = LoopExit::Completed;
             break;
         }
 
@@ -282,6 +334,36 @@ pub async fn run_agent_loop(
         }
 
         final_text = accumulated_text;
+    }
+
+    match loop_exit {
+        LoopExit::Completed => {}
+        LoopExit::Cancelled => {
+            let message = if final_text.trim().is_empty() {
+                "Agent run was cancelled before producing output.".to_string()
+            } else {
+                "\n\nAgent run was cancelled. Partial output above was preserved.".to_string()
+            };
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            final_text.push_str(&message);
+        }
+        LoopExit::Interrupted(error) => {
+            let message =
+                format!("\n\nAgent stream stopped before completion: {error}. Partial output above was preserved.");
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            final_text.push_str(&message);
+        }
+        LoopExit::Exhausted => {
+            let message = if final_text.trim().is_empty() {
+                format!("Agent reached the {MAX_AGENT_TURNS}-turn safety limit before producing output. Send Continue to let the agent keep working.")
+            } else {
+                format!(
+                    "\n\nAgent reached the {MAX_AGENT_TURNS}-turn safety limit before a final answer. The partial output above was preserved; send Continue to let the agent keep working."
+                )
+            };
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            final_text.push_str(&message);
+        }
     }
 
     on_event(AgentEvent::AgentEnd {
@@ -521,18 +603,19 @@ async fn maybe_compact(
     messages: &mut Vec<AiMessage>,
     max_tokens: Option<u32>,
     on_event: &(impl Fn(AgentEvent) + Send + Sync),
+    cancelled: &Notify,
     force: bool,
-) -> Option<u32> {
+) -> CompactResult {
     let window = config.context_window.unwrap_or_else(|| context_window_for_model(&config.model));
     let budget = prompt_budget(window, max_tokens);
     let estimated_before = estimate_current_prompt_tokens(system_prompt, tools, messages);
 
     if !force && estimated_before <= budget {
-        return None;
+        return CompactResult::Skipped;
     }
 
     if messages.len() <= 2 {
-        return None;
+        return CompactResult::Skipped;
     }
 
     // Find cut point: keep a dynamic budget of recent messages and summarize older context.
@@ -558,7 +641,7 @@ async fn maybe_compact(
     // Always keep messages[0] (the original user question) verbatim outside the summary.
     // Only summarize messages[1..cut].
     if cut <= 1 {
-        return None;
+        return CompactResult::Skipped;
     }
     let summary_start = 1usize;
 
@@ -579,9 +662,15 @@ async fn maybe_compact(
         temperature: Some(0.1),
     };
 
-    let summary = match ai::complete(&summary_request).await {
-        Ok(s) => s,
-        Err(_) => fallback_summary(messages, cut),
+    let summary = match cancelled.notified().now_or_never() {
+        Some(_) => return CompactResult::Cancelled,
+        None => match tokio::select! {
+            result = ai::complete(&summary_request) => result,
+            _ = cancelled.notified() => return CompactResult::Cancelled,
+        } {
+            Ok(s) => s,
+            Err(_) => fallback_summary(messages, cut),
+        },
     };
 
     let summary = if validate_summary(&summary) { summary } else { fallback_summary(messages, cut) };
@@ -612,7 +701,7 @@ async fn maybe_compact(
         estimated_before,
         estimated_after,
     });
-    Some(summary_tokens)
+    CompactResult::Compacted
 }
 
 fn compact_tool_result_for_context(tool_name: &str, content: &str) -> String {

@@ -1937,7 +1937,15 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              ORDER BY i.relname";
 
 const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) ORDER BY k.n) AS columns, \
+             ARRAY( \
+               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, true)) \
+               FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
+               LEFT JOIN pg_attribute a \
+                 ON a.attrelid = t.oid \
+                AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
+                AND a.attnum > 0 \
+               ORDER BY pos.n \
+             ) AS columns, \
              ix.indisunique AS is_unique, \
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
@@ -1950,10 +1958,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
-             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
              WHERE n.nspname = $1 AND t.relname = $2 \
-             GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indkey \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -2747,6 +2752,10 @@ mod tests {
         assert!(POSTGRES_INDEXES_SQL.contains("ix.indnkeyatts"));
         assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("ix.indnkeyatts"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("NULL::smallint AS nkeyatts"));
+        assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("LATERAL"));
+        assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("WITH ORDINALITY"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("generate_series"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("string_to_array(ix.indkey::text, ' ')"));
     }
 
     #[test]

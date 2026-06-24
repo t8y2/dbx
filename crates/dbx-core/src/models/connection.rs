@@ -258,6 +258,8 @@ pub enum DatabaseType {
     Qdrant,
     #[serde(rename = "milvus")]
     Milvus,
+    #[serde(rename = "weaviate")]
+    Weaviate,
     Doris,
     #[serde(rename = "starrocks")]
     StarRocks,
@@ -735,7 +737,7 @@ impl ConnectionConfig {
                 format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
-            DatabaseType::Elasticsearch | DatabaseType::Qdrant | DatabaseType::Milvus => {
+            DatabaseType::Elasticsearch | DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
@@ -874,7 +876,7 @@ impl ConnectionConfig {
             DatabaseType::Oracle => {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::Elasticsearch | DatabaseType::Qdrant | DatabaseType::Milvus => {
+            DatabaseType::Elasticsearch | DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }

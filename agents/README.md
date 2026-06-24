@@ -43,6 +43,8 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | xugu | 虚谷 XuguDB | XuguDB Go native agent |
 | iotdb | Apache IoTDB | IoTDB JDBC |
 | etcd | etcd | jetcd |
+| zookeeper | Apache ZooKeeper | Apache Curator |
+
 
 ## Multi-JRE Support
 

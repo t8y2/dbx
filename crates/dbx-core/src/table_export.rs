@@ -647,6 +647,16 @@ mod tests {
     use crate::database_export::{clear_export_cancelled, set_export_cancelled};
     use crate::xlsx_export::{build_xlsx_workbook, XlsxWorksheetData};
     use serde_json::json;
+    use std::io::Read;
+
+    /// Read and decompress a single entry from an in-memory XLSX (ZIP) buffer.
+    fn read_zip_entry(bytes: &[u8], path: &str) -> String {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("open xlsx as zip archive");
+        let mut entry = archive.by_name(path).unwrap_or_else(|_| panic!("missing zip entry: {path}"));
+        let mut content = String::new();
+        entry.read_to_string(&mut content).expect("read zip entry");
+        content
+    }
 
     // -----------------------------------------------------------------------
     // Helper: check that two CSV strings are equivalent by splitting lines
@@ -766,15 +776,16 @@ mod tests {
             ],
         };
         let workbook = build_xlsx_workbook(&data).expect("XLSX build should succeed");
-        let text = String::from_utf8_lossy(&workbook);
 
         assert_eq!(workbook[0], 0x50, "Should be a ZIP (PK) archive");
         assert_eq!(workbook[1], 0x4b);
-        assert!(text.contains("[Content_Types].xml"));
-        assert!(text.contains("xl/worksheets/sheet1.xml"));
-        assert!(text.contains("name=\"employees\""));
-        assert!(text.contains("<v>75000.5</v>"));
-        assert!(text.contains("Alice"));
+
+        // Entries are Deflate-compressed; assert on their decompressed contents.
+        let workbook_xml = read_zip_entry(&workbook, "xl/workbook.xml");
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(workbook_xml.contains("name=\"employees\""));
+        assert!(sheet.contains("<v>75000.5</v>"));
+        assert!(sheet.contains("Alice"));
     }
 
     // -----------------------------------------------------------------------

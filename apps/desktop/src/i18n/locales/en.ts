@@ -92,6 +92,7 @@ export default {
   },
   savedSql: {
     saveToLibrary: "Save to SQL Library",
+    saveToFile: "Save Locally",
     save: "Save",
     saved: "SQL saved",
     saveFailed: "Failed to save SQL: {message}",

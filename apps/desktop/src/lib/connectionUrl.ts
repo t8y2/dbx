@@ -42,6 +42,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   elasticsearch: { type: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", defaultPort: 9200 },
   qdrant: { type: "qdrant", profile: "qdrant", label: "Qdrant", defaultPort: 6333 },
   milvus: { type: "milvus", profile: "milvus", label: "Milvus", defaultPort: 19530 },
+  weaviate: { type: "weaviate", profile: "weaviate", label: "Weaviate", defaultPort: 8080 },
   dm: { type: "dameng", profile: "dm", label: "DM (Dameng)", defaultPort: 5236 },
   dameng: { type: "dameng", profile: "dm", label: "DM (Dameng)", defaultPort: 5236 },
   gaussdb: { type: "gaussdb", profile: "gaussdb", label: "GaussDB", defaultPort: 5432 },
@@ -64,6 +65,7 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   elasticsearch: SCHEME_PROFILES.elasticsearch,
   qdrant: SCHEME_PROFILES.qdrant,
   milvus: SCHEME_PROFILES.milvus,
+  weaviate: SCHEME_PROFILES.weaviate,
 };
 
 function decodeUrlPart(value: string): string {

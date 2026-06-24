@@ -33,6 +33,22 @@ test("parseMongoFindCommand parses getCollection find with chained sort skip and
   });
 });
 
+test("parseMongoFindCommand accepts line breaks before find and chained calls", () => {
+  const command = parseMongoFindCommand(`db.getCollection("accounting_reconciliations")
+.find({
+  "_id": ObjectId("68ad51ca84c8127bc7d44cb3")
+})
+.sort({ lineNo: -1 })
+.skip(5)
+.limit(20)`);
+  assert.ok(command);
+  assert.equal(command.collection, "accounting_reconciliations");
+  assert.deepEqual(JSON.parse(command.filter), { _id: { $oid: "68ad51ca84c8127bc7d44cb3" } });
+  assert.deepEqual(JSON.parse(command.sort || "{}"), { lineNo: -1 });
+  assert.equal(command.skip, 5);
+  assert.equal(command.limit, 20);
+});
+
 test("parseMongoFindCommand accepts Compass-style unquoted keys and ObjectId", () => {
   const command = parseMongoFindCommand("db.products.find({_id: ObjectId('6a045a92d2971e44243771a1')}).limit(1)");
   assert.ok(command);

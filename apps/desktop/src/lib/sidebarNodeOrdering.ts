@@ -30,7 +30,7 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
     const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "saved-sql-root");
     const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
 
-    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "qdrant" || databaseType === "milvus") {
+    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate") {
       return withConnectionUtilityOrder(sortByLabel(regularChildren));
     }
 

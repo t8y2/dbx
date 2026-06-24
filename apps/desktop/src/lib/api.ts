@@ -228,6 +228,7 @@ export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
 export const pendingOpenConnectionLinks = forward("pendingOpenConnectionLinks");
 export const readExternalSqlFile = forward("readExternalSqlFile");
+export const writeExternalSqlFile = forward("writeExternalSqlFile");
 
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");

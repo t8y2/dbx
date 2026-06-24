@@ -4,12 +4,13 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import java.util.ArrayList;
-import java.util.List;
 import org.apache.curator.test.TestingServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 final class ZooKeeperAgentTest {
     @AfterEach
@@ -178,6 +179,122 @@ final class ZooKeeperAgentTest {
 
             JsonObject value = result(request(4, "kv_get", "{\"key\":\"/app/name\"}")).getAsJsonObject("value");
             Assertions.assertEquals("dbx-updated", value.get("data").getAsString());
+        }
+    }
+
+    @Test
+    void kvPutCreatePersistentCreatesOnlyMissingZnode() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+
+            JsonObject created = result(request(
+                2,
+                "kv_put",
+                "{\"key\":\"/app/created\",\"value\":{\"encoding\":\"utf8\",\"data\":\"dbx\"},"
+                    + "\"writeMode\":\"create\",\"createMode\":\"persistent\"}"
+            ));
+            JsonObject get = result(request(3, "kv_get", "{\"key\":\"/app/created\"}"));
+            JsonObject duplicate = error(request(
+                4,
+                "kv_put",
+                "{\"key\":\"/app/created\",\"value\":{\"encoding\":\"utf8\",\"data\":\"again\"},"
+                    + "\"writeMode\":\"create\",\"createMode\":\"persistent\"}"
+            ));
+
+            Assertions.assertEquals("/app/created", requiredString(created, "key"));
+            Assertions.assertEquals("/app/created", requiredString(created, "createdKey"));
+            Assertions.assertEquals("dbx", get.getAsJsonObject("value").get("data").getAsString());
+            Assertions.assertTrue(duplicate.get("message").getAsString().contains("NodeExists"));
+        }
+    }
+
+    @Test
+    void kvPutCreateEphemeralCreatesEphemeralZnode() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+
+            JsonObject created = result(request(
+                2,
+                "kv_put",
+                "{\"key\":\"/session/node\",\"value\":{\"encoding\":\"utf8\",\"data\":\"temporary\"},"
+                    + "\"writeMode\":\"create\",\"createMode\":\"ephemeral\"}"
+            ));
+            JsonObject get = result(request(3, "kv_get", "{\"key\":\"/session/node\"}"));
+
+            Assertions.assertEquals("/session/node", requiredString(created, "createdKey"));
+            Assertions.assertEquals("temporary", get.getAsJsonObject("value").get("data").getAsString());
+            Assertions.assertTrue(get.getAsJsonObject("metadata").get("ephemeralOwner").getAsLong() > 0);
+        }
+    }
+
+    @Test
+    void kvPutCreatePersistentSequentialReturnsGeneratedPath() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+
+            JsonObject created = result(request(
+                2,
+                "kv_put",
+                "{\"key\":\"/jobs/job-\",\"value\":{\"encoding\":\"utf8\",\"data\":\"one\"},"
+                    + "\"writeMode\":\"create\",\"createMode\":\"persistent_sequential\"}"
+            ));
+            String createdKey = requiredString(created, "createdKey");
+            JsonObject get = result(request(3, "kv_get", "{\"key\":\"" + createdKey + "\"}"));
+
+            Assertions.assertEquals(createdKey, requiredString(created, "key"));
+            Assertions.assertTrue(createdKey.startsWith("/jobs/job-"));
+            Assertions.assertTrue(createdKey.length() > "/jobs/job-".length());
+            Assertions.assertEquals("one", get.getAsJsonObject("value").get("data").getAsString());
+            Assertions.assertEquals(0, get.getAsJsonObject("metadata").get("ephemeralOwner").getAsLong());
+        }
+    }
+
+    @Test
+    void kvPutCreateEphemeralSequentialReturnsGeneratedEphemeralPath() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+
+            JsonObject created = result(request(
+                2,
+                "kv_put",
+                "{\"key\":\"/sessions/member-\",\"value\":{\"encoding\":\"utf8\",\"data\":\"online\"},"
+                    + "\"writeMode\":\"create\",\"createMode\":\"ephemeral_sequential\"}"
+            ));
+            String createdKey = requiredString(created, "createdKey");
+            JsonObject get = result(request(3, "kv_get", "{\"key\":\"" + createdKey + "\"}"));
+
+            Assertions.assertEquals(createdKey, requiredString(created, "key"));
+            Assertions.assertTrue(createdKey.startsWith("/sessions/member-"));
+            Assertions.assertEquals("online", get.getAsJsonObject("value").get("data").getAsString());
+            Assertions.assertTrue(get.getAsJsonObject("metadata").get("ephemeralOwner").getAsLong() > 0);
+        }
+    }
+
+    @Test
+    void kvPutUpdateOnlyUpdatesExistingZnode() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+
+            JsonObject missing = error(request(
+                2,
+                "kv_put",
+                "{\"key\":\"/app/missing\",\"value\":{\"encoding\":\"utf8\",\"data\":\"x\"},\"writeMode\":\"update\"}"
+            ));
+            result(request(
+                3,
+                "kv_put",
+                "{\"key\":\"/app/name\",\"value\":{\"encoding\":\"utf8\",\"data\":\"before\"},\"writeMode\":\"create\"}"
+            ));
+            JsonObject updated = result(request(
+                4,
+                "kv_put",
+                "{\"key\":\"/app/name\",\"value\":{\"encoding\":\"utf8\",\"data\":\"after\"},\"writeMode\":\"update\"}"
+            ));
+            JsonObject value = result(request(5, "kv_get", "{\"key\":\"/app/name\"}")).getAsJsonObject("value");
+
+            Assertions.assertTrue(missing.get("message").getAsString().contains("NoNode"));
+            Assertions.assertTrue(updated.get("version").getAsInt() > 0);
+            Assertions.assertEquals("after", value.get("data").getAsString());
         }
     }
 
@@ -382,7 +499,14 @@ final class ZooKeeperAgentTest {
     }
 
     private static JsonObject error(String response) {
-        return JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
+        JsonObject object = JsonParser.parseString(response).getAsJsonObject();
+        Assertions.assertTrue(object.has("error"), "expected JSON-RPC error but got " + response);
+        return object.getAsJsonObject("error");
+    }
+
+    private static String requiredString(JsonObject object, String key) {
+        Assertions.assertTrue(object.has(key), "expected result to contain " + key);
+        return object.get(key).getAsString();
     }
 
     private static List<String> listedKeys(JsonObject listResult) {

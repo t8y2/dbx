@@ -986,6 +986,7 @@ WHERE u.id = picked.id;
             database_type: Some(DatabaseType::Postgres),
             pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
             use_agent_cursor: false,
+            first_page_uses_actual_sql: false,
         });
 
         assert_eq!(plan.sql_to_execute, sql);

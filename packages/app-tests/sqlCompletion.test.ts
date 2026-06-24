@@ -788,7 +788,8 @@ test("suggests SQL snippets for common abbreviations", () => {
 
   const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
   assert.ok(snippet);
-  assert.equal(snippet.apply, "SELECT *\nFROM table\nLIMIT 100;");
+  assert.equal(snippet.detail, "SELECT *\nFROM table\nLIMIT 100;");
+  assert.equal(snippet.apply, "SELECT *\nFROM ${table}\nLIMIT 100;");
 });
 
 test("applies keyword case to built-in SQL snippets", () => {
@@ -800,7 +801,8 @@ test("applies keyword case to built-in SQL snippets", () => {
 
   const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
   assert.ok(snippet);
-  assert.equal(snippet.apply, "select *\nfrom table\nlimit 100;");
+  assert.equal(snippet.detail, "select *\nfrom table\nlimit 100;");
+  assert.equal(snippet.apply, "select *\nfrom ${table}\nlimit 100;");
 });
 
 test("suggests DATE_FORMAT as parameter snippet", () => {

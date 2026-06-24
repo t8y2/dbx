@@ -16,6 +16,11 @@ pub async fn read_external_sql_file(path: String) -> Result<String, String> {
     read_external_sql_file_content_async(PathBuf::from(path)).await
 }
 
+#[tauri::command]
+pub async fn write_external_sql_file(path: String, content: String) -> Result<(), String> {
+    write_external_sql_file_content_async(PathBuf::from(path), content).await
+}
+
 #[derive(Default)]
 pub struct ExternalSqlOpenState {
     pending: Mutex<Vec<String>>,
@@ -77,6 +82,21 @@ async fn read_external_sql_file_content_async(path: PathBuf) -> Result<String, S
     }
     let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
     decode_sql_file_bytes(&bytes)
+}
+
+#[cfg(test)]
+fn write_external_sql_file_content(path: &Path, content: &str) -> Result<(), String> {
+    if !is_sql_file_path(path) {
+        return Err("Only .sql files can be saved this way".to_string());
+    }
+    std::fs::write(path, content).map_err(|e| format!("Failed to save SQL file: {e}"))
+}
+
+async fn write_external_sql_file_content_async(path: PathBuf, content: String) -> Result<(), String> {
+    if !is_sql_file_path(&path) {
+        return Err("Only .sql files can be saved this way".to_string());
+    }
+    tokio::fs::write(&path, content).await.map_err(|e| format!("Failed to save SQL file: {e}"))
 }
 
 fn dedupe_paths(paths: Vec<String>) -> Vec<String> {
@@ -147,5 +167,27 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         assert!(result.unwrap_err().contains(".sql"));
+    }
+
+    #[test]
+    fn writes_external_sql_file_content() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+
+        let result = write_external_sql_file_content(&path, "select 2;");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok());
+        assert_eq!(content, "select 2;");
+    }
+
+    #[test]
+    fn rejects_external_non_sql_file_save() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.txt", uuid::Uuid::new_v4()));
+
+        let result = write_external_sql_file_content(&path, "select 2;");
+
+        assert!(result.unwrap_err().contains(".sql"));
+        assert!(!path.exists());
     }
 }

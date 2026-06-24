@@ -430,6 +430,10 @@ export async function readExternalSqlFile(path: string): Promise<string> {
   return invoke("read_external_sql_file", { path });
 }
 
+export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
+  return invoke("write_external_sql_file", { path, content });
+}
+
 // --- AI Conversations ---
 
 export interface AiChatMessage {

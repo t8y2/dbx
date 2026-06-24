@@ -92,6 +92,7 @@ export default {
   },
   savedSql: {
     saveToLibrary: "保存到 SQL 库",
+    saveToFile: "保存到本地",
     save: "保存",
     saved: "SQL 已保存",
     saveFailed: "保存 SQL 失败：{message}",

@@ -733,6 +733,7 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Elasticsearch
                 | DatabaseType::Qdrant
                 | DatabaseType::Milvus
+                | DatabaseType::Weaviate
                 | DatabaseType::InfluxDb
         )
 }

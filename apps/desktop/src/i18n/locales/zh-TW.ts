@@ -90,6 +90,7 @@ export default {
   },
   savedSql: {
     saveToLibrary: "儲存到 SQL 庫",
+    saveToFile: "儲存到本機",
     save: "儲存",
     saved: "SQL 已儲存",
     saveFailed: "儲存 SQL 失敗：{message}",

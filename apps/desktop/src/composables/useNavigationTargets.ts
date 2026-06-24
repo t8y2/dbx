@@ -25,7 +25,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
   const tabTitle = target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
-  if (config?.db_type === "qdrant" || config?.db_type === "milvus") {
+  if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate") {
     await connectionStore.ensureConnected(target.connectionId);
     const tabId = queryStore.createTab(target.connectionId, target.database || "default", tabTitle, "vector");
     queryStore.updateSql(tabId, target.tableName);

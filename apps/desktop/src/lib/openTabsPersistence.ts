@@ -20,6 +20,7 @@ export interface SavedOpenTab {
   schema?: string;
   sql: string;
   savedSqlId?: string;
+  externalSqlPath?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
   resultSortedSql?: string;
@@ -62,6 +63,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     schema: tab.schema,
     sql: tab.sql,
     savedSqlId: tab.savedSqlId,
+    externalSqlPath: tab.externalSqlPath,
     ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: tab.lastExecutedSql } : {}),
     ...(tab.resultBaseSql !== undefined ? { resultBaseSql: tab.resultBaseSql } : {}),
     ...(tab.resultSortedSql !== undefined ? { resultSortedSql: tab.resultSortedSql } : {}),
@@ -138,6 +140,7 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
         editorViewport: undefined,
         editorSelection: undefined,
         isExplaining: false,
+        originalSql: mode === "query" && tab.externalSqlPath ? tab.sql : undefined,
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
         resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,

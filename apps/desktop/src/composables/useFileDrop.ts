@@ -22,12 +22,13 @@ export function useFileDrop() {
   const queryStore = useQueryStore();
   const { toast } = useToast();
 
-  async function openDroppedSqlFile(name: string, content: string) {
+  async function openDroppedSqlFile(name: string, content: string, path?: string) {
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection?.database || "";
     const tabId = queryStore.createTab(connectionId, database, name, "query");
     queryStore.updateSql(tabId, content);
+    if (path) queryStore.linkExternalSqlPath(tabId, path, name);
     toast(t("welcome.fileOpened", { name }));
   }
 
@@ -66,7 +67,7 @@ export function useFileDrop() {
           if (isSqlFilePath(path)) {
             try {
               const content = await api.readExternalSqlFile(path);
-              await openDroppedSqlFile(name, content);
+              await openDroppedSqlFile(name, content, path);
             } catch (e: any) {
               toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
             }

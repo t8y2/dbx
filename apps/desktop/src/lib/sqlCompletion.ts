@@ -2523,10 +2523,17 @@ function shouldFormatBuiltinSnippet(snippet: SqlSnippet): boolean {
   return snippet.id.startsWith("builtin-");
 }
 
-function applyBuiltinSnippetKeywordCase(snippet: SqlSnippet, keywordCase?: SqlKeywordCase): string {
+function applyBuiltinSnippetKeywordCase(snippet: SqlSnippet, text: string, keywordCase?: SqlKeywordCase): string {
+  if (!shouldFormatBuiltinSnippet(snippet)) return text;
+  if (keywordCase === "lower") return text.toLowerCase();
+  return text;
+}
+
+const BUILTIN_SNIPPET_PLACEHOLDER_RE = /\b(idx_name|left_column|right_column|columns|values|condition|column|default|value|name|type|table)\b/g;
+
+function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet): string {
   if (!shouldFormatBuiltinSnippet(snippet)) return snippet.body;
-  if (keywordCase === "lower") return snippet.body.toLowerCase();
-  return snippet.body;
+  return snippet.body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
 }
 
 function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
@@ -3209,8 +3216,8 @@ function singularTableName(name: string): string {
   return lower;
 }
 
-export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[]): SqlCompletionItem[] {
-  return buildSnippetItems(prefix, snippets);
+export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+  return buildSnippetItems(prefix, snippets, keywordCase);
 }
 
 function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
@@ -3229,12 +3236,15 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       // they are likely typing the actual keyword — reduce the base boost so
       // the real keyword can rank higher.
       const baseBoost = matchesByPrefix ? 4000 : 0;
-      const body = applyBuiltinSnippetKeywordCase(snippet, keywordCase);
+      // Placeholder replacement runs on the original (UPPER-case) body first,
+      // then keyword casing is applied to both variants uniformly.
+      const body = applyBuiltinSnippetKeywordCase(snippet, snippet.body, keywordCase);
+      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet), keywordCase);
       return {
         label: snippet.label,
         type: "snippet" as const,
         detail: body,
-        apply: body,
+        apply,
         boost: Math.max(boostByPrefix, boostByLabel) + baseBoost,
       };
     });

@@ -442,11 +442,18 @@ const lastClickedItemIndex = ref<number | null>(null); // Unified index for both
 const activeItemId = ref<string | null>(null);
 const activeItemType = ref<"file" | "folder" | null>(null);
 
-// Unified item list for selection (folders first, then unfiled files)
+// Unified item list for selection, matching the currently rendered order.
 const allSelectableItems = computed(() => {
-  const folders = visibleFolderRows.value.filter((r) => r.type === "folder").map((r) => ({ type: "folder" as const, id: r.folder.id }));
-  const files = visibleFiles.value.map((f) => ({ type: "file" as const, id: f.id }));
-  return [...folders, ...files];
+  if (sortMode.value === "date") {
+    return itemsByDate.value.map((item) => ({
+      type: item.type,
+      id: item.item.id,
+    }));
+  }
+
+  const treeItems = visibleFolderRows.value.map((row) => (row.type === "folder" ? { type: "folder" as const, id: row.folder.id } : { type: "file" as const, id: row.file.id }));
+  const rootFiles = visibleFiles.value.map((file) => ({ type: "file" as const, id: file.id }));
+  return [...treeItems, ...rootFiles];
 });
 
 const hasSelection = computed(() => selectedFileIds.value.size > 0 || selectedFolderIds.value.size > 0);

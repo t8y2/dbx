@@ -35,6 +35,7 @@ import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
+import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabResultCache";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/queryResultArchive";
@@ -498,6 +499,7 @@ export const useQueryStore = defineStore("query", () => {
       schema: t.schema,
       sql: t.sql,
       savedSqlId: t.savedSqlId,
+      externalSqlPath: t.externalSqlPath,
       lastExecutedSql: t.lastExecutedSql,
       resultBaseSql: t.resultBaseSql,
       resultSortedSql: t.resultSortedSql,
@@ -533,6 +535,18 @@ export const useQueryStore = defineStore("query", () => {
     },
     { flush: "post" },
   );
+
+  // Immediately flush any pending debounced persist so the on-disk content
+  // reflects the latest in-memory tabs without waiting for the 300ms debounce.
+  // Lets callers (e.g. tests that reload the store) read back persisted state
+  // deterministically instead of racing the debounce timer.
+  function flushPendingPersist() {
+    if (_persistTimer) {
+      clearTimeout(_persistTimer);
+      _persistTimer = null;
+    }
+    saveTabs(tabs.value, activeTabId.value);
+  }
 
   function findTabByIdentity(connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string) {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || ""));
@@ -712,7 +726,7 @@ export const useQueryStore = defineStore("query", () => {
 
   function isTabDirty(tab: QueryTab): boolean {
     if (tab.mode !== "query") return false;
-    if (!tab.sql.trim()) return false;
+    if (!tab.externalSqlPath && !tab.sql.trim()) return false;
     const original = tab.originalSql;
     if (original === undefined) return !!tab.savedSqlId;
     return tab.sql !== original;
@@ -950,10 +964,23 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.savedSqlId = savedSqlId;
+    tab.externalSqlPath = undefined;
     if (title) {
       tab.title = title;
       tab.customTitle = true;
     }
+  }
+
+  function linkExternalSqlPath(id: string, path: string, title?: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return;
+    tab.externalSqlPath = path;
+    tab.savedSqlId = undefined;
+    if (title) {
+      tab.title = title;
+      tab.customTitle = true;
+    }
+    markTabClean(tab);
   }
 
   function openSavedSql(file: SavedSqlFile) {
@@ -1557,7 +1584,8 @@ export const useQueryStore = defineStore("query", () => {
         }
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-aggregate:start]", { traceId, collection: mongoAggregate.collection });
-        const result = await api.mongoAggregateDocuments(tab.connectionId, tab.database, mongoAggregate.collection, mongoAggregate.pipeline, pageLimit, executionId);
+        const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
+        const result = await api.mongoAggregateDocuments(tab.connectionId, tab.database, mongoAggregate.collection, mongoAggregate.pipeline, aggregateMaxRows, executionId);
         console.info("[DBX][executeTabSql:mongo-aggregate:done]", {
           traceId,
           rowCount: result.documents.length,
@@ -2303,6 +2331,7 @@ export const useQueryStore = defineStore("query", () => {
     closeTab,
     forceClosePendingTab,
     cancelClosePendingTab,
+    flushPendingPersist,
     saveAndClosePendingTab,
     isTabDirty,
     markTabClean,
@@ -2323,6 +2352,7 @@ export const useQueryStore = defineStore("query", () => {
     openNacosAdmin,
     openTableStructure,
     linkSavedSql,
+    linkExternalSqlPath,
     openSavedSql,
     togglePinnedTab,
     reorderTab,

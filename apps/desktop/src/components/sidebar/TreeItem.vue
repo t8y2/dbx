@@ -352,6 +352,7 @@ function connectionTooltipScheme(config: Pick<ConnectionConfig, "db_type" | "ssl
     case "elasticsearch":
     case "qdrant":
     case "milvus":
+    case "weaviate":
     case "rqlite":
     case "turso":
     case "mq":
@@ -478,7 +479,7 @@ async function toggle() {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await connectionStore.loadElasticsearchIndices(node.connectionId);
-      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus") {
+      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate") {
         await connectionStore.loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await connectionStore.loadMqTenants(node.connectionId);
@@ -3067,7 +3068,7 @@ const nodeIconClass = computed(() => {
 const canConfigureVisibleDatabases = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;
   const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
-  return dbType !== "elasticsearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "etcd" && dbType !== "mq" && dbType !== "nacos";
+  return dbType !== "elasticsearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "weaviate" && dbType !== "etcd" && dbType !== "mq" && dbType !== "nacos";
 });
 const canCopyFinalProxyPort = computed(() => {
   if (props.node.type !== "connection" || !props.node.connectionId) return false;

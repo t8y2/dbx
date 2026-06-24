@@ -1119,6 +1119,10 @@ export async function readExternalSqlFile(_path: string): Promise<string> {
   throw new Error("Opening external SQL file paths is only available in the desktop app");
 }
 
+export async function writeExternalSqlFile(_path: string, _content: string): Promise<void> {
+  throw new Error("Saving external SQL file paths is only available in the desktop app");
+}
+
 // ---------------------------------------------------------------------------
 // Data Transfer
 // ---------------------------------------------------------------------------

@@ -1,11 +1,14 @@
 package com.dbx.agent.zookeeper;
 
 import com.dbx.agent.AgentProtocol;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import com.google.gson.*;
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.data.Stat;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
@@ -13,19 +16,8 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.retry.ExponentialBackoffRetry;
-import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.data.Stat;
 
 public final class ZooKeeperAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
@@ -196,6 +188,16 @@ public final class ZooKeeperAgent {
         requireMutablePath(path, "modified");
         byte[] bytes = parseValue(params.getAsJsonObject("value"));
 
+        String writeMode = stringOrDefault(params, "writeMode", "upsert");
+        return switch (writeMode) {
+            case "create" -> create(active, path, bytes, createMode(params));
+            case "update" -> update(active, path, bytes);
+            case "upsert" -> upsert(active, path, bytes);
+            default -> throw new IllegalArgumentException("Unsupported writeMode: " + writeMode);
+        };
+    }
+
+    private static Object upsert(CuratorFramework active, String path, byte[] bytes) throws Exception {
         Stat stat = active.checkExists().forPath(path);
         if (stat == null) {
             active.create().creatingParentsIfNeeded().forPath(path, bytes);
@@ -203,11 +205,41 @@ public final class ZooKeeperAgent {
         } else {
             stat = active.setData().forPath(path, bytes);
         }
+        return putResult(stat);
+    }
 
+    private static Object create(CuratorFramework active, String path, byte[] bytes, CreateMode createMode) throws Exception {
+        String createdPath = active.create()
+            .creatingParentsIfNeeded()
+            .withMode(createMode)
+            .forPath(path, bytes);
+        Stat stat = active.checkExists().forPath(createdPath);
+        Map<String, Object> result = putResult(stat);
+        result.put("key", createdPath);
+        result.put("createdKey", createdPath);
+        return result;
+    }
+
+    private static Object update(CuratorFramework active, String path, byte[] bytes) throws Exception {
+        return putResult(active.setData().forPath(path, bytes));
+    }
+
+    private static Map<String, Object> putResult(Stat stat) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("version", stat.getVersion());
         result.put("mtime", stat.getMtime());
         return result;
+    }
+
+    private static CreateMode createMode(JsonObject params) {
+        String createMode = stringOrDefault(params, "createMode", "persistent");
+        return switch (createMode) {
+            case "persistent" -> CreateMode.PERSISTENT;
+            case "ephemeral" -> CreateMode.EPHEMERAL;
+            case "persistent_sequential" -> CreateMode.PERSISTENT_SEQUENTIAL;
+            case "ephemeral_sequential" -> CreateMode.EPHEMERAL_SEQUENTIAL;
+            default -> throw new IllegalArgumentException("Unsupported createMode: " + createMode);
+        };
     }
 
     private static Object delete(JsonObject params) throws Exception {
@@ -326,9 +358,11 @@ public final class ZooKeeperAgent {
         Map<String, Object> metadata = new LinkedHashMap<>();
         long czxid = stat.getCzxid();
         long mzxid = stat.getMzxid();
+        long pzxid = stat.getPzxid();
         int dataLength = stat.getDataLength();
         metadata.put("czxid", czxid);
         metadata.put("mzxid", mzxid);
+        metadata.put("pzxid", pzxid);
         metadata.put("ctime", stat.getCtime());
         metadata.put("mtime", stat.getMtime());
         metadata.put("version", stat.getVersion());

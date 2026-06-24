@@ -49,7 +49,11 @@ const terminalStatus = ref<SqlFileStatus | "idle">("idle");
 const terminalError = ref("");
 const refreshedTarget = ref(false);
 
+<<<<<<< HEAD
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
+=======
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "etcd", "mq", "nacos"].includes(c.db_type)));
+>>>>>>> origin/main
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
 

@@ -89,6 +89,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::Elasticsearch
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
+            | DatabaseType::Weaviate
             | DatabaseType::InfluxDb
             | DatabaseType::Neo4j
             | DatabaseType::Etcd

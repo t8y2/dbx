@@ -22,6 +22,7 @@ export const BRIDGE_REQUIRED_TYPES = [
   "elasticsearch",
   "qdrant",
   "milvus",
+  "weaviate",
   "etcd",
   "dameng",
   "kingbase",

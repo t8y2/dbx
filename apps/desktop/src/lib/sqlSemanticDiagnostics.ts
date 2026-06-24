@@ -80,7 +80,7 @@ export function areSqlSemanticDiagnosticsEqual(left: readonly SqlSemanticDiagnos
 }
 
 export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
-  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "redis") return false;
+  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "redis") return false;
   const context = getSqlCompletionContext(sql, cursor);
   if (context.suggestTables || context.exclusiveTableSuggestions || context.exclusiveColumnSuggestions) return false;
   if (context.qualifier) return false;

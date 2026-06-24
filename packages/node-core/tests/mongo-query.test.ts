@@ -12,6 +12,22 @@ test("parseMongoFindCommand accepts shell-style find commands", () => {
   });
 });
 
+test("parseMongoFindCommand accepts line breaks before find and chained calls", () => {
+  const command = parseMongoFindCommand(`db.getCollection("operation_logs")
+.find({
+  "_id": ObjectId("68ad51ca84c8127bc7d44cb3")
+})
+.sort({ ts: -1 })
+.skip(5)
+.limit(10)`);
+  assert.ok(command);
+  assert.equal(command.collection, "operation_logs");
+  assert.deepEqual(JSON.parse(command.filter), { _id: { $oid: "68ad51ca84c8127bc7d44cb3" } });
+  assert.deepEqual(JSON.parse(command.sort || "{}"), { ts: -1 });
+  assert.equal(command.skip, 5);
+  assert.equal(command.limit, 10);
+});
+
 test("parseMongoFindCommand accepts Compass-style unquoted keys and ObjectId", () => {
   const command = parseMongoFindCommand("db.products.find({_id: ObjectId('6a045a92d2971e44243771a1')}).limit(1)");
   assert.ok(command);

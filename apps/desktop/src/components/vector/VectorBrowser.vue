@@ -32,7 +32,7 @@ const operationMode = ref<VectorOperationMode>("browse");
 const requestText = ref(defaultRequestText(props.databaseType, props.database, props.collection, operationMode.value));
 let loadingTimer: ReturnType<typeof setInterval> | undefined;
 
-const productLabel = computed(() => (props.databaseType === "milvus" ? "Milvus" : "Qdrant"));
+const productLabel = computed(() => (props.databaseType === "milvus" ? "Milvus" : props.databaseType === "weaviate" ? "Weaviate" : "Qdrant"));
 const collectionLabel = computed(() => props.collection || t("vector.collectionFallback"));
 const executeLabel = computed(() => (operationMode.value === "browse" ? t("vector.run") : t("vector.apply")));
 const operationIcon = computed(() => (operationMode.value === "delete" ? Trash2 : operationMode.value === "upsert" ? Save : Play));
@@ -93,6 +93,26 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
             };
     const endpoint = mode === "delete" ? "delete" : mode === "upsert" ? "upsert" : "query";
     return `POST /v2/vectordb/entities/${endpoint}\n${JSON.stringify(body, null, 2)}`;
+  }
+  if (databaseType === "weaviate") {
+    const collectionName = collection || "Collection";
+    if (mode === "delete") {
+      return "DELETE /v1/objects/{id}";
+    }
+    if (mode === "upsert") {
+      return `POST /v1/objects\n${JSON.stringify(
+        {
+          class: collectionName,
+          properties: {
+            title: "updated vector",
+            kind: "demo",
+          },
+        },
+        null,
+        2,
+      )}`;
+    }
+    return `GET /v1/objects?class=${encodeURIComponent(collectionName)}&limit=100`;
   }
   const collectionPath = pathSegment(collection);
   if (mode === "delete") {

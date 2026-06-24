@@ -46,7 +46,7 @@ function formatQueryToolResult(result: QueryResult, title?: string) {
 }
 
 export const DBX_CONNECTION_TYPE_DESCRIPTION =
-  "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, etcd, doris, starrocks, manticoresearch, milvus, qdrant, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, questdb, gbase, h2, snowflake, trino, prestosql, hive, db2, informix, influxdb, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access, mq";
+  "Database type: postgres, mysql, sqlite, rqlite, redis, duckdb, clickhouse, sqlserver, mongodb, oracle, elasticsearch, etcd, doris, starrocks, manticoresearch, milvus, qdrant, weaviate, redshift, dameng, kingbase, highgo, vastbase, goldendb, databend, gaussdb, kwdb, yashandb, databricks, saphana, teradata, vertica, firebird, exasol, opengauss, oceanbase-oracle, questdb, gbase, h2, snowflake, trino, prestosql, hive, db2, informix, influxdb, iris, neo4j, cassandra, bigquery, kylin, sundb, tdengine, iotdb, xugu, jdbc, access, mq";
 const FILE_CAPABLE_CONNECTION_TYPES = new Set(["sqlite", "duckdb", "access", "h2"]);
 
 interface McpScope {

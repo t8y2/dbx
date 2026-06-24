@@ -92,6 +92,7 @@ export default {
   },
   savedSql: {
     saveToLibrary: "SQLライブラリに保存",
+    saveToFile: "ローカルに保存",
     save: "保存",
     saved: "SQLを保存しました",
     saveFailed: "SQLの保存に失敗しました: {message}",

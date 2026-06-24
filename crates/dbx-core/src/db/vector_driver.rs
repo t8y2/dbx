@@ -25,10 +25,13 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
+const QUERY_VALUE_ENCODE_SET: &AsciiSet = &PATH_SEGMENT_ENCODE_SET.add(b'&').add(b'=').add(b'+');
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorDbKind {
     Qdrant,
     Milvus,
+    Weaviate,
 }
 
 impl VectorDbKind {
@@ -36,6 +39,7 @@ impl VectorDbKind {
         match self {
             VectorDbKind::Qdrant => "Qdrant",
             VectorDbKind::Milvus => "Milvus",
+            VectorDbKind::Weaviate => "Weaviate",
         }
     }
 }
@@ -48,7 +52,7 @@ pub struct VectorClient {
     auth: Option<VectorAuth>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum VectorAuth {
     Basic(String, String),
     Bearer(String),
@@ -108,6 +112,8 @@ fn vector_auth(kind: VectorDbKind, username: Option<&str>, password: Option<&str
         VectorDbKind::Qdrant => None,
         VectorDbKind::Milvus if !username.is_empty() => Some(VectorAuth::Bearer(format!("{username}:{password}"))),
         VectorDbKind::Milvus => None,
+        VectorDbKind::Weaviate if !password.is_empty() => Some(VectorAuth::Bearer(password.to_string())),
+        VectorDbKind::Weaviate => None,
     }
 }
 
@@ -116,10 +122,12 @@ pub async fn test_connection(client: &VectorClient, timeout: Duration) -> Result
     let path = match client.kind {
         VectorDbKind::Qdrant => "/collections",
         VectorDbKind::Milvus => "/v2/vectordb/collections/list",
+        VectorDbKind::Weaviate => "/v1/meta",
     };
     let request = match client.kind {
         VectorDbKind::Qdrant => client.get(path),
         VectorDbKind::Milvus => client.post(path).json(&serde_json::json!({ "dbName": "default" })),
+        VectorDbKind::Weaviate => client.get(path),
     };
     let resp = with_connection_timeout(label, timeout, async {
         request.send().await.map_err(|e| format!("{label} connection failed: {}", format_reqwest_error(&e)))
@@ -132,6 +140,7 @@ pub async fn list_collections(client: &VectorClient) -> Result<Vec<String>, Stri
     match client.kind {
         VectorDbKind::Qdrant => list_qdrant_collections(client).await,
         VectorDbKind::Milvus => list_milvus_collections(client).await,
+        VectorDbKind::Weaviate => list_weaviate_collections(client).await,
     }
 }
 
@@ -169,6 +178,22 @@ fn collection_name_from_milvus_item(item: &Value) -> Option<String> {
         .or_else(|| item.get("name").and_then(Value::as_str).map(str::to_string))
 }
 
+async fn list_weaviate_collections(client: &VectorClient) -> Result<Vec<String>, String> {
+    let body = send_json(client.get("/v1/schema"), "Weaviate").await?;
+    let mut names = weaviate_collection_names_from_schema(&body);
+    names.sort();
+    Ok(names)
+}
+
+fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
+    body.get("classes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("class").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
 pub async fn find_documents(
     client: &VectorClient,
     collection: &str,
@@ -197,6 +222,9 @@ pub async fn find_documents(
                 "outputFields": ["*"],
             })
         ),
+        VectorDbKind::Weaviate => {
+            format!("GET /v1/objects?class={}&limit={}&offset={}", query_value(collection), limit.max(1), skip)
+        }
     };
     let result = execute_rest_query(client, &query).await?;
     let documents = result
@@ -272,6 +300,7 @@ fn default_collection_query(client: &VectorClient, collection: &str) -> Result<r
             "limit": 100,
             "outputFields": ["*"],
         }))),
+        VectorDbKind::Weaviate => Ok(client.get(&format!("/v1/objects?class={}&limit=100", query_value(collection)))),
     }
 }
 
@@ -281,6 +310,10 @@ fn starts_with_http_method(input: &str) -> bool {
 
 fn path_segment(value: &str) -> String {
     utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
+
+fn query_value(value: &str) -> String {
+    utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET).to_string()
 }
 
 async fn send_json(req: reqwest::RequestBuilder, label: &str) -> Result<Value, String> {
@@ -302,6 +335,9 @@ fn json_to_query_result(status: u16, body: Value, start: Instant) -> QueryResult
     let rows_value =
         body.pointer("/result/points").or_else(|| body.get("result")).or_else(|| body.get("data")).cloned();
     if let Some(Value::Array(items)) = rows_value {
+        return values_to_query_result(items, start);
+    }
+    if let Some(Value::Array(items)) = body.get("objects").cloned() {
         return values_to_query_result(items, start);
     }
     if let Some(Value::Array(items)) = body.pointer("/result/collections").cloned() {
@@ -361,6 +397,11 @@ fn normalize_row_object(value: Value) -> Map<String, Value> {
                     object.entry(key).or_insert(value);
                 }
             }
+            if let Some(Value::Object(properties)) = object.remove("properties") {
+                for (key, value) in properties {
+                    object.entry(key).or_insert(value);
+                }
+            }
             object
         }
         other => {
@@ -386,7 +427,10 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{starts_with_http_method, values_to_query_result};
+    use super::{
+        starts_with_http_method, values_to_query_result, vector_auth, weaviate_collection_names_from_schema,
+        VectorAuth, VectorDbKind,
+    };
     use serde_json::json;
     use std::time::Instant;
 
@@ -404,5 +448,35 @@ mod tests {
         assert!(result.columns.contains(&"id".to_string()));
         assert!(result.columns.contains(&"score".to_string()));
         assert!(result.columns.contains(&"title".to_string()));
+    }
+
+    #[test]
+    fn extracts_weaviate_schema_class_names() {
+        let names = weaviate_collection_names_from_schema(&json!({
+            "classes": [
+                { "class": "Article" },
+                { "class": "Product" }
+            ]
+        }));
+        assert_eq!(names, vec!["Article".to_string(), "Product".to_string()]);
+    }
+
+    #[test]
+    fn flattens_weaviate_properties_columns() {
+        let result = values_to_query_result(
+            vec![json!({"id": "abc", "class": "Article", "properties": {"title": "hello"}})],
+            Instant::now(),
+        );
+        assert!(result.columns.contains(&"id".to_string()));
+        assert!(result.columns.contains(&"class".to_string()));
+        assert!(result.columns.contains(&"title".to_string()));
+    }
+
+    #[test]
+    fn uses_bearer_auth_for_weaviate_tokens_even_with_username() {
+        assert_eq!(
+            vector_auth(VectorDbKind::Weaviate, Some("user"), Some("token")),
+            Some(VectorAuth::Bearer("token".to_string()))
+        );
     }
 }

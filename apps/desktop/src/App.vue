@@ -339,6 +339,7 @@ watch(
       );
     }
     if (id) newQueryContextSource.value = "tab";
+    if (id && showDriverStore.value) showDriverStore.value = false;
     selectedSql.value = "";
     activeOutputView.value = "result";
     if (id) queryStore.reloadEvictedTab(id);

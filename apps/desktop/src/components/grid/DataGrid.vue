@@ -7,6 +7,7 @@ type CachedStructuredFilterRule = {
   mode: "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than";
   rawValue: string;
   conjunction: "AND" | "OR";
+  disabled?: boolean;
 };
 type StructuredFilterCacheState = {
   scopeKey: string;
@@ -39,6 +40,7 @@ import {
   Code2,
   Copy,
   Eye,
+  EyeOff,
   Loader2,
   X,
   Undo2,
@@ -518,6 +520,7 @@ type StructuredFilterRule = {
   mode: FilterMode;
   rawValue: string;
   conjunction: "AND" | "OR";
+  disabled?: boolean;
 };
 
 const localColumnFilters = ref<Record<number, Set<string>>>({});
@@ -544,7 +547,7 @@ const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connect
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
 const appliedStructuredWhereInput = ref("");
-const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !!rule.columnName && (!filterModeNeedsValue(rule.mode) || rule.rawValue.trim().length > 0)).length);
+const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && (!filterModeNeedsValue(rule.mode) || rule.rawValue.trim().length > 0)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
 type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref">;
@@ -1002,6 +1005,7 @@ async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Pro
   const rulesWithConditions = (
     await Promise.all(
       rules.map(async (rule) => {
+        if (rule.disabled) return { rule, condition: null };
         if (!rule.columnName) return { rule, condition: null };
         if (filterModeNeedsValue(rule.mode) && !rule.rawValue.trim()) return { rule, condition: null };
         const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName);
@@ -6615,7 +6619,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             </Button>
                           </div>
                           <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-                            <Select :model-value="rule.columnName" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                            <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
                               <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                 <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                               </SelectTrigger>
@@ -6626,7 +6630,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               </SelectContent>
                             </Select>
 
-                            <Select :model-value="rule.mode" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { mode: value as FilterMode })">
+                            <Select :model-value="rule.mode" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { mode: value as FilterMode })">
                               <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                 <SelectValue />
                               </SelectTrigger>
@@ -6641,17 +6645,25 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               v-if="filterModeNeedsValue(rule.mode)"
                               :model-value="rule.rawValue"
                               class="h-8 min-w-0 text-xs"
+                              :class="rule.disabled ? 'opacity-45' : ''"
+                              :disabled="rule.disabled"
                               :placeholder="t('grid.filterBuilderValue')"
                               @update:model-value="(value) => updateStructuredFilterRule(rule.id, { rawValue: String(value ?? '') })"
                               @keydown.enter.prevent="applyStructuredFilters"
                             />
-                            <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground">
+                            <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground" :class="rule.disabled ? 'opacity-45' : ''">
                               <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
                             </div>
 
-                            <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="structuredFilterRules.length === 1" @click="removeStructuredFilterRule(rule.id)">
-                              <Trash2 class="h-3.5 w-3.5" />
-                            </Button>
+                            <div class="flex items-center gap-1">
+                              <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground" @click="updateStructuredFilterRule(rule.id, { disabled: !rule.disabled })">
+                                <EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" />
+                                <Eye v-else class="h-3.5 w-3.5" />
+                              </Button>
+                              <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="structuredFilterRules.length === 1" @click="removeStructuredFilterRule(rule.id)">
+                                <Trash2 class="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
                           </div>
                         </template>
                       </div>

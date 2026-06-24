@@ -86,7 +86,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const editor = view.value;
     if (!editor) return;
     editor.dispatch({
-      effects: fontThemeComp.reconfigure(editorFontTheme(EditorView, size, family, { scrollable: false })),
+      effects: fontThemeComp.reconfigure(editorFontTheme(EditorView, size, family, { fixedHeight: true, scrollable: true })),
     });
   }
 
@@ -139,7 +139,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const theme = await loadEditorTheme(editorTheme, appearance);
     if (!view.value || destroyed) return;
     view.value.dispatch({
-      effects: [themeComp.reconfigure(theme), fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { scrollable: false }))],
+      effects: [themeComp.reconfigure(theme), fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { fixedHeight: true, scrollable: true }))],
     });
   });
 
@@ -151,7 +151,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
 
     const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance());
     liveFontSize = clampEditorFontSize(options.fontSize());
-    const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { scrollable: false });
+    const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { fixedHeight: true, scrollable: true });
     const shortcuts = settingsStore.editorSettings.shortcuts;
 
     const state = EditorState.create({

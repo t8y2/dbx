@@ -3561,6 +3561,16 @@ const editorThemeAccessor = () => settingsStore.editorSettings.theme;
 const editorAppAppearance = () => (isDark.value ? "dark" : "light") as import("@/lib/appTheme").AppThemeAppearance;
 const editorFontSize = () => settingsStore.editorSettings.fontSize;
 const editorFontFamily = () => settingsStore.editorSettings.fontFamily;
+const SIDE_DETAIL_EDITOR_MIN_HEIGHT = 160;
+const SIDE_DETAIL_EDITOR_MAX_HEIGHT = 360;
+const SIDE_DETAIL_EDITOR_LINE_HEIGHT = 20;
+const SIDE_DETAIL_EDITOR_SOFT_WRAP_CHARS = 48;
+const sideDetailEditorStyle = computed(() => {
+  if (cellDetailPanelIsBottom.value) return undefined;
+  const lines = detailEditValue.value.split(/\r\n|\r|\n/).reduce((total, line) => total + Math.max(1, Math.ceil(line.length / SIDE_DETAIL_EDITOR_SOFT_WRAP_CHARS)), 0);
+  const height = Math.min(SIDE_DETAIL_EDITOR_MAX_HEIGHT, Math.max(SIDE_DETAIL_EDITOR_MIN_HEIGHT, lines * SIDE_DETAIL_EDITOR_LINE_HEIGHT + 28));
+  return { height: `${height}px` };
+});
 
 function getDetailEditor(): UseCellDetailEditorReturn | null {
   return activeCellDetailTab.value === "valueEditor" ? valueDetailEditor : detailsDetailEditor;
@@ -7928,7 +7938,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </a>
                     </div>
                     <template v-if="isEditingDetail">
-                      <div class="min-h-0" :class="cellDetailPanelIsBottom ? 'flex-1' : 'h-40'">
+                      <div class="min-h-0" :class="cellDetailPanelIsBottom ? 'flex-1' : ''" :style="sideDetailEditorStyle">
                         <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelDetailEdit" @commit="commitDetailEdit" />
                         <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
                       </div>

@@ -449,6 +449,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jsonl_agent_applies_env_to_child() {
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s\n' \"{\\\"type\\\":\\\"item.completed\\\",\\\"item\\\":{\\\"type\\\":\\\"agent_message\\\",\\\"text\\\":\\\"$DBX_TEST_ENV\\\"}}\" \"{\\\"type\\\":\\\"turn.completed\\\"}\"".to_string(),
+                ],
+            },
+            env: vec![("DBX_TEST_ENV".to_string(), "from-env".to_string())],
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+
+        let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
+
+        assert_eq!(result, "from-env");
+    }
+
+    #[tokio::test]
     async fn jsonl_error_kills_and_waits_for_child() {
         let pid_file = std::env::temp_dir().join(format!(
             "dbx-cli-agent-error-{}-{}",

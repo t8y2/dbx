@@ -6,7 +6,7 @@ use crate::ai_cli_agent::{
     CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -36,8 +36,13 @@ async fn resolve_codex_command(config: &AiConfig) -> CodexCommandSpec {
     }
 }
 
-fn command_env(command: &CodexCommandSpec) -> Vec<(String, String)> {
-    command.parent_dir().map(|dir| ("PATH".to_string(), merged_path_with_dir(&dir))).into_iter().collect()
+fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
+    let mut env = BTreeMap::from_iter(codex_cli_env(config)?);
+    if let Some(dir) = command.parent_dir() {
+        let user_path = env.get("PATH").map(String::as_str);
+        env.insert("PATH".to_string(), merged_path_with_dir(&dir, user_path));
+    }
+    Ok(env.into_iter().collect())
 }
 
 trait CommandParentDir {
@@ -167,9 +172,12 @@ fn common_executable_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn merged_path_with_dir(dir: &str) -> String {
+fn merged_path_with_dir(dir: &str, user_path: Option<&str>) -> String {
     let mut seen = BTreeSet::new();
     let mut dirs = vec![PathBuf::from(dir)];
+    if let Some(path) = user_path {
+        dirs.extend(env::split_paths(path));
+    }
     dirs.extend(common_executable_dirs());
     let paths = dirs.into_iter().filter(|path| seen.insert(path.clone())).collect::<Vec<_>>();
     env::join_paths(paths).unwrap_or_default().to_string_lossy().to_string()
@@ -225,6 +233,58 @@ fn shell_quote(value: &str) -> String {
         return "''".to_string();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn validate_codex_program(config: &AiConfig) -> Result<String, String> {
+    let program = codex_program(config);
+    if starts_with_env_assignment(&program) {
+        return Err("[codexCliPathInvalid] Codex CLI path should contain only the executable path. Add environment variables in the Codex CLI environment variables section.".to_string());
+    }
+    Ok(program)
+}
+
+pub fn codex_cli_env(config: &AiConfig) -> Result<Vec<(String, String)>, String> {
+    let mut env = BTreeMap::new();
+    for (key, value) in &config.codex_cli_env {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if !is_env_var_name(key) {
+            return Err(format!(
+                "[codexEnvInvalid] Invalid Codex CLI environment variable name `{key}`. Use names like HTTPS_PROXY."
+            ));
+        }
+        if is_reserved_dbx_mcp_env_name(key) {
+            return Err(format!(
+                "[codexEnvReserved] `{key}` is managed by DBX for the scoped MCP server and cannot be set here."
+            ));
+        }
+        env.insert(key.to_string(), value.clone());
+    }
+    Ok(env.into_iter().collect())
+}
+
+fn starts_with_env_assignment(program: &str) -> bool {
+    let Some(first_token) = program.split_whitespace().next() else {
+        return false;
+    };
+    let Some((key, _)) = first_token.split_once('=') else {
+        return false;
+    };
+    is_env_var_name(key)
+}
+
+fn is_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_reserved_dbx_mcp_env_name(name: &str) -> bool {
+    name.to_ascii_uppercase().starts_with("DBX_MCP_")
 }
 
 pub fn codex_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
@@ -284,10 +344,11 @@ pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]
 }
 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
+    validate_codex_program(config)?;
     let command = resolve_codex_command(config).await;
     let output = cli_command(&command.program)
         .args(["debug", "models"])
-        .envs(command_env(&command).iter().map(|(key, value)| (key.as_str(), value.as_str())))
+        .envs(codex_process_env(config, &command)?.iter().map(|(key, value)| (key.as_str(), value.as_str())))
         .output()
         .await;
 
@@ -335,10 +396,11 @@ fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
 
 pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
     let start = Instant::now();
+    validate_codex_program(config)?;
     let codex_command = resolve_codex_command(config).await;
     let mut command = cli_command(&codex_command.program);
     command.args(["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]);
-    command.envs(command_env(&codex_command).iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    command.envs(codex_process_env(config, &codex_command)?.iter().map(|(key, value)| (key.as_str(), value.as_str())));
 
     let model = config.model.trim();
     if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
@@ -405,10 +467,11 @@ pub async fn run_codex_agent(
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
+    validate_codex_program(config)?;
     let mut command = build_codex_exec_command(config, prompt, &options);
     let resolved_command = resolve_codex_command(config).await;
     command.program = resolved_command.program;
-    let env = command_env(&command);
+    let env = codex_process_env(config, &command)?;
     run_cli_jsonl_agent(
         CliAgentProcessSpec {
             command,
@@ -428,8 +491,9 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        build_codex_exec_command, codex_enabled_tools, command_env, common_executable_dirs, is_path_like_program,
-        merged_path_with_dir, parse_codex_jsonl_event, parse_codex_models, CodexRunOptions, DEFAULT_CODEX_MODELS,
+        build_codex_exec_command, codex_cli_env, codex_enabled_tools, codex_process_env, common_executable_dirs,
+        is_path_like_program, merged_path_with_dir, parse_codex_jsonl_event, parse_codex_models,
+        validate_codex_program, CodexRunOptions, DEFAULT_CODEX_MODELS,
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
@@ -449,6 +513,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         }
     }
 
@@ -533,8 +598,9 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn codex_command_env_prepends_resolved_program_dir_and_keeps_node_dirs() {
+        let config = codex_config("default");
         let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
-        let env = command_env(&command);
+        let env = codex_process_env(&config, &command).unwrap();
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
         let dirs = std::env::split_paths(path).collect::<Vec<_>>();
 
@@ -577,6 +643,55 @@ mod tests {
     #[test]
     fn default_model_list_matches_plan() {
         assert_eq!(model_infos(DEFAULT_CODEX_MODELS), model_infos(&["default", "gpt-5.5", "gpt-5.4-mini"]));
+    }
+
+    #[test]
+    fn normalizes_codex_cli_env() {
+        let mut config = codex_config("default");
+        config.codex_cli_env.insert(" HTTPS_PROXY ".to_string(), "http://proxy:9800".to_string());
+        config.codex_cli_env.insert("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string());
+        config.codex_cli_env.insert("".to_string(), "ignored".to_string());
+
+        let env = codex_cli_env(&config).unwrap();
+
+        assert_eq!(
+            env,
+            vec![
+                ("HTTPS_PROXY".to_string(), "http://proxy:9800".to_string()),
+                ("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_codex_cli_env_name() {
+        let mut config = codex_config("default");
+        config.codex_cli_env.insert("BAD-NAME".to_string(), "value".to_string());
+
+        let err = codex_cli_env(&config).unwrap_err();
+
+        assert!(err.contains("[codexEnvInvalid]"));
+    }
+
+    #[test]
+    fn rejects_reserved_dbx_mcp_env_name() {
+        let mut config = codex_config("default");
+        config.codex_cli_env.insert("DBX_MCP_ALLOW_DANGEROUS_SQL".to_string(), "1".to_string());
+
+        let err = codex_cli_env(&config).unwrap_err();
+
+        assert!(err.contains("[codexEnvReserved]"));
+    }
+
+    #[test]
+    fn rejects_shell_style_env_prefix_in_codex_cli_path() {
+        let mut config = codex_config("default");
+        config.codex_cli_path = Some("HTTPS_PROXY=http://proxy:9800 /opt/homebrew/bin/codex".to_string());
+
+        let err = validate_codex_program(&config).unwrap_err();
+
+        assert!(err.contains("[codexCliPathInvalid]"));
+        assert!(err.contains("environment variables section"));
     }
 
     #[test]

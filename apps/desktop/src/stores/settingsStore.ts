@@ -30,6 +30,7 @@ export interface AiConfig {
   reasoningLevel?: AiReasoningLevel;
   contextWindow?: number;
   codexCliPath?: string | null;
+  codexCliEnv?: Record<string, string>;
 }
 
 export interface AiTestConnectionResult {
@@ -195,9 +196,21 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
 const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high"];
+const AI_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {
   return typeof value === "string" && AI_REASONING_LEVELS.includes(value as AiReasoningLevel) ? (value as AiReasoningLevel) : "default";
+}
+
+export function normalizeAiEnv(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const key = rawKey.trim();
+    if (!key || !AI_ENV_KEY_RE.test(key)) continue;
+    result[key] = rawValue == null ? "" : String(rawValue);
+  }
+  return result;
 }
 
 export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined): AiConfig {
@@ -215,6 +228,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
+    codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
   };
 }
 

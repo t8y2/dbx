@@ -3,7 +3,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
+import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -25,6 +25,7 @@ import {
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
   DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
+  normalizeAiEnv,
   type AiProvider,
   type AiApiStyle,
   type AiAuthMethod,
@@ -110,6 +111,12 @@ interface TableColumnTemplateGridRow {
   required: boolean;
   comment: string;
   overrides: TableColumnTemplateOverrideRow[];
+}
+
+interface AiEnvRow {
+  id: string;
+  key: string;
+  value: string;
 }
 
 function tableColumnTemplateRowsFromSettings(lines: readonly string[]): TableColumnTemplateGridRow[] {
@@ -1477,6 +1484,7 @@ const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
 const aiEditReasoningLevel = ref<AiReasoningLevel>(settingsStore.aiConfig.reasoningLevel || "default");
 const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
 const aiEditCodexCliPath = ref(settingsStore.aiConfig.codexCliPath || "");
+const aiEditCodexCliEnvRows = ref<AiEnvRow[]>(aiEnvRowsFromConfig(settingsStore.aiConfig.codexCliEnv));
 
 const aiModelOptions = ref<AiModelInfo[]>([]);
 const aiModelLoading = ref(false);
@@ -1541,6 +1549,52 @@ const aiModelEmptyText = computed(() => {
   if (!aiModelListSupported.value) return t("ai.modelListUnsupported");
   return t("ai.noModels");
 });
+const aiCodexEnvError = computed(() => codexEnvValidationError());
+const aiCodexPathError = computed(() => {
+  const path = aiEditCodexCliPath.value.trim();
+  const firstToken = path.split(/\s+/)[0] || "";
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(firstToken) ? t("ai.codexCliPathEnvError") : "";
+});
+const aiCodexValidationError = computed(() => (aiIsCodexCli.value ? aiCodexPathError.value || aiCodexEnvError.value : ""));
+
+function aiEnvRowsFromConfig(env: unknown): AiEnvRow[] {
+  return Object.entries(normalizeAiEnv(env)).map(([key, value]) => ({ id: uuid(), key, value }));
+}
+
+function codexEnvFromRows(): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const row of aiEditCodexCliEnvRows.value) {
+    const key = row.key.trim();
+    if (!key || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key.toUpperCase().startsWith("DBX_MCP_")) continue;
+    result[key] = row.value;
+  }
+  return result;
+}
+
+function codexEnvSignature(): string {
+  return JSON.stringify(Object.entries(codexEnvFromRows()).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function savedCodexEnvSignature(): string {
+  return JSON.stringify(Object.entries(normalizeAiEnv(settingsStore.aiConfig.codexCliEnv)).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function codexEnvValidationError(): string {
+  for (const row of aiEditCodexCliEnvRows.value) {
+    const key = row.key.trim();
+    if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.codexCliEnvInvalidName", { name: key });
+    if (key.toUpperCase().startsWith("DBX_MCP_")) return t("ai.codexCliEnvReservedName", { name: key });
+  }
+  return "";
+}
+
+function addCodexEnvRow() {
+  aiEditCodexCliEnvRows.value.push({ id: uuid(), key: "", value: "" });
+}
+
+function removeCodexEnvRow(id: string) {
+  aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
+}
 
 function clearAiModelOptions() {
   aiModelRequestToken += 1;
@@ -1559,6 +1613,7 @@ function aiModelConfigSignature() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value.trim(),
     codexCliPath: aiEditCodexCliPath.value.trim(),
+    codexCliEnv: codexEnvSignature(),
   });
 }
 
@@ -1576,6 +1631,7 @@ function currentAiEditConfig() {
     reasoningLevel: aiEditReasoningLevel.value,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
+    codexCliEnv: aiIsCodexCli.value ? codexEnvFromRows() : {},
   };
 }
 
@@ -1661,6 +1717,7 @@ function syncAiEditState() {
   aiEditReasoningLevel.value = settingsStore.aiConfig.reasoningLevel || "default";
   aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
   aiEditCodexCliPath.value = settingsStore.aiConfig.codexCliPath || "";
+  aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(settingsStore.aiConfig.codexCliEnv);
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
@@ -1678,6 +1735,7 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditReasoningLevel.value = "default";
   if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
   aiEditCodexCliPath.value = "";
+  aiEditCodexCliEnvRows.value = [];
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
@@ -1699,16 +1757,27 @@ function aiHasChanges(): boolean {
     aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
     aiEditReasoningLevel.value !== (settingsStore.aiConfig.reasoningLevel || "default") ||
     aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow ||
-    aiEditCodexCliPath.value !== (settingsStore.aiConfig.codexCliPath || "")
+    aiEditCodexCliPath.value !== (settingsStore.aiConfig.codexCliPath || "") ||
+    codexEnvSignature() !== savedCodexEnvSignature()
   );
 }
 
 function aiApplySettings() {
+  if (aiCodexValidationError.value) {
+    aiTestResult.value = "error";
+    aiTestError.value = aiCodexValidationError.value;
+    return;
+  }
   settingsStore.updateAiConfig(currentAiEditConfig());
 }
 
 async function aiTestConn() {
   if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) || (!aiIsCodexCli.value && !aiEditModel.value.trim())) return;
+  if (aiCodexValidationError.value) {
+    aiTestResult.value = "error";
+    aiTestError.value = aiCodexValidationError.value;
+    return;
+  }
   aiTesting.value = true;
   aiTestResult.value = "";
   aiTestError.value = "";
@@ -2975,6 +3044,28 @@ watch(
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditCodexCliPath" autocomplete="off" class="h-8 text-xs" placeholder="codex" />
                     <p class="text-[11px] text-muted-foreground">{{ t("ai.codexCliPathHint") }}</p>
+                    <p v-if="aiCodexPathError" class="text-[11px] text-destructive">{{ aiCodexPathError }}</p>
+                  </div>
+                </div>
+
+                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliEnv") }}</Label>
+                  <div class="col-span-2 space-y-2">
+                    <div class="space-y-1.5">
+                      <div v-for="row in aiEditCodexCliEnvRows" :key="row.id" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)_2rem] gap-2">
+                        <Input v-model="row.key" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.codexCliEnvKeyPlaceholder')" />
+                        <Input v-model="row.value" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.codexCliEnvValuePlaceholder')" />
+                        <Button type="button" variant="ghost" size="icon" class="h-8 w-8" :title="t('common.remove')" :aria-label="t('common.remove')" @click="removeCodexEnvRow(row.id)">
+                          <X class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                    <Button type="button" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="addCodexEnvRow">
+                      <Plus class="mr-1 h-3.5 w-3.5" />
+                      {{ t("ai.codexCliEnvAdd") }}
+                    </Button>
+                    <p v-if="aiCodexEnvError" class="text-[11px] text-destructive">{{ aiCodexEnvError }}</p>
+                    <p v-else class="text-[11px] text-muted-foreground">{{ t("ai.codexCliEnvHint") }}</p>
                   </div>
                 </div>
 
@@ -3344,7 +3435,7 @@ watch(
 
           <DialogFooter v-else-if="activeSettingsTab === 'ai'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
             <div class="flex flex-1 items-center gap-2">
-              <Button size="sm" variant="outline" :disabled="aiTesting || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
+              <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCodexValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
                 <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                 {{ t("connection.test") }}
               </Button>
@@ -3369,7 +3460,7 @@ watch(
               </span>
             </div>
             <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>
-            <Button :disabled="!aiHasChanges()" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
+            <Button :disabled="!aiHasChanges() || !!aiCodexValidationError" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">

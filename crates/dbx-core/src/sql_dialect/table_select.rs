@@ -205,9 +205,12 @@ pub(super) fn build_select_columns(
         {
             tdengine_columns.push(DBX_TDENGINE_TBNAME_COLUMN.to_string());
         }
-        tdengine_columns.extend(columns.iter().filter(|column| {
-            include_tdengine_tbname || !column.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN)
-        }).cloned());
+        tdengine_columns.extend(
+            columns
+                .iter()
+                .filter(|column| include_tdengine_tbname || !column.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN))
+                .cloned(),
+        );
         if tdengine_columns.is_empty() {
             return "*".to_string();
         }

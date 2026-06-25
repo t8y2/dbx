@@ -113,14 +113,7 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
         TrayIconBuilder::<R>::with_id(DESKTOP_TRAY_ID).tooltip("DBX").menu(&menu).show_menu_on_left_click(false);
     #[cfg(target_os = "macos")]
     {
-        match _icon_theme {
-            DesktopIconTheme::Default => {
-                tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
-            }
-            DesktopIconTheme::Black => {
-                tray = tray.icon(BLACK_APP_ICON).icon_as_template(false);
-            }
-        }
+        tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
     }
     #[cfg(target_os = "windows")]
     {
@@ -172,19 +165,6 @@ fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme
 
 fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
     if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
-        #[cfg(target_os = "macos")]
-        {
-            match icon_theme {
-                DesktopIconTheme::Default => {
-                    tray.set_icon(Some(MACOS_TRAY_ICON))?;
-                    tray.set_icon_as_template(true)?;
-                }
-                DesktopIconTheme::Black => {
-                    tray.set_icon(Some(BLACK_APP_ICON))?;
-                    tray.set_icon_as_template(false)?;
-                }
-            }
-        }
         #[cfg(target_os = "windows")]
         {
             let icon = match icon_theme {

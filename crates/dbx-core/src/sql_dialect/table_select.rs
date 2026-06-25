@@ -38,7 +38,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
     let page_select_columns = if options.include_row_id && database_type == Some(DatabaseType::Oracle) {
         if options.columns.is_empty() {
-            format!("\"{DBX_ROWID_COLUMN}\", *")
+            "*".to_string()
         } else {
             format!("\"{DBX_ROWID_COLUMN}\", {rownum_select_columns}")
         }

@@ -63,7 +63,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Informix)), TablePaginationStrategy::InformixFirst);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::OceanbaseOracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
-    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Unbounded);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
         TablePaginationStrategy::FetchFirst
@@ -113,6 +113,17 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             limit: 100,
         }),
         "SELECT \"id\", \"name\" FROM \"DB2INST1\".\"USERS\" ORDER BY \"id\" ASC FETCH FIRST 100 ROWS ONLY"
+    );
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST"),
+            table_name: "USERS",
+            columns: &columns,
+            order_columns: &keys,
+            limit: 100,
+        }),
+        "SELECT \"id\", \"name\" FROM (SELECT \"id\", \"name\" FROM \"DBXTEST\".\"USERS\" ORDER BY \"id\" ASC) WHERE ROWNUM <= 100"
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
@@ -303,6 +314,22 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
         }),
         "SELECT * FROM \"DB2INST1\".\"ORDERS\" WHERE (amount > 10) FETCH FIRST 50 ROWS ONLY"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "ORDERS".to_string(),
+            primary_keys: vec!["ID".to_string()],
+            columns: vec!["ID".to_string(), "AMOUNT".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: Some("\"ID\" ASC".to_string()),
+            limit: Some(50),
+            offset: Some(100),
+            where_input: Some("WHERE amount > 10".to_string()),
+            include_row_id: false,
+        }),
+        "SELECT \"ID\", \"AMOUNT\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"AMOUNT\" FROM \"DBXTEST\".\"ORDERS\" WHERE (amount > 10) ORDER BY \"ID\" ASC) dbx_inner WHERE ROWNUM <= 150) WHERE \"__dbx_row_num\" > 100"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -557,7 +584,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             where_input: None,
             include_row_id: true,
         }),
-        "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t"
+        "SELECT \"__DBX_ROWID\", * FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t) WHERE ROWNUM <= 100"
     );
     assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {

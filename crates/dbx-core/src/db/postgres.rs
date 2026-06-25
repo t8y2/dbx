@@ -1153,7 +1153,7 @@ pub async fn completion_assistant_search(
             let table_type: String = row.get(2);
             candidates.push(CompletionAssistantCandidate {
                 name: row.get(0),
-                kind: if table_type == "VIEW" {
+                kind: if table_type.contains("VIEW") {
                     CompletionAssistantCandidateKind::View
                 } else {
                     CompletionAssistantCandidateKind::Table

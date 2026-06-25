@@ -432,6 +432,8 @@ fn build_sqlserver_alter_view_sql(schema: Option<&str>, name: &str, source: &str
 fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
     if value.eq_ignore_ascii_case("VIEW") {
         Some(ObjectSourceKind::View)
+    } else if value.eq_ignore_ascii_case("MATERIALIZED VIEW") || value.eq_ignore_ascii_case("MATERIALIZED_VIEW") {
+        Some(ObjectSourceKind::MaterializedView)
     } else if value.eq_ignore_ascii_case("PROCEDURE") {
         Some(ObjectSourceKind::Procedure)
     } else if value.eq_ignore_ascii_case("FUNCTION") {

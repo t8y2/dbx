@@ -263,25 +263,25 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     let source_table_names: Vec<String> = options
         .source_tables
         .iter()
-        .filter(|table| table.table_type != "VIEW")
+        .filter(|table| !table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
     let target_table_names: Vec<String> = options
         .target_tables
         .iter()
-        .filter(|table| table.table_type != "VIEW")
+        .filter(|table| !table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
     let source_view_names: Vec<String> = options
         .source_tables
         .iter()
-        .filter(|table| table.table_type == "VIEW")
+        .filter(|table| table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
     let target_view_names: Vec<String> = options
         .target_tables
         .iter()
-        .filter(|table| table.table_type == "VIEW")
+        .filter(|table| table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
 

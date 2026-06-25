@@ -578,8 +578,8 @@ pub async fn export_database_sql_core(
     }
 
     // 7. Separate tables and views
-    let mut tables: Vec<_> = all_tables.iter().filter(|t| t.table_type != "VIEW").collect();
-    let views: Vec<_> = all_tables.iter().filter(|t| t.table_type == "VIEW").collect();
+    let mut tables: Vec<_> = all_tables.iter().filter(|t| !t.table_type.contains("VIEW")).collect();
+    let views: Vec<_> = all_tables.iter().filter(|t| t.table_type.contains("VIEW")).collect();
     let postgres_sequences = if request.include_structure && matches!(db_type, DatabaseType::Postgres) {
         match list_postgres_export_sequences(
             state,

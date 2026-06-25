@@ -1779,9 +1779,7 @@ async fn completion_assistant_fallback_core(
         )
         .await?;
         for table in tables {
-            let kind = if table.table_type.eq_ignore_ascii_case("VIEW")
-                || table.table_type.eq_ignore_ascii_case("MATERIALIZED_VIEW")
-            {
+            let kind = if table.table_type.to_uppercase().contains("VIEW") {
                 db::CompletionAssistantCandidateKind::View
             } else {
                 db::CompletionAssistantCandidateKind::Table
@@ -2818,8 +2816,11 @@ pub fn sqlserver_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSo
 pub fn postgres_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     match kind {
         db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => {
+            let identifier = format!("\"{}\".\"{}\"", schema.replace('"', "\"\""), name.replace('"', "\"\""));
             format!(
-                "SELECT pg_get_viewdef(c.oid, 0) \
+                "SELECT CASE WHEN c.relkind = 'm' THEN 'CREATE MATERIALIZED VIEW {identifier} AS ' || pg_get_viewdef(c.oid, 0) \
+                 ELSE 'CREATE OR REPLACE VIEW {identifier} AS ' || pg_get_viewdef(c.oid, 0) \
+                 END \
                  FROM pg_catalog.pg_class c \
                  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = {} AND c.relname = {} AND c.relkind IN ('v','m') \
@@ -3178,7 +3179,7 @@ mod object_source_tests {
     fn builds_postgres_object_source_sql_for_views_and_functions() {
         assert_eq!(
             postgres_object_source_sql("public", "active_users", &ObjectSourceKind::View),
-            "SELECT pg_get_viewdef(c.oid, 0) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'active_users' AND c.relkind IN ('v','m') ORDER BY c.oid LIMIT 1"
+            "SELECT CASE WHEN c.relkind = 'm' THEN 'CREATE MATERIALIZED VIEW \"public\".\"active_users\" AS ' || pg_get_viewdef(c.oid, 0) ELSE 'CREATE OR REPLACE VIEW \"public\".\"active_users\" AS ' || pg_get_viewdef(c.oid, 0) END FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'active_users' AND c.relkind IN ('v','m') ORDER BY c.oid LIMIT 1"
         );
         assert_eq!(
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function),

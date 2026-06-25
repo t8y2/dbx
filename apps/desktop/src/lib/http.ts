@@ -163,7 +163,7 @@ async function del<T>(url: string): Promise<T> {
   return res.json();
 }
 
-function qs(params: Record<string, string | number | undefined>): string {
+function qs(params: Record<string, string | number | boolean | undefined>): string {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) sp.set(k, String(v));
@@ -564,7 +564,7 @@ export async function listFunctions(connectionId: string, database: string, sche
 }
 
 export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
-  return get(`/api/schema/sequences?${qs({ connection_id: connectionId, database, schema, with_last_values: withLastValues ? 1 : 0 })}`);
+  return get(`/api/schema/sequences?${qs({ connection_id: connectionId, database, schema, with_last_values: withLastValues })}`);
 }
 
 export async function listRules(connectionId: string, database: string, schema: string): Promise<RuleInfo[]> {

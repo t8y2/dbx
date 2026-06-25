@@ -1596,7 +1596,7 @@ fn first_executable_sql_token_with_options(sql: &str, options: SqlParsingOptions
     let mut i = 0;
 
     while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'(') {
             i += 1;
         }
 
@@ -2121,6 +2121,16 @@ mod tests {
     fn describe_keyword_detection_accepts_desc_shorthand() {
         assert!(starts_with_executable_sql_keyword("DESC users", &["DESCRIBE"]));
         assert!(starts_with_executable_sql_keyword("-- comment\nDESC users", &["DESCRIBE"]));
+    }
+
+    #[test]
+    fn detects_keyword_after_parentheses() {
+        assert!(starts_with_executable_sql_keyword("(SELECT 1)", &["SELECT"]));
+        assert!(starts_with_executable_sql_keyword("  (  SELECT 1  )", &["SELECT"]));
+        assert!(starts_with_executable_sql_keyword("((SELECT 1))", &["SELECT"]));
+        assert!(starts_with_executable_sql_keyword("(SELECT * FROM users)", &["SELECT"]));
+        assert!(starts_with_executable_sql_keyword("(INSERT INTO users VALUES (1))", &["INSERT"]));
+        assert!(starts_with_executable_sql_keyword("/* comment */(UPDATE users SET name = 'test')", &["UPDATE"]));
     }
 
     #[test]

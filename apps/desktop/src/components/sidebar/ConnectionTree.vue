@@ -72,12 +72,7 @@ const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "li
 const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
-  return (
-    settingsStore.editorSettings.sidebarObjectDisplay === "simple" &&
-    simpleObjectParentTypes.has(node.type) &&
-    node.isExpanded === true &&
-    !!node.children?.some((child) => simpleObjectChildTypes.has(child.type))
-  );
+  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && !!node.children?.some((child) => simpleObjectChildTypes.has(child.type));
 }
 
 function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {

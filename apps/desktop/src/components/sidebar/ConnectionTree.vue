@@ -33,7 +33,7 @@ const plainTreeScrollerRef = ref<HTMLElement | null>(null);
 type SearchScope = "connection" | "database" | "schema" | "table" | "view";
 const selectedSearchScopes = ref<SearchScope[]>([]);
 const searchCollapsedIds = ref<Set<string>>(new Set());
-const searchRefreshedGroupIds = new Set<string>();
+const searchRefreshedNodeIds = new Set<string>();
 let searchTimer: number | undefined;
 
 watch(
@@ -58,30 +58,50 @@ watch(deferredSearchQuery, (newQuery, oldQuery) => {
   store.sidebarSearchQuery = newQuery;
   const tasks: Promise<void>[] = [];
   for (const root of store.treeNodes) {
-    collectExpandedObjectGroups(root, tasks, newQuery ? searchRefreshedGroupIds : undefined);
+    collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined);
   }
   if (!newQuery && oldQuery) {
-    searchRefreshedGroupIds.clear();
+    searchRefreshedNodeIds.clear();
   }
   Promise.all(tasks).catch(() => {});
 });
 
 const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
+const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
+const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
 
-function collectExpandedObjectGroups(node: TreeNode, tasks: Promise<void>[], refreshedGroupIds?: Set<string>) {
-  if (refreshedGroupIds && node.isExpanded && node.children) {
+function isSimpleObjectSearchParent(node: TreeNode): boolean {
+  return (
+    settingsStore.editorSettings.sidebarObjectDisplay === "simple" &&
+    simpleObjectParentTypes.has(node.type) &&
+    node.isExpanded === true &&
+    !!node.children?.some((child) => simpleObjectChildTypes.has(child.type))
+  );
+}
+
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {
+  if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
+    refreshedNodeIds.add(node.id);
+    tasks.push(store.refreshTreeNode(node));
+    return;
+  }
+  if (refreshedNodeIds && node.isExpanded && node.children) {
     for (const child of node.children) {
       if (child.connectionId && searchableObjectGroupTypes.has(child.type)) {
-        refreshedGroupIds.add(child.id);
+        refreshedNodeIds.add(child.id);
         tasks.push(store.loadObjectGroupChildren(child, { force: true }));
       }
     }
-  } else if (!refreshedGroupIds && searchRefreshedGroupIds.has(node.id)) {
-    tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+  } else if (!refreshedNodeIds && searchRefreshedNodeIds.has(node.id)) {
+    if (searchableObjectGroupTypes.has(node.type)) {
+      tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+    } else if (simpleObjectParentTypes.has(node.type)) {
+      tasks.push(store.refreshTreeNode(node));
+    }
   }
   if (node.children) {
     for (const child of node.children) {
-      collectExpandedObjectGroups(child, tasks, refreshedGroupIds);
+      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds);
     }
   }
 }

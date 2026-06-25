@@ -1064,7 +1064,9 @@ pub async fn list_tables_filtered(
             log::debug!(
                 "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES failed: {err}"
             );
-            return list_tables_show(pool, database).await;
+            return list_tables_show(pool, database)
+                .await
+                .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
         }
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -1085,12 +1087,50 @@ pub async fn list_tables_filtered(
         })
         .collect();
 
-    if tables.is_empty() {
+    if tables.is_empty() && should_fallback_empty_list_tables(filter, limit, offset, object_types) {
         log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
         return list_tables_show(pool, database).await;
     }
 
     Ok(tables)
+}
+
+fn should_fallback_empty_list_tables(
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> bool {
+    let has_filter = filter.is_some_and(|filter| !filter.trim().is_empty());
+    let has_object_types = object_types.is_some_and(|object_types| !object_types.is_empty());
+    !has_filter && limit.is_none() && offset.unwrap_or(0) == 0 && !has_object_types
+}
+
+fn filter_list_tables_fallback(
+    tables: Vec<TableInfo>,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> Vec<TableInfo> {
+    let filter = filter.unwrap_or("").trim().to_ascii_lowercase();
+    let normalized_object_types: Vec<String> = object_types
+        .unwrap_or(&[])
+        .iter()
+        .map(|object_type| object_type.to_ascii_uppercase().replace(' ', "_"))
+        .collect();
+    let wants_table =
+        normalized_object_types.is_empty() || normalized_object_types.iter().any(|object_type| object_type == "TABLE");
+    let wants_view =
+        normalized_object_types.is_empty() || normalized_object_types.iter().any(|object_type| object_type == "VIEW");
+
+    tables
+        .into_iter()
+        .filter(|table| filter.is_empty() || table.name.to_ascii_lowercase().contains(&filter))
+        .filter(|table| if table.table_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
+        .skip(offset.unwrap_or(0))
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
 }
 
 fn list_tables_sql(
@@ -2556,6 +2596,45 @@ mod tests {
         let views = vec!["VIEW".to_string()];
         let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views));
         assert!(view_sql.contains("TABLE_TYPE = 'VIEW'"));
+    }
+
+    #[test]
+    fn mysql_empty_list_tables_fallback_only_for_unfiltered_query() {
+        assert!(should_fallback_empty_list_tables(None, None, None, None));
+        assert!(!should_fallback_empty_list_tables(Some("missing"), None, None, None));
+        assert!(!should_fallback_empty_list_tables(None, Some(1000), None, None));
+        assert!(!should_fallback_empty_list_tables(None, None, Some(1000), None));
+        assert!(!should_fallback_empty_list_tables(None, None, None, Some(&["VIEW".to_string()])));
+    }
+
+    #[test]
+    fn mysql_show_tables_fallback_applies_filter_type_limit_and_offset() {
+        let rows = vec![
+            TableInfo {
+                name: "audit_2024".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "audit_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "audit_2025".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let filtered = filter_list_tables_fallback(rows, Some("audit"), Some(1), Some(1), Some(&["TABLE".to_string()]));
+
+        assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["audit_2025"]);
     }
 
     #[test]

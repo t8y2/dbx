@@ -114,7 +114,9 @@ const showSettingsDialog = ref(false);
 const settingsInitialTab = ref("editor");
 const settingsInitialSection = ref<string | undefined>(undefined);
 const showQueryEditorDdlDialog = ref(false);
-const showDriverStore = ref(false);
+const driverStoreTabOpen = ref(false);
+const driverStoreActive = ref(false);
+const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
 const showQuickOpen = ref(false);
 const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
@@ -347,7 +349,7 @@ watch(
       );
     }
     if (id) newQueryContextSource.value = "tab";
-    if (id && showDriverStore.value) showDriverStore.value = false;
+    if (id && driverStoreActive.value) driverStoreActive.value = false;
     selectedSql.value = "";
     activeOutputView.value = "result";
     if (id) queryStore.reloadEvictedTab(id);
@@ -1186,7 +1188,8 @@ function handleKeydown(e: KeyboardEvent) {
   if (isCloseTabShortcut(e, shortcuts)) {
     e.preventDefault();
     if (showDriverStore.value) {
-      showDriverStore.value = false;
+      driverStoreTabOpen.value = false;
+      driverStoreActive.value = false;
     } else if (queryStore.activeTabId) {
       queryStore.closeTab(queryStore.activeTabId);
     }
@@ -1309,7 +1312,8 @@ function handleContextMenu(e: MouseEvent) {
 }
 
 function openDriverStoreFromEvent() {
-  showDriverStore.value = true;
+  driverStoreTabOpen.value = true;
+  driverStoreActive.value = true;
 }
 
 function runUpdateNotificationChecks() {
@@ -1436,7 +1440,10 @@ onUnmounted(() => {
           @toggle-sql-library="toggleSqlLibrary"
           @open-github="openGitHub"
           @open-settings="openSettings()"
-          @open-driver-store="showDriverStore = !showDriverStore"
+          @open-driver-store="
+            driverStoreTabOpen = true;
+            driverStoreActive = true;
+          "
           @check-updates="checkUpdates()"
           @open-transfer="dialogs.showTransferDialog.value = true"
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
@@ -1454,9 +1461,23 @@ onUnmounted(() => {
 
           <div :class="isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
             <div class="h-full flex flex-col min-w-0">
-              <AppTabBar :show-driver-store="showDriverStore" :agent-driver-update-count="toolbarAgentDriverUpdateCount" @toggle-driver-store="showDriverStore = true" @close-driver-store="showDriverStore = false" @save-tab="handleSaveTab" />
-              <DriverStorePage v-if="showDriverStore" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
-              <div v-else-if="activeTab" class="flex flex-col flex-1 min-h-0">
+              <AppTabBar
+                :driver-store-open="driverStoreTabOpen"
+                :driver-store-active="driverStoreActive"
+                :agent-driver-update-count="toolbarAgentDriverUpdateCount"
+                @activate-driver-store="
+                  driverStoreTabOpen = true;
+                  driverStoreActive = true;
+                "
+                @activate-tab="driverStoreActive = false"
+                @close-driver-store="
+                  driverStoreTabOpen = false;
+                  driverStoreActive = false;
+                "
+                @save-tab="handleSaveTab"
+              />
+              <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
+              <div v-if="activeTab" v-show="!driverStoreActive" class="flex flex-col flex-1 min-h-0">
                 <EditorToolbar
                   v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)"
                   :active-tab="activeTab"
@@ -1609,7 +1630,8 @@ onUnmounted(() => {
           "
           @open-driver-store="
             setConnectionDialogOpen(false);
-            showDriverStore = true;
+            driverStoreTabOpen = true;
+            driverStoreActive = true;
           "
           @open-lineage-target="openLineageTarget"
           @open-database-search-target="openDatabaseSearchTarget"

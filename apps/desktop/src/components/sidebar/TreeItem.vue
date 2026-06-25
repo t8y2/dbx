@@ -904,7 +904,7 @@ async function openData() {
     dbType: config?.db_type,
   });
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
-  const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE";
+  const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
   const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
   const activateExistingSameTableTab = () => {
     const existing = queryStore.tabs.find(isSameDataTableTab);
@@ -1072,6 +1072,7 @@ async function openData() {
       databaseType: effectiveDbType,
       schema: tableSchema,
       tableName: node.label,
+      tableType,
       columns: columns.map((column) => column.name),
       primaryKeys,
       limit,
@@ -2719,6 +2720,7 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
       databaseType: effectiveDbType,
       schema: node.schema,
       tableName: node.label,
+      tableType: node.tableType,
       columns: queryColumns,
       executePage: (sql) => api.executeQuery(connectionId, database, sql),
     });

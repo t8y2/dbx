@@ -33,7 +33,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let select_columns = if options.include_row_id && database_type == Some(DatabaseType::Oracle) {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
     } else {
-        build_select_columns(database_type, &options.columns)
+        build_select_columns(
+            database_type,
+            &options.columns,
+            tdengine_should_include_tbname(database_type, options.table_type.as_deref()),
+        )
     };
     let table_alias = if options.include_row_id && database_type.is_some_and(uses_fetch_first) {
         format!("{table} t")
@@ -176,16 +180,37 @@ pub(super) fn is_tdengine_tbname(database_type: Option<DatabaseType>, name: &str
     database_type == Some(DatabaseType::Tdengine) && name.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN)
 }
 
-pub(super) fn build_select_columns(database_type: Option<DatabaseType>, columns: &[String]) -> String {
+fn tdengine_should_include_tbname(database_type: Option<DatabaseType>, table_type: Option<&str>) -> bool {
+    if database_type != Some(DatabaseType::Tdengine) {
+        return false;
+    }
+    matches!(
+        table_type.map(|value| value.trim().to_ascii_uppercase()),
+        Some(value) if value == "STABLE" || value == "SUPER TABLE" || value == "SUPERTABLE"
+    )
+}
+
+pub(super) fn build_select_columns(
+    database_type: Option<DatabaseType>,
+    columns: &[String],
+    include_tdengine_tbname: bool,
+) -> String {
     if columns.is_empty() {
         return "*".to_string();
     }
     if database_type == Some(DatabaseType::Tdengine) {
         let mut tdengine_columns = Vec::new();
-        if !columns.iter().any(|column| column.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN)) {
+        if include_tdengine_tbname
+            && !columns.iter().any(|column| column.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN))
+        {
             tdengine_columns.push(DBX_TDENGINE_TBNAME_COLUMN.to_string());
         }
-        tdengine_columns.extend(columns.iter().cloned());
+        tdengine_columns.extend(columns.iter().filter(|column| {
+            include_tdengine_tbname || !column.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN)
+        }).cloned());
+        if tdengine_columns.is_empty() {
+            return "*".to_string();
+        }
         return tdengine_columns
             .iter()
             .map(|column| {

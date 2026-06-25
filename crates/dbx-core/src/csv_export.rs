@@ -120,6 +120,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
             database_type: Some(database_type),
             schema: options.schema.clone(),
             table_name: options.table_name.clone(),
+            table_type: None,
             primary_keys: Vec::new(),
             columns: options.columns.clone(),
             fallback_order_columns: Vec::new(),

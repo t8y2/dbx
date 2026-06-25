@@ -7,9 +7,10 @@ export interface FetchTableDataForExportOptions {
   databaseType?: DatabaseType;
   schema?: string;
   tableName: string;
+  tableType?: string;
   columns?: string[];
   pageSize?: number;
-  buildPageSql?: (options: { databaseType?: DatabaseType; schema?: string; tableName: string; columns?: string[]; limit: number; offset: number }) => Promise<string> | string;
+  buildPageSql?: (options: { databaseType?: DatabaseType; schema?: string; tableName: string; tableType?: string; columns?: string[]; limit: number; offset: number }) => Promise<string> | string;
   executePage: (sql: string) => Promise<QueryResult>;
 }
 
@@ -25,6 +26,7 @@ export async function fetchTableDataForExport(options: FetchTableDataForExportOp
       databaseType: options.databaseType,
       schema: options.schema,
       tableName: options.tableName,
+      tableType: options.tableType,
       columns: options.columns,
       limit: pageSize,
       offset,

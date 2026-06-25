@@ -17,6 +17,7 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
   vastbase: new Set(["template0", "template1"]),
   redshift: new Set(["template0", "template1"]),
   clickhouse: new Set(["information_schema", "system"]),
+  tdengine: new Set(["information_schema", "performance_schema"]),
   sqlserver: new Set(["master", "model", "msdb", "tempdb"]),
   mongodb: new Set(["admin", "config", "local"]),
   oracle: new Set([

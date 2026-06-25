@@ -269,10 +269,10 @@ function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
  *  Views and materialized views need the object_type parameter so the
  *  backend can call DBMS_METADATA.GET_DDL with the correct type. */
 function isViewOrMaterializedView(tableType: string): ObjectSourceKind | undefined {
-  switch (tableType.toUpperCase()) {
+  switch (tableType.toUpperCase().replace(/\s+/g, "_")) {
     case "VIEW":
       return "VIEW";
-    case "MATERIALIZED VIEW":
+    case "MATERIALIZED_VIEW":
       return "MATERIALIZED_VIEW";
     default:
       return undefined;

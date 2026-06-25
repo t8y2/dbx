@@ -2816,10 +2816,9 @@ pub fn sqlserver_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSo
 pub fn postgres_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     match kind {
         db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => {
-            let identifier = format!("\"{}\".\"{}\"", schema.replace('"', "\"\""), name.replace('"', "\"\""));
             format!(
-                "SELECT CASE WHEN c.relkind = 'm' THEN 'CREATE MATERIALIZED VIEW {identifier} AS ' || pg_get_viewdef(c.oid, 0) \
-                 ELSE 'CREATE OR REPLACE VIEW {identifier} AS ' || pg_get_viewdef(c.oid, 0) \
+                "SELECT CASE WHEN c.relkind = 'm' THEN format('CREATE MATERIALIZED VIEW %I.%I AS ', n.nspname, c.relname) || regexp_replace(pg_get_viewdef(c.oid, 0), ';[[:space:]]*$', '') || CASE WHEN c.relispopulated THEN ' WITH DATA' ELSE ' WITH NO DATA' END \
+                 ELSE format('CREATE OR REPLACE VIEW %I.%I AS ', n.nspname, c.relname) || pg_get_viewdef(c.oid, 0) \
                  END \
                  FROM pg_catalog.pg_class c \
                  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -3179,7 +3178,7 @@ mod object_source_tests {
     fn builds_postgres_object_source_sql_for_views_and_functions() {
         assert_eq!(
             postgres_object_source_sql("public", "active_users", &ObjectSourceKind::View),
-            "SELECT CASE WHEN c.relkind = 'm' THEN 'CREATE MATERIALIZED VIEW \"public\".\"active_users\" AS ' || pg_get_viewdef(c.oid, 0) ELSE 'CREATE OR REPLACE VIEW \"public\".\"active_users\" AS ' || pg_get_viewdef(c.oid, 0) END FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'active_users' AND c.relkind IN ('v','m') ORDER BY c.oid LIMIT 1"
+            "SELECT CASE WHEN c.relkind = 'm' THEN format('CREATE MATERIALIZED VIEW %I.%I AS ', n.nspname, c.relname) || regexp_replace(pg_get_viewdef(c.oid, 0), ';[[:space:]]*$', '') || CASE WHEN c.relispopulated THEN ' WITH DATA' ELSE ' WITH NO DATA' END ELSE format('CREATE OR REPLACE VIEW %I.%I AS ', n.nspname, c.relname) || pg_get_viewdef(c.oid, 0) END FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'active_users' AND c.relkind IN ('v','m') ORDER BY c.oid LIMIT 1"
         );
         assert_eq!(
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function),
@@ -3193,6 +3192,7 @@ mod object_source_tests {
 
         assert!(!sql.contains("::regclass"));
         assert!(sql.contains("pg_get_viewdef(c.oid, 0)"));
+        assert!(sql.contains("format('CREATE OR REPLACE VIEW %I.%I AS ', n.nspname, c.relname)"));
         assert!(sql.contains("n.nspname = 'tenant''s schema'"));
         assert!(sql.contains("c.relname = 'active users'"));
         assert!(sql.contains("c.relkind IN ('v','m')"));

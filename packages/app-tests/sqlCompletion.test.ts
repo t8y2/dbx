@@ -974,6 +974,18 @@ test("returns function signature help inside function arguments", () => {
   });
 });
 
+test("returns cast signature with AS syntax", () => {
+  const sql = "select cast(created_at ";
+  const signature = getSqlFunctionSignatureHelp(sql, sql.length);
+
+  assert.deepEqual(signature, {
+    name: "CAST",
+    signature: "CAST(expression AS type)",
+    activeParameter: 0,
+    parameters: ["expression AS type"],
+  });
+});
+
 test("returns null signature help outside function calls", () => {
   assert.equal(getSqlFunctionSignatureHelp("select created_at from users", "select created_at".length), null);
 });
@@ -1875,6 +1887,50 @@ test("suggests columns after multiple select-list expressions", () => {
   });
 
   assert.ok(items.some((item) => item.label === "doc_id" && item.type === "column"));
+  assert.ok(!items.some((item) => item.type === "function" && item.label.startsWith("proc_")));
+});
+
+test("suggests columns after multiple group by expressions", () => {
+  const sql = "select project_name, count(*) from ypmng_archive group by project_name, review";
+  const cursor = sql.length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables: [{ name: "ypmng_archive", type: "table" }],
+    objects: [{ name: "proc_get_ypfmm_pd_score_list_with_template_doc_id", schema: "y_jnpf", type: "procedure" }],
+    columnsByTable: new Map([
+      [
+        "ypmng_archive",
+        [
+          { name: "doc_id", table: "ypmng_archive", dataType: "bigint" },
+          { name: "project_name", table: "ypmng_archive", dataType: "varchar" },
+          { name: "review_accountant", table: "ypmng_archive", dataType: "varchar" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.ok(items.some((item) => item.label === "review_accountant" && item.type === "column"));
+  assert.ok(!items.some((item) => item.type === "function" && item.label.startsWith("proc_")));
+});
+
+test("suggests columns after multiple order by expressions", () => {
+  const sql = "select project_name, review_accountant, doc_id from ypmng_archive order by project_name, review";
+  const cursor = sql.length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables: [{ name: "ypmng_archive", type: "table" }],
+    objects: [{ name: "proc_get_ypfmm_pd_score_list_with_template_doc_id", schema: "y_jnpf", type: "procedure" }],
+    columnsByTable: new Map([
+      [
+        "ypmng_archive",
+        [
+          { name: "doc_id", table: "ypmng_archive", dataType: "bigint" },
+          { name: "project_name", table: "ypmng_archive", dataType: "varchar" },
+          { name: "review_accountant", table: "ypmng_archive", dataType: "varchar" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.ok(items.some((item) => item.label === "review_accountant" && item.type === "column"));
   assert.ok(!items.some((item) => item.type === "function" && item.label.startsWith("proc_")));
 });
 

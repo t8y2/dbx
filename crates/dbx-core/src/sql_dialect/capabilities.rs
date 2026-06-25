@@ -65,12 +65,13 @@ pub fn uses_fetch_first(database_type: DatabaseType) -> bool {
 pub fn pagination_strategy(database_type: Option<DatabaseType>, context: PaginationContext) -> TablePaginationStrategy {
     match database_type {
         Some(DatabaseType::Jdbc) => TablePaginationStrategy::AgentMaxRows,
-        Some(DatabaseType::Oracle)
-            if matches!(context, PaginationContext::TablePreview | PaginationContext::UserQuery) =>
-        {
-            TablePaginationStrategy::Unbounded
+        Some(DatabaseType::Oracle) if matches!(context, PaginationContext::TablePreview) => {
+            TablePaginationStrategy::Rownum
         }
-        Some(DatabaseType::Oracle) => TablePaginationStrategy::FetchFirst,
+        Some(DatabaseType::Oracle) if matches!(context, PaginationContext::BoundedRead) => {
+            TablePaginationStrategy::FetchFirst
+        }
+        Some(DatabaseType::Oracle) => TablePaginationStrategy::Unbounded,
         Some(DatabaseType::Dameng) => TablePaginationStrategy::FetchFirst,
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,

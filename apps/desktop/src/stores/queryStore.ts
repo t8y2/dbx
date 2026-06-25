@@ -2172,6 +2172,7 @@ export const useQueryStore = defineStore("query", () => {
             databaseType: effectiveDbType,
             schema: tableMeta.schema,
             tableName: tableMeta.tableName,
+            tableType: tableMeta.tableType,
             columns: tableMeta.columns.map((column) => column.name),
             primaryKeys,
             whereInput: tab.whereInput,

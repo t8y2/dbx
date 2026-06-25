@@ -895,24 +895,21 @@ fn linked_i32(row: &tiberius::Row, index: usize) -> Option<i32> {
 }
 
 pub async fn list_schemas(client: &mut SqlServerClient) -> Result<Vec<String>, String> {
-    let stream = client
-        .query(
-            "SELECT s.name \
-         FROM sys.schemas s \
-         WHERE s.name NOT IN ('guest','INFORMATION_SCHEMA','sys') \
-           AND EXISTS ( \
-             SELECT 1 FROM sys.objects o \
-             WHERE o.schema_id = s.schema_id \
-               AND o.type IN ('U','V') \
-               AND o.is_ms_shipped = 0 \
-           ) \
-         ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name",
-            &[],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+    let sql = sqlserver_list_schemas_sql();
+    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| row.get::<&str, _>(0).unwrap_or("").to_string()).collect())
+}
+
+fn sqlserver_list_schemas_sql() -> String {
+    let excluded_schemas =
+        sqlserver_hidden_schema_names().iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(",");
+    format!(
+        "SELECT s.name \
+         FROM sys.schemas s \
+         WHERE s.name NOT IN ({excluded_schemas}) \
+         ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name"
+    )
 }
 
 pub async fn list_tables(
@@ -1051,6 +1048,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
             type_ids.extend(["'FN'", "'IF'", "'TF'", "'FS'", "'FT'"]);
         }
         let object_like = sqlserver_completion_object_search_clause(request, &like_pattern);
+        let object_visibility = sqlserver_visible_object_predicate();
         queries.push(format!(
             "SELECT TOP ({limit}) o.name, s.name AS schema_name, \
              CASE o.type WHEN 'U' THEN 'TABLE' WHEN 'V' THEN 'VIEW' WHEN 'P' THEN 'PROCEDURE' WHEN 'FN' THEN 'FUNCTION' WHEN 'IF' THEN 'FUNCTION' WHEN 'TF' THEN 'FUNCTION' WHEN 'FS' THEN 'FUNCTION' WHEN 'FT' THEN 'FUNCTION' ELSE o.type_desc END AS object_type, \
@@ -1058,7 +1056,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
              FROM sys.objects o \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
              OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
-             WHERE o.type IN ({}) AND o.is_ms_shipped = 0 {schema_filter} {object_like}",
+             WHERE o.type IN ({}) AND {object_visibility} {schema_filter} {object_like}",
             type_ids.join(",")
         ));
     }
@@ -1070,12 +1068,13 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
             .filter(|table| !table.trim().is_empty())
             .map(|table| format!(" AND o.name = '{}' ", table.replace('\'', "''")))
             .unwrap_or_default();
+        let object_visibility = sqlserver_visible_object_predicate();
         queries.push(format!(
             "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
              FROM sys.columns c \
              JOIN sys.objects o ON o.object_id = c.object_id \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
-             WHERE o.type IN ('U','V') AND o.is_ms_shipped = 0 {schema_filter} {parent_table_filter} {column_like}"
+             WHERE o.type IN ('U','V') AND {object_visibility} {schema_filter} {parent_table_filter} {column_like}"
         ));
     }
 
@@ -1138,8 +1137,9 @@ fn sqlserver_list_tables_sql(
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
            WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
+    let object_visibility = sqlserver_visible_object_predicate();
     let base_where =
-        format!("WHERE s.name = '{schema_escaped}' AND o.type IN ('U','V') AND o.is_ms_shipped = 0 {filter_clause}");
+        format!("WHERE s.name = '{schema_escaped}' AND o.type IN ('U','V') AND {object_visibility} {filter_clause}");
     let order_by = "ORDER BY o.name";
 
     // Use SELECT TOP for broad SQL Server version compatibility.
@@ -1167,6 +1167,27 @@ fn escape_like_literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "''").replace('%', "\\%").replace('_', "\\_").replace('[', "\\[")
 }
 
+fn sqlserver_visible_object_predicate() -> &'static str {
+    "(o.is_ms_shipped = 0 OR s.name = 'cdc')"
+}
+
+fn sqlserver_hidden_schema_names() -> &'static [&'static str] {
+    &[
+        "guest",
+        "INFORMATION_SCHEMA",
+        "sys",
+        "db_owner",
+        "db_accessadmin",
+        "db_securityadmin",
+        "db_ddladmin",
+        "db_backupoperator",
+        "db_datareader",
+        "db_datawriter",
+        "db_denydatareader",
+        "db_denydatawriter",
+    ]
+}
+
 pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<Vec<crate::types::ObjectInfo>, String> {
     let sql = sqlserver_list_objects_sql(schema);
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
@@ -1188,6 +1209,7 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
 
 fn sqlserver_list_objects_sql(schema: &str) -> String {
     let s = schema.replace('\'', "''");
+    let object_visibility = sqlserver_visible_object_predicate();
     format!(
         "SELECT o.name, \
          CASE o.type \
@@ -1209,7 +1231,7 @@ fn sqlserver_list_objects_sql(schema: &str) -> String {
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
          WHERE s.name = '{s}' \
            AND o.type IN ('U','V','P','FN','IF','TF','FS','FT') \
-           AND o.is_ms_shipped = 0 \
+           AND {object_visibility} \
          ORDER BY CASE o.type \
            WHEN 'U' THEN 0 \
            WHEN 'V' THEN 1 \
@@ -1224,6 +1246,7 @@ pub async fn list_object_statistics(
     schema: &str,
 ) -> Result<Vec<ObjectStatistics>, String> {
     let s = schema.replace('\'', "''");
+    let object_visibility = sqlserver_visible_object_predicate();
     let sql = format!(
         "SELECT o.name, \
                 SUM(CASE WHEN ps.index_id IN (0, 1) THEN ps.row_count ELSE 0 END) AS estimated_rows, \
@@ -1231,7 +1254,7 @@ pub async fn list_object_statistics(
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          JOIN sys.dm_db_partition_stats ps ON ps.object_id = o.object_id \
-         WHERE s.name = '{s}' AND o.type = 'U' AND o.is_ms_shipped = 0 \
+         WHERE s.name = '{s}' AND o.type = 'U' AND {object_visibility} \
          GROUP BY o.object_id, o.name \
          ORDER BY o.name"
     );
@@ -1626,6 +1649,10 @@ fn is_transaction_control(sql: &str) -> bool {
 
 fn requires_simple_query_batch(sql: &str) -> bool {
     let tokens = first_sql_tokens(sql, 4);
+    if tokens.len() >= 2 && tokens[0].eq_ignore_ascii_case("CREATE") && tokens[1].eq_ignore_ascii_case("SCHEMA") {
+        return true;
+    }
+
     if tokens.len() >= 4
         && tokens[0].eq_ignore_ascii_case("CREATE")
         && tokens[1].eq_ignore_ascii_case("OR")
@@ -1688,9 +1715,9 @@ mod tests {
     use super::{
         build_spatial_safe_sqlserver_query, is_sqlserver_spatial_column, requires_simple_query_batch,
         sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_indexes_sql,
-        sqlserver_list_objects_sql, sqlserver_list_tables_sql, sqlserver_table_comment_sql, SqlServerDescribedColumn,
-        SqlServerResultSet,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names,
+        sqlserver_indexes_sql, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
+        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, SqlServerDescribedColumn, SqlServerResultSet,
     };
     use crate::types::{CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest};
     use chrono::NaiveDate;
@@ -1731,6 +1758,7 @@ mod tests {
 
     #[test]
     fn sqlserver_module_definitions_require_simple_query_batch() {
+        assert!(requires_simple_query_batch("CREATE SCHEMA [analytics];"));
         assert!(requires_simple_query_batch("CREATE FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1; END;"));
         assert!(requires_simple_query_batch("ALTER PROCEDURE dbo.usp_demo AS SELECT 1;"));
         assert!(requires_simple_query_batch("CREATE OR ALTER VIEW dbo.vw_demo AS SELECT 1 AS id;"));
@@ -1741,6 +1769,7 @@ mod tests {
 
     #[test]
     fn sqlserver_regular_ddl_can_use_execute() {
+        assert!(!sqlserver_batch_can_use_execute("CREATE SCHEMA [analytics];"));
         assert!(!requires_simple_query_batch("ALTER TABLE dbo.t ADD name NVARCHAR(20);"));
         assert!(!requires_simple_query_batch("CREATE TABLE dbo.t(id INT);"));
         assert!(!requires_simple_query_batch("UPDATE dbo.t SET id = 1;"));
@@ -1830,6 +1859,26 @@ mod tests {
 
         assert!(sql.contains("create_date"));
         assert!(sql.contains("modify_date"));
+    }
+
+    #[test]
+    fn sqlserver_metadata_allows_cdc_system_shipped_objects() {
+        let predicate = sqlserver_visible_object_predicate();
+
+        assert_eq!(predicate, "(o.is_ms_shipped = 0 OR s.name = 'cdc')");
+        assert!(sqlserver_list_tables_sql("cdc", None, Some(200), None).contains(predicate));
+        assert!(sqlserver_list_objects_sql("cdc").contains(predicate));
+    }
+
+    #[test]
+    fn sqlserver_list_schemas_includes_empty_user_schemas() {
+        let sql = sqlserver_list_schemas_sql();
+
+        assert!(!sql.contains("sys.objects"));
+        assert!(sql.contains("s.name NOT IN"));
+        assert!(sql.contains("'db_owner'"));
+        assert!(sql.contains("'db_datareader'"));
+        assert!(sqlserver_hidden_schema_names().contains(&"sys"));
     }
 
     #[test]

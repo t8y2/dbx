@@ -198,6 +198,7 @@ const props = defineProps<{
   tableMeta?: {
     schema?: string;
     tableName: string;
+    tableType?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
   };
@@ -3858,6 +3859,7 @@ async function applyOrderBySearch() {
       databaseType: resolvedDatabaseType.value,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
+      tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
       primaryKeys: tableMeta.primaryKeys,
       orderBy: orderByClause,
@@ -3888,6 +3890,7 @@ async function applyWhereFilter() {
       databaseType: resolvedDatabaseType.value,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
+      tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
       primaryKeys: tableMeta.primaryKeys,
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),

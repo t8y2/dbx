@@ -17,6 +17,7 @@
     "release:agents": "node scripts/release.mjs agents",
     "release:app": "node scripts/release.mjs app",
     "release:packages": "node scripts/release.mjs packages",
+    "build:knowledge-base": "node scripts/build-knowledge-base.mjs",
     "typecheck": "vue-tsc --noEmit --project apps/desktop/tsconfig.json",
     "build": "vite build --config apps/desktop/vite.config.ts",
     "build:checked": "pnpm typecheck && pnpm build",

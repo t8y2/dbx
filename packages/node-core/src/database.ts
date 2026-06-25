@@ -192,14 +192,97 @@ async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: str
   return { host: "127.0.0.1", port };
 }
 
-function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
+export function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
   const db = config.database || "";
-  const params = config.url_params || "";
-  const suffix = params ? `?${params}` : "";
   if (isMysqlType(config.db_type)) {
+    const params = config.url_params || "";
+    const suffix = params ? `?${params}` : "";
     return `mysql://${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@${endpoint.host}:${endpoint.port}/${db}${suffix}`;
   }
+  if (!isPostgresType(config.db_type)) {
+    throw new Error(`Unsupported pooled connection type: ${config.db_type}`);
+  }
+  const params = normalizePostgresUrlParams(config.url_params || "", config.ssl);
+  const suffix = params ? `?${params}` : "";
   return `postgres://${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@${endpoint.host}:${endpoint.port}/${db}${suffix}`;
+}
+
+function normalizePostgresUrlParams(value: string, forceTls: boolean): string {
+  const parts: string[] = [];
+  let timezone: string | undefined;
+  let searchPath: string | undefined;
+  for (const part of value.trim().replace(/^\?/, "").split("&")) {
+    if (!part) continue;
+    const [rawKey, rawValue] = splitUrlParam(part);
+    const key = decodeUrlParamPart(rawKey);
+    const lowerKey = key.toLowerCase();
+    if (lowerKey === "timezone" || lowerKey === "time_zone") {
+      const decoded = decodeUrlParamPart(rawValue).trim();
+      if (decoded) timezone = decoded;
+      continue;
+    }
+    if (lowerKey === "schema" || lowerKey === "currentschema") {
+      const decoded = decodeUrlParamPart(rawValue).trim();
+      if (decoded) searchPath = decoded;
+      continue;
+    }
+    if (lowerKey === "ssl-mode") {
+      const value = decodeUrlParamPart(rawValue).toLowerCase().replaceAll("_", "-");
+      if (value === "require" || value === "required") parts.push("sslmode=require");
+      else if (value === "prefer" || value === "preferred") parts.push("sslmode=prefer");
+      else if (value === "disable" || value === "disabled") parts.push("sslmode=disable");
+      else if (value === "verify-ca") parts.push("sslmode=verify-ca");
+      else if (value === "verify-full" || value === "verify-identity") parts.push("sslmode=verify-full");
+      continue;
+    }
+    if (lowerKey === "charset" || lowerKey === "require_ssl" || lowerKey === "verify_ca" || lowerKey === "verify_identity") {
+      continue;
+    }
+    parts.push(part);
+  }
+
+  const connectionOptions: Array<{ needle: string; value: string }> = [];
+  if (searchPath) connectionOptions.push({ needle: "search_path=", value: `-c search_path=${searchPath}` });
+  if (timezone) connectionOptions.push({ needle: "timezone=", value: `-c TimeZone=${timezone}` });
+  if (connectionOptions.length > 0) {
+    const optionsIndex = parts.findIndex((part) => urlParamKeyIs(part, "options"));
+    if (optionsIndex >= 0) {
+      const [rawKey, rawValue] = splitUrlParam(parts[optionsIndex]);
+      const optionsValue = decodeUrlParamPart(rawValue);
+      const lowerOptions = optionsValue.toLowerCase();
+      const appended = connectionOptions.filter((option) => !lowerOptions.includes(option.needle)).map((option) => option.value).join(" ");
+      if (appended) {
+        const combined = `${optionsValue.trim()} ${appended}`.trim();
+        parts[optionsIndex] = `${rawKey}=${encodeURIComponent(combined)}`;
+      }
+    } else {
+      parts.push(`options=${encodeURIComponent(connectionOptions.map((option) => option.value).join(" "))}`);
+    }
+  }
+
+  if (forceTls && !parts.some((part) => urlParamKeyIs(part, "sslmode"))) {
+    parts.unshift("sslmode=require");
+  }
+  return parts.join("&");
+}
+
+function urlParamKeyIs(part: string, expected: string): boolean {
+  const [rawKey] = splitUrlParam(part);
+  return decodeUrlParamPart(rawKey).toLowerCase() === expected.toLowerCase();
+}
+
+function splitUrlParam(part: string): [string, string] {
+  const index = part.indexOf("=");
+  if (index < 0) return [part, ""];
+  return [part.slice(0, index), part.slice(index + 1)];
+}
+
+function decodeUrlParamPart(value: string): string {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " "));
+  } catch {
+    return value;
+  }
 }
 
 function connectViaProxy(config: ConnectionConfig, proxy: ProxyLayer): Promise<Socket> {
@@ -293,6 +376,10 @@ function portBytes(port: number): Buffer {
 
 function isMysqlType(dbType: string): boolean {
   return dbType === "mysql" || dbType === "doris" || dbType === "starrocks" || dbType === "manticoresearch";
+}
+
+function isPostgresType(dbType: string): boolean {
+  return dbType === "postgres" || dbType === "redshift" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "questdb";
 }
 
 interface BridgeQueryResult {

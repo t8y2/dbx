@@ -786,7 +786,7 @@ const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["COALESCE", ["value", "...values"]],
   ["IFNULL", ["expression", "fallback"]],
   ["NULLIF", ["expression1", "expression2"]],
-  ["CAST", ["expression", "type"]],
+  ["CAST", ["expression AS type"]],
   ["CONVERT", ["expression", "type"]],
   ["GREATEST", ["...values"]],
   ["LEAST", ["...values"]],
@@ -1716,6 +1716,7 @@ function isInColumnContext(beforeCursor: string): boolean {
   if (!beforeCursor) return false;
 
   if (isInSelectListContext(beforeCursor)) return true;
+  if (isInOrderOrGroupByContext(beforeCursor)) return true;
 
   // Strip string literals
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, "''");
@@ -2747,6 +2748,7 @@ function isFollowedByJoin(beforeToken: string): boolean {
 }
 
 function isInTableListContext(beforeToken: string): boolean {
+  if (isInOrderOrGroupByContext(beforeToken)) return false;
   return /,\s*$/.test(beforeToken) && /\b(?:from|join|update|into)\b/i.test(beforeToken);
 }
 

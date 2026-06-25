@@ -7,6 +7,37 @@ use std::time::Duration;
 
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_execute_query_creates_schema() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("dbx_schema_{suffix}");
+    let create = format!("CREATE SCHEMA [{schema}];");
+    let verify = format!("SELECT SCHEMA_ID(N'{schema}') AS schema_id;");
+    let cleanup = format!("DROP SCHEMA [{schema}];");
+
+    let result = dbx_core::db::sqlserver::execute_query(&mut client, &create).await;
+    let verify_result = dbx_core::db::sqlserver::execute_query(&mut client, &verify).await;
+    let schemas = dbx_core::db::sqlserver::list_schemas(&mut client).await;
+    let _ = dbx_core::db::sqlserver::execute_query(&mut client, &cleanup).await;
+
+    result.expect("create schema through execute_query");
+    let verify_result = verify_result.expect("verify created schema");
+    assert_eq!(verify_result.rows.len(), 1);
+    assert!(verify_result.rows[0][0].as_i64().is_some(), "schema_id row={:?}", verify_result.rows[0]);
+    assert!(schemas.expect("list schemas").contains(&schema));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
 async fn live_sqlserver_stream_first_result_set_exports_cte_query_rows() {
     let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
     let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());

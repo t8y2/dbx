@@ -148,17 +148,17 @@ function modelOptionSecondary(modelId: string, label = displayModelName(modelId)
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
 const pendingCompaction = ref<{ summary: string; compactedMessages: number } | null>(null);
 
-// 新增：输入框拖拽调整相关常量
-const AI_TEXTAREA_MIN_ROWS = 3;
-const AI_TEXTAREA_MAX_ROWS = 8;
-const AI_TEXTAREA_LINE_HEIGHT_PX = 20;
-const AI_TEXTAREA_ROWS_STORAGE_KEY = "dbx-ai-textarea-rows";
+const AI_TEXTAREA_MIN_HEIGHT_PX = 64;
+const AI_TEXTAREA_MAX_PANEL_RATIO = 0.5;
+const AI_TEXTAREA_HEIGHT_STORAGE_KEY = "dbx-ai-textarea-height";
 
-// 新增：输入框拖拽调整相关状态
-const textareaRows = ref<number>(AI_TEXTAREA_MIN_ROWS);
+const textareaHeight = ref<number>(AI_TEXTAREA_MIN_HEIGHT_PX);
+const assistantRootRef = ref<HTMLElement | null>(null);
+const promptPanelRef = ref<HTMLElement | null>(null);
 const isResizing = ref<boolean>(false);
 let resizeStartY = 0;
-let resizeStartRows = 0;
+let resizeStartHeight = 0;
+let promptPanelResizeObserver: ResizeObserver | undefined;
 
 interface AiMentionCandidate {
   schema?: string;
@@ -403,9 +403,19 @@ function agentStepClass(tone: AiAgentStepTone): string {
 function extractToolResultContent(result: unknown): string | undefined {
   if (!result) return undefined;
   if (typeof result === "string") return result;
+  if (Array.isArray(result)) return result.map(extractToolResultContent).filter(Boolean).join("\n");
   if (typeof result === "object" && result !== null && "content" in result) {
     const content = (result as Record<string, unknown>).content;
+    if (Array.isArray(content)) return content.map(extractToolResultContent).filter(Boolean).join("\n");
     return typeof content === "string" ? content : JSON.stringify(content);
+  }
+  if (typeof result === "object" && result !== null && "text" in result) {
+    const text = (result as Record<string, unknown>).text;
+    if (typeof text === "string") return text;
+  }
+  if (typeof result === "object" && result !== null && "message" in result) {
+    const message = (result as Record<string, unknown>).message;
+    if (typeof message === "string") return message;
   }
   return JSON.stringify(result);
 }
@@ -454,7 +464,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
     titleParams: { tool: event.tool_name || "" },
     toolName: event.tool_name,
     toolArgs: event.type === "tool_call_start" ? (event.args as Record<string, unknown>) : undefined,
-    toolResult: event.type === "tool_call_end" && !event.is_error ? extractToolResultContent(event.result) : undefined,
+    toolResult: event.type === "tool_call_end" ? extractToolResultContent(event.result) : undefined,
     explainData: event.type === "tool_call_end" ? extractExplainData(event.result) : undefined,
     isError: event.type === "tool_call_end" ? event.is_error : undefined,
   };
@@ -606,7 +616,7 @@ function filterMentionCandidates(candidates: AiMentionCandidate[], tableFilter: 
 function refreshMentionState() {
   clearTimeout(mentionTimer);
   const mention = activeMentionAtCursor();
-  if (!mention || !props.connection || !props.tab?.database || isGenerating.value) {
+  if (!mention || !props.connection || !props.tab?.database) {
     mentionOpen.value = false;
     return;
   }
@@ -917,16 +927,14 @@ function startNewChat() {
 }
 
 onMounted(async () => {
-  // 新增：恢复用户偏好的输入框行数
-  const savedRows = localStorage.getItem(AI_TEXTAREA_ROWS_STORAGE_KEY);
-  if (savedRows) {
-    const rows = parseInt(savedRows, 10);
-    if (!isNaN(rows) && rows >= AI_TEXTAREA_MIN_ROWS && rows <= AI_TEXTAREA_MAX_ROWS) {
-      textareaRows.value = rows;
+  const savedHeight = localStorage.getItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY);
+  if (savedHeight) {
+    const height = parseInt(savedHeight, 10);
+    if (!isNaN(height)) {
+      textareaHeight.value = clampTextareaHeight(height);
     }
   }
 
-  // 现有代码
   conversations.value = await loadAiConversations().catch(() => []);
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
@@ -934,13 +942,35 @@ onMounted(async () => {
 
   // Load available AI models for inline selector
   fetchModelOptions();
+
+  window.addEventListener("resize", handlePanelResize);
+  if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
+    promptPanelResizeObserver = new ResizeObserver(handlePanelResize);
+    promptPanelResizeObserver.observe(assistantRootRef.value);
+  }
 });
+
+function maxTextareaHeight() {
+  const panelHeight = assistantRootRef.value?.clientHeight || window.innerHeight || 0;
+  const promptPanelHeight = promptPanelRef.value?.offsetHeight || 0;
+  const currentTextareaHeight = promptTextareaRef.value?.offsetHeight || textareaHeight.value;
+  const promptPanelChromeHeight = Math.max(0, promptPanelHeight - currentTextareaHeight);
+  return Math.max(AI_TEXTAREA_MIN_HEIGHT_PX, Math.floor(panelHeight * AI_TEXTAREA_MAX_PANEL_RATIO - promptPanelChromeHeight));
+}
+
+function clampTextareaHeight(height: number) {
+  return Math.max(AI_TEXTAREA_MIN_HEIGHT_PX, Math.min(maxTextareaHeight(), Math.round(height)));
+}
+
+function handlePanelResize() {
+  textareaHeight.value = clampTextareaHeight(textareaHeight.value);
+}
 
 function startResize(event: MouseEvent) {
   event.preventDefault();
   isResizing.value = true;
   resizeStartY = event.clientY;
-  resizeStartRows = textareaRows.value;
+  resizeStartHeight = textareaHeight.value;
 
   document.addEventListener("mousemove", handleResize);
   document.addEventListener("mouseup", stopResize);
@@ -953,10 +983,7 @@ function handleResize(event: MouseEvent) {
   if (!isResizing.value) return;
 
   const deltaY = resizeStartY - event.clientY;
-  const deltaRows = Math.round(deltaY / AI_TEXTAREA_LINE_HEIGHT_PX);
-
-  const newRows = Math.max(AI_TEXTAREA_MIN_ROWS, Math.min(AI_TEXTAREA_MAX_ROWS, resizeStartRows + deltaRows));
-  textareaRows.value = newRows;
+  textareaHeight.value = clampTextareaHeight(resizeStartHeight + deltaY);
 }
 
 function stopResize() {
@@ -970,7 +997,7 @@ function stopResize() {
   document.body.style.userSelect = "";
   document.body.style.cursor = "";
 
-  localStorage.setItem(AI_TEXTAREA_ROWS_STORAGE_KEY, textareaRows.value.toString());
+  localStorage.setItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY, clampTextareaHeight(textareaHeight.value).toString());
 }
 
 onUnmounted(() => {
@@ -982,6 +1009,8 @@ onUnmounted(() => {
   // 若卸载时仍在拖拽，复位 body 样式，避免全局残留
   document.body.style.userSelect = "";
   document.body.style.cursor = "";
+  window.removeEventListener("resize", handlePanelResize);
+  promptPanelResizeObserver?.disconnect();
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
@@ -1021,7 +1050,7 @@ const messageRenderer = computed(() => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col overflow-hidden">
+  <div ref="assistantRootRef" class="flex h-full min-h-0 flex-col overflow-hidden">
     <div class="flex items-center gap-2 border-b px-3 shrink-0" :class="settings.editorSettings.appLayout === 'classic' ? 'h-9' : 'h-10'">
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
@@ -1172,7 +1201,7 @@ const messageRenderer = computed(() => {
     </ScrollArea>
 
     <div class="p-2">
-      <div class="relative rounded-lg border bg-background">
+      <div ref="promptPanelRef" class="relative rounded-lg border bg-background">
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
@@ -1269,10 +1298,9 @@ const messageRenderer = computed(() => {
           <textarea
             ref="promptTextareaRef"
             v-model="prompt"
-            :rows="textareaRows"
+            :style="{ height: `${textareaHeight}px`, maxHeight: `${maxTextareaHeight()}px` }"
             class="w-full resize-none bg-transparent text-xs outline-none placeholder:text-muted-foreground mb-1"
             :placeholder="activePlaceholder"
-            :disabled="isGenerating"
             @input="refreshMentionState"
             @click="refreshMentionState"
             @keyup="refreshMentionState"

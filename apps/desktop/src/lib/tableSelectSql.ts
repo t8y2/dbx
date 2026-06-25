@@ -7,6 +7,7 @@ export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
   schema?: string;
   tableName: string;
+  tableType?: string;
   primaryKeys?: string[];
   columns?: string[];
   fallbackOrderColumns?: string[];

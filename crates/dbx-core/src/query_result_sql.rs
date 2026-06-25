@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::models::connection::DatabaseType;
 use crate::sql::find_statement_at_cursor;
 use crate::sql_dialect::{pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy};
+use sqlparser::ast::{GroupByExpr, SelectItem, SetExpr, Statement};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,7 +194,8 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
         TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
-            ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset))
+            let dedup_count = dedup_projection_count_without_order_by(&options.original_sql);
+            ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_count))
         }
     }
 }
@@ -488,7 +492,7 @@ fn add_iris_top_limit(statement: &str, limit: usize) -> String {
 fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
     if has_top_level_limit(statement) {
         if offset > 0 {
-            return add_outer_standard_limit(statement, Some(DatabaseType::Questdb), limit, offset);
+            return add_outer_standard_limit(statement, Some(DatabaseType::Questdb), limit, offset, "");
         }
         return format!("{statement};");
     }
@@ -562,15 +566,31 @@ fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {
     )
 }
 
-fn add_standard_limit(statement: &str, database_type: Option<DatabaseType>, limit: usize, offset: usize) -> String {
+fn add_standard_limit(
+    statement: &str,
+    database_type: Option<DatabaseType>,
+    limit: usize,
+    offset: usize,
+    dedup_projection_count: Option<usize>,
+) -> String {
+    let order_sql = dedup_projection_count.map_or(String::new(), |count| format_positional_order_by(count));
+
     if has_top_level_limit(statement) {
+        if !order_sql.is_empty() {
+            // For dedup queries (DISTINCT / GROUP BY) without user ORDER BY,
+            // wrap the query to guarantee deterministic LIMIT/OFFSET pagination.
+            // The inner query preserves DISTINCT semantics; the outer query
+            // adds ORDER BY on positional columns to ensure consistent row
+            // ordering across pages in distributed databases like Doris.
+            return add_outer_standard_limit(statement, database_type, limit, offset, &order_sql);
+        }
         if offset > 0 {
-            return add_outer_standard_limit(statement, database_type, limit, offset);
+            return add_outer_standard_limit(statement, database_type, limit, offset, "");
         }
         return format!("{statement};");
     }
     let offset_sql = if offset > 0 { format!(" OFFSET {offset}") } else { String::new() };
-    format!("{statement} LIMIT {limit}{offset_sql};")
+    format!("{statement}{order_sql} LIMIT {limit}{offset_sql};")
 }
 
 fn add_outer_standard_limit(
@@ -578,9 +598,59 @@ fn add_outer_standard_limit(
     database_type: Option<DatabaseType>,
     limit: usize,
     offset: usize,
+    order_sql: &str,
 ) -> String {
     let alias = quote_table_identifier(database_type, "dbx_page");
-    format!("SELECT * FROM ({statement}) {alias} LIMIT {limit} OFFSET {offset};")
+    format!("SELECT * FROM ({statement}) {alias}{order_sql} LIMIT {limit} OFFSET {offset};")
+}
+
+/// For dedup queries (DISTINCT / GROUP BY) without an ORDER BY clause, generate
+/// a positional `ORDER BY 1, 2, ..., N` clause so that LIMIT/OFFSET pagination
+/// returns deterministic results across pages.  This is especially important for
+/// distributed databases (e.g. Doris, StarRocks) where tablet scan order varies
+/// between independent query executions.
+fn format_positional_order_by(column_count: usize) -> String {
+    if column_count == 0 {
+        return String::new();
+    }
+    let cols: Vec<String> = (1..=column_count).map(|i| i.to_string()).collect();
+    format!(" ORDER BY {}", cols.join(", "))
+}
+
+/// Detect dedup queries (SELECT DISTINCT, GROUP BY, HAVING) that lack a
+/// top-level ORDER BY clause.  Returns the number of projection items so that
+/// a positional ORDER BY can be injected for deterministic pagination.
+///
+/// Returns `None` for:
+///   - Non-SELECT queries
+///   - Queries without dedup semantics
+///   - Queries that already specify ORDER BY
+///   - Wildcard projections (`SELECT *`)
+///   - Parse failures
+fn dedup_projection_count_without_order_by(sql: &str) -> Option<usize> {
+    let dialect = GenericDialect {};
+    let statements = Parser::parse_sql(&dialect, sql).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    // Reject if the query already has an ORDER BY clause.
+    if query.order_by.is_some() {
+        return None;
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    let has_distinct = select.distinct.is_some();
+    let has_group_by = !matches!(&select.group_by, GroupByExpr::Expressions(exprs, _) if exprs.is_empty());
+    let has_having = select.having.is_some();
+    if !has_distinct && !has_group_by && !has_having {
+        return None;
+    }
+    // Wildcard projections cannot be used with positional ORDER BY.
+    if select.projection.len() == 1 && matches!(select.projection.first(), Some(SelectItem::Wildcard(_))) {
+        return None;
+    }
+    Some(select.projection.len())
 }
 
 fn find_top_level_trailing_order_by(sql: &str) -> Option<usize> {
@@ -1417,5 +1487,237 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result, err("with"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dedup query ORDER BY injection (DISTINCT / GROUP BY)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dedup_count_detects_distinct_query_without_order_by() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT a, b, c FROM t"), Some(3));
+    }
+
+    #[test]
+    fn dedup_count_detects_group_by_query() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT city, COUNT(*) FROM users GROUP BY city"), Some(2));
+    }
+
+    #[test]
+    fn dedup_count_returns_none_for_plain_select() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT a, b FROM t"), None);
+    }
+
+    #[test]
+    fn dedup_count_returns_none_when_order_by_exists() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT a, b FROM t ORDER BY a"), None);
+    }
+
+    #[test]
+    fn dedup_count_returns_none_for_wildcard() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT * FROM t"), None);
+    }
+
+    #[test]
+    fn doris_distinct_query_first_page_gets_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT city, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(result.sql.unwrap(), "SELECT DISTINCT city, name FROM users ORDER BY 1, 2 LIMIT 100;");
+    }
+
+    #[test]
+    fn doris_distinct_query_second_page_wraps_with_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT city, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 100,
+        });
+
+        assert!(result.ok);
+        // No top-level LIMIT in the original query, so ORDER BY + LIMIT + OFFSET
+        // are appended directly to the statement (no wrapping needed).
+        assert_eq!(result.sql.unwrap(), "SELECT DISTINCT city, name FROM users ORDER BY 1, 2 LIMIT 100 OFFSET 100;");
+    }
+
+    #[test]
+    fn doris_group_by_query_first_page_gets_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT dept, SUM(salary) FROM employees GROUP BY dept".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 50,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT dept, SUM(salary) FROM employees GROUP BY dept ORDER BY 1, 2 LIMIT 50;"
+        );
+    }
+
+    #[test]
+    fn doris_plain_query_without_distinct_is_unaffected() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(result.sql.unwrap(), "SELECT id, name FROM users LIMIT 100;");
+    }
+
+    #[test]
+    fn doris_distinct_with_existing_limit_first_page_keeps_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT a, b, c FROM t LIMIT 500".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        // The dedup query has a LIMIT, so it must be wrapped.
+        // `add_outer_standard_limit` always includes OFFSET clause.
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT DISTINCT a, b, c FROM t LIMIT 500) \"dbx_page\" ORDER BY 1, 2, 3 LIMIT 100 OFFSET 0;"
+        );
+    }
+
+    #[test]
+    fn mysql_distinct_query_first_page_gets_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT city FROM users".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 200,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(result.sql.unwrap(), "SELECT DISTINCT city FROM users ORDER BY 1 LIMIT 200;");
+    }
+
+    #[test]
+    fn postgres_distinct_query_first_page_gets_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT city, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(result.sql.unwrap(), "SELECT DISTINCT city, name FROM users ORDER BY 1, 2 LIMIT 100;");
+    }
+
+    #[test]
+    fn distinct_query_with_existing_order_by_is_not_modified() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT a, b FROM t ORDER BY a".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        // Already has ORDER BY, so only LIMIT is appended.
+        assert_eq!(result.sql.unwrap(), "SELECT DISTINCT a, b FROM t ORDER BY a LIMIT 100;");
+    }
+
+    // -----------------------------------------------------------------------
+    // Complex queries with aliases, expressions, subqueries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dedup_count_handles_aliases() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT a AS x, b AS y, c AS z FROM t"), Some(3));
+    }
+
+    #[test]
+    fn dedup_count_handles_expressions() {
+        assert_eq!(
+            dedup_projection_count_without_order_by(
+                "SELECT DISTINCT a + b AS sum_col, CASE WHEN c > 0 THEN 'Y' ELSE 'N' END AS flag FROM t"
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn dedup_count_handles_aggregate_with_alias() {
+        assert_eq!(
+            dedup_projection_count_without_order_by(
+                "SELECT city, COUNT(*) AS cnt, AVG(salary) AS avg_sal FROM users GROUP BY city"
+            ),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn doris_distinct_with_alias_and_expression_gets_positional_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql:
+                "SELECT DISTINCT a AS col1, b + c AS col2, CASE WHEN d > 0 THEN 'Y' ELSE 'N' END AS col3 FROM t"
+                    .to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        // Positional ORDER BY 1, 2, 3 works regardless of aliases or expressions.
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT DISTINCT a AS col1, b + c AS col2, CASE WHEN d > 0 THEN 'Y' ELSE 'N' END AS col3 FROM t ORDER BY 1, 2, 3 LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn doris_group_by_with_aggregate_alias_gets_positional_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT dept, SUM(salary) AS total, COUNT(*) AS head_count FROM emp GROUP BY dept"
+                .to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 50,
+            offset: 100,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT dept, SUM(salary) AS total, COUNT(*) AS head_count FROM emp GROUP BY dept ORDER BY 1, 2, 3 LIMIT 50 OFFSET 100;"
+        );
+    }
+
+    #[test]
+    fn doris_distinct_with_subquery_column_gets_positional_order_by() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql:
+                "SELECT DISTINCT name, (SELECT MAX(score) FROM scores s WHERE s.uid = u.id) AS max_score FROM users u"
+                    .to_string(),
+            database_type: Some(DatabaseType::Doris),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT DISTINCT name, (SELECT MAX(score) FROM scores s WHERE s.uid = u.id) AS max_score FROM users u ORDER BY 1, 2 LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn union_query_is_not_treated_as_dedup() {
+        assert_eq!(dedup_projection_count_without_order_by("SELECT a FROM t1 UNION SELECT b FROM t2"), None);
     }
 }

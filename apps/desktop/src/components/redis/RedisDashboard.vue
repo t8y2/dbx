@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Loader2, Search, ChevronDown, ChevronRight, Clock, Info, HardDrive, Activity, Target, AlertCircle } from "@lucide/vue";
+import { RefreshCw, Loader2, Search, ChevronDown, ChevronRight, Clock, Info, HardDrive, Activity, Target, Database, Users, Terminal, AlertCircle } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -121,6 +121,10 @@ async function fetchInfo() {
     }
 
     rawSections.value = parseInfoText(infoText);
+    // Default all sections to collapsed (only on first load to preserve user interactions)
+    if (collapsedSections.value.size === 0) {
+      collapsedSections.value = new Set(rawSections.value.map((s) => s.name));
+    }
   } catch (e: any) {
     error.value = e?.message || String(e);
     rawSections.value = [];
@@ -178,6 +182,25 @@ const hitRatio = computed(() => {
   const m = parseInt(misses, 10);
   if (isNaN(h) || isNaN(m) || h + m === 0) return "N/A";
   return `${((h / (h + m)) * 100).toFixed(2)}%`;
+});
+
+const keyCount = computed(() => {
+  const keyspaceSec = rawSections.value.find((s) => s.name === "Keyspace");
+  if (!keyspaceSec) return "N/A";
+  let total = 0;
+  for (const entry of keyspaceSec.entries) {
+    const match = entry.value.match(/keys=(\d+)/);
+    if (match) total += parseInt(match[1], 10);
+  }
+  return total.toLocaleString();
+});
+
+const connectedClients = computed(() => {
+  const val = findValue("Clients", "connected_clients");
+  if (val === undefined) return "N/A";
+  const num = parseInt(val, 10);
+  if (isNaN(num)) return val;
+  return num.toLocaleString();
 });
 
 // ---------------------------------------------------------------------------
@@ -312,10 +335,10 @@ function copyEntryValue(entry: InfoEntry) {
             </SelectTrigger>
             <SelectContent>
               <SelectItem :value="0" class="text-xs">Off</SelectItem>
+              <SelectItem :value="1" class="text-xs">1s</SelectItem>
               <SelectItem :value="5" class="text-xs">5s</SelectItem>
-              <SelectItem :value="10" class="text-xs">10s</SelectItem>
+              <SelectItem :value="15" class="text-xs">15s</SelectItem>
               <SelectItem :value="30" class="text-xs">30s</SelectItem>
-              <SelectItem :value="60" class="text-xs">60s</SelectItem>
             </SelectContent>
           </Select>
           <!-- Refresh button -->
@@ -341,7 +364,7 @@ function copyEntryValue(entry: InfoEntry) {
     <!-- Scrollable content -->
     <div class="flex-1 min-h-0 overflow-auto">
       <!-- Stat cards -->
-      <div class="grid grid-cols-4 gap-3 px-4 pt-3 pb-2">
+      <div class="grid grid-cols-6 gap-3 px-4 pt-3 pb-2">
         <!-- Total Memory -->
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
@@ -365,8 +388,8 @@ function copyEntryValue(entry: InfoEntry) {
         <!-- Operation -->
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
-            <Info class="h-3.5 w-3.5" />
-            <span>Operation</span>
+            <Terminal class="h-3.5 w-3.5" />
+            <span>Operations</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="operation">
             {{ operation }}
@@ -380,6 +403,26 @@ function copyEntryValue(entry: InfoEntry) {
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="hitRatio">
             {{ hitRatio }}
+          </div>
+        </div>
+        <!-- Key Count -->
+        <div class="rounded-lg border bg-card text-card-foreground p-3">
+          <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+            <Database class="h-3.5 w-3.5" />
+            <span>Key Count</span>
+          </div>
+          <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="keyCount">
+            {{ keyCount }}
+          </div>
+        </div>
+        <!-- Clients -->
+        <div class="rounded-lg border bg-card text-card-foreground p-3">
+          <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+            <Users class="h-3.5 w-3.5" />
+            <span>Clients</span>
+          </div>
+          <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="connectedClients">
+            {{ connectedClients }}
           </div>
         </div>
       </div>
@@ -400,9 +443,9 @@ function copyEntryValue(entry: InfoEntry) {
 
       <!-- Info sections -->
       <div v-else-if="filteredSections.length > 0" class="px-4 pb-4 space-y-1">
-        <div v-for="section in filteredSections" :key="section.name" class="rounded-lg border overflow-hidden">
+        <div v-for="section in filteredSections" :key="section.name" class="rounded-lg border overflow-hidden" :class="[!isCollapsed(section.name) ? 'bg-muted/60' : '']">
           <!-- Section header (clickable) -->
-          <button class="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-foreground hover:bg-muted/50 transition-colors text-left" @click="toggleSection(section.name)">
+          <button class="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-foreground hover:bg-muted/50 transition-colors text-left" @click="toggleSection(section.name)">
             <component :is="isCollapsed(section.name) ? ChevronRight : ChevronDown" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <span>{{ section.name }}</span>
             <span class="ml-auto text-muted-foreground font-normal">{{ section.entries.length }}</span>

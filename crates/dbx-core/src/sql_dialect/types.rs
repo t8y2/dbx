@@ -24,6 +24,8 @@ pub struct TableDataSelectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_type: Option<String>,
     #[serde(default)]
     pub primary_keys: Vec<String>,
     #[serde(default)]

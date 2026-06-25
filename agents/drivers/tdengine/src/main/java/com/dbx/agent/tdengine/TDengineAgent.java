@@ -81,7 +81,10 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             try (java.sql.Statement stmt = requireConnected().createStatement();
                  ResultSet rs = stmt.executeQuery("SHOW DATABASES")) {
                 while (rs.next()) {
-                    result.add(new DatabaseInfo(rs.getString(1)));
+                    String name = rs.getString(1);
+                    if (!isSystemDatabase(name)) {
+                        result.add(new DatabaseInfo(name));
+                    }
                 }
             }
             return result;
@@ -321,6 +324,14 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     private static String quoteIdentifier(String identifier) {
         return "`" + identifier.replace("`", "``") + "`";
+    }
+
+    private static boolean isSystemDatabase(String name) {
+        if (name == null) {
+            return false;
+        }
+        String normalized = name.trim().toLowerCase(Locale.ROOT);
+        return "information_schema".equals(normalized) || "performance_schema".equals(normalized);
     }
 
     private static Integer parseNumericPrecision(String dataType) {

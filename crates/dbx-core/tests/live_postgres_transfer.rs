@@ -114,6 +114,10 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
             "CREATE INDEX \"users_display_name_idx\" ON \"{}\".\"users\" USING btree (lower(display_name))",
             source_schema
         ),
+        format!(
+            "COMMENT ON COLUMN \"{}\".\"users\".\"display_name\" IS 'Display name used in transfer test'",
+            source_schema
+        ),
         format!("COMMENT ON INDEX \"{}\".\"users_display_name_idx\" IS 'lookup index'", source_schema),
         format!(
             "CREATE OR REPLACE FUNCTION \"{}\".\"log_user_insert\"() RETURNS trigger LANGUAGE plpgsql AS $$ \
@@ -273,6 +277,21 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         )
         .await,
         json!("email_text")
+    );
+    assert_eq!(
+        query_scalar(
+            &target_pool,
+            &format!(
+                "SELECT col_description(c.oid, a.attnum) \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+                 WHERE n.nspname = '{}' AND c.relname = 'users' AND a.attname = 'display_name'",
+                target_schema
+            )
+        )
+        .await,
+        json!("Display name used in transfer test")
     );
     assert_eq!(
         query_scalar(&target_pool, &format!("SELECT count(*) FROM \"{}\".\"active_users\"", target_schema)).await,

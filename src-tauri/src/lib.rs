@@ -74,13 +74,45 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
     }
 }
 
+fn linux_webkit_rendering_workarounds() -> &'static [(&'static str, &'static str)] {
+    &[
+        // WebKitGTK's DMABUF renderer can produce a blank AppImage window or
+        // Wayland protocol errors on Fedora/Wayland/NVIDIA systems.
+        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+        // Tauri's Linux graphics guidance recommends this for Wayland explicit
+        // sync issues that can prevent WebKitGTK from creating a usable surface.
+        ("__NV_DISABLE_EXPLICIT_SYNC", "1"),
+    ]
+}
+
+fn linux_appimage_wayland_backend_override(
+    appimage: Option<&std::ffi::OsStr>,
+    wayland_display: Option<&std::ffi::OsStr>,
+    gdk_backend: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    if appimage.is_some() && wayland_display.is_some() && gdk_backend.is_none() {
+        // AppImage uses the host GTK/WebKitGTK stack. Prefer XWayland for the
+        // affected Wayland/EGL path, but keep Wayland and other compiled
+        // backends as fallbacks for systems without XWayland.
+        Some("x11,wayland,*")
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    const DISABLE_DMABUF_RENDERER: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
-    if std::env::var_os(DISABLE_DMABUF_RENDERER).is_none() {
-        // WebKitGTK's DMABUF renderer can produce a blank AppImage window on
-        // Fedora/Wayland/NVIDIA systems. This must be set before WebKit starts.
-        std::env::set_var(DISABLE_DMABUF_RENDERER, "1");
+    for (key, value) in linux_webkit_rendering_workarounds() {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+        }
+    }
+    if let Some(gdk_backend) = linux_appimage_wayland_backend_override(
+        std::env::var_os("APPIMAGE").as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("GDK_BACKEND").as_deref(),
+    ) {
+        std::env::set_var("GDK_BACKEND", gdk_backend);
     }
 }
 
@@ -163,19 +195,19 @@ fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme
     Ok(())
 }
 
-fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
-    if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
+fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, _icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    if let Some(_tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
         #[cfg(target_os = "windows")]
         {
-            let icon = match icon_theme {
+            let icon = match _icon_theme {
                 DesktopIconTheme::Default => app.default_window_icon().cloned(),
                 DesktopIconTheme::Black => Some(BLACK_APP_ICON),
             };
-            tray.set_icon(icon)?;
+            _tray.set_icon(icon)?;
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let _ = (tray, icon_theme);
+            let _ = (_tray, _icon_theme);
         }
     }
     Ok(())
@@ -202,9 +234,11 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
+        linux_appimage_wayland_backend_override, linux_webkit_rendering_workarounds,
         native_window_decorations_override, should_hide_window_on_close, should_setup_desktop_tray,
         should_show_main_window_after_setup,
     };
+    use std::ffi::OsStr;
 
     #[test]
     fn hides_window_on_close_for_windows_and_macos() {
@@ -236,6 +270,36 @@ mod tests {
         assert_eq!(native_window_decorations_override("windows"), Some(false));
         assert_eq!(native_window_decorations_override("linux"), Some(true));
         assert_eq!(native_window_decorations_override("macos"), None);
+    }
+
+    #[test]
+    fn applies_linux_webkit_rendering_workarounds_before_webkit_starts() {
+        assert_eq!(
+            linux_webkit_rendering_workarounds(),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+        );
+    }
+
+    #[test]
+    fn prefers_x11_for_appimage_wayland_when_backend_is_not_user_configured() {
+        assert_eq!(
+            linux_appimage_wayland_backend_override(
+                Some(OsStr::new("/tmp/DBX.AppImage")),
+                Some(OsStr::new("wayland-0")),
+                None
+            ),
+            Some("x11,wayland,*")
+        );
+        assert_eq!(
+            linux_appimage_wayland_backend_override(
+                Some(OsStr::new("/tmp/DBX.AppImage")),
+                Some(OsStr::new("wayland-0")),
+                Some(OsStr::new("wayland"))
+            ),
+            None
+        );
+        assert_eq!(linux_appimage_wayland_backend_override(Some(OsStr::new("/tmp/DBX.AppImage")), None, None), None);
+        assert_eq!(linux_appimage_wayland_backend_override(None, Some(OsStr::new("wayland-0")), None), None);
     }
 }
 

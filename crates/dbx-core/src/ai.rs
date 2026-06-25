@@ -120,6 +120,8 @@ pub struct AiConfig {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub codex_cli_path: Option<String>,
+    #[serde(default)]
+    pub codex_cli_env: HashMap<String, String>,
 }
 
 fn default_enable_thinking() -> bool {
@@ -2118,6 +2120,7 @@ mod tests {
         assert_eq!(config.proxy_url, "");
         assert!(config.enable_thinking);
         assert_eq!(config.auth_method, AiAuthMethod::ApiKey);
+        assert!(config.codex_cli_env.is_empty());
     }
 
     #[test]
@@ -2135,6 +2138,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -2157,6 +2161,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2177,6 +2182,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2197,6 +2203,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         assert_eq!(
@@ -2217,6 +2224,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -2238,6 +2246,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -2254,6 +2263,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -2274,6 +2284,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -2329,6 +2340,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -2400,6 +2412,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
 
         assert!(!supports_temperature(&config));
@@ -2466,6 +2479,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             context_window: None,
             codex_cli_path: None,
+            codex_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,

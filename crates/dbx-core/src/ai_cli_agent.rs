@@ -2,10 +2,14 @@ use crate::agent_events::AgentEvent;
 use crate::ai::{AiMessage, AiModelInfo};
 use crate::token_usage::TokenUsage;
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Notify;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone)]
 pub struct CliAgentRunOptions {
@@ -96,12 +100,28 @@ pub fn model_infos(ids: &[&str]) -> Vec<AiModelInfo> {
     ids.iter().map(|id| AiModelInfo { id: (*id).to_string(), display_name: None }).collect()
 }
 
+pub fn cli_command(program: impl AsRef<OsStr>) -> Command {
+    let command = Command::new(program);
+    configure_cli_command(command)
+}
+
+#[cfg(windows)]
+fn configure_cli_command(mut command: Command) -> Command {
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(windows))]
+fn configure_cli_command(command: Command) -> Command {
+    command
+}
+
 pub async fn list_json_models_or_default(
     program: String,
     args: impl IntoIterator<Item = String>,
     default_models: &[&str],
 ) -> Result<Vec<AiModelInfo>, String> {
-    let output = Command::new(program).args(args).output().await;
+    let output = cli_command(program).args(args).output().await;
 
     let Ok(output) = output else {
         return Ok(model_infos(default_models));
@@ -285,6 +305,7 @@ fn cli_item_id(item: &Value) -> String {
 fn cli_tool_name(item: &Value) -> String {
     item.get("tool_name")
         .and_then(Value::as_str)
+        .or_else(|| item.get("tool").and_then(Value::as_str))
         .or_else(|| item.get("name").and_then(Value::as_str))
         .or_else(|| item.get("server_tool_name").and_then(Value::as_str))
         .unwrap_or("cli_tool")
@@ -300,7 +321,16 @@ fn cli_tool_args(item: &Value) -> Value {
 }
 
 fn cli_tool_result(item: &Value) -> Value {
-    item.get("result").or_else(|| item.get("output")).or_else(|| item.get("content")).cloned().unwrap_or(Value::Null)
+    non_null_field(item, "result")
+        .or_else(|| non_null_field(item, "output"))
+        .or_else(|| non_null_field(item, "content"))
+        .or_else(|| non_null_field(item, "error"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn non_null_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    value.get(key).filter(|field| !field.is_null())
 }
 
 fn cli_text(item: &Value) -> Option<String> {
@@ -326,7 +356,8 @@ pub async fn run_cli_jsonl_agent(
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
-    let mut child = Command::new(&spec.command.program)
+    let mut command = cli_command(&spec.command.program);
+    let mut child = command
         .args(&spec.command.args)
         .envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
         .stdout(Stdio::piped())
@@ -425,6 +456,27 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn jsonl_agent_applies_env_to_child() {
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s\n' \"{\\\"type\\\":\\\"item.completed\\\",\\\"item\\\":{\\\"type\\\":\\\"agent_message\\\",\\\"text\\\":\\\"$DBX_TEST_ENV\\\"}}\" \"{\\\"type\\\":\\\"turn.completed\\\"}\"".to_string(),
+                ],
+            },
+            env: vec![("DBX_TEST_ENV".to_string(), "from-env".to_string())],
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+
+        let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
+
+        assert_eq!(result, "from-env");
     }
 
     #[tokio::test]

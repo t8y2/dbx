@@ -83,9 +83,12 @@ interface PendingChangesSnapshot {
   rowCount: number;
 }
 
+type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "dirtyRows" | "deletedRows" | "transactionActive">;
+
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
+const MAX_PENDING_CHANGES_HISTORY = 100;
 
 function cacheKeyBelongsToTab(cacheKey: string, tabId: string) {
   return cacheKey === tabId || cacheKey.startsWith(`${tabId}-`);
@@ -143,6 +146,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const dirtyRows = ref<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
   const deletedRows = ref<Set<number>>(new Set());
+  const undoStack = ref<PendingChangesHistorySnapshot[]>([]);
+  const redoStack = ref<PendingChangesHistorySnapshot[]>([]);
   const pendingChangesVersion = ref(0);
   let restoredEditingCell = false;
   let restoredTransactionActive = false;
@@ -175,6 +180,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const deletedRowCount = computed(() => deletedRows.value.size);
   const pendingChangeCount = computed(() => dirtyRowCount.value + newRowCount.value + deletedRowCount.value);
   const hasPendingChanges = computed(() => pendingChangeCount.value > 0);
+  const canUndoPendingChange = computed(() => undoStack.value.length > 0);
+  const canRedoPendingChange = computed(() => redoStack.value.length > 0);
   const resolvedDatabaseType = computed(() => databaseType.value ?? effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId.value ?? "")));
 
   // --- Transaction state ---
@@ -223,6 +230,50 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function touchPendingChanges() {
     pendingChangesVersion.value++;
+  }
+
+  function pendingChangesSnapshot(): PendingChangesHistorySnapshot {
+    return {
+      newRows: newRows.value.map((row) => [...row]),
+      dirtyRows: new Map([...dirtyRows.value].map(([rowIndex, changes]) => [rowIndex, new Map(changes)])),
+      deletedRows: new Set(deletedRows.value),
+      transactionActive: transactionActive.value,
+    };
+  }
+
+  function restorePendingChangesSnapshot(snapshot: PendingChangesHistorySnapshot) {
+    newRows.value = snapshot.newRows.map((row) => [...row]);
+    dirtyRows.value = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
+    deletedRows.value = new Set(snapshot.deletedRows);
+    transactionActive.value = snapshot.transactionActive === true && useTransaction.value === true;
+    editingCell.value = null;
+    touchPendingChanges();
+  }
+
+  function pushUndoSnapshot() {
+    undoStack.value = [...undoStack.value.slice(-MAX_PENDING_CHANGES_HISTORY + 1), pendingChangesSnapshot()];
+    redoStack.value = [];
+  }
+
+  function clearPendingChangeHistory() {
+    undoStack.value = [];
+    redoStack.value = [];
+  }
+
+  function undoPendingChange() {
+    const snapshot = undoStack.value[undoStack.value.length - 1];
+    if (!snapshot) return;
+    undoStack.value = undoStack.value.slice(0, -1);
+    redoStack.value = [...redoStack.value, pendingChangesSnapshot()];
+    restorePendingChangesSnapshot(snapshot);
+  }
+
+  function redoPendingChange() {
+    const snapshot = redoStack.value[redoStack.value.length - 1];
+    if (!snapshot) return;
+    redoStack.value = redoStack.value.slice(0, -1);
+    undoStack.value = [...undoStack.value, pendingChangesSnapshot()];
+    restorePendingChangesSnapshot(snapshot);
   }
 
   function exitTransaction() {
@@ -420,6 +471,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       const oldVal = newRows.value[item.newIndex]?.[col];
       const newVal = coerceCellValue(editValue.value, oldVal, col);
       if (newRows.value[item.newIndex]) {
+        if (newVal !== oldVal) pushUndoSnapshot();
         newRows.value[item.newIndex][col] = newVal;
       }
       newRows.value = [...newRows.value];
@@ -443,6 +495,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
     const newVal = coerceCellValue(editValue.value, oldVal, col);
     if (newVal !== oldVal) {
+      pushUndoSnapshot();
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
       dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);
       if (useTransaction.value && !transactionActive.value) {
@@ -450,6 +503,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     } else {
       const rowChanges = dirtyRows.value.get(item.sourceIndex);
+      if (rowChanges?.has(col)) pushUndoSnapshot();
       rowChanges?.delete(col);
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
     }
@@ -473,8 +527,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!item || item.isDeleted) return;
 
     if (item.isNew && item.newIndex !== undefined) {
-      const oldVal = newRows.value[item.newIndex]?.[col];
-      newRows.value[item.newIndex][col] = value === null ? null : coerceCellValue(value, oldVal, col);
+      const row = newRows.value[item.newIndex];
+      if (!row) return;
+      const oldVal = row[col];
+      const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+      if (newVal === oldVal) return;
+      pushUndoSnapshot();
+      row[col] = newVal;
       newRows.value = [...newRows.value];
       touchPendingChanges();
       return;
@@ -484,18 +543,49 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!canEditExistingRows.value) return;
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
+    const rowChanges = dirtyRows.value.get(item.sourceIndex);
+    const hasPendingCellChange = rowChanges?.has(col) ?? false;
+    const currentVal = hasPendingCellChange ? rowChanges!.get(col) : oldVal;
     const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+    if (newVal === currentVal) return;
     if (newVal !== oldVal) {
+      pushUndoSnapshot();
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
       dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);
       if (useTransaction.value && !transactionActive.value) {
         enterTransaction();
       }
     } else {
-      const rowChanges = dirtyRows.value.get(item.sourceIndex);
+      if (hasPendingCellChange) pushUndoSnapshot();
       rowChanges?.delete(col);
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
     }
+    dirtyRows.value = new Map(dirtyRows.value);
+    touchPendingChanges();
+  }
+
+  function restoreCellValue(rowId: number, col: number) {
+    if (!canEditColumn(col)) return;
+    const item = getRowItem(rowId);
+    if (!item || item.isDeleted) return;
+
+    if (item.isNew && item.newIndex !== undefined) {
+      const row = newRows.value[item.newIndex];
+      if (!row || row[col] === null) return;
+      pushUndoSnapshot();
+      row[col] = null;
+      newRows.value = [...newRows.value];
+      touchPendingChanges();
+      return;
+    }
+
+    if (item.sourceIndex === undefined) return;
+    if (!canEditExistingRows.value) return;
+    const rowChanges = dirtyRows.value.get(item.sourceIndex);
+    if (!rowChanges?.has(col)) return;
+    pushUndoSnapshot();
+    rowChanges.delete(col);
+    if (rowChanges.size === 0) dirtyRows.value.delete(item.sourceIndex);
     dirtyRows.value = new Map(dirtyRows.value);
     touchPendingChanges();
   }
@@ -521,6 +611,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function addRow() {
+    pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(result.value.columns.map(() => null));
     newRows.value = [...newRows.value];
@@ -557,6 +648,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const item = getRowItem(rowId);
     if (!item) return;
     const clonedData = clonedRowData(item);
+    pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
     newRows.value = [...newRows.value];
@@ -573,10 +665,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function cloneRows(rowIds: number[]) {
+    const rowsToClone = rowIds.map((rowId) => getRowItem(rowId)).filter(Boolean) as RowItem[];
+    if (rowsToClone.length === 0) return;
+    pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
-    for (const rowId of rowIds) {
-      const item = getRowItem(rowId);
-      if (!item) continue;
+    for (const item of rowsToClone) {
       const clonedData = clonedRowData(item);
       newRows.value.push(clonedData);
     }
@@ -591,10 +684,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const item = getRowItem(rowId);
     if (!item) return;
     if (item.isNew && item.newIndex !== undefined) {
+      pushUndoSnapshot();
       newRows.value.splice(item.newIndex, 1);
       newRows.value = [...newRows.value];
     } else if (item.sourceIndex !== undefined) {
       if (!canEditExistingRows.value) return;
+      pushUndoSnapshot();
       dirtyRows.value.delete(item.sourceIndex);
       deletedRows.value.add(item.sourceIndex);
       dirtyRows.value = new Map(dirtyRows.value);
@@ -636,7 +731,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function restoreRow(rowId: number) {
     const item = getRowItem(rowId);
-    if (item?.sourceIndex !== undefined) {
+    if (item?.sourceIndex !== undefined && deletedRows.value.has(item.sourceIndex)) {
+      pushUndoSnapshot();
       deletedRows.value.delete(item.sourceIndex);
       deletedRows.value = new Set(deletedRows.value);
       touchPendingChanges();
@@ -644,9 +740,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function restoreRows(rowIds: number[]) {
-    for (const rowId of rowIds) {
-      restoreRow(rowId);
+    const sourceIndexes = rowIds.map((rowId) => getRowItem(rowId)?.sourceIndex).filter((sourceIndex): sourceIndex is number => sourceIndex !== undefined && deletedRows.value.has(sourceIndex));
+    if (sourceIndexes.length === 0) return;
+    pushUndoSnapshot();
+    for (const sourceIndex of sourceIndexes) {
+      deletedRows.value.delete(sourceIndex);
     }
+    deletedRows.value = new Set(deletedRows.value);
+    touchPendingChanges();
   }
 
   function deleteSelectedRow(contextCell: Ref<{ rowId: number; rowIndex: number; col: number } | null>) {
@@ -749,6 +850,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows.value.clear();
       newRows.value = [];
       deletedRows.value.clear();
+      clearPendingChangeHistory();
       touchPendingChanges();
       exitTransaction();
       isSaving.value = false;
@@ -834,6 +936,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     dirtyRows.value.clear();
     newRows.value = [];
     deletedRows.value.clear();
+    clearPendingChangeHistory();
     touchPendingChanges();
     exitTransaction();
     isSaving.value = false;
@@ -846,6 +949,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     dirtyRows.value.clear();
     newRows.value = [];
     deletedRows.value.clear();
+    clearPendingChangeHistory();
     touchPendingChanges();
     editingCell.value = null;
     exitTransaction();
@@ -973,6 +1077,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     deletedRowCount,
     pendingChangeCount,
     hasPendingChanges,
+    canUndoPendingChange,
+    canRedoPendingChange,
     transactionActive,
     isSaving,
     saveError,
@@ -983,6 +1089,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     commitEdit,
     commitEditFromBlur,
     applyCellValue,
+    restoreCellValue,
+    undoPendingChange,
+    redoPendingChange,
     cancelEdit,
     onEditKeydown,
     addRow,

@@ -887,24 +887,46 @@ async function openData() {
   });
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE";
+  const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
+  const activateExistingSameTableTab = () => {
+    const existing = queryStore.tabs.find(isSameDataTableTab);
+    if (!existing) return false;
+    queryStore.activeTabId = existing.id;
+    return true;
+  };
+  const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
+    tab.title = node.label;
+    tab.schema = tableSchema;
+    tab.whereInput = undefined;
+    tab.orderByInput = undefined;
+    tab.previewSql = undefined;
+    tab.resultSortColumn = undefined;
+    tab.resultSortColumnIndex = undefined;
+    tab.resultSortDirection = undefined;
+    tab.resultSortMode = undefined;
+    tab.resultLocalSortOriginalRows = undefined;
+    tab.resultSortedSql = undefined;
+    tab.resultPageSql = undefined;
+    tab.resultPageLimit = undefined;
+    tab.resultPageOffset = undefined;
+    tab.resultTotalRowCount = undefined;
+    tab.resultTotalRowCountLoading = undefined;
+    tab.queryAnalysis = undefined;
+    tab.querySourceColumns = undefined;
+    tab.queryEditabilityReason = undefined;
+  };
+
+  if (activateExistingSameTableTab()) {
+    logPhase("existing-tab-activated", { table: node.label });
+    return;
+  }
+
   const tabId = (() => {
     if (settingsStore.editorSettings.reuseDataTab) {
       const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
       if (existing) {
-        existing.title = node.label;
-        existing.schema = tableSchema;
-        // Reset per-table filter/sort state so the reused tab doesn't keep
-        // the previous table's WHERE/ORDER BY. DataGrid remounts (result is
-        // cleared below) and reinitializes its inputs from these props.
-        existing.whereInput = undefined;
-        existing.orderByInput = undefined;
-        existing.resultSortColumn = undefined;
-        existing.resultSortColumnIndex = undefined;
-        existing.resultSortDirection = undefined;
-        existing.resultSortMode = undefined;
-        existing.resultLocalSortOriginalRows = undefined;
-        existing.resultSortedSql = undefined;
         queryStore.activeTabId = existing.id;
+        resetReusedDataTabState(existing);
         return existing.id;
       }
     }

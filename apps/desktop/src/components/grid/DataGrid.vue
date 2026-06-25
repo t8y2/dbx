@@ -84,7 +84,7 @@ import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
 import * as api from "@/lib/api";
-import { coerceDataGridCellValue, dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
+import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
@@ -147,6 +147,7 @@ import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGridConditionHistory";
 import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { isMacOS } from "@/lib/platform";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 
@@ -218,6 +219,9 @@ const props = defineProps<{
 const dataGridTraceId = uuid().slice(0, 8);
 const dataGridCreatedAt = performance.now();
 const dataGridElapsed = () => `${Math.round(performance.now() - dataGridCreatedAt)}ms`;
+const isMac = isMacOS();
+const shortcutMod = isMac ? "Cmd" : "Ctrl";
+const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
 
 const emit = defineEmits<{
   reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number];
@@ -309,10 +313,12 @@ const columnCommentMap = computed(() => {
   }
   return map;
 });
+const dataGridTopbarWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const compactDataGridToolbar = computed(() => dataGridTopbarWidth.value > 0 && dataGridTopbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
 const infiniteScrollEnabled = computed(() => settingsStore.editorSettings.infiniteScroll);
 const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
 
@@ -1346,13 +1352,17 @@ function dismissWhereSuggestions() {
 
 function navigateWhereSuggestion(delta: number) {
   if (whereSuggestions.value.length === 0) return;
+  if (whereSuggestionIndex.value < 0) {
+    whereSuggestionIndex.value = delta > 0 ? 0 : whereSuggestions.value.length - 1;
+    return;
+  }
   whereSuggestionIndex.value = Math.min(Math.max(whereSuggestionIndex.value + delta, 0), whereSuggestions.value.length - 1);
 }
 
 function showWhereHistorySuggestions() {
   const history = loadDataGridConditionHistory("where", conditionHistoryScope.value, whereFilterInput.value);
   whereSuggestions.value = history.map((value) => ({ value, kind: "history" }));
-  whereSuggestionIndex.value = whereSuggestions.value.length ? 0 : -1;
+  whereSuggestionIndex.value = -1;
   if (whereSuggestions.value.length) updateWhereSuggestionPosition();
 }
 
@@ -1469,7 +1479,7 @@ function onWhereFilterKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Enter") {
     e.preventDefault();
-    if (whereSuggestions.value.length > 0) {
+    if (whereSuggestions.value.length > 0 && whereSuggestionIndex.value >= 0) {
       acceptWhereSuggestion();
       return;
     }
@@ -1523,13 +1533,17 @@ function dismissOrderBySuggestions() {
 
 function navigateOrderBySuggestion(delta: number) {
   if (orderBySuggestions.value.length === 0) return;
+  if (orderBySuggestionIndex.value < 0) {
+    orderBySuggestionIndex.value = delta > 0 ? 0 : orderBySuggestions.value.length - 1;
+    return;
+  }
   orderBySuggestionIndex.value = Math.min(Math.max(orderBySuggestionIndex.value + delta, 0), orderBySuggestions.value.length - 1);
 }
 
 function showOrderByHistorySuggestions() {
   const history = loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByInput.value);
   orderBySuggestions.value = history.map((value) => ({ value, kind: "history" }));
-  orderBySuggestionIndex.value = orderBySuggestions.value.length ? 0 : -1;
+  orderBySuggestionIndex.value = -1;
   if (orderBySuggestions.value.length) updateOrderBySuggestionPosition();
 }
 
@@ -1588,7 +1602,7 @@ function onOrderByKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Enter") {
     e.preventDefault();
-    if (orderBySuggestions.value.length > 0) {
+    if (orderBySuggestions.value.length > 0 && orderBySuggestionIndex.value >= 0) {
       acceptOrderBySuggestion();
       return;
     }
@@ -1599,6 +1613,7 @@ function onOrderByKeydown(e: KeyboardEvent) {
 const isApplyingWhere = ref(false);
 const rowStatusFilter = ref<RowStatusFilter>("all");
 const gridRef = ref<HTMLDivElement>();
+const dataGridTopbarRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
 const gridScrollbarGutter = ref(0);
 const gridHorizontalScrollbarTrackRef = ref<HTMLDivElement>();
@@ -1613,6 +1628,7 @@ const gridHorizontalScrollbarDragging = ref(false);
 const gridVerticalScrollbarDragging = ref(false);
 let gridHorizontalScrollbarFrame = 0;
 let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
+let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let gridHorizontalScrollbarDragState: {
   trackRect: DOMRect;
   thumbOffsetPx: number;
@@ -1890,6 +1906,21 @@ function observeGridHorizontalScrollbarScroller() {
     }
   }
   scheduleGridHorizontalScrollbarUpdate();
+}
+
+function updateDataGridTopbarWidth() {
+  dataGridTopbarWidth.value = dataGridTopbarRef.value?.clientWidth ?? 0;
+}
+
+function observeDataGridTopbarWidth() {
+  dataGridTopbarResizeObserver?.disconnect();
+  dataGridTopbarResizeObserver = null;
+  const topbar = dataGridTopbarRef.value;
+  updateDataGridTopbarWidth();
+  if (topbar && typeof ResizeObserver !== "undefined") {
+    dataGridTopbarResizeObserver = new ResizeObserver(updateDataGridTopbarWidth);
+    dataGridTopbarResizeObserver.observe(topbar);
+  }
 }
 
 function applyGridHorizontalScrollbarDrag(clientX: number) {
@@ -2705,12 +2736,12 @@ const {
   isSaving,
   saveError,
   useTransaction,
-  enterTransaction,
   exitTransaction,
   startEdit,
   commitEdit,
   commitEditFromBlur,
   applyCellValue,
+  restoreCellValue,
   cancelEdit,
   onEditKeydown,
   addRow: addEditorRow,
@@ -2725,6 +2756,10 @@ const {
   cloneRows,
   saveChanges,
   discardChanges,
+  canUndoPendingChange,
+  canRedoPendingChange,
+  undoPendingChange,
+  redoPendingChange,
   rowDataWithChanges,
   canEditColumn,
   resetGridVerticalScroll,
@@ -2752,7 +2787,7 @@ async function refreshPreviewSql() {
 function schedulePreviewRefresh() {
   if (!showSqlPreview.value) return;
   if (pendingChangeCount.value === 0) {
-    // All changes were discarded — close the preview
+    // Keep the panel visible so undo/redo results are explicit in the SQL preview area.
     previewSqlText.value = "";
     return;
   }
@@ -2831,15 +2866,6 @@ function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
   const columnName = props.sourceColumns?.[columnIndex] ?? props.result.columns[columnIndex];
   if (!columnName) return undefined;
   return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
-}
-
-function coerceDetailCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
-  return coerceDataGridCellValue({
-    value,
-    oldValue,
-    databaseType: props.databaseType,
-    columnInfo: tableColumnForGridColumn(columnIndex),
-  }) as CellValue;
 }
 
 function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKind | undefined {
@@ -3645,30 +3671,8 @@ function commitDetailEdit() {
 
   const item = getRowItem(detail.rowId);
   if (!item || item.isDeleted) return;
-
-  if (item.isNew && item.newIndex !== undefined) {
-    const oldVal = newRows.value[item.newIndex]?.[detail.colIndex];
-    newRows.value[item.newIndex][detail.colIndex] = coerceDetailCellValue(detailEditValue.value, oldVal, detail.colIndex);
-    return;
-  }
-
-  if (item.sourceIndex === undefined) return;
-  if (!canEditExistingRows.value) return;
-
-  const oldVal = props.result.rows[item.sourceIndex]?.[detail.colIndex];
-  const newVal = coerceDetailCellValue(detailEditValue.value, oldVal, detail.colIndex);
-  if (newVal !== oldVal) {
-    if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
-    dirtyRows.value.get(item.sourceIndex)!.set(detail.colIndex, newVal);
-    if (useTransaction.value && !transactionActive.value) {
-      enterTransaction();
-    }
-  } else {
-    const rowChanges = dirtyRows.value.get(item.sourceIndex);
-    rowChanges?.delete(detail.colIndex);
-    if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
-  }
-  dirtyRows.value = new Map(dirtyRows.value);
+  applyCellValue(detail.rowId, detail.colIndex, detailEditValue.value);
+  detailCell.value = detailCell.value ? { ...detailCell.value } : null;
 }
 
 function cancelDetailEdit() {
@@ -3710,16 +3714,10 @@ function restoreDetailOriginalValue() {
 
   let restoredValue: CellValue = null;
 
-  if (item.isNew && item.newIndex !== undefined) {
-    newRows.value[item.newIndex][detail.colIndex] = null;
-    newRows.value = [...newRows.value];
-  } else if (item.sourceIndex !== undefined) {
+  if (!item.isNew && item.sourceIndex !== undefined) {
     restoredValue = props.result.rows[item.sourceIndex]?.[detail.colIndex] ?? null;
-    const rowChanges = dirtyRows.value.get(item.sourceIndex);
-    rowChanges?.delete(detail.colIndex);
-    if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
-    dirtyRows.value = new Map(dirtyRows.value);
   }
+  restoreCellValue(detail.rowId, detail.colIndex);
 
   detailEditValue.value = dataGridCellEditorText({
     value: restoredValue,
@@ -3752,22 +3750,7 @@ function setDetailNull() {
   const item = getRowItem(detail.rowId);
   if (!item || item.isDeleted) return;
 
-  if (item.isNew && item.newIndex !== undefined) {
-    newRows.value[item.newIndex][detail.colIndex] = null;
-    newRows.value = [...newRows.value];
-    resetDetailEdit();
-    detailCell.value = { ...detailCell.value! };
-    return;
-  }
-
-  if (item.sourceIndex === undefined) return;
-  if (!canEditExistingRows.value) return;
-  if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
-  dirtyRows.value.get(item.sourceIndex)!.set(detail.colIndex, null);
-  dirtyRows.value = new Map(dirtyRows.value);
-  if (useTransaction.value && !transactionActive.value) {
-    enterTransaction();
-  }
+  applyCellValue(detail.rowId, detail.colIndex, null);
   resetDetailEdit();
   detailCell.value = { ...detailCell.value! };
 }
@@ -4478,6 +4461,7 @@ function drawCanvasGrid() {
 }
 
 watch(useCanvasGridRows, () => nextTick(attachCanvasResizeObserver), { immediate: true });
+watch(showDataGridTopbar, () => nextTick(observeDataGridTopbarWidth), { immediate: true });
 watch(
   [
     displayRowRefs,
@@ -4508,6 +4492,8 @@ function pauseCanvasGridWork() {
   dataGridIsActive = false;
   canvasResizeObserver?.disconnect();
   canvasResizeObserver = null;
+  dataGridTopbarResizeObserver?.disconnect();
+  dataGridTopbarResizeObserver = null;
   canvasPixelRatioMediaQueryCleanup?.();
   canvasPixelRatioMediaQueryCleanup = null;
   canvasPixelRatioMediaQuery = null;
@@ -4525,6 +4511,7 @@ function resumeCanvasGridWork() {
   dataGridIsActive = true;
   nextTick(() => {
     attachCanvasResizeObserver();
+    observeDataGridTopbarWidth();
     refreshGridScrollerMetrics();
     observeGridHorizontalScrollbarScroller();
   });
@@ -4542,6 +4529,7 @@ onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   pauseCanvasGridWork();
   gridHorizontalScrollbarResizeObserver?.disconnect();
+  dataGridTopbarResizeObserver?.disconnect();
   stopColumnHeaderDrag(false);
   stopGridHorizontalScrollbarDrag();
   stopGridVerticalScrollbarDrag();
@@ -5160,6 +5148,18 @@ function commitGridEdit() {
   nextTick(() => gridRef.value?.focus({ preventScroll: true }));
 }
 
+function undoGridChange(): boolean {
+  if (editingCell.value || !canUndoPendingChange.value) return false;
+  undoPendingChange();
+  return true;
+}
+
+function redoGridChange(): boolean {
+  if (editingCell.value || !canRedoPendingChange.value) return false;
+  redoPendingChange();
+  return true;
+}
+
 function openCellDetailSearch(): boolean {
   return getDetailEditor()?.openSearch() ?? false;
 }
@@ -5179,6 +5179,37 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (eventTargetAllowsNativeClipboard(event)) return;
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+    const handled = event.shiftKey ? redoGridChange() : undoGridChange();
+    if (handled) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
+  if (event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "y") {
+    if (redoGridChange()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "n") {
+    if (props.editable && (props.tableMeta || props.customSaveHandler)) {
+      event.preventDefault();
+      event.stopPropagation();
+      addRow();
+    }
+    return;
+  }
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "s") {
+    if (saveToolbarState.value.showActions && !saveToolbarState.value.actionsDisabled) {
+      event.preventDefault();
+      event.stopPropagation();
+      await onToolbarCommit();
+    }
+    return;
+  }
   if (isCopyCurrentRowShortcut(event, settingsStore.editorSettings.shortcuts) && copyCurrentRow()) {
     event.preventDefault();
     return;
@@ -6530,6 +6561,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
         <div
+          ref="dataGridTopbarRef"
           v-if="showDataGridTopbar"
           class="data-grid-topbar-scroll shrink-0 overflow-x-auto border-b bg-muted/20"
           @scroll="
@@ -6537,7 +6569,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             updateOrderBySuggestionPosition();
           "
         >
-          <div class="data-grid-topbar flex items-stretch relative">
+          <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
             <div v-if="useTransaction && editable && (tableMeta || customSaveHandler)" class="flex items-center px-2 py-0.5 border-r shrink-0">
               <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
                 <SelectTrigger class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground [&_svg]:size-3">
@@ -6705,15 +6737,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </PopoverContent>
                   </Popover>
-                  <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">WHERE</span>
+                  <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--where" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">WHERE</span>
                   <input
                     ref="whereFilterInputRef"
                     v-model="whereFilterInput"
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck="false"
-                    class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
-                    placeholder=""
+                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where flex-1 h-5 min-w-0 text-xs bg-transparent outline-none"
+                    :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
+                    placeholder="WHERE"
                     @input="onWhereFilterInput"
                     @keydown="onWhereFilterKeydown"
                     @focus="showWhereHistorySuggestions"
@@ -6767,15 +6800,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
                 </button>
                 <div class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0 relative">
-                  <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">ORDER BY</span>
+                  <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--order" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">ORDER BY</span>
                   <input
                     ref="orderByInputRef"
                     v-model="orderByInput"
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck="false"
-                    class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60"
-                    placeholder=""
+                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order flex-1 h-5 min-w-0 text-xs bg-transparent outline-none"
+                    :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
+                    placeholder="ORDER BY"
                     @keydown="onOrderByKeydown"
                     @focus="showOrderByHistorySuggestions"
                     @click="updateOrderBySuggestionPosition"
@@ -6845,30 +6879,47 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   {{ t("grid.keylessEditWarningHint") }}
                 </TooltipContent>
               </Tooltip>
-              <Button v-if="props.context !== 'results'" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :disabled="isSaving" @click="onToolbarRefresh">
-                <Loader2 v-if="loading" class="w-3 h-3 mr-1 animate-spin" />
-                <RefreshCcw v-else class="w-3 h-3 mr-1" />
-                {{ t("grid.refresh") }}
-              </Button>
-              <Tooltip>
+              <Tooltip v-if="props.context !== 'results'">
                 <TooltipTrigger as-child>
-                  <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="dataGridRenderMode === 'canvas' ? 'text-primary bg-primary/10' : ''" @click="toggleDataGridRenderMode">
-                    <SquareDashed class="w-3 h-3 mr-1" />
-                    {{ dataGridRenderMode === "canvas" ? t("grid.canvasRenderMode") : t("grid.domRenderMode") }}
+                  <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', isSaving ? '' : '']" :disabled="isSaving" @click="onToolbarRefresh">
+                    <Loader2 v-if="loading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
+                    <RefreshCcw v-else class="data-grid-topbar-action-icon w-3 h-3" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.refresh") }}</span>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("grid.renderModeHint") }}
-                </TooltipContent>
+                <TooltipContent side="bottom">{{ t("grid.refresh") }} ({{ shortcutMod }}+R)</TooltipContent>
               </Tooltip>
-              <Button v-if="editable && (tableMeta || customSaveHandler)" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" @click="addRow"> <Plus class="w-3 h-3 mr-1" /> {{ t("grid.addRow") }} </Button>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', dataGridRenderMode === 'canvas' ? 'text-primary bg-primary/10' : '']" @click="toggleDataGridRenderMode">
+                    <SquareDashed class="data-grid-topbar-action-icon w-3 h-3" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ dataGridRenderMode === "canvas" ? t("grid.canvasRenderMode") : t("grid.domRenderMode") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-sm"> {{ dataGridRenderMode === "canvas" ? t("grid.canvasRenderMode") : t("grid.domRenderMode") }} · {{ t("grid.renderModeHint") }} </TooltipContent>
+              </Tooltip>
+              <Tooltip v-if="editable && (tableMeta || customSaveHandler)">
+                <TooltipTrigger as-child>
+                  <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']" @click="addRow">
+                    <Plus class="data-grid-topbar-action-icon w-3 h-3" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.addRow") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{{ t("grid.addRow") }} ({{ shortcutMod }}+N)</TooltipContent>
+              </Tooltip>
               <template v-if="saveToolbarState.showActions">
                 <Tooltip v-if="pendingChangeCount > 0">
                   <TooltipTrigger as-child>
-                    <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700" :disabled="isPreviewLoading" @click="openSqlPreview">
-                      <Loader2 v-if="isPreviewLoading" class="w-3 h-3 mr-1 animate-spin" />
-                      <Eye v-else class="w-3 h-3 mr-1" />
-                      {{ t("toolbar.previewSql") }}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                      :disabled="isPreviewLoading"
+                      @click="openSqlPreview"
+                    >
+                      <Loader2 v-if="isPreviewLoading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
+                      <Eye v-else class="data-grid-topbar-action-icon w-3 h-3" />
+                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("toolbar.previewSql") }}</span>
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" class="max-w-sm">
@@ -6877,23 +6928,45 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger as-child>
-                    <Button variant="default" size="sm" class="h-5 text-xs px-1.5 shrink-0" :disabled="saveToolbarState.actionsDisabled" @click="onToolbarCommit">
-                      <Loader2 v-if="isSaving" class="w-3 h-3 mr-1 animate-spin" />
-                      <span v-else-if="pendingChangeCount > 0" class="mr-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950">
+                    <Button
+                      variant="default"
+                      size="sm"
+                      :class="['data-grid-topbar-action-button data-grid-topbar-action-button--commit relative h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                      :disabled="saveToolbarState.actionsDisabled"
+                      @click="onToolbarCommit"
+                    >
+                      <Loader2 v-if="isSaving" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
+                      <Save v-else-if="compactDataGridToolbar || pendingChangeCount === 0" class="data-grid-topbar-action-icon w-3 h-3" />
+                      <span
+                        v-if="pendingChangeCount > 0"
+                        :class="
+                          compactDataGridToolbar
+                            ? 'absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950'
+                            : 'mr-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950'
+                        "
+                      >
                         {{ pendingChangeCount }}
                       </span>
-                      <Save v-else class="w-3 h-3 mr-1" />
-                      {{ t(saveActionMode.labelKey, { count: pendingChangeCount }) }}
+                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.labelKey, { count: pendingChangeCount }) }}</span>
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-sm">
-                    {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }}
-                  </TooltipContent>
+                  <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ shortcutMod }}+S) </TooltipContent>
                 </Tooltip>
-                <Button variant="outline" size="sm" class="h-5 text-xs px-1.5 shrink-0" :disabled="saveToolbarState.actionsDisabled" @click="useTransaction ? onToolbarRollback() : discardChanges()">
-                  <RotateCcw class="w-3 h-3 mr-1" />
-                  {{ t(saveActionMode.secondaryActionKey) }}
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                      :disabled="saveToolbarState.actionsDisabled"
+                      @click="useTransaction ? onToolbarRollback() : discardChanges()"
+                    >
+                      <RotateCcw class="data-grid-topbar-action-icon w-3 h-3" />
+                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.secondaryActionKey) }}</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{{ t(saveActionMode.secondaryActionKey) }}</TooltipContent>
+                </Tooltip>
               </template>
             </div>
           </div>
@@ -8436,7 +8509,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
     <!-- SQL Preview panel for pending data changes -->
     <div v-if="showSqlPreview" class="h-52 shrink-0 border-t">
-      <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" @close="closeSqlPreview" />
+      <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 
     <DangerConfirmDialog
@@ -8520,7 +8593,134 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-topbar {
+  --data-grid-topbar-transition-duration: 340ms;
+  --data-grid-topbar-transition-easing: cubic-bezier(0.22, 1, 0.36, 1);
   min-width: 760px;
+  transition: min-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing);
+}
+
+.data-grid-topbar--compact {
+  min-width: 620px;
+}
+
+.data-grid-topbar-condition-label {
+  display: inline-flex;
+  flex-shrink: 0;
+  max-width: 5rem;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 500;
+  user-select: none;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    max-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    opacity 240ms ease 60ms,
+    transform var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    color 240ms ease;
+}
+
+.data-grid-topbar-condition-label--where {
+  color: rgb(37 99 235);
+}
+
+.data-grid-topbar-condition-label--order {
+  color: rgb(234 88 12);
+}
+
+:global(.dark) [data-grid-root] .data-grid-topbar-condition-label--where {
+  color: rgb(96 165 250);
+}
+
+:global(.dark) [data-grid-root] .data-grid-topbar-condition-label--order {
+  color: rgb(251 146 60);
+}
+
+.data-grid-topbar-condition-label--compact {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(-4px);
+}
+
+.data-grid-topbar-condition-input::placeholder {
+  color: transparent;
+  transition: color 240ms ease;
+}
+
+.data-grid-topbar-condition-input--where.data-grid-topbar-condition-input--compact::placeholder {
+  color: rgb(59 130 246 / 70%);
+}
+
+.data-grid-topbar-condition-input--order.data-grid-topbar-condition-input--compact::placeholder {
+  color: rgb(249 115 22 / 70%);
+}
+
+:global(.dark) [data-grid-root] .data-grid-topbar-condition-input--where.data-grid-topbar-condition-input--compact::placeholder {
+  color: rgb(147 197 253 / 70%);
+}
+
+:global(.dark) [data-grid-root] .data-grid-topbar-condition-input--order.data-grid-topbar-condition-input--compact::placeholder {
+  color: rgb(253 186 116 / 70%);
+}
+
+.data-grid-topbar-action-button {
+  max-width: 9rem;
+  min-width: 1.25rem;
+  gap: 0;
+  overflow: hidden;
+  transition:
+    max-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    min-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    padding-inline var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    color 220ms ease,
+    background-color 220ms ease,
+    border-color 220ms ease;
+}
+
+.data-grid-topbar-action-button--compact {
+  max-width: 1.25rem;
+  min-width: 1.25rem;
+  padding-inline: 0;
+}
+
+.data-grid-topbar-action-button--commit.data-grid-topbar-action-button--compact {
+  overflow: visible;
+}
+
+.data-grid-topbar-action-icon {
+  flex-shrink: 0;
+  transition:
+    margin-inline-end var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    transform var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing);
+}
+
+.data-grid-topbar-action-button:not(.data-grid-topbar-action-button--compact) .data-grid-topbar-action-icon {
+  margin-inline-end: 0.25rem;
+}
+
+.data-grid-topbar-action-button--compact .data-grid-topbar-action-icon {
+  margin-inline-end: 0;
+  transform: scale(0.96);
+}
+
+.data-grid-topbar-action-label {
+  display: inline-block;
+  max-width: 8rem;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    max-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
+    opacity 240ms ease 60ms,
+    transform var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing);
+}
+
+.data-grid-topbar-action-label--compact {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(-4px);
 }
 
 .data-grid-topbar-scroll {

@@ -40,6 +40,9 @@ export function LandingFooter({ lang }: { lang: "en" | "cn" }) {
             <a href="https://github.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" className="text-[var(--color-landing-muted)] hover:text-[var(--color-landing-ink)] transition-colors" aria-label="GitHub">
               <GithubIcon />
             </a>
+            <a href="https://cnb.cool/dbxio.com/dbx" target="_blank" rel="noopener noreferrer" className="opacity-40 hover:opacity-100 transition-opacity" aria-label="CNB">
+              <img src="/icons/cnb.svg" alt="CNB" width={18} height={18} />
+            </a>
             <a href="https://atomgit.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" className="opacity-40 hover:opacity-100 transition-opacity" aria-label="AtomGit">
               <img src="/icons/atomgit.png" alt="AtomGit" width={18} height={18} />
             </a>

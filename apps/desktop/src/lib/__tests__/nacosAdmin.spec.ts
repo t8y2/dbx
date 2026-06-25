@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { buildNacosConfigDeleteConfirm, buildNacosInlineDiff, buildNacosInstanceConfirm, buildNacosRawRequest, buildNacosSideBySideDiff, isNacosRawMutation, parseNacosRawBody, parseNacosRawQuery, summarizeNacosConfigDiff } from "../nacosAdmin";
+import {
+  buildNacosConfigExportFileName,
+  buildNacosConfigDeleteConfirm,
+  buildNacosInlineDiff,
+  buildNacosInstanceConfirm,
+  buildNacosRawRequest,
+  buildNacosSideBySideDiff,
+  isNacosRawMutation,
+  nacosConfigFileExtension,
+  parseNacosRawBody,
+  parseNacosRawQuery,
+  resolveNacosConfigCopyText,
+  sanitizeNacosConfigFileNameSegment,
+  summarizeNacosConfigDiff,
+} from "../nacosAdmin";
 
 describe("nacosAdmin helpers", () => {
   it("parses raw query and body text", () => {
@@ -47,5 +61,20 @@ describe("nacosAdmin helpers", () => {
     const details = buildNacosInstanceConfirm({ serviceName: "DEFAULT_GROUP@@svc", groupName: "DEFAULT_GROUP" }, { ip: "127.0.0.1", port: 8080, enabled: true, metadata: null }, { enabled: false }, "", "public");
     expect(details).toContain("serviceName=DEFAULT_GROUP@@svc");
     expect(details).toContain("targetEnabled=false");
+  });
+
+  it("builds safe export file names from config data id and format", () => {
+    expect(sanitizeNacosConfigFileNameSegment("../prod:app?config")).toBe("prod_app_config");
+    expect(nacosConfigFileExtension("yaml")).toBe("yaml");
+    expect(nacosConfigFileExtension("props")).toBe("properties");
+    expect(buildNacosConfigExportFileName({ dataId: "application.yaml", configType: "text" })).toBe("application.yaml");
+    expect(buildNacosConfigExportFileName({ dataId: "service/config", configType: "json" })).toBe("service_config.json");
+    expect(buildNacosConfigExportFileName({ dataId: "", configType: "toml" })).toBe("nacos-config.toml");
+  });
+
+  it("copies selected config text before editor text and state text", () => {
+    expect(resolveNacosConfigCopyText("selected", "editor", "state")).toBe("selected");
+    expect(resolveNacosConfigCopyText("", "editor", "state")).toBe("editor");
+    expect(resolveNacosConfigCopyText("", "", "state")).toBe("state");
   });
 });

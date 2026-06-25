@@ -78,6 +78,37 @@ export function buildNacosConfigCopy(item: NacosConfigItem, content: string): st
   return `${formatNacosConfigIdentity(item)}\n\n${content}`;
 }
 
+export function resolveNacosConfigCopyText(selectionText: string, editorText: string | undefined, stateText: string): string {
+  return selectionText || editorText || stateText;
+}
+
+export function sanitizeNacosConfigFileNameSegment(value: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/\s+/g, " ")
+    .replace(/^[._\s-]+/, "")
+    .replace(/\.+$/, "");
+  return sanitized || "nacos-config";
+}
+
+export function nacosConfigFileExtension(configType?: string): string {
+  const normalized = configType?.trim().toLowerCase();
+  if (normalized === "yaml" || normalized === "yml") return "yaml";
+  if (normalized === "json") return "json";
+  if (normalized === "xml") return "xml";
+  if (normalized === "html") return "html";
+  if (normalized === "properties" || normalized === "props") return "properties";
+  if (normalized === "toml") return "toml";
+  return "txt";
+}
+
+export function buildNacosConfigExportFileName(item: Pick<NacosConfigItem, "dataId" | "configType">): string {
+  const baseName = sanitizeNacosConfigFileNameSegment(item.dataId || "nacos-config");
+  if (/\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/.test(baseName)) return baseName;
+  return `${baseName}.${nacosConfigFileExtension(item.configType)}`;
+}
+
 export function createNacosSaveAsCopy(item: NacosConfigItem): NacosConfigItem {
   return {
     ...item,

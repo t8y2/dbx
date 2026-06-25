@@ -329,7 +329,26 @@ impl NacosOpenApiAdmin {
         let start = ((page_no.saturating_sub(1)) * page_size) as usize;
         let end = start.saturating_add(page_size as usize).min(matched.len());
         let items = if start < matched.len() { matched[start..end].to_vec() } else { Vec::new() };
-        Ok(NacosConfigList { page_no, page_size, total_count, items })
+        Ok(self.enrich_missing_config_formats(NacosConfigList { page_no, page_size, total_count, items }).await)
+    }
+
+    async fn enrich_missing_config_formats(&self, mut list: NacosConfigList) -> NacosConfigList {
+        for item in list.items.iter_mut() {
+            if item.config_type.is_some() {
+                continue;
+            }
+            let detail = self
+                .get_config(NacosConfigKey {
+                    namespace: Some(item.namespace.clone()),
+                    data_id: item.data_id.clone(),
+                    group: item.group.clone(),
+                })
+                .await;
+            if let Ok(detail) = detail {
+                item.config_type = detail.config_type;
+            }
+        }
+        list
     }
 }
 
@@ -452,7 +471,8 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let group_filter = query.group.clone();
         let group = group_filter.clone().unwrap_or_default();
         let value = self.get_config_list_value(&namespace, &search, &group, page_no, page_size).await?;
-        let parsed = parse_config_list(value, namespace.clone(), page_no, page_size);
+        let parsed =
+            self.enrich_missing_config_formats(parse_config_list(value, namespace.clone(), page_no, page_size)).await;
         if data_id_filter.is_some() && parsed.items.is_empty() {
             let fallback =
                 self.list_configs_by_client_filter(namespace, group_filter, data_id_filter, page_no, page_size).await?;

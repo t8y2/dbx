@@ -15,10 +15,11 @@ import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialo
 import { useToast } from "@/composables/useToast";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/api";
-import { buildNacosConfigCopy, buildNacosConfigDeleteConfirm, buildNacosConfigExport, buildNacosConfigHistoryRollbackConfirm, buildNacosInstanceConfirm, createNacosSaveAsCopy } from "@/lib/nacosAdmin";
-import { copyToClipboard } from "@/lib/clipboard";
+import { buildNacosConfigDeleteConfirm, buildNacosConfigExportFileName, buildNacosConfigHistoryRollbackConfirm, buildNacosInstanceConfirm, createNacosSaveAsCopy, resolveNacosConfigCopyText } from "@/lib/nacosAdmin";
+import { copyToClipboard, readTextFromClipboard } from "@/lib/clipboard";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editorThemes";
+import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import type { NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosConnectionInfo, NacosInstanceInfo, NacosServiceInfo } from "@/types/nacos";
@@ -83,6 +84,7 @@ const configFormatOptions = ["text", "json", "xml", "yaml", "html", "properties"
 const configEditorHost = ref<HTMLDivElement | null>(null);
 const configEditorView = shallowRef<EditorView | null>(null);
 const configSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
+const knownConfigFormats = ref<Record<string, string>>({});
 const configEditorTheme = new Compartment();
 const configEditorFontTheme = new Compartment();
 const configEditorLanguage = new Compartment();
@@ -276,22 +278,35 @@ function normalizeConfigFormat(value?: string): string {
   return normalized;
 }
 
-function mergeSelectedConfigFormat(items: NacosConfigItem[]): NacosConfigItem[] {
-  const selected = selectedConfig.value;
-  const selectedKey = selectedConfigOriginalKey.value;
-  if (!selected || !selectedKey) return items;
-  const selectedFormat = configFormatValue(selected);
-  if (!selectedFormat) return items;
-  return items.map((item) => {
-    if (!isSameConfigKey(item, selectedKey) || configFormatValue(item)) return item;
-    return { ...item, configType: selectedFormat };
-  });
-}
-
 function normalizeConfigItemFormat<T extends NacosConfigItem>(item: T): T {
   const value = normalizeConfigFormat(item.configType);
   if (!value || value === item.configType) return item;
   return { ...item, configType: value };
+}
+
+function configFormatCacheKey(key: { namespace?: string; dataId: string; group: string }): string {
+  return [props.connectionId, key.namespace || namespace.value || "", key.dataId, key.group || "DEFAULT_GROUP"].join("\u0000");
+}
+
+function rememberConfigFormat(item: { namespace?: string; dataId: string; group: string; configType?: string }) {
+  const value = configFormatValue(item);
+  if (!value) return;
+  knownConfigFormats.value = {
+    ...knownConfigFormats.value,
+    [configFormatCacheKey(item)]: value,
+  };
+}
+
+function applyKnownConfigFormats(items: NacosConfigItem[]): NacosConfigItem[] {
+  return items.map((item) => {
+    const existingFormat = configFormatValue(item);
+    if (existingFormat) {
+      rememberConfigFormat({ ...item, configType: existingFormat });
+      return item.configType === existingFormat ? item : { ...item, configType: existingFormat };
+    }
+    const knownFormat = knownConfigFormats.value[configFormatCacheKey(item)];
+    return knownFormat ? { ...item, configType: knownFormat } : item;
+  });
 }
 
 function configFormatDisplayLabel(value: string): string {
@@ -358,7 +373,7 @@ async function loadConfigs(page = configPageNo.value) {
       pageNo: configPageNo.value,
       pageSize: configPageSize.value,
     });
-    configs.value = mergeSelectedConfigFormat(result.items.map(normalizeConfigItemFormat));
+    configs.value = applyKnownConfigFormats(result.items.map(normalizeConfigItemFormat));
     configTotal.value = result.totalCount;
   } catch (error) {
     configError.value = error instanceof Error ? error.message : String(error);
@@ -400,6 +415,12 @@ async function selectConfig(item: NacosConfigItem) {
       dataId: normalizedDetail.dataId || item.dataId,
       group: normalizedDetail.group || item.group,
     };
+    rememberConfigFormat({
+      ...normalizedDetail,
+      namespace: selectedConfigOriginalKey.value.namespace,
+      dataId: selectedConfigOriginalKey.value.dataId,
+      group: selectedConfigOriginalKey.value.group,
+    });
     configContent.value = normalizedDetail.content || "";
     originalConfigContent.value = configContent.value;
     configType.value = configFormatValue(normalizedDetail) || configFormatValue(item) || "text";
@@ -446,14 +467,57 @@ function saveConfigAsCopy() {
 
 async function copyConfigIdentity() {
   if (!selectedConfig.value) return;
-  await copyToClipboard(buildNacosConfigCopy(selectedConfig.value, configContent.value));
-  toast(t("nacos.copied"), 2000);
+  const view = configEditorView.value;
+  const selection = view?.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to) || "";
+  const text = resolveNacosConfigCopyText(selection, view?.state.doc.toString(), configContent.value);
+  try {
+    await copyToClipboard(text);
+    try {
+      const copiedText = await readTextFromClipboard();
+      if (copiedText !== text) {
+        throw new Error(t("nacos.copyVerifyFailed"));
+      }
+    } catch (verifyError) {
+      if (isTauriRuntime()) throw verifyError;
+    }
+    toast(t("nacos.copied"), 2000);
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
+async function downloadConfigText(content: string, fileName: string) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 async function exportConfig() {
   if (!selectedConfig.value) return;
-  await copyToClipboard(buildNacosConfigExport({ ...selectedConfig.value, configType: configType.value }, configContent.value));
-  toast(t("nacos.exported"), 2000);
+  const item = { ...selectedConfig.value, configType: configType.value };
+  const fileName = buildNacosConfigExportFileName(item);
+  try {
+    if (isTauriRuntime()) {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      const path = await save({
+        defaultPath: fileName,
+        filters: [{ name: configFormatDisplayLabel(configType.value || item.configType || "text"), extensions: [fileName.split(".").pop() || "txt"] }],
+      });
+      if (!path) return;
+      await writeTextFile(path, configContent.value);
+      toast(t("nacos.exportedTo", { path }), 2000);
+      return;
+    }
+    await downloadConfigText(configContent.value, fileName);
+    toast(t("nacos.exported"), 2000);
+  } catch (error) {
+    toast(t("nacos.exportFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
 }
 
 function historyKeyFor(item: NacosConfigHistoryItem) {
@@ -575,6 +639,7 @@ async function rollbackConfigHistory() {
 async function setConfigFormat(format: string) {
   configType.value = format;
   if (selectedConfig.value) selectedConfig.value.configType = format;
+  if (selectedConfigOriginalKey.value) rememberConfigFormat({ ...selectedConfigOriginalKey.value, configType: format });
   configSaveNotice.value = "";
   await refreshConfigEditor();
 }
@@ -615,6 +680,7 @@ async function saveConfig() {
     });
     const savedConfig = { ...selectedConfig.value, dataId, group, content: configContent.value, configType: configType.value };
     selectedConfig.value = savedConfig;
+    rememberConfigFormat({ ...savedConfig, namespace: savedConfig.namespace || namespace.value || undefined });
     originalConfigContent.value = configContent.value;
     selectedConfigOriginalKey.value = {
       namespace: savedConfig.namespace || namespace.value || undefined,

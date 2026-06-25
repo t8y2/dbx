@@ -1011,12 +1011,21 @@ async fn list_tables_once(
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
         }
         PoolKind::Mysql(p, mode) => {
-            let tables = if *mode == MysqlMode::OceanBaseOracle {
-                db::ob_oracle::list_tables(p, schema).await
+            if *mode == MysqlMode::OceanBaseOracle {
+                let tables = db::ob_oracle::list_tables(p, schema).await?;
+                Ok(filter_table_infos(tables, filter, limit, offset, object_types))
             } else {
-                db::mysql::list_tables(p, mysql_table_metadata_catalog(database, schema)).await
-            }?;
-            Ok(filter_table_infos(tables, filter, limit, offset, object_types))
+                db::mysql::list_tables_filtered(
+                    p,
+                    mysql_table_metadata_catalog(database, schema),
+                    filter,
+                    limit,
+                    offset,
+                    object_types,
+                )
+                .await
+                .map(|tables| filter_table_infos(tables, None, None, None, object_types))
+            }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
             db::questdb::list_tables(p, schema)

@@ -34,6 +34,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/databaseFileDetection";
+import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
@@ -56,6 +57,7 @@ type JdbcDriverSelectItem = {
 const NACOS_DEFAULT_CONSOLE_URL = "http://127.0.0.1:8085";
 const NACOS_LEGACY_SERVER_PORT = "8848";
 const NACOS_DOCKER_CONSOLE_PORT = "8085";
+const DEFAULT_SSH_USER = "root";
 
 type LegacyTransportFields = {
   ssh_enabled?: boolean;
@@ -164,7 +166,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     enabled: true,
     host: "",
     port: 22,
-    user: "",
+    user: DEFAULT_SSH_USER,
     password: "",
     key_path: "",
     key_passphrase: "",
@@ -182,7 +184,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     enabled: hop.enabled !== false,
     host: hop.host || "",
     port: Number(hop.port) || 22,
-    user: hop.user || "",
+    user: hop.user?.trim() || DEFAULT_SSH_USER,
     password: hop.password || "",
     key_path: hop.key_path || "",
     key_passphrase: hop.key_passphrase || "",
@@ -725,11 +727,44 @@ async function tryNacosDockerConsoleFallback(config: ConnectionConfig, originalE
   nacosServerAddr.value = fallbackUrl;
   try {
     const fallbackConfig = connectionConfigForSubmit(config.id);
-    const message = await api.testConnection(fallbackConfig);
+    const message = await testConnectionWithTimeout(fallbackConfig);
     return `${message} ${t("connection.nacosConsoleUrlAutoAdjusted", { from: previousUrl.trim(), to: fallbackUrl })}`;
   } catch {
     nacosServerAddr.value = previousUrl;
     return null;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+async function testConnectionWithTimeout(config: ConnectionConfig): Promise<string> {
+  const timeoutMs = connectionAttemptTimeoutMs(config);
+  const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
+  const promise = api.testConnection(config);
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  void promise.catch((error) => {
+    if (!timedOut) return;
+    testResult.value = {
+      ok: false,
+      message: connectionAttemptOriginalErrorMessage(timeoutMessage, errorMessage(error)),
+    };
+  });
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<string>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(timeoutMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -1398,7 +1433,7 @@ async function testConnection() {
   testResult.value = null;
   const config = connectionConfigForSubmit(editingId.value || uuid());
   try {
-    const msg = await api.testConnection(config);
+    const msg = await testConnectionWithTimeout(config);
     if (runId !== testRunId) return;
     if (config.db_type === "mongodb" && /legacy driver/i.test(msg)) {
       mongoDriverMode.value = "legacy";
@@ -2286,7 +2321,7 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
       throw new Error(t("connection.sshHopInvalidPort", { hop: label }));
     }
     if (layer.type === "ssh") {
-      if (!layer.user?.trim()) throw new Error(t("connection.sshHopInvalidUser", { hop: label }));
+      layer.user = layer.user?.trim() || DEFAULT_SSH_USER;
       // Auth credentials are optional: the backend probes "none" authentication
       // first, so hops that require no credential (e.g. passwordless SSH proxies)
       // are valid with password, key, and agent all left empty.

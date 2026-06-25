@@ -857,7 +857,7 @@ onBeforeUnmount(() => {
     <div class="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
       <div class="flex min-w-0 items-center gap-2 text-sm">
         <Network class="h-4 w-4 text-sky-600" />
-        <span class="truncate font-medium">{{ connectionInfo?.serverAddr || "Nacos" }}</span>
+        <span class="truncate font-medium">{{ connectionInfo?.displayServerAddr || connectionInfo?.serverAddr || "Nacos" }}</span>
         <Badge v-if="connectionInfo?.serverVersion" variant="secondary">{{ connectionInfo.serverVersion }}</Badge>
         <Badge variant="outline">{{ namespaceLabel }}</Badge>
         <Badge v-if="namespaceIdLabel" variant="outline" class="max-w-72 truncate font-mono">{{ namespaceIdLabel }}</Badge>

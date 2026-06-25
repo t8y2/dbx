@@ -32,22 +32,6 @@ impl NacosOpenApiAdmin {
         if cfg.tls_skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
-        if let Some(connect_override) = cfg.connect_override.as_ref() {
-            let url =
-                reqwest::Url::parse(&cfg.server_addr).map_err(|e| format!("Nacos server address is invalid: {e}"))?;
-            let host = url.host_str().ok_or("Nacos server address host is empty")?;
-            let _port = url.port_or_known_default().ok_or("Nacos server address port is empty")?;
-            builder = builder.resolve(
-                host,
-                std::net::SocketAddr::new(
-                    connect_override
-                        .host
-                        .parse()
-                        .map_err(|e| format!("Nacos transport override host must be an IP address: {e}"))?,
-                    connect_override.port,
-                ),
-            );
-        }
         let http = builder.build().map_err(|e| format!("Failed to build Nacos HTTP client: {e}"))?;
         Ok(Self { cfg, http, token: Mutex::new(None) })
     }
@@ -359,6 +343,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let _ = self.access_token().await?;
         Ok(NacosConnectionInfo {
             server_addr: self.cfg.server_addr.clone(),
+            display_server_addr: self.cfg.display_server_addr.clone(),
             namespace: self.cfg.namespace.clone(),
             server_version: extract_server_version(&raw),
             auth: match self.cfg.auth {

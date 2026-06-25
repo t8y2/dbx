@@ -4,7 +4,11 @@ use crate::nacos::types::*;
 
 pub async fn nacos_test_connection_core(state: &AppState, conn_id: &str) -> Result<NacosConnectionInfo, String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
-    let admin = state.nacos_registry.build_transient(&cfg).await?;
+    if cfg.db_type != DatabaseType::Nacos {
+        return Err("Connection is not a Nacos admin connection".to_string());
+    }
+    let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
+    let admin = state.nacos_registry.build_transient_config(admin_config).await?;
     admin.test_connection().await
 }
 
@@ -140,7 +144,8 @@ async fn get_admin(
     if cfg.db_type != DatabaseType::Nacos {
         return Err("Connection is not a Nacos admin connection".to_string());
     }
-    state.nacos_registry.get_or_build(&cfg).await
+    let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
+    state.nacos_registry.get_or_build_config(conn_id, admin_config).await
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {

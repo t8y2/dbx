@@ -19,6 +19,8 @@ impl Default for NacosAuthConfig {
 #[serde(rename_all = "camelCase")]
 pub struct NacosAdminConfig {
     pub server_addr: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_server_addr: String,
     #[serde(default)]
     pub namespace: String,
     #[serde(default)]
@@ -53,6 +55,7 @@ impl NacosAdminConfig {
             let scheme = if cfg.ssl { "https" } else { "http" };
             NacosAdminConfig {
                 server_addr: format!("{scheme}://{}:{}", cfg.host.trim(), cfg.port),
+                display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
                 context_path: String::new(),
                 auth: if cfg.username.trim().is_empty() {
@@ -73,6 +76,11 @@ impl NacosAdminConfig {
         if self.server_addr.is_empty() {
             return Err("Nacos server address is empty".to_string());
         }
+        if self.display_server_addr.trim().is_empty() {
+            self.display_server_addr = self.server_addr.clone();
+        } else {
+            self.display_server_addr = self.display_server_addr.trim().trim_end_matches('/').to_string();
+        }
         self.context_path = normalize_context_path(&self.context_path);
         if self.page_size == 0 {
             self.page_size = default_page_size();
@@ -84,6 +92,16 @@ impl NacosAdminConfig {
     pub fn with_connect_override(mut self, host: &str, port: u16) -> Self {
         self.connect_override = Some(NacosConnectOverride { host: host.to_string(), port });
         self
+    }
+
+    pub fn with_server_endpoint(mut self, host: &str, port: u16) -> Result<Self, String> {
+        let mut url =
+            reqwest::Url::parse(&self.server_addr).map_err(|e| format!("Nacos server address is invalid: {e}"))?;
+        url.set_host(Some(host)).map_err(|_| format!("Nacos server address host is invalid: {host}"))?;
+        url.set_port(Some(port)).map_err(|_| format!("Nacos server address port is invalid: {port}"))?;
+        self.server_addr = url.to_string().trim_end_matches('/').to_string();
+        self.connect_override = None;
+        Ok(self)
     }
 }
 
@@ -190,5 +208,21 @@ mod tests {
         assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
         assert_eq!(parsed.context_path, "");
         assert!(matches!(parsed.auth, NacosAuthConfig::UsernamePassword { .. }));
+    }
+
+    #[test]
+    fn with_server_endpoint_rewrites_only_host_and_port() {
+        let cfg = connection_with_external(serde_json::json!({
+            "serverAddr": "https://192.168.2.51:10840/nacos",
+            "namespace": "public",
+            "contextPath": "/console",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap().with_server_endpoint("127.0.0.1", 49152).unwrap();
+
+        assert_eq!(parsed.server_addr, "https://127.0.0.1:49152/nacos");
+        assert_eq!(parsed.context_path, "/console");
+        assert!(parsed.connect_override.is_none());
     }
 }

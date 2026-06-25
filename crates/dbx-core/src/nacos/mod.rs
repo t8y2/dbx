@@ -27,7 +27,7 @@ pub use crate::nacos::types::*;
 
 #[derive(Default)]
 pub struct NacosAdminRegistry {
-    instances: RwLock<HashMap<String, Arc<dyn NacosAdmin>>>,
+    instances: RwLock<HashMap<String, (NacosAdminConfig, Arc<dyn NacosAdmin>)>>,
     build_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
 }
 
@@ -46,8 +46,10 @@ impl NacosAdminRegistry {
         connection_id: &str,
         cfg: NacosAdminConfig,
     ) -> Result<Arc<dyn NacosAdmin>, String> {
-        if let Some(admin) = self.instances.read().await.get(connection_id) {
-            return Ok(admin.clone());
+        if let Some((existing_cfg, admin)) = self.instances.read().await.get(connection_id) {
+            if existing_cfg == &cfg {
+                return Ok(admin.clone());
+            }
         }
 
         let lock = {
@@ -56,12 +58,14 @@ impl NacosAdminRegistry {
         };
         let _guard = lock.lock().await;
 
-        if let Some(admin) = self.instances.read().await.get(connection_id) {
-            return Ok(admin.clone());
+        if let Some((existing_cfg, admin)) = self.instances.read().await.get(connection_id) {
+            if existing_cfg == &cfg {
+                return Ok(admin.clone());
+            }
         }
 
-        let admin = build_admin(cfg)?;
-        self.instances.write().await.insert(connection_id.to_string(), admin.clone());
+        let admin = build_admin(cfg.clone())?;
+        self.instances.write().await.insert(connection_id.to_string(), (cfg, admin.clone()));
         Ok(admin)
     }
 

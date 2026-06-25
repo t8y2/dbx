@@ -8,6 +8,7 @@ export interface NacosCapabilities {
 
 export interface NacosConnectionInfo {
   serverAddr: string;
+  displayServerAddr: string;
   namespace: string;
   serverVersion?: string;
   auth: string;

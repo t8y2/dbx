@@ -2,6 +2,7 @@ import type { DatabaseType } from "@/types/database";
 import driverManifest from "../../../../crates/dbx-core/assets/database-drivers.manifest.json";
 
 export type DatabaseSupportLevel = "connect" | "browse" | "understand" | "operate";
+export type DatabaseRuntimeMode = "native" | "file" | "agent" | "external";
 
 export const DATABASE_PRODUCT_CAPABILITY_KEYS = [
   "queryExecution",
@@ -27,6 +28,7 @@ export type DatabaseProductCapabilities = Record<DatabaseProductCapability, bool
 
 interface DatabaseDriverManifestEntry {
   dbType: DatabaseType;
+  runtimeMode: DatabaseRuntimeMode;
   supportLevel: DatabaseSupportLevel;
   capabilities: Partial<DatabaseProductCapabilities>;
 }
@@ -72,6 +74,10 @@ export function databaseSupportLevel(dbType?: DatabaseType): DatabaseSupportLeve
   return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.supportLevel : undefined;
 }
 
+export function databaseRuntimeMode(dbType?: DatabaseType): DatabaseRuntimeMode | undefined {
+  return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.runtimeMode : undefined;
+}
+
 export function databaseProductCapabilities(dbType?: DatabaseType): DatabaseProductCapabilities {
   if (!dbType) return DEFAULT_CAPABILITIES;
   return (DATABASE_DRIVER_BY_TYPE.get(dbType)?.capabilities ?? DEFAULT_CAPABILITIES) as DatabaseProductCapabilities;
@@ -83,6 +89,11 @@ export function supportsDatabaseFeature(dbType: DatabaseType | undefined, capabi
 
 export function manifestDatabaseTypes(): DatabaseType[] {
   return DATABASE_DRIVER_ENTRIES.map((entry) => entry.dbType);
+}
+
+export function usesAgentCursorForQuery(dbType?: DatabaseType): boolean {
+  const runtimeMode = databaseRuntimeMode(dbType);
+  return runtimeMode === "agent" || runtimeMode === "external";
 }
 
 function productCapabilities(overrides: Partial<DatabaseProductCapabilities>): DatabaseProductCapabilities {

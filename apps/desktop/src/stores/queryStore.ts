@@ -27,7 +27,7 @@ import {
 import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
-import { supportsDatabaseFeature } from "@/lib/databaseCapabilities";
+import { usesAgentCursorForQuery } from "@/lib/databaseDriverManifest";
 import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
@@ -1428,7 +1428,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
-      const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
+      const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
       console.info("[DBX][executeTabSql:previous-session-close:start]", { traceId, elapsed: elapsed() });
@@ -2218,7 +2218,7 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
-    const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = tab.resultBaseSql ?? sql;
     const exportRowLimit = useSettingsStore().editorSettings.exportRowLimit;
     // Use the already-computed total row count as a progress estimate so the
@@ -2296,7 +2296,7 @@ export const useQueryStore = defineStore("query", () => {
     const settings = useSettingsStore().editorSettings;
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
-    const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = tab.resultBaseSql ?? sql;
     const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
     const clientSessionId = tabClientSessionId(tab, "export");

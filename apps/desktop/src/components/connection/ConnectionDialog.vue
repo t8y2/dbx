@@ -1388,6 +1388,15 @@ const testResultMessage = computed(() => {
   if (!testResult.value) return "";
   return testResult.value.ok ? t("connection.testSuccess") : testResult.value.message;
 });
+const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
+const connectionDialogContentClass = computed(() => {
+  if (dialogStep.value === "select") return "sm:max-w-[760px]";
+  return shouldUseWideConnectionDialog.value ? "sm:max-w-[660px]" : "sm:max-w-[560px]";
+});
+const connectionLabelClass = "justify-self-start text-left";
+const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
+const connectionLabelTopClass = `${connectionLabelClass} mt-2`;
+const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
 const hasRequiredConnectionTarget = computed(() => {
   if (form.value.db_type === "mq") return !!mqAdminUrl.value.trim();
   if (form.value.db_type === "zookeeper") return !!(form.value.host || form.value.connection_string || connectionUrlInput.value.trim());
@@ -2659,7 +2668,7 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :class="dialogStep === 'select' ? 'sm:max-w-[760px]' : 'sm:max-w-[560px]'" @interact-outside.prevent>
+    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
@@ -2756,9 +2765,9 @@ function openExternalUrl(url: string) {
             </div>
 
             <TabsContent value="connection" class="m-0">
-              <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
+              <div class="connection-form-body grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
                 <div v-if="!isJdbcConnection" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right">{{ t("connection.connectionUrlOptional") }}</Label>
+                  <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="connectionUrlInput" class="flex-1" :placeholder="connectionUrlPlaceholder" @keydown.enter.prevent="applyConnectionUrl" />
                     <Tooltip>
@@ -2773,12 +2782,12 @@ function openExternalUrl(url: string) {
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right">{{ t("connection.name") }}</Label>
+                  <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
                   <Input v-model="form.name" class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right">{{ t("connection.type") }}</Label>
+                  <Label :class="connectionLabelClass">{{ t("connection.type") }}</Label>
                   <button type="button" class="col-span-3 flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 hover:bg-muted/40 cursor-pointer transition" @click="backToDatabasePicker()">
                     <DatabaseIcon :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
                     <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
@@ -2788,7 +2797,7 @@ function openExternalUrl(url: string) {
 
                 <!-- OceanBase mode toggle -->
                 <div v-if="selectedType === 'oceanbase'" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                   <div class="col-span-3 flex gap-2">
                     <Button size="sm" :variant="oceanbaseSubMode === 'mysql' ? 'default' : 'outline'" @click="switchOceanbaseMode('mysql')">
                       {{ t("connection.oceanbaseMySQLMode") }}
@@ -2800,7 +2809,7 @@ function openExternalUrl(url: string) {
                 </div>
 
                 <div v-if="selectedType === 'gbase'" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.version") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.version") }}</Label>
                   <div class="col-span-3 flex gap-2">
                     <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'outline' : 'default'" @click="switchGbaseProfile('gbase8a')"> GBase 8a </Button>
                     <Button size="sm" :variant="form.driver_profile === 'gbase8s' ? 'default' : 'outline'" @click="switchGbaseProfile('gbase8s')"> GBase 8s </Button>
@@ -2808,12 +2817,12 @@ function openExternalUrl(url: string) {
                 </div>
 
                 <div v-if="isCustomCompatibleProfile()" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right">{{ t("connection.driverName") }}</Label>
+                  <Label :class="connectionLabelClass">{{ t("connection.driverName") }}</Label>
                   <Input v-model="customDriverName" class="col-span-3" :placeholder="t('connection.driverNamePlaceholder')" />
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right">{{ t("connection.color") }}</Label>
+                  <Label :class="connectionLabelClass">{{ t("connection.color") }}</Label>
                   <div class="col-span-3 flex items-center gap-1.5">
                     <button
                       v-for="color in colorOptions"
@@ -2847,7 +2856,7 @@ function openExternalUrl(url: string) {
                 </div>
 
                 <div v-if="form.db_type === 'h2'" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                   <div class="col-span-3 flex gap-2">
                     <Button size="sm" :variant="h2ConnectionMode === 'file' ? 'default' : 'outline'" @click="switchH2ConnectionMode('file')">
                       {{ t("connection.h2FileMode") }}
@@ -2869,19 +2878,19 @@ function openExternalUrl(url: string) {
                 <!-- JDBC: optional external plugin -->
                 <template v-if="isJdbcConnection">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.jdbcUrl") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.jdbcUrl") }}</Label>
                     <Input v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.jdbcUrlPlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.user") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" placeholder="sa" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.password") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="text-right mt-2">{{ t("connection.jdbcDriverPaths") }}</Label>
+                    <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
                     <div class="col-span-3 space-y-2">
                       <Select v-if="jdbcDriverSelectItems.length > 0" :model-value="selectedJdbcDriverPath" @update:model-value="onJdbcDriverSelect">
                         <SelectTrigger>
@@ -2920,7 +2929,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.jdbcDriverClass") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.jdbcDriverClass") }}</Label>
                     <Input v-model="form.jdbc_driver_class" class="col-span-3" :placeholder="t('connection.jdbcDriverClassPlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
@@ -2946,7 +2955,7 @@ function openExternalUrl(url: string) {
                 <!-- Local database files: file path only -->
                 <template v-else-if="usesLocalFilePathInput">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.filePath") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.filePath") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-center gap-1">
                         <Input v-model="form.host" class="flex-1" :placeholder="filePathPlaceholder" />
@@ -2981,7 +2990,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-start gap-4">
-                    <Label class="text-right mt-2">{{ t("connection.sqliteExtensions") }}</Label>
+                    <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-start gap-1">
                         <textarea
@@ -3006,11 +3015,11 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="form.db_type === 'h2' || form.db_type === 'access'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.user") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
                       <Input v-model="form.username" class="col-span-3" :placeholder="form.db_type === 'access' ? '' : 'sa'" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.password") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                   </template>
@@ -3019,15 +3028,15 @@ function openExternalUrl(url: string) {
                 <!-- Message Queue: admin URL and auth -->
                 <template v-else-if="form.db_type === 'mq'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">Admin URL</Label>
+                    <Label :class="connectionLabelClass">Admin URL</Label>
                     <Input v-model="mqAdminUrl" class="col-span-3" placeholder="http://127.0.0.1:8080" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">System</Label>
+                    <Label :class="connectionLabelClass">System</Label>
                     <div class="col-span-3 h-9 rounded-md border border-input bg-muted px-3 py-2 text-sm text-muted-foreground">Apache Pulsar</div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">Auth</Label>
+                    <Label :class="connectionLabelClass">Auth</Label>
                     <div class="col-span-3 flex flex-wrap gap-2">
                       <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">None</Button>
                       <Button size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">Token</Button>
@@ -3038,61 +3047,61 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="mqAuthKind === 'token'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Token</Label>
+                      <Label :class="connectionLabelClass">Token</Label>
                       <Input v-model="mqToken" type="password" class="col-span-3" />
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'basic'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.user") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="mqBasicUsername" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.password") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <Input v-model="mqBasicPassword" type="password" class="col-span-3" />
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'apiKey'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Header</Label>
+                      <Label :class="connectionLabelClass">Header</Label>
                       <Input v-model="mqApiKeyHeader" class="col-span-3" placeholder="Authorization" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Value</Label>
+                      <Label :class="connectionLabelClass">Value</Label>
                       <Input v-model="mqApiKeyValue" type="password" class="col-span-3" />
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'oauth2'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Issuer URL</Label>
+                      <Label :class="connectionLabelClass">Issuer URL</Label>
                       <Input v-model="mqOauthIssuerUrl" class="col-span-3" placeholder="https://issuer.example.com/oauth/token" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Client ID</Label>
+                      <Label :class="connectionLabelClass">Client ID</Label>
                       <Input v-model="mqOauthClientId" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Client Secret</Label>
+                      <Label :class="connectionLabelClass">Client Secret</Label>
                       <Input v-model="mqOauthClientSecret" type="password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Audience</Label>
+                      <Label :class="connectionLabelClass">Audience</Label>
                       <Input v-model="mqOauthAudience" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">Scope</Label>
+                      <Label :class="connectionLabelClass">Scope</Label>
                       <Input v-model="mqOauthScope" class="col-span-3" />
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">TLS</Label>
+                    <Label :class="connectionLabelSmallClass">TLS</Label>
                     <label class="col-span-3 inline-flex items-center gap-2">
                       <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
                       <span class="text-xs text-muted-foreground">Skip certificate verification</span>
                     </label>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">Pinned Version</Label>
+                    <Label :class="connectionLabelClass">Pinned Version</Label>
                     <Select v-model="mqPinnedVersion">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -3108,7 +3117,7 @@ function openExternalUrl(url: string) {
                     </Select>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">Broker Token 签发</Label>
+                    <Label :class="connectionLabelClass">Broker Token 签发</Label>
                     <Select v-model="mqTokenSigningMode">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -3137,7 +3146,7 @@ function openExternalUrl(url: string) {
                 <!-- Nacos: server address, namespace and auth -->
                 <template v-else-if="form.db_type === 'nacos'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.nacosConsoleUrl") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosConsoleUrl") }}</Label>
                     <Input v-model="nacosServerAddr" class="col-span-3" placeholder="http://127.0.0.1:8085" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
@@ -3145,15 +3154,15 @@ function openExternalUrl(url: string) {
                     <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.nacosConsoleUrlHint") }}</p>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.nacosNamespace") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosNamespace") }}</Label>
                     <Input v-model="nacosNamespace" class="col-span-3" placeholder="public" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.nacosContextPath") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosContextPath") }}</Label>
                     <Input v-model="nacosContextPath" class="col-span-3" :placeholder="t('connection.nacosContextPathPlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.nacosAuth") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosAuth") }}</Label>
                     <div class="col-span-3 flex flex-wrap gap-2">
                       <Button size="sm" :variant="nacosAuthKind === 'none' ? 'default' : 'outline'" @click="nacosAuthKind = 'none'">{{ t("connection.nacosAuthNone") }}</Button>
                       <Button size="sm" :variant="nacosAuthKind === 'usernamePassword' ? 'default' : 'outline'" @click="nacosAuthKind = 'usernamePassword'">{{ t("connection.nacosAuthUserPassword") }}</Button>
@@ -3161,23 +3170,23 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="nacosAuthKind === 'usernamePassword'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.user") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="nacosUsername" class="col-span-3" placeholder="nacos" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.password") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="nacosPassword" class="col-span-3" />
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.nacosTls") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.nacosTls") }}</Label>
                     <label class="col-span-3 inline-flex items-center gap-2">
                       <input type="checkbox" v-model="nacosTlsSkipVerify" class="mr-0" />
                       <span class="text-xs text-muted-foreground">{{ t("connection.nacosTlsSkipVerify") }}</span>
                     </label>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.nacosPageSize") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosPageSize") }}</Label>
                     <Input v-model.number="nacosPageSize" type="number" min="1" max="500" class="col-span-3" />
                   </div>
                 </template>
@@ -3185,7 +3194,7 @@ function openExternalUrl(url: string) {
                 <!-- Redis: host, port, user, password, ssl -->
                 <template v-else-if="form.db_type === 'redis'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 flex gap-2">
                       <Button size="sm" :variant="form.redis_connection_mode === 'standalone' ? 'default' : 'outline'" @click="form.redis_connection_mode = 'standalone'">
                         {{ t("connection.redisStandaloneMode") }}
@@ -3199,13 +3208,13 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ form.redis_connection_mode === "sentinel" ? t("connection.redisFirstSentinel") : form.redis_connection_mode === "cluster" ? t("connection.redisFirstClusterNode") : t("connection.host") }}</Label>
+                    <Label :class="connectionLabelClass">{{ form.redis_connection_mode === "sentinel" ? t("connection.redisFirstSentinel") : form.redis_connection_mode === "cluster" ? t("connection.redisFirstClusterNode") : t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" />
                   </div>
                   <template v-if="form.redis_connection_mode === 'sentinel'">
                     <div class="grid grid-cols-4 items-start gap-4">
-                      <Label class="text-right mt-2">{{ t("connection.redisSentinelNodes") }}</Label>
+                      <Label :class="connectionLabelTopClass">{{ t("connection.redisSentinelNodes") }}</Label>
                       <textarea
                         v-model="form.redis_sentinel_nodes"
                         class="col-span-3 flex min-h-[76px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -3214,19 +3223,19 @@ function openExternalUrl(url: string) {
                       />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.redisSentinelMaster") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.redisSentinelMaster") }}</Label>
                       <Input v-model="form.redis_sentinel_master" class="col-span-3" placeholder="mymaster" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.redisSentinelUser") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.redisSentinelUser") }}</Label>
                       <Input v-model="form.redis_sentinel_username" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.redisSentinelPassword") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.redisSentinelPassword") }}</Label>
                       <PasswordInput v-model="form.redis_sentinel_password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.redisSentinelTls") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.redisSentinelTls") }}</Label>
                       <label class="col-span-3 inline-flex items-center gap-2">
                         <input type="checkbox" v-model="form.redis_sentinel_tls" class="mr-0" />
                         <span class="text-xs text-muted-foreground">{{ t("connection.redisSentinelTlsHint") }}</span>
@@ -3235,7 +3244,7 @@ function openExternalUrl(url: string) {
                   </template>
                   <template v-else-if="form.redis_connection_mode === 'cluster'">
                     <div class="grid grid-cols-4 items-start gap-4">
-                      <Label class="text-right mt-2">{{ t("connection.redisClusterNodes") }}</Label>
+                      <Label :class="connectionLabelTopClass">{{ t("connection.redisClusterNodes") }}</Label>
                       <textarea
                         v-model="form.redis_cluster_nodes"
                         class="col-span-3 flex min-h-[76px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -3245,15 +3254,15 @@ function openExternalUrl(url: string) {
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.user") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" placeholder="default" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.password") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.redisKeySeparator") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisKeySeparator") }}</Label>
                     <Input v-model="form.redis_key_separator" class="col-span-3 h-8 text-xs" placeholder=":" />
                   </div>
                 </template>
@@ -3261,12 +3270,12 @@ function openExternalUrl(url: string) {
                 <!-- etcd: endpoints, user, password, TLS -->
                 <template v-else-if="form.db_type === 'etcd'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="text-right mt-2">{{ t("connection.etcdEndpoints") }}</Label>
+                    <Label :class="connectionLabelTopClass">{{ t("connection.etcdEndpoints") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <textarea
                         v-model="etcdEndpointsLines"
@@ -3280,11 +3289,11 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.user") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.password") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                 </template>
@@ -3292,12 +3301,12 @@ function openExternalUrl(url: string) {
                 <!-- ZooKeeper: host, connect string, user, password -->
                 <template v-else-if="form.db_type === 'zookeeper'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" placeholder="127.0.0.1" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" />
                   </div>
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="text-right mt-2">{{ t("connection.zookeeperConnectString") }}</Label>
+                    <Label :class="connectionLabelTopClass">{{ t("connection.zookeeperConnectString") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <textarea
                         v-model="zookeeperConnectString"
@@ -3311,11 +3320,11 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.user") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.password") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
                 </template>
@@ -3323,7 +3332,7 @@ function openExternalUrl(url: string) {
                 <!-- MongoDB: URL or form -->
                 <template v-else-if="form.db_type === 'mongodb'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.driverMode") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.driverMode") }}</Label>
                     <div class="col-span-3 flex items-center gap-2">
                       <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'outline' : 'default'" @click="mongoDriverMode = 'auto'">{{ t("connection.mongoDriverAuto") }}</Button>
                       <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
@@ -3338,7 +3347,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 flex gap-2">
                       <Button size="sm" :variant="mongoUseUrl ? 'outline' : 'default'" @click="mongoUseUrl = false">{{ t("connection.modeForm") }}</Button>
                       <Button size="sm" :variant="mongoUseUrl ? 'default' : 'outline'" @click="mongoUseUrl = true">URL</Button>
@@ -3346,7 +3355,7 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="mongoUseUrl">
                     <div class="grid grid-cols-4 items-start gap-4">
-                      <Label class="text-right mt-2">URL</Label>
+                      <Label :class="connectionLabelTopClass">URL</Label>
                       <textarea
                         v-model="form.connection_string"
                         class="col-span-3 flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -3356,7 +3365,7 @@ function openExternalUrl(url: string) {
                   </template>
                   <template v-else>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.host") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                       <Input v-model="form.host" class="col-span-2" />
                       <Input v-model.number="form.port" type="number" class="col-span-1" />
                     </div>
@@ -3368,23 +3377,23 @@ function openExternalUrl(url: string) {
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.user") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.password") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.defaultDatabase") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.defaultDatabase") }}</Label>
                       <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.authDatabase") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.authDatabase") }}</Label>
                       <Input v-model="mongoAuthDatabase" class="col-span-3" :placeholder="t('connection.authDatabasePlaceholder')" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.authMechanism") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.authMechanism") }}</Label>
                       <Select v-model="mongoAuthMechanism">
                         <SelectTrigger class="col-span-3">
                           <SelectValue />
@@ -3397,7 +3406,7 @@ function openExternalUrl(url: string) {
                       </Select>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.urlParams") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
                       <Input v-model="form.url_params" class="col-span-3" placeholder="authSource=admin&authMechanism=SCRAM-SHA-1" />
                     </div>
                   </template>
@@ -3406,7 +3415,7 @@ function openExternalUrl(url: string) {
                 <!-- Turso: simplified form (URL + Token) -->
                 <template v-else-if="form.db_type === 'turso'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-3" placeholder="your-database.turso.io 或 libsql://your-database.turso.io" />
                   </div>
 
@@ -3416,7 +3425,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">Auth Token</Label>
+                    <Label :class="connectionLabelClass">Auth Token</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." />
                   </div>
 
@@ -3426,7 +3435,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.urlParams") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
                     <Input v-model="form.url_params" class="col-span-3" placeholder="authToken=xxx（可选，优先使用上面的 Token 字段）" />
                   </div>
                 </template>
@@ -3434,38 +3443,38 @@ function openExternalUrl(url: string) {
                 <!-- MySQL / PostgreSQL: host, port, user, password, database -->
                 <template v-else>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.host") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" />
                   </div>
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.gbaseServer") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
                     <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
                   </div>
 
                   <div v-if="form.db_type === 'informix'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.informixServer") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.informixServer") }}</Label>
                     <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.user") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.password") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ databaseLabel }}</Label>
+                    <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
 
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
                       <button
                         type="button"
@@ -3497,7 +3506,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">SYSDBA</Label>
+                    <Label :class="connectionLabelSmallClass">SYSDBA</Label>
                     <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                       <input type="checkbox" v-model="form.sysdba" class="mr-0" :disabled="isOracleSysUser(form)" />
                       <span class="text-xs text-muted-foreground">as SYSDBA</span>
@@ -3505,7 +3514,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right">{{ t("connection.urlParams") }}</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
                     <Input
                       v-model="form.url_params"
                       class="col-span-3"
@@ -3529,7 +3538,7 @@ function openExternalUrl(url: string) {
 
                   <template v-if="isPrestoSqlConnection">
                     <div class="grid grid-cols-4 items-start gap-4">
-                      <Label class="text-right mt-2">{{ t("connection.jdbcDriverPaths") }}</Label>
+                      <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
                       <div class="col-span-3 space-y-2">
                         <Select v-if="jdbcDriverSelectItems.length > 0" :model-value="selectedJdbcDriverPath" @update:model-value="onJdbcDriverSelect">
                           <SelectTrigger>
@@ -3568,7 +3577,7 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right">{{ t("connection.jdbcDriverClass") }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.jdbcDriverClass") }}</Label>
                       <Input v-model="form.jdbc_driver_class" class="col-span-3" :placeholder="t('connection.jdbcDriverClassPlaceholder')" />
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
@@ -3595,9 +3604,9 @@ function openExternalUrl(url: string) {
             </TabsContent>
 
             <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0">
-              <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
+              <div class="connection-form-body grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
                 <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">SSL/TLS</Label>
+                  <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.ssl" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.sslEnable") }}</span>
@@ -3605,7 +3614,7 @@ function openExternalUrl(url: string) {
                 </div>
 
                 <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.redisTlsInsecure") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.redisTlsInsecure") }}</Label>
                   <label class="col-span-3 flex items-start gap-2 cursor-pointer">
                     <input type="checkbox" v-model="redisTlsInsecure" class="mr-0 mt-0.5" :disabled="!form.ssl" />
                     <span class="text-xs leading-5 text-muted-foreground">
@@ -3616,7 +3625,7 @@ function openExternalUrl(url: string) {
 
                 <template v-if="form.db_type === 'etcd'">
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right text-xs">
+                    <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
                         <ShieldCheck class="h-3.5 w-3.5" />
                         {{ t("connection.caCertPath") }}
@@ -3638,7 +3647,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right text-xs">
+                    <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
                         <KeyRound class="h-3.5 w-3.5" />
                         {{ t("connection.etcdClientAuth") }}
@@ -3676,7 +3685,7 @@ function openExternalUrl(url: string) {
 
                 <template v-if="supportsMysqlTlsOptions">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.mysqlTlsMode") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.mysqlTlsMode") }}</Label>
                     <Select v-model="mysqlTlsMode">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -3692,7 +3701,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right text-xs">
+                    <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
                         <ShieldCheck class="h-3.5 w-3.5" />
                         {{ t("connection.caCertPath") }}
@@ -3717,7 +3726,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right text-xs">
+                    <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
                         <KeyRound class="h-3.5 w-3.5" />
                         {{ t("connection.mysqlClientCert") }}
@@ -3755,7 +3764,7 @@ function openExternalUrl(url: string) {
 
                 <template v-if="supportsPostgresTlsOptions">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.postgresSslMode") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.postgresSslMode") }}</Label>
                     <Select v-model="postgresTlsMode">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -3771,7 +3780,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right text-xs">
+                    <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
                         <ShieldCheck class="h-3.5 w-3.5" />
                         {{ t("connection.postgresServerCert") }}
@@ -3796,7 +3805,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right text-xs">
+                    <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
                         <KeyRound class="h-3.5 w-3.5" />
                         {{ t("connection.postgresClientCert") }}
@@ -3833,7 +3842,7 @@ function openExternalUrl(url: string) {
                 </template>
 
                 <div v-if="supportsCaCertificatePath" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.caCertPath") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.caCertPath") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="form.ca_cert_path" class="flex-1" :placeholder="t('connection.caCertPathPlaceholder')" :disabled="!form.ssl" />
                     <Tooltip v-if="isDesktop">
@@ -3850,35 +3859,35 @@ function openExternalUrl(url: string) {
             </TabsContent>
 
             <TabsContent value="advanced" class="m-0">
-              <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
+              <div class="connection-form-body grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.connectTimeout") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                   <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.queryTimeout") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
                   <Input v-model.number="form.query_timeout_secs" type="number" min="0" max="300" step="1" class="col-span-3" />
                 </div>
                 <div v-show="form.db_type === 'mongodb'" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.idleTimeout") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>
                   <Input v-model.number="form.idle_timeout_secs" type="number" min="0" max="600" step="1" class="col-span-3" />
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.keepaliveInterval") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.keepaliveInterval") }}</Label>
                   <div class="col-span-3 flex items-center gap-2">
                     <Switch v-model="keepaliveEnabled" />
                     <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
                   </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("connection.readOnly") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
                   </label>
                 </div>
                 <div v-show="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
-                  <Label class="text-right text-xs">{{ t("settings.redisScanPageSize") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
                   <div class="col-span-3 flex flex-col gap-1">
                     <Select :model-value="String(form.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT)" @update:model-value="form.redis_scan_page_size = Number($event)">
                       <SelectTrigger>
@@ -3897,9 +3906,9 @@ function openExternalUrl(url: string) {
             </TabsContent>
 
             <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0">
-              <div class="grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
+              <div class="connection-form-body grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
                 <div class="grid grid-cols-4 items-start gap-4">
-                  <Label class="pt-2 text-right text-xs">{{ t("connection.sshHops") }}</Label>
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.sshHops") }}</Label>
                   <div class="col-span-3 grid gap-3">
                     <div class="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                       <template v-for="(segment, index) in transportPathSegments" :key="`${segment}-${index}`">
@@ -3967,11 +3976,11 @@ function openExternalUrl(url: string) {
 
                 <template v-if="selectedTransportLayer">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">{{ t("connection.sshHopName") }}</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.sshHopName") }}</Label>
                     <Input v-model="selectedTransportLayer.name" class="col-span-3" :placeholder="t('connection.sshHopNamePlaceholder')" />
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">Type</Label>
+                    <Label :class="connectionLabelSmallClass">Type</Label>
                     <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -3984,20 +3993,20 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="selectedSshLayer">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshHost") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshHost") }}</Label>
                       <Input v-model="selectedSshLayer.host" class="col-span-2" placeholder="ssh.example.com" :disabled="selectedSshLayer.enabled === false" />
                       <Input v-model.number="selectedSshLayer.port" type="number" min="1" max="65535" class="col-span-1" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshUser") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshUser") }}</Label>
                       <Input v-model="selectedSshLayer.user" class="col-span-3" placeholder="root" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshPassword") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshKeyPath") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPath") }}</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="selectedSshLayer.key_path" class="flex-1" placeholder="~/.ssh/id_rsa" :disabled="selectedSshLayer.enabled === false" />
                         <Tooltip v-if="isDesktop">
@@ -4011,7 +4020,7 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshKeyPassphrase") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPassphrase") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
@@ -4022,7 +4031,7 @@ function openExternalUrl(url: string) {
                       </label>
                     </div>
                     <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshAgentSockPath") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
                       <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
@@ -4033,13 +4042,13 @@ function openExternalUrl(url: string) {
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.sshConnectTimeout") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshConnectTimeout") }}</Label>
                       <Input v-model.number="selectedSshLayer.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                   </template>
                   <template v-else-if="selectedProxyLayer">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.proxyType") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.proxyType") }}</Label>
                       <Select :model-value="selectedProxyLayer.proxy_type || 'socks5'" :disabled="selectedProxyLayer.enabled === false" @update:model-value="updateSelectedProxyType">
                         <SelectTrigger class="col-span-3 h-9">
                           <SelectValue />
@@ -4051,16 +4060,16 @@ function openExternalUrl(url: string) {
                       </Select>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.proxyHost") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.proxyHost") }}</Label>
                       <Input v-model="selectedProxyLayer.host" class="col-span-2" placeholder="127.0.0.1" :disabled="selectedProxyLayer.enabled === false" />
                       <Input v-model.number="selectedProxyLayer.port" type="number" class="col-span-1" :disabled="selectedProxyLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.proxyUsername") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.proxyUsername") }}</Label>
                       <Input v-model="selectedProxyLayer.username" class="col-span-3" :placeholder="t('connection.proxyUsernamePlaceholder')" :disabled="selectedProxyLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label class="text-right text-xs">{{ t("connection.proxyPassword") }}</Label>
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.proxyPassword") }}</Label>
                       <PasswordInput v-model="selectedProxyLayer.password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" :disabled="selectedProxyLayer.enabled === false" />
                     </div>
                   </template>
@@ -4199,3 +4208,14 @@ function openExternalUrl(url: string) {
     @draft:show-all="handleDraftSchemasShowAll"
   />
 </template>
+
+<style>
+.connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {
+  grid-template-columns: minmax(5.5rem, 0.7fr) repeat(3, minmax(0, 1fr));
+}
+
+.connection-dialog-content[data-wide="true"] .connection-form-body {
+  width: min(100%, 36rem);
+  margin-inline: auto;
+}
+</style>

@@ -1163,14 +1163,18 @@ fn list_tables_sql(
     if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
         let escaped = filter.to_ascii_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let pattern = format!("%{}%", escaped);
-        let fuzzy_pattern = crate::sql::fuzzy_like_pattern_with_escape(&filter.to_ascii_lowercase(), |value| {
-            value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-        });
-        sql.push_str(&format!(
-            " AND (LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\' OR LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\')",
-            quote_value(&pattern),
-            quote_value(&fuzzy_pattern)
-        ));
+        if crate::sql::fuzzy_filter_enabled(filter) {
+            let fuzzy_pattern = crate::sql::fuzzy_like_pattern_with_escape(&filter.to_ascii_lowercase(), |value| {
+                value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            });
+            sql.push_str(&format!(
+                " AND (LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\' OR LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\')",
+                quote_value(&pattern),
+                quote_value(&fuzzy_pattern)
+            ));
+        } else {
+            sql.push_str(&format!(" AND LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\'", quote_value(&pattern)));
+        }
     }
     sql.push_str(" ORDER BY TABLE_NAME");
     if let Some(limit) = limit {
@@ -2599,6 +2603,15 @@ mod tests {
 
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%sysu%' ESCAPE '\\\\'"));
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%s%y%s%u%' ESCAPE '\\\\'"));
+    }
+
+    #[test]
+    fn mysql_list_tables_sql_skips_fuzzy_filter_for_single_character() {
+        let sql = list_tables_sql("app", Some("u"), Some(100), None, None);
+
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%' ESCAPE '\\\\'"));
+        assert_eq!(sql.matches("LOWER(TABLE_NAME) LIKE").count(), 1);
+        assert!(!sql.contains(" OR LOWER(TABLE_NAME) LIKE"));
     }
 
     #[test]

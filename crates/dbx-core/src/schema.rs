@@ -1432,11 +1432,7 @@ mod tests {
 
     #[test]
     fn filter_table_infos_matches_fuzzy_subsequences() {
-        let tables = vec![
-            test_table_info("system_user"),
-            test_table_info("user_order"),
-            test_table_info("alpha"),
-        ];
+        let tables = vec![test_table_info("system_user"), test_table_info("user_order"), test_table_info("alpha")];
 
         let system_user = filter_table_infos(tables.clone(), Some("sysu"), None, None, None);
         assert_eq!(system_user.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["system_user"]);
@@ -1446,12 +1442,17 @@ mod tests {
     }
 
     #[test]
+    fn filter_table_infos_skips_fuzzy_for_single_character_filters() {
+        let tables = vec![test_table_info("orders"), test_table_info("user_order")];
+
+        let filtered = filter_table_infos(tables, Some("u"), None, None, None);
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_order"]);
+    }
+
+    #[test]
     fn filter_table_infos_keeps_special_filter_characters_literal() {
-        let tables = vec![
-            test_table_info("user_%"),
-            test_table_info("user_account"),
-            test_table_info("userXpercent"),
-        ];
+        let tables = vec![test_table_info("user_%"), test_table_info("user_account"), test_table_info("userXpercent")];
 
         let filtered = filter_table_infos(tables, Some("user_%"), None, None, None);
 

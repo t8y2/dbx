@@ -1131,11 +1131,15 @@ fn sqlserver_list_tables_sql(
         .filter(|value| !value.trim().is_empty())
         .map(|value| {
             let contains_pattern = format!("%{}%", escape_like_literal(value.trim()));
-            let fuzzy_pattern =
-                crate::sql::fuzzy_like_pattern_with_escape(value.trim(), escape_like_literal);
-            format!(
-                " AND (LOWER(o.name) LIKE LOWER('{contains_pattern}') ESCAPE '\\' OR LOWER(o.name) LIKE LOWER('{fuzzy_pattern}') ESCAPE '\\') "
-            )
+            if crate::sql::fuzzy_filter_enabled(value) {
+                let fuzzy_pattern =
+                    crate::sql::fuzzy_like_pattern_with_escape(value.trim(), escape_like_literal);
+                format!(
+                    " AND (LOWER(o.name) LIKE LOWER('{contains_pattern}') ESCAPE '\\' OR LOWER(o.name) LIKE LOWER('{fuzzy_pattern}') ESCAPE '\\') "
+                )
+            } else {
+                format!(" AND LOWER(o.name) LIKE LOWER('{contains_pattern}') ESCAPE '\\' ")
+            }
         })
         .unwrap_or_default();
     let schema_escaped = schema.replace('\'', "''");
@@ -1911,6 +1915,15 @@ mod tests {
 
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('%sysu%') ESCAPE '\\'"));
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('%s%y%s%u%') ESCAPE '\\'"));
+        assert!(sql.contains("SELECT TOP (200)"));
+    }
+
+    #[test]
+    fn sqlserver_list_tables_filter_skips_fuzzy_pattern_for_single_character() {
+        let sql = sqlserver_list_tables_sql("dbo", Some("u"), Some(200), None);
+
+        assert!(sql.contains("LOWER(o.name) LIKE LOWER('%u%') ESCAPE '\\'"));
+        assert!(!sql.contains(" OR LOWER(o.name) LIKE"));
         assert!(sql.contains("SELECT TOP (200)"));
     }
 

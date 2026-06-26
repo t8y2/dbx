@@ -779,7 +779,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     &url,
                     username,
                     password,
-                    config.url_params,
+                    config.url_params.clone(),
                     Some(&config.ca_cert_path),
                     connect_timeout,
                 )?;

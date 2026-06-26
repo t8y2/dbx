@@ -778,6 +778,8 @@ export default {
     formatJson: "Format JSON",
     setNull: "Set NULL",
     restoreOriginalValue: "Restore Original",
+    cellEditLengthLimited: "Input truncated to the column length limit",
+    cellEditTypeLimited: "Input filtered to match the column type",
     copyColumnName: "Copy Column Name",
     copyAlterColumnSql: "Copy as SQL ALTER",
     alterSqlCopied: "SQL ALTER copied to clipboard",

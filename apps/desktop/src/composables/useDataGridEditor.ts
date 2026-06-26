@@ -204,11 +204,16 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const focusInput = () => {
       if (typeof document === "undefined") return;
       const root = getScrollerElement()?.closest("[data-grid-root]");
-      const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | null;
+      const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | HTMLTextAreaElement | null;
       input?.focus();
       if (select && input) {
-        input.select();
-        input.setSelectionRange?.(0, input.value.length);
+        if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
+          input.setSelectionRange?.(0, 0);
+          input.scrollTop = 0;
+        } else {
+          input.select();
+          input.setSelectionRange?.(0, input.value.length);
+        }
       }
     };
     nextTick(() => {
@@ -599,7 +604,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function onEditKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
+    const isExpandedTextarea = e.target instanceof HTMLTextAreaElement && e.target.dataset.expandedCellEditor === "true";
+    if (e.key === "Enter" && (!isExpandedTextarea || e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       commitEdit();
       nextTick(focusScrollerWithoutScrolling);

@@ -155,7 +155,7 @@ function sameIdentifier(left: string | undefined, right: string | undefined): bo
 }
 
 function nodeMatchesCandidate(node: TreeNode, candidate: QueryCursorTableCandidate): boolean {
-  if (node.type !== "table" && node.type !== "view") return false;
+  if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
   if (node.connectionId !== candidate.connectionId) return false;
   if (!sameIdentifier(node.database, candidate.database)) return false;
   if (candidate.schema && !sameIdentifier(node.schema, candidate.schema)) return false;

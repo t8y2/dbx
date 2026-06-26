@@ -39,6 +39,7 @@ import {
   mergeTableTreePageChildren,
   objectGroupRefreshParentId,
   objectTypesForGroupNode,
+  sortDatabaseObjectsByName,
   tablePartitionGroups,
   type DatabaseObjectTreeKind,
 } from "@/lib/tableTree";
@@ -70,6 +71,13 @@ function sidebarObjectGroupPageSize(): number {
   return typeof size === "number" && size > 0 ? size : 500;
 }
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+
+interface LocateTableTarget {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  tableName: string;
+}
 
 function nodeIdPart(value: string): string {
   return encodeURIComponent(value);
@@ -636,6 +644,44 @@ export const useConnectionStore = defineStore("connection", () => {
     }));
   }
 
+  function sameSidebarObjectName(left: string | undefined, right: string | undefined): boolean {
+    return (left || "").toLowerCase() === (right || "").toLowerCase();
+  }
+
+  function treeNodeObjectIdentity(node: TreeNode): string {
+    return `${node.type}\0${(node.schema || "").toLowerCase()}\0${node.label.toLowerCase()}`;
+  }
+
+  function mergeLocatedTreeChildren(parent: TreeNode, currentChildren: TreeNode[], pageChildren: TreeNode[], connectionId: string, database: string): TreeNode[] {
+    const tableChildren = pageChildren.filter((child) => child.type === "table");
+    const nonTableChildren = pageChildren.filter((child) => child.type !== "table");
+    let merged = tableChildren.length ? mergeTableTreePageChildren(currentChildren, tableChildren, connectionId, database) : [...currentChildren];
+    const existing = new Set(merged.map(treeNodeObjectIdentity));
+    for (const child of nonTableChildren) {
+      const key = treeNodeObjectIdentity(child);
+      if (existing.has(key)) continue;
+      merged.push(child);
+      existing.add(key);
+    }
+    const config = parent.connectionId ? getConfig(parent.connectionId) : undefined;
+    return sortSidebarTreeChildrenForParent(
+      parent,
+      sortDatabaseObjectsByName(merged, (node) => node.label),
+      config?.db_type,
+    );
+  }
+
+  function findTreeNodes(nodes: TreeNode[], predicate: (node: TreeNode) => boolean): TreeNode[] {
+    const matches: TreeNode[] = [];
+    for (const node of nodes) {
+      if (predicate(node)) matches.push(node);
+      if (node.children) matches.push(...findTreeNodes(node.children, predicate));
+      const hiddenOnlyChildren = node.hiddenChildren?.filter((child) => !(node.children || []).includes(child));
+      if (hiddenOnlyChildren?.length) matches.push(...findTreeNodes(hiddenOnlyChildren, predicate));
+    }
+    return matches;
+  }
+
   async function loadPagedTableGroupChildren(options: {
     node: TreeNode;
     parentNodeId: string;
@@ -644,11 +690,12 @@ export const useConnectionStore = defineStore("connection", () => {
     objectTypes: DatabaseObjectTreeKind[];
     offset: number;
     pageSize: number;
+    searchFilter?: string;
   }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number }> {
     if (!options.node.connectionId || !options.node.database) {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
-    const searchFilter = sidebarSearchQuery.value || undefined;
+    const searchFilter = options.searchFilter || sidebarSearchQuery.value || undefined;
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const tables = await api.listTables(options.node.connectionId, options.node.database, options.querySchema, searchFilter, fetchLimit, searchFilter ? undefined : options.offset, options.objectTypes);
     const hasMore = searchFilter ? false : tables.length > options.pageSize;
@@ -679,8 +726,9 @@ export const useConnectionStore = defineStore("connection", () => {
     nonTableObjectTypes: DatabaseObjectTreeKind[];
     offset: number;
     pageSize: number;
+    searchFilter?: string;
   }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number }> {
-    const searchFilter = sidebarSearchQuery.value || undefined;
+    const searchFilter = options.searchFilter || sidebarSearchQuery.value || undefined;
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const tables = await api.listTables(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, searchFilter ? undefined : options.offset);
     const hasMore = searchFilter ? false : tables.length > options.pageSize;
@@ -2050,6 +2098,75 @@ export const useConnectionStore = defineStore("connection", () => {
     } finally {
       node.isLoading = false;
     }
+  }
+
+  async function loadTableForLocate(target: LocateTableTarget): Promise<boolean> {
+    const config = getConfig(target.connectionId);
+    if (!config) return false;
+    await ensureConnected(target.connectionId);
+
+    const querySchema = connectionObjectTreeQuerySchema(config, target.database, target.schema);
+    const effectiveSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
+    const pageSize = sidebarObjectGroupPageSize();
+    const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
+    let loaded = false;
+
+    if (simpleObjectDisplay) {
+      const parentId = target.schema ? `${target.connectionId}:${target.database}:${target.schema}` : `${target.connectionId}:${target.database}`;
+      const parent = findNode(treeNodes.value, parentId);
+      if (!parent) return false;
+      const page = await loadPagedSimpleTableChildren({
+        nodeId: parentId,
+        connectionId: target.connectionId,
+        database: target.database,
+        querySchema,
+        effectiveSchema,
+        nonTableObjectTypes: [],
+        offset: 0,
+        pageSize,
+        searchFilter: target.tableName,
+      });
+      if (!page.children.length) return false;
+      const currentChildren = withoutLoadMoreNodes(parent.children);
+      const loadMoreNodes = (parent.children || []).filter((child) => child.type === "load-more");
+      const mergedChildren = mergeLocatedTreeChildren(parent, currentChildren, page.children, target.connectionId, target.database);
+      setChildren(parent, [...mergedChildren, ...loadMoreNodes]);
+      parent.objectCount = Math.max(parent.objectCount ?? currentChildren.length, mergedChildren.length);
+      parent.isExpanded = true;
+      return true;
+    }
+
+    const matchingGroups = findTreeNodes(treeNodes.value, (node) => {
+      return (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database) && (!target.schema || sameSidebarObjectName(node.schema, target.schema));
+    });
+
+    for (const group of matchingGroups) {
+      const objectTypes = objectTypesForGroupNode(group.type);
+      const parentNodeId = objectGroupRefreshParentId(group);
+      if (!objectTypes || !parentNodeId) continue;
+
+      const page = await loadPagedTableGroupChildren({
+        node: group,
+        parentNodeId,
+        querySchema,
+        effectiveSchema,
+        objectTypes,
+        offset: 0,
+        pageSize,
+        searchFilter: target.tableName,
+      });
+      if (!page.children.length) continue;
+
+      const currentChildren = withoutLoadMoreNodes(group.children);
+      const loadMoreNodes = (group.children || []).filter((child) => child.type === "load-more");
+      const mergedChildren = mergeLocatedTreeChildren(group, currentChildren, page.children, target.connectionId, target.database);
+      setChildren(group, [...mergedChildren, ...loadMoreNodes]);
+      group.objectCount = Math.max(group.objectCount ?? currentChildren.length, mergedChildren.length);
+      group.isExpanded = true;
+      loaded = true;
+    }
+
+    return loaded;
   }
 
   async function loadAllObjectGroupChildren(parent: TreeNode) {
@@ -3682,6 +3799,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadSqlServerLinkedServerCatalogs,
     loadSqlServerLinkedServerSchemas,
     loadTables,
+    loadTableForLocate,
     loadObjectGroupChildren,
     loadMoreObjectGroupChildren,
     loadAllObjectGroupChildren,

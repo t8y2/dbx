@@ -1,6 +1,7 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export interface ParsedConnectionUrl {
+  name?: string;
   dbType: DatabaseType;
   driverProfile: string;
   driverLabel: string;
@@ -170,6 +171,28 @@ function queryParamValue(params: string, key: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function connectionNameParam(parsed: URL): string | undefined {
+  for (const [key, value] of parsed.searchParams) {
+    if (key.toLowerCase() === "name") {
+      const name = value.trim();
+      if (name) return name;
+    }
+  }
+  return undefined;
+}
+
+function stripConnectionNameParam(params: string): string {
+  if (!params) return params;
+  return params
+    .split("&")
+    .filter((part) => {
+      if (!part) return true;
+      const [rawKey] = part.split("=");
+      return decodeUrlPart(rawKey).trim().toLowerCase() !== "name";
+    })
+    .join("&");
 }
 
 function extractMysqlCredentialParams(params: string): { username?: string; password?: string; urlParams: string } {
@@ -430,8 +453,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
 
   const urlParams = parsed.search.replace(/^\?/, "");
+  const name = connectionNameParam(parsed);
+  const urlParamsWithoutName = stripConnectionNameParam(urlParams);
   const normalizedFragment = decodeUrlPart(parsed.hash.replace(/^#/, "")).trim().toLowerCase();
-  const parsedUrlParams = profile.type === "redis" && normalizedFragment === "insecure" ? [urlParams, "insecure=true"].filter(Boolean).join("&") : urlParams;
+  const parsedUrlParams = profile.type === "redis" && normalizedFragment === "insecure" ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
   const mysqlCredentials = isJdbcUrl && profile.type === "mysql" ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
   const effectiveUrlParams = mysqlCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
@@ -452,6 +477,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
   if (profile.type === "zookeeper") {
     return {
+      ...(name ? { name } : {}),
       dbType: profile.type,
       driverProfile: profile.profile,
       driverLabel: profile.label,
@@ -460,13 +486,14 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
       username: decodeUrlPart(parsed.username),
       password: decodeUrlPart(parsed.password),
       database: undefined,
-      urlParams,
+      urlParams: urlParamsWithoutName,
       ssl: false,
       connectionString: zookeeperConnectStringFromUrl(parsed, profile.defaultPort),
     };
   }
 
   return {
+    ...(name ? { name } : {}),
     dbType: profile.type,
     driverProfile: profile.profile,
     driverLabel: profile.label,
@@ -496,6 +523,7 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     driver_label: parsed.driverLabel,
     host: parsed.host,
     port: parsed.port,
+    name: parsed.name?.trim() || config.name,
     username: parsed.username,
     password: parsed.password,
     database: parsed.database,

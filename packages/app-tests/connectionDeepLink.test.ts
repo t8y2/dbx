@@ -33,6 +33,23 @@ test("parses encoded database URL with password", () => {
   assert.equal(draft?.urlParams, "sslmode=require");
 });
 
+test("uses the nested database URL name as connection name", () => {
+  const nested = encodeURIComponent("mysql://root:123456@localhost/?name=%E5%85%AC%E5%8F%B8+-+%E6%9C%AC%E5%9C%B0Docker&charset=utf8mb4");
+  const draft = parseConnectionDeepLink(`dbx://connection/new?url=${nested}`);
+
+  assert.equal(draft?.name, "公司 - 本地Docker");
+  assert.equal(draft?.dbType, "mysql");
+  assert.equal(draft?.host, "localhost");
+  assert.equal(draft?.urlParams, "charset=utf8mb4");
+});
+
+test("top-level deep link name overrides nested database URL name", () => {
+  const nested = encodeURIComponent("mysql://root@localhost/?name=Nested");
+  const draft = parseConnectionDeepLink(`dbx://connection/new?url=${nested}&name=Top+Level`);
+
+  assert.equal(draft?.name, "Top Level");
+});
+
 test("allows password query field to override database URL password", () => {
   const draft = parseConnectionDeepLink("dbx://connection/new?url=postgres%3A%2F%2Fapp%3Asecret%40db.internal%3A5432%2Forders&password=override");
 

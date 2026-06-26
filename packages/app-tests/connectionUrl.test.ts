@@ -45,6 +45,32 @@ test("parses mysql URLs with encoded credentials", () => {
   assert.equal(parsed.urlParams, "charset=utf8mb4");
 });
 
+test("parses mysql URL name as decoded connection name", () => {
+  const parsed = parseConnectionUrl("mysql://root:123456@localhost/?name=%E5%85%AC%E5%8F%B8+-+%E6%9C%AC%E5%9C%B0Docker&charset=utf8mb4");
+
+  assert.equal(parsed.name, "公司 - 本地Docker");
+  assert.equal(parsed.host, "localhost");
+  assert.equal(parsed.username, "root");
+  assert.equal(parsed.password, "123456");
+  assert.equal(parsed.urlParams, "charset=utf8mb4");
+});
+
+test("consumes mysql URL name when it is the only URL param", () => {
+  const parsed = parseConnectionUrl("mysql://root:123456@localhost/?name=%E5%85%AC%E5%8F%B8+-+%E6%9C%AC%E5%9C%B0Docker");
+
+  assert.equal(parsed.name, "公司 - 本地Docker");
+  assert.equal(parsed.urlParams, "");
+});
+
+test("removes only the connection name from URL params", () => {
+  const parsed = parseConnectionUrl("mysql://root@localhost/app?Name=Analytics+Local&ssl-mode=required");
+
+  assert.equal(parsed.name, "Analytics Local");
+  assert.equal(parsed.database, "app");
+  assert.equal(parsed.urlParams, "ssl-mode=required");
+  assert.equal(parsed.ssl, true);
+});
+
 test("parses mysql TLS URL params into the SSL switch state", () => {
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?ssl-mode=required").ssl, true);
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?require_ssl=true").ssl, true);

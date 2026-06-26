@@ -48,6 +48,7 @@ function optionalBooleanParam(params: URLSearchParams, ...keys: string[]): boole
 function draftFromConnectionUrl(value: string, preferredProfile?: string): ConnectionDeepLinkDraft {
   const parsed = parseConnectionUrl(value, preferredProfile);
   return {
+    name: parsed.name,
     dbType: parsed.dbType,
     driverProfile: parsed.driverProfile,
     driverLabel: parsed.driverLabel,

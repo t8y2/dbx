@@ -356,14 +356,7 @@ function activateTab(tabId: string) {
                     </TooltipTrigger>
                     <TooltipContent>{{ t("connection.readOnlyBadge") }}</TooltipContent>
                   </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <button class="inline-flex rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:opacity-100" :class="tab.pinned ? 'visible text-primary' : 'invisible group-hover:visible'" @click.stop="queryStore.togglePinnedTab(tab.id)">
-                        <Pin class="h-3 w-3" :class="{ 'fill-current': tab.pinned }" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>{{ tab.pinned ? t("contextMenu.unpin") : t("contextMenu.pin") }}</TooltipContent>
-                  </Tooltip>
+                  <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 text-primary fill-current" aria-hidden="true" />
                   <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
                     <X class="h-3 w-3" />
                   </button>

@@ -206,22 +206,7 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
 
 const blockDangerousRedisCommands = ref(true);
 
-const {
-  dangerSql,
-  pendingDangerSql,
-  showDangerDialog,
-  suppressDangerConfirm,
-  tryExecute,
-  doExecute,
-  cancelActiveExecution,
-  tryExplain,
-  onDangerConfirm,
-  showSqlParameterDialog,
-  sqlParameterSourceSql,
-  sqlParameterNames,
-  onSqlParametersConfirm,
-  explainMode,
-} = useSqlExecution({
+const { dangerSql, pendingDangerSql, showDangerDialog, suppressDangerConfirm, tryExecute, doExecute, cancelActiveExecution, tryExplain, onDangerConfirm, showSqlParameterDialog, sqlParameterSourceSql, sqlParameterNames, onSqlParametersConfirm, explainMode } = useSqlExecution({
   activeTab,
   activeConnection,
   executableSql,

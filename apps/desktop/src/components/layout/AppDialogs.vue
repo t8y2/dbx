@@ -125,14 +125,7 @@ watch(
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
   />
-  <SqlParameterDialog
-    v-if="showSqlParameterDialog"
-    :open="showSqlParameterDialog"
-    :sql="sqlParameterSourceSql"
-    :parameters="sqlParameterNames"
-    @update:open="emit('update:showSqlParameterDialog', $event)"
-    @execute="emit('sqlParametersConfirm', $event)"
-  />
+  <SqlParameterDialog v-if="showSqlParameterDialog" :open="showSqlParameterDialog" :sql="sqlParameterSourceSql" :parameters="sqlParameterNames" @update:open="emit('update:showSqlParameterDialog', $event)" @execute="emit('sqlParametersConfirm', $event)" />
   <DataTransferDialog v-if="dialogs.showTransferDialog.value" v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog

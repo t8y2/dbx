@@ -1086,12 +1086,12 @@ fn filter_table_infos(
     offset: Option<usize>,
     object_types: Option<&[String]>,
 ) -> Vec<db::TableInfo> {
-    let filter = filter.unwrap_or("").to_lowercase();
+    let filter = filter.unwrap_or("");
     let limit = limit.unwrap_or(usize::MAX);
     let offset = offset.unwrap_or(0);
     tables
         .into_iter()
-        .filter(|table| filter.is_empty() || table.name.to_lowercase().contains(&filter))
+        .filter(|table| crate::sql::contains_or_fuzzy_match(&table.name, filter))
         .filter(|table| table_info_matches_object_types(table, object_types))
         .skip(offset)
         .take(limit)
@@ -1428,6 +1428,34 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
+    }
+
+    #[test]
+    fn filter_table_infos_matches_fuzzy_subsequences() {
+        let tables = vec![
+            test_table_info("system_user"),
+            test_table_info("user_order"),
+            test_table_info("alpha"),
+        ];
+
+        let system_user = filter_table_infos(tables.clone(), Some("sysu"), None, None, None);
+        assert_eq!(system_user.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["system_user"]);
+
+        let user_order = filter_table_infos(tables, Some("uo"), None, None, None);
+        assert_eq!(user_order.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_order"]);
+    }
+
+    #[test]
+    fn filter_table_infos_keeps_special_filter_characters_literal() {
+        let tables = vec![
+            test_table_info("user_%"),
+            test_table_info("user_account"),
+            test_table_info("userXpercent"),
+        ];
+
+        let filtered = filter_table_infos(tables, Some("user_%"), None, None, None);
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_%"]);
     }
 
     #[test]

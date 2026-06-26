@@ -1744,7 +1744,10 @@ pub async fn execute_query_with_schema_and_max_rows(
     }
 
     let set_schema_start = Instant::now();
-    client.execute(&format!("SET search_path TO {}", pg_quote_ident(schema)), &[]).await.map_err(pg_error_to_string)?;
+    client
+        .execute(&format!("SET search_path TO {}, public", pg_quote_ident(schema)), &[])
+        .await
+        .map_err(pg_error_to_string)?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),
@@ -1808,7 +1811,10 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     }
 
     let set_schema_start = Instant::now();
-    client.execute(&format!("SET search_path TO {}", pg_quote_ident(schema)), &[]).await.map_err(pg_error_to_string)?;
+    client
+        .execute(&format!("SET search_path TO {}, public", pg_quote_ident(schema)), &[])
+        .await
+        .map_err(pg_error_to_string)?;
     log::info!(
         "[postgres][execute_with_schema:set-search-path:done] elapsed_ms={} total_ms={}",
         set_schema_start.elapsed().as_millis(),

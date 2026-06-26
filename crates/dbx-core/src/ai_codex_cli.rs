@@ -75,9 +75,7 @@ fn direct_program_path(program: &str) -> Option<String> {
     if path.is_absolute() && path.is_file() {
         #[cfg(windows)]
         {
-            if let Some(path) = windows_launchable_program_path(path) {
-                return Some(path);
-            }
+            return windows_launchable_program_path(path);
         }
         Some(path.to_string_lossy().to_string())
     } else {
@@ -110,8 +108,19 @@ fn common_program_path(program: &str) -> Option<String> {
     common_executable_dirs()
         .into_iter()
         .flat_map(|dir| program_path_candidates(&dir, program))
+        .filter(|path| is_launchable_program_path(path))
         .find(|path| path.is_file())
         .map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(not(windows))]
+fn is_launchable_program_path(_path: &Path) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn is_launchable_program_path(path: &Path) -> bool {
+    is_windows_launchable_program(path)
 }
 
 #[cfg(not(windows))]
@@ -164,12 +173,10 @@ async fn shell_program_path(program: &str) -> Option<String> {
 #[cfg(windows)]
 fn first_windows_program_path(value: &str) -> Option<String> {
     let paths = value.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
-    if let Some(path) =
-        paths.iter().copied().find(|path| is_windows_launchable_program(Path::new(path)) && Path::new(path).is_file())
-    {
-        return Some(path.to_string());
-    }
-    paths.into_iter().find(|path| Path::new(path).is_file()).map(ToOwned::to_owned)
+    paths
+        .into_iter()
+        .find(|path| is_windows_launchable_program(Path::new(path)) && Path::new(path).is_file())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(windows)]
@@ -519,7 +526,7 @@ mod tests {
     #[cfg(not(windows))]
     use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
     #[cfg(windows)]
-    use super::{first_windows_program_path, program_path_candidates};
+    use super::{direct_program_path, first_windows_program_path, program_path_candidates};
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
@@ -636,6 +643,39 @@ mod tests {
         assert_eq!(resolved, cmd.to_string_lossy());
         let _ = std::fs::remove_file(extensionless);
         let _ = std::fs::remove_file(cmd);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_direct_extensionless_path_uses_cmd_sibling() {
+        let dir = std::env::temp_dir().join(format!("dbx-codex-direct-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let extensionless = dir.join("codex");
+        let cmd = dir.join("codex.cmd");
+        std::fs::write(&extensionless, "#!/bin/sh\n").unwrap();
+        std::fs::write(&cmd, "@echo off\n").unwrap();
+
+        let resolved = direct_program_path(extensionless.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(resolved, cmd.to_string_lossy().as_ref());
+        let _ = std::fs::remove_file(extensionless);
+        let _ = std::fs::remove_file(cmd);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_direct_extensionless_path_is_not_launchable_without_sibling() {
+        let dir = std::env::temp_dir().join(format!("dbx-codex-direct-missing-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let extensionless = dir.join("codex");
+        std::fs::write(&extensionless, "#!/bin/sh\n").unwrap();
+
+        let resolved = direct_program_path(extensionless.to_string_lossy().as_ref());
+
+        assert!(resolved.is_none());
+        let _ = std::fs::remove_file(extensionless);
         let _ = std::fs::remove_dir(dir);
     }
 

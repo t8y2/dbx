@@ -153,18 +153,20 @@ fn locate_windows_command(command: &str) -> Option<String> {
                 .ok()
                 .and_then(first_windows_command_path)
         })
-        .or_else(|| windows_command_candidates(command).into_iter().find(|candidate| Path::new(candidate).is_file()))
+        .or_else(|| {
+            windows_command_candidates(command)
+                .into_iter()
+                .find(|candidate| is_windows_launchable_command(candidate) && Path::new(candidate).is_file())
+        })
 }
 
 #[cfg(windows)]
 fn first_windows_command_path(value: String) -> Option<String> {
     let paths = value.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
-    if let Some(path) =
-        paths.iter().copied().find(|path| is_windows_launchable_command(path) && Path::new(path).is_file())
-    {
-        return Some(path.to_string());
-    }
-    paths.into_iter().find(|path| Path::new(path).is_file()).map(ToOwned::to_owned)
+    paths
+        .into_iter()
+        .find(|path| is_windows_launchable_command(path) && Path::new(path).is_file())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(windows)]
@@ -373,6 +375,8 @@ fn stdout_after_shell_marker(stdout: &str) -> String {
 mod tests {
     #[cfg(not(windows))]
     use super::bash_login_script;
+    #[cfg(windows)]
+    use super::first_windows_command_path;
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
     use super::{stdout_after_shell_marker, SHELL_COMMAND_MARKER};
@@ -409,5 +413,39 @@ mod tests {
         let stdout = format!("loading profile\n{SHELL_COMMAND_MARKER}\n22.19.0\n");
 
         assert_eq!(stdout_after_shell_marker(&stdout), "22.19.0\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_lookup_prefers_cmd_over_extensionless_shim() {
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-command-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let extensionless = dir.join("codex");
+        let cmd = dir.join("codex.cmd");
+        std::fs::write(&extensionless, "#!/bin/sh\n").unwrap();
+        std::fs::write(&cmd, "@echo off\n").unwrap();
+
+        let output = format!("{}\n{}\n", extensionless.display(), cmd.display());
+        let resolved = first_windows_command_path(output).unwrap();
+
+        assert_eq!(resolved, cmd.to_string_lossy().as_ref());
+        let _ = std::fs::remove_file(extensionless);
+        let _ = std::fs::remove_file(cmd);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_lookup_rejects_extensionless_only_shim() {
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-command-extensionless-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let extensionless = dir.join("codex");
+        std::fs::write(&extensionless, "#!/bin/sh\n").unwrap();
+
+        let resolved = first_windows_command_path(extensionless.display().to_string());
+
+        assert!(resolved.is_none());
+        let _ = std::fs::remove_file(extensionless);
+        let _ = std::fs::remove_dir(dir);
     }
 }

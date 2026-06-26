@@ -53,6 +53,7 @@ import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/s
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongoCompletion";
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kvRootPresentation";
+import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redisKeyPattern";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -2792,7 +2793,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (cached) return cached;
     return withCompletionInFlight(`${cacheKey}:redis-keys`, async () => {
       await ensureConnected(connectionId);
-      const pageSize = settingsStore.editorSettings.redisScanPageSize;
+      const pageSize = getConfig(connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT;
       // Bounded multi-round SCAN: trade coverage for latency/memory safety.
       const result = await api.redisScanKeysBatch(connectionId, Number(database), 0, "*", pageSize, 6, false);
       const keys = result.keys.map((key) => key.key_display).slice(0, REDIS_COMPLETION_KEYS_MAX);

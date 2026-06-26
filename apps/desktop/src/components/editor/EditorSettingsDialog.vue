@@ -206,7 +206,6 @@ const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPL
 const tableColumnTemplateSectionRef = ref<HTMLElement | null>(null);
 const draggedTableColumnTemplateRowId = ref<string | null>(null);
 let tableColumnTemplatePointerDragCleanup: (() => void) | null = null;
-const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
 const sqlFormatterConfigValid = ref(true);
@@ -226,7 +225,6 @@ const editExportRowLimitEnabled = ref(settingsStore.editorSettings.exportRowLimi
 const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
-const redisScanPageSizeOptions = [200, 1000, 5000, 10000];
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
@@ -477,7 +475,6 @@ watch(
       editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
       editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
       editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
-      editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
       editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
       sqlFormatterConfigValid.value = true;
@@ -540,7 +537,6 @@ function hasChanges(): boolean {
     editInfiniteScroll.value !== settingsStore.editorSettings.infiniteScroll ||
     editInfiniteScrollMaxRows.value !== settingsStore.editorSettings.infiniteScrollMaxRows ||
     JSON.stringify(normalizedEditTableColumnTemplateFields.value) !== JSON.stringify(settingsStore.editorSettings.tableColumnTemplateFields) ||
-    editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
     JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
@@ -584,7 +580,6 @@ async function persistSettings() {
     infiniteScroll: editInfiniteScroll.value,
     infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
-    redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
@@ -674,8 +669,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
     editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
     editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
-  } else if (tab === "redis") {
-    editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   } else if (tab === "shortcuts") {
     editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   } else if (tab === "snippets") {
@@ -708,7 +701,6 @@ function resetAllDefaults() {
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
   editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
-  editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
   sqlFormatterConfigValid.value = true;
@@ -910,11 +902,6 @@ function onLocaleChange(v: any) {
   if (typeof v === "string") void setLocale(v as Locale);
 }
 
-function onRedisScanPageSizeChange(v: any) {
-  const value = Number(v);
-  if (redisScanPageSizeOptions.includes(value)) editRedisScanPageSize.value = value;
-}
-
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
   editSidebarObjectDisplay.value = value;
 }
@@ -1007,14 +994,13 @@ function setSidebarActivation(value: "single" | "double") {
 const activeSettingsTab = ref("editor");
 const isWeb = !isTauriRuntime();
 const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
-type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "redis" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
+type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
   { value: "editor", label: t("settings.editorTab") },
   { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "appearance", label: t("settings.appearanceTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
-  { value: "redis", label: t("settings.redisTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
   { value: "snippets", label: t("settings.snippetsTab") },
   ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
@@ -1023,7 +1009,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "redis", "shortcuts", "snippets"]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
@@ -2726,23 +2712,6 @@ watch(
                     </table>
                   </div>
                 </div>
-              </div>
-            </section>
-
-            <section v-else-if="activeSettingsTab === 'redis'" class="flex flex-col gap-5 py-2">
-              <div class="space-y-2">
-                <Label>{{ t("settings.redisScanPageSize") }}</Label>
-                <Select :model-value="String(editRedisScanPageSize)" @update:model-value="onRedisScanPageSizeChange">
-                  <SelectTrigger>
-                    <SelectValue :placeholder="t('settings.redisScanPageSize')" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="size in redisScanPageSizeOptions" :key="size" :value="String(size)">
-                      {{ t("settings.redisScanPageSizeOption", { count: size }) }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
               </div>
             </section>
 

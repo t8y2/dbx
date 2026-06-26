@@ -45,6 +45,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         redis_sentinel_tls: false,
         redis_cluster_nodes: String::new(),
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
+        redis_scan_page_size: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),

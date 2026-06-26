@@ -1437,6 +1437,7 @@ const aiModelLoadedSignature = ref("");
 let aiModelRequestToken = 0;
 
 const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
+const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 const aiReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
   { value: "default", labelKey: "ai.reasoningLevelDefault" },
   { value: "minimal", labelKey: "ai.reasoningLevelMinimal" },
@@ -1455,7 +1456,7 @@ watch(aiIsCodexCli, (isCodex) => {
   if (isCodex) void ensureCodexMcpStatus();
 });
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
-const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude");
+const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
 const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
 const aiCredentialPlaceholder = computed(() => {
   if (!aiRequiresApiKey.value) return "Optional";
@@ -1463,18 +1464,25 @@ const aiCredentialPlaceholder = computed(() => {
   return "";
 });
 const aiEndpointPlaceholder = computed(() => {
+  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+    return "https://api.example.com/v1/messages";
+  }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
     return "https://api.example.com/v1";
   }
   return "https://api.openai.com/v1";
 });
 const aiEndpointHint = computed(() => {
+  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+    return t("ai.anthropicMessagesHint");
+  }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
     return "大多数 OpenAI 兼容 API 需要 /v1 路径前缀";
   }
   return "";
 });
 const aiSupportsApiStyle = computed(() => !aiIsCodexCli.value && (aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom"));
+const aiSupportsAnthropicApiStyle = computed(() => aiEditProvider.value === "custom");
 const aiCodexMcpNeedsInstall = computed(() => aiIsCodexCli.value && (!mcpStatus.value || !mcpStatus.value.installed));
 const aiCodexMcpCanInstall = computed(() => {
   const status = mcpStatus.value;
@@ -1686,6 +1694,13 @@ function aiSelectProvider(provider: AiProvider) {
   aiTestErrorCopied.value = false;
   clearAiModelOptions();
   if (provider === "codex-cli") void ensureCodexMcpStatus();
+}
+
+function aiSelectApiStyle(style: AiApiStyle) {
+  aiEditApiStyle.value = style;
+  if (aiEditProvider.value === "custom") {
+    aiEditAuthMethod.value = style === "anthropic-messages" ? "api-key" : "bearer";
+  }
 }
 
 function aiHasChanges(): boolean {
@@ -3058,8 +3073,9 @@ watch(
                 <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }" @click="aiEditApiStyle = 'completions'">/chat/completions</Button>
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }" @click="aiEditApiStyle = 'responses'">/responses</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
+                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
                   </div>
                 </div>
 

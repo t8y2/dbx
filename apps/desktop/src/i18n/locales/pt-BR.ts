@@ -1054,6 +1054,7 @@ export default {
     proxy: "Proxy",
     proxyEnable: "Enviar requisições de AI através do proxy",
     proxyUrl: "URL do Proxy",
+    anthropicMessagesHint: "APIs compatíveis com Anthropic Messages geralmente usam /v1/messages.",
     enableThinking: "Raciocínio",
     enableThinkingOn: "Ativado",
     enableThinkingOff: "Desativado",

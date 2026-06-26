@@ -1115,6 +1115,7 @@ export default {
     enableThinkingOn: "Enabled",
     enableThinkingOff: "Disabled",
     enableThinkingHint: "This option only takes effect on /chat/completions APIs and supported models. When disabled, it can significantly reduce token usage, but the quality of generated results may decrease slightly.",
+    anthropicMessagesHint: "Anthropic Messages compatible APIs usually use /v1/messages.",
     contextWindow: "Context Window",
     contextWindowAuto: "Auto (detect from model name)",
     contextWindowHint: "Tokens. Leave empty to auto-detect. Set manually for local/custom models.",

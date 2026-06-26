@@ -1021,6 +1021,7 @@ export default {
     enableThinkingOn: "已啟用",
     enableThinkingOff: "已停用",
     enableThinkingHint: "此選項僅對 /chat/completions API 且部分支援的模型生效。設為停用後可大幅節省 token，但產生結果品質可能會略微下降。",
+    anthropicMessagesHint: "Anthropic Messages 相容 API 通常使用 /v1/messages。",
     codexMcpRequiredTitle: "需要 DBX MCP Server",
     codexMcpRequiredDescription: "Codex CLI 會透過 DBX MCP Server 存取資料庫結構與查詢工具。請先安裝後再於 AI 助理中使用 Codex。",
     codexCliPathEnvError: "Codex CLI 路徑只能填寫可執行檔路徑。請在下方新增環境變數。",

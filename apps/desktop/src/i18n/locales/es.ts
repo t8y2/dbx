@@ -951,6 +951,7 @@ export default {
     proxy: "Proxy",
     proxyEnable: "Enviar solicitudes de IA mediante proxy",
     proxyUrl: "URL del proxy",
+    anthropicMessagesHint: "Las API compatibles con Anthropic Messages suelen usar /v1/messages.",
     actions: {
       generate: "Generar SQL",
       explain: "Explicar SQL",

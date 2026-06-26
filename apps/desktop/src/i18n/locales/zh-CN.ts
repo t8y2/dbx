@@ -1114,6 +1114,7 @@ export default {
     enableThinkingOn: "已启用",
     enableThinkingOff: "已禁用",
     enableThinkingHint: "此选项仅对 /chat/completions API 且部分支持的模型生效。设为禁用后可大幅节省 token，但生成结果质量可能会略微下降。",
+    anthropicMessagesHint: "Anthropic Messages 兼容 API 通常使用 /v1/messages。",
     contextWindow: "上下文窗口",
     contextWindowAuto: "自动（根据模型名称推断）",
     contextWindowHint: "单位：token。留空自动推断，本地/自定义模型建议手动设置。",

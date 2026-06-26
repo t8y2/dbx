@@ -1110,6 +1110,7 @@ export default {
     enableThinkingOn: "有効",
     enableThinkingOff: "無効",
     enableThinkingHint: "このオプションは/chat/completions APIとサポートされているモデルでのみ有効です。無効にするとトークン使用量を大幅に削減できますが、生成結果の品質が若干低下する可能性があります。",
+    anthropicMessagesHint: "Anthropic Messages 互換 API は通常 /v1/messages を使用します。",
     actions: {
       generate: "SQLを生成",
       explain: "SQLを説明",

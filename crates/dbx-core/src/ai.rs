@@ -61,6 +61,8 @@ pub enum AiApiStyle {
     #[default]
     Completions,
     Responses,
+    #[serde(rename = "anthropic-messages")]
+    AnthropicMessages,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -264,6 +266,15 @@ fn ensure_openai_version_prefix(endpoint: &str) -> String {
     }
 }
 
+fn ensure_anthropic_version_prefix(endpoint: &str) -> String {
+    let ep = endpoint.trim().trim_end_matches('/');
+    if ep.ends_with("/v1") {
+        ep.to_string()
+    } else {
+        format!("{ep}/v1")
+    }
+}
+
 pub fn resolve_endpoint(config: &AiConfig) -> String {
     let ep = config.endpoint.trim().trim_end_matches('/');
     if matches!(config.provider, AiProvider::Gemini) {
@@ -276,9 +287,11 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
     if ep.ends_with("/chat/completions") || ep.ends_with("/responses") || ep.ends_with("/messages") {
         return ep.to_string();
     }
+    if uses_anthropic_messages_api(config) {
+        let base = ensure_anthropic_version_prefix(ep);
+        return format!("{base}/messages");
+    }
     match config.provider {
-        AiProvider::Claude => format!("{ep}/messages"),
-        AiProvider::CodexCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -292,8 +305,13 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
                 format!("{base}/chat/completions")
             }
         }
-        AiProvider::Gemini => unreachable!(),
+        AiProvider::Claude | AiProvider::CodexCli | AiProvider::Gemini => unreachable!(),
     }
+}
+
+pub fn uses_anthropic_messages_api(config: &AiConfig) -> bool {
+    matches!(config.provider, AiProvider::Claude)
+        || matches!(config.provider, AiProvider::Custom) && config.api_style == AiApiStyle::AnthropicMessages
 }
 
 fn resolve_gemini_stream_endpoint(config: &AiConfig) -> String {
@@ -324,6 +342,11 @@ pub fn resolve_model_list_endpoint(config: &AiConfig) -> Result<String, String> 
         .or_else(|| ep.strip_suffix("/messages"))
         .unwrap_or(ep)
         .trim_end_matches('/');
+
+    if uses_anthropic_messages_api(config) {
+        let base = ensure_anthropic_version_prefix(base);
+        return Ok(format!("{base}/models"));
+    }
 
     let base = ensure_openai_version_prefix(base);
 
@@ -684,8 +707,14 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
         | AiProvider::Deepseek
         | AiProvider::Qwen
         | AiProvider::Ollama
-        | AiProvider::OpenaiCompatible
-        | AiProvider::Custom => list_openai_compatible_models(&client, config).await,
+        | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await,
+        AiProvider::Custom => {
+            if uses_anthropic_messages_api(config) {
+                list_claude_models(&client, config).await
+            } else {
+                list_openai_compatible_models(&client, config).await
+            }
+        }
         AiProvider::CodexCli => unreachable!(),
         AiProvider::Gemini => {
             Err("Model listing is only supported for OpenAI-compatible and Claude providers".to_string())
@@ -916,7 +945,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     let client = build_ai_http_client(config, 15)?;
     let start = std::time::Instant::now();
 
-    let is_claude = matches!(config.provider, AiProvider::Claude);
+    let is_claude = uses_anthropic_messages_api(config);
     let is_gemini = matches!(config.provider, AiProvider::Gemini);
     let model = config.model.clone();
 
@@ -957,6 +986,28 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 .send()
                 .await
                 .map_err(|e| format!("Gemini request failed: {e}"))?;
+            if !res.status().is_success() {
+                let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+                return Err(categorize_error(&data, config));
+            }
+            res.bytes_stream()
+        }
+        AiProvider::Custom if uses_anthropic_messages_api(config) => {
+            let body = json!({
+                "model": &model,
+                "max_tokens": 16,
+                "temperature": temperature_value(Some(0.0)),
+                "system": CLAUDE_DEFAULT_SYSTEM,
+                "messages": [{ "role": "user", "content": TEST_PROMPT }],
+                "stream": true,
+            });
+            let res = client
+                .post(resolve_endpoint(config))
+                .headers(claude_headers(config)?)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Claude request failed: {e}"))?;
             if !res.status().is_success() {
                 let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
                 return Err(categorize_error(&data, config));
@@ -1071,9 +1122,17 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
         | AiProvider::Deepseek
         | AiProvider::Qwen
         | AiProvider::Ollama
-        | AiProvider::OpenaiCompatible
-        | AiProvider::Custom => {
+        | AiProvider::OpenaiCompatible => {
             if request.config.api_style == AiApiStyle::Responses {
+                call_responses_api(&client, request.clone()).await
+            } else {
+                call_openai_compatible(&client, request.clone()).await
+            }
+        }
+        AiProvider::Custom => {
+            if uses_anthropic_messages_api(&request.config) {
+                call_claude(&client, request.clone()).await
+            } else if request.config.api_style == AiApiStyle::Responses {
                 call_responses_api(&client, request.clone()).await
             } else {
                 call_openai_compatible(&client, request.clone()).await
@@ -1109,9 +1168,17 @@ pub async fn stream(
         | AiProvider::Deepseek
         | AiProvider::Qwen
         | AiProvider::Ollama
-        | AiProvider::OpenaiCompatible
-        | AiProvider::Custom => {
+        | AiProvider::OpenaiCompatible => {
             if request.config.api_style == AiApiStyle::Responses {
+                stream_responses_api(&client, session_id, request, cancelled, &on_chunk).await
+            } else {
+                stream_openai(&client, session_id, request, cancelled, &on_chunk).await
+            }
+        }
+        AiProvider::Custom => {
+            if uses_anthropic_messages_api(&request.config) {
+                stream_claude(&client, session_id, request, cancelled, &on_chunk).await
+            } else if request.config.api_style == AiApiStyle::Responses {
                 stream_responses_api(&client, session_id, request, cancelled, &on_chunk).await
             } else {
                 stream_openai(&client, session_id, request, cancelled, &on_chunk).await
@@ -2044,6 +2111,12 @@ pub async fn stream_with_tools(
             })
             .await?
         }
+        AiProvider::Custom if uses_anthropic_messages_api(config) => {
+            stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                accumulator.lock().unwrap().process(event, &on_chunk);
+            })
+            .await?
+        }
         _ => {
             stream_openai_with_tools(&client, session_id, request, tools, cancelled, &|event| {
                 accumulator.lock().unwrap().process(event, &on_chunk);
@@ -2119,8 +2192,9 @@ mod tests {
         add_temperature_if_supported_for_config, build_ai_http_client, claude_headers, claude_system_prompt,
         gemini_text, is_kimi_model, openai_response_text, openai_stream_reasoning, openai_stream_text,
         parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens,
-        responses_text, supports_temperature, temperature_value, validate_config, AiApiStyle, AiAuthMethod, AiConfig,
-        AiModelInfo, AiProvider, AiReasoningLevel, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        responses_text, supports_temperature, temperature_value, uses_anthropic_messages_api, validate_config,
+        AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AiReasoningLevel, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     #[test]
@@ -2284,6 +2358,49 @@ mod tests {
             codex_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
+    }
+
+    #[test]
+    fn custom_anthropic_messages_style_uses_claude_endpoints() {
+        let config = AiConfig {
+            provider: AiProvider::Custom,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::ApiKey,
+            endpoint: "https://gateway.example.com/anthropic/v1".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            api_style: AiApiStyle::AnthropicMessages,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+
+        assert!(uses_anthropic_messages_api(&config));
+        assert_eq!(resolve_endpoint(&config), "https://gateway.example.com/anthropic/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://gateway.example.com/anthropic/v1/models");
+
+        let full_messages =
+            AiConfig { endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&full_messages), "https://gateway.example.com/anthropic/v1/messages");
+        assert_eq!(
+            resolve_model_list_endpoint(&full_messages).unwrap(),
+            "https://gateway.example.com/anthropic/v1/models"
+        );
+
+        let bare_origin = AiConfig { endpoint: "https://gateway.example.com".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&bare_origin), "https://gateway.example.com/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&bare_origin).unwrap(), "https://gateway.example.com/v1/models");
+
+        let kimi_coding = AiConfig {
+            endpoint: "https://api.kimi.com/coding/".to_string(),
+            model: "kimi-for-coding".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(resolve_endpoint(&kimi_coding), "https://api.kimi.com/coding/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&kimi_coding).unwrap(), "https://api.kimi.com/coding/v1/models");
     }
 
     #[test]

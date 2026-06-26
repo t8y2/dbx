@@ -13,7 +13,7 @@ import { setDebugLoggingEnabled } from "@/lib/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/tableColumnTemplates";
 
 export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
-export type AiApiStyle = "completions" | "responses";
+export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiReasoningLevel = "default" | "minimal" | "low" | "medium" | "high";
 

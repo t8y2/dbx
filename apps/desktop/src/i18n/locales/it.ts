@@ -1666,6 +1666,23 @@ export default {
     cancel: "Annulla",
     confirm: "Esegui",
   },
+  sqlParameters: {
+    title: "Parametri SQL",
+    description: "Compila i valori per i segnaposto del template SQL. DBX li sostituisce prima di eseguire l'SQL.",
+    name: "Parametro",
+    type: "Tipo",
+    value: "Valore",
+    valuePlaceholder: "Inserisci valore",
+    preview: "Anteprima SQL",
+    execute: "Esegui",
+    kind: {
+      string: "Stringa",
+      number: "Numero",
+      boolean: "Booleano",
+      null: "NULL",
+      raw: "SQL grezzo",
+    },
+  },
   transfer: {
     title: "Trasferimento Dati",
     source: "Sorgente",

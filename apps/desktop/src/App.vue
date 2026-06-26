@@ -206,7 +206,22 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
 
 const blockDangerousRedisCommands = ref(true);
 
-const { dangerSql, pendingDangerSql, showDangerDialog, suppressDangerConfirm, tryExecute, doExecute, cancelActiveExecution, tryExplain, onDangerConfirm, explainMode } = useSqlExecution({
+const {
+  dangerSql,
+  pendingDangerSql,
+  showDangerDialog,
+  suppressDangerConfirm,
+  tryExecute,
+  doExecute,
+  cancelActiveExecution,
+  tryExplain,
+  onDangerConfirm,
+  showSqlParameterDialog,
+  sqlParameterSourceSql,
+  sqlParameterNames,
+  onSqlParametersConfirm,
+  explainMode,
+} = useSqlExecution({
   activeTab,
   activeConnection,
   executableSql,
@@ -1612,11 +1627,16 @@ onUnmounted(() => {
           :show-danger-dialog="showDangerDialog"
           :danger-sql="dangerSql"
           :suppress-danger-confirm="suppressDangerConfirm"
+          :show-sql-parameter-dialog="showSqlParameterDialog"
+          :sql-parameter-source-sql="sqlParameterSourceSql"
+          :sql-parameter-names="sqlParameterNames"
           @update:show-connection-dialog="setConnectionDialogOpen"
           @update:show-settings-dialog="showSettingsDialog = $event"
           @update:show-danger-dialog="showDangerDialog = $event"
           @update:suppress-danger-confirm="suppressDangerConfirm = $event"
+          @update:show-sql-parameter-dialog="showSqlParameterDialog = $event"
           @danger-confirm="onDangerConfirm"
+          @sql-parameters-confirm="onSqlParametersConfirm"
           @connect-started="(name: string) => toast(t('connection.connecting', { name }), 30000)"
           @connect-succeeded="(name: string) => toast(t('connection.connectSuccess', { name }), 2000)"
           @connect-failed="

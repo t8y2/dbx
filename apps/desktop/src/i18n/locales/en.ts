@@ -1884,6 +1884,23 @@ export default {
     cancel: "Cancel",
     confirm: "Execute",
   },
+  sqlParameters: {
+    title: "SQL Parameters",
+    description: "Fill values for SQL template placeholders. DBX replaces them before executing the SQL.",
+    name: "Parameter",
+    type: "Type",
+    value: "Value",
+    valuePlaceholder: "Enter value",
+    preview: "SQL Preview",
+    execute: "Execute",
+    kind: {
+      string: "String",
+      number: "Number",
+      boolean: "Boolean",
+      null: "NULL",
+      raw: "Raw SQL",
+    },
+  },
   transfer: {
     title: "Data Transfer",
     source: "Source",

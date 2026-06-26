@@ -1668,6 +1668,23 @@ export default {
     cancel: "取消",
     confirm: "執行",
   },
+  sqlParameters: {
+    title: "SQL 參數",
+    description: "為 SQL 模板佔位符填寫參數值，DBX 會在執行前替換為 SQL 字面量。",
+    name: "參數名",
+    type: "類型",
+    value: "參數值",
+    valuePlaceholder: "輸入參數值",
+    preview: "SQL 預覽",
+    execute: "執行",
+    kind: {
+      string: "字串",
+      number: "數字",
+      boolean: "布林值",
+      null: "NULL",
+      raw: "原始 SQL",
+    },
+  },
   transfer: {
     title: "資料傳輸",
     source: "來源",

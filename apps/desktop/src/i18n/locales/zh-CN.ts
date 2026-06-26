@@ -1883,6 +1883,23 @@ export default {
     cancel: "取消",
     confirm: "执行",
   },
+  sqlParameters: {
+    title: "SQL 参数",
+    description: "为 SQL 模板占位符填写参数值，DBX 会在执行前替换为 SQL 字面量。",
+    name: "参数名",
+    type: "类型",
+    value: "参数值",
+    valuePlaceholder: "输入参数值",
+    preview: "SQL 预览",
+    execute: "执行",
+    kind: {
+      string: "字符串",
+      number: "数字",
+      boolean: "布尔值",
+      null: "NULL",
+      raw: "原始 SQL",
+    },
+  },
   transfer: {
     title: "数据传输",
     source: "源",

@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 const ConnectionDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionDialog.vue"));
 const EditorSettingsDialog = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const DangerConfirmDialog = defineAsyncComponent(() => import("@/components/editor/DangerConfirmDialog.vue"));
+const SqlParameterDialog = defineAsyncComponent(() => import("@/components/editor/SqlParameterDialog.vue"));
 const DataTransferDialog = defineAsyncComponent(() => import("@/components/transfer/DataTransferDialog.vue"));
 const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/SchemaDiffDialog.vue"));
 const DataCompareDialog = defineAsyncComponent(() => import("@/components/diff/DataCompareDialog.vue"));
@@ -31,6 +32,9 @@ const props = defineProps<{
   showDangerDialog: boolean;
   dangerSql: string;
   suppressDangerConfirm: boolean;
+  showSqlParameterDialog: boolean;
+  sqlParameterSourceSql: string;
+  sqlParameterNames: string[];
 }>();
 
 const emit = defineEmits<{
@@ -38,7 +42,9 @@ const emit = defineEmits<{
   "update:showSettingsDialog": [value: boolean];
   "update:showDangerDialog": [value: boolean];
   "update:suppressDangerConfirm": [value: boolean];
+  "update:showSqlParameterDialog": [value: boolean];
   dangerConfirm: [];
+  sqlParametersConfirm: [sql: string];
   connectStarted: [name: string];
   connectSucceeded: [name: string];
   connectFailed: [message: string];
@@ -118,6 +124,14 @@ watch(
     @update:open="emit('update:showDangerDialog', $event)"
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
+  />
+  <SqlParameterDialog
+    v-if="showSqlParameterDialog"
+    :open="showSqlParameterDialog"
+    :sql="sqlParameterSourceSql"
+    :parameters="sqlParameterNames"
+    @update:open="emit('update:showSqlParameterDialog', $event)"
+    @execute="emit('sqlParametersConfirm', $event)"
   />
   <DataTransferDialog v-if="dialogs.showTransferDialog.value" v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />

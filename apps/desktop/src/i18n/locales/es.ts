@@ -1537,6 +1537,23 @@ export default {
     cancel: "Cancelar",
     confirm: "Ejecutar",
   },
+  sqlParameters: {
+    title: "Parámetros SQL",
+    description: "Completa valores para marcadores de plantilla SQL. DBX los reemplaza antes de ejecutar el SQL.",
+    name: "Parámetro",
+    type: "Tipo",
+    value: "Valor",
+    valuePlaceholder: "Introduce un valor",
+    preview: "Vista previa SQL",
+    execute: "Ejecutar",
+    kind: {
+      string: "Cadena",
+      number: "Número",
+      boolean: "Booleano",
+      null: "NULL",
+      raw: "SQL sin procesar",
+    },
+  },
   transfer: {
     title: "Transferencia de datos",
     source: "Origen",

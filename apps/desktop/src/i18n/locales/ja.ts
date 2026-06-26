@@ -1797,6 +1797,23 @@ export default {
     cancel: "キャンセル",
     confirm: "実行",
   },
+  sqlParameters: {
+    title: "SQLパラメーター",
+    description: "SQLテンプレートのプレースホルダーに値を入力します。DBXは実行前にSQLリテラルへ置換します。",
+    name: "パラメーター",
+    type: "型",
+    value: "値",
+    valuePlaceholder: "値を入力",
+    preview: "SQLプレビュー",
+    execute: "実行",
+    kind: {
+      string: "文字列",
+      number: "数値",
+      boolean: "真偽値",
+      null: "NULL",
+      raw: "Raw SQL",
+    },
+  },
   transfer: {
     title: "データ転送",
     source: "ソース",

@@ -1677,6 +1677,23 @@ export default {
     cancel: "Cancelar",
     confirm: "Executar",
   },
+  sqlParameters: {
+    title: "Parâmetros SQL",
+    description: "Preencha valores para marcadores de template SQL. O DBX substitui antes de executar o SQL.",
+    name: "Parâmetro",
+    type: "Tipo",
+    value: "Valor",
+    valuePlaceholder: "Digite o valor",
+    preview: "Prévia SQL",
+    execute: "Executar",
+    kind: {
+      string: "Texto",
+      number: "Número",
+      boolean: "Booleano",
+      null: "NULL",
+      raw: "SQL bruto",
+    },
+  },
   transfer: {
     title: "Transferência de Dados",
     source: "Origem",

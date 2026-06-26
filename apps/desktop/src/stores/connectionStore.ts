@@ -63,6 +63,7 @@ const METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS = 60_000;
 const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
+const SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE = "Connection attempt was superseded by a newer attempt";
 function sidebarObjectGroupPageSize(): number {
   const settingsStore = useSettingsStore();
   const size = settingsStore.desktopSettings.sidebar_table_page_size;
@@ -224,6 +225,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const staleTreeRefreshIds = new Set<string>();
+  const connectInFlight = new Map<string, Promise<void>>();
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
 
@@ -253,6 +255,10 @@ export const useConnectionStore = defineStore("connection", () => {
   function connectionErrorMessage(error: unknown): string {
     if (error instanceof Error) return error.message;
     return String(error);
+  }
+
+  function isSupersededConnectionAttempt(error: unknown): boolean {
+    return connectionErrorMessage(error).includes(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
   }
 
   function setConnectionError(connectionId: string, message: string) {
@@ -1196,7 +1202,12 @@ export const useConnectionStore = defineStore("connection", () => {
       recordConnectionError(connectionId, error);
       throw error;
     }
-    try {
+    const existingConnect = connectInFlight.get(connectionId);
+    if (existingConnect) {
+      await existingConnect;
+      return;
+    }
+    const connectPromise = (async () => {
       await beforeConnectHandler?.(config);
       await withConnectionAttemptTimeout(api.connectDb(config), config);
       await syncMongoLegacyDriverFallback(connectionId, config);
@@ -1204,9 +1215,21 @@ export const useConnectionStore = defineStore("connection", () => {
       markConnectionHealthChecked(connectionId);
       activeConnectionId.value = connectionId;
       clearConnectionError(connectionId);
+    })();
+    connectInFlight.set(connectionId, connectPromise);
+    try {
+      await connectPromise;
     } catch (e) {
+      if (isSupersededConnectionAttempt(e) && connectedIds.value.has(connectionId)) {
+        clearConnectionError(connectionId);
+        return;
+      }
       recordConnectionError(connectionId, e);
       throw e;
+    } finally {
+      if (connectInFlight.get(connectionId) === connectPromise) {
+        connectInFlight.delete(connectionId);
+      }
     }
   }
 

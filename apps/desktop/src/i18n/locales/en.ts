@@ -392,6 +392,7 @@ export default {
     selectConnection: "Select connection",
     searchConnection: "Search connections...",
     selectDatabase: "Select database",
+    selectDatabaseRequired: "Select a database first",
     searchDatabase: "Search databases...",
     selectSchema: "Select schema",
     setDefaultDatabase: "Set Default",

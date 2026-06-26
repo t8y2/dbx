@@ -393,6 +393,7 @@ export default {
     selectConnection: "选择连接",
     searchConnection: "搜索连接...",
     selectDatabase: "选择数据库",
+    selectDatabaseRequired: "请先选择数据库",
     searchDatabase: "搜索数据库...",
     selectSchema: "选择模式",
     setDefaultDatabase: "设为默认",

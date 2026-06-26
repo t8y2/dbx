@@ -205,6 +205,16 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
 }
 
 const blockDangerousRedisCommands = ref(true);
+const databaseRequiredSignal = ref(0);
+const databaseRequiredTabId = ref<string | null>(null);
+
+function promptActiveDatabaseSelection() {
+  const tab = activeTab.value;
+  if (!tab) return;
+  databaseRequiredTabId.value = tab.id;
+  databaseRequiredSignal.value += 1;
+  toast(t("editor.selectDatabaseRequired"), 2500);
+}
 
 const { dangerSql, pendingDangerSql, showDangerDialog, suppressDangerConfirm, tryExecute, doExecute, cancelActiveExecution, tryExplain, onDangerConfirm, explainMode } = useSqlExecution({
   activeTab,
@@ -213,6 +223,7 @@ const { dangerSql, pendingDangerSql, showDangerDialog, suppressDangerConfirm, tr
   resolveExecutableSql: resolveActiveExecutableSql,
   activeOutputView,
   blockDangerousRedisCommands,
+  onMissingDatabase: promptActiveDatabaseSelection,
 });
 
 function requestActiveEditorExecute() {
@@ -938,7 +949,12 @@ async function changeActiveConnection(connectionId: string) {
 
 function changeActiveDatabase(database: string) {
   const tab = activeTab.value;
-  if (tab) queryStore.updateDatabase(tab.id, database);
+  if (tab) {
+    queryStore.updateDatabase(tab.id, database);
+    if (databaseRequiredTabId.value === tab.id && database) {
+      databaseRequiredTabId.value = null;
+    }
+  }
 }
 
 async function setActiveDatabaseAsDefault() {
@@ -1486,6 +1502,7 @@ onUnmounted(() => {
                   :explain-mode="explainMode"
                   :block-dangerous-redis-commands="blockDangerousRedisCommands"
                   :sql-keyword-case="settingsStore.editorSettings.sqlFormatter.keywordCase"
+                  :database-required-signal="databaseRequiredTabId === activeTab.id ? databaseRequiredSignal : 0"
                   @update:explain-mode="(m: 'explain' | 'autotrace') => (explainMode = m)"
                   @update:block-dangerous-redis-commands="(v: boolean) => (blockDangerousRedisCommands = v)"
                   @execute="requestActiveEditorExecute()"

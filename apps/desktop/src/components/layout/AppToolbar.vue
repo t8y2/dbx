@@ -8,6 +8,7 @@ import LightDropdown from "@/components/ui/LightDropdown.vue";
 import WindowControls from "@/components/layout/WindowControls.vue";
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
 import { shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
+import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/appTheme";
 
@@ -53,19 +54,33 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 
-const themeItems = computed(() => [
-  { value: "light", label: t("toolbar.themeLight"), icon: Sun },
-  { value: "dark", label: t("toolbar.themeDark"), icon: Moon },
-  { value: "system", label: t("toolbar.themeSystem"), icon: SunMoon },
-]);
 const themeTriggerIcon = computed(() => {
   if (props.themeMode === "system") return SunMoon;
   return props.isDark ? Moon : Sun;
 });
+
+function nextThemeMode(mode: AppThemeMode): AppThemeMode {
+  if (mode === "light") return "dark";
+  if (mode === "dark") return "system";
+  return "light";
+}
+
+function themeModeLabel(mode: AppThemeMode): string {
+  if (mode === "light") return t("toolbar.themeLight");
+  if (mode === "dark") return t("toolbar.themeDark");
+  return t("toolbar.themeSystem");
+}
+
+function cycleThemeMode() {
+  const next = nextThemeMode(props.themeMode);
+  emit("set-theme-mode", next);
+  toast(`${t("toolbar.theme")}: ${themeModeLabel(next)}`, 1600);
+}
 
 function onToolbarDblClick(e: MouseEvent) {
   if (isDesktop) return;
@@ -149,8 +164,8 @@ const collapsibleRightItemDefs = computed(() => {
     items.push({
       key: "theme",
       label: t("toolbar.theme"),
-      icon: SunMoon,
-      action: () => {},
+      icon: themeTriggerIcon.value,
+      action: cycleThemeMode,
       disabled: false,
     });
   }
@@ -322,6 +337,16 @@ const collapsedItems = computed(() => {
   return items;
 });
 
+function runMoreItem(value: string) {
+  const item = moreItems.value.find((i) => i.value === value);
+  item?.action();
+}
+
+function runCollapsedItem(value: string) {
+  const item = collapsedItems.value.find((i) => i.value === value);
+  item?.action();
+}
+
 // Per-item overflow visibility helper
 function isRightItemVisible(key: string) {
   return !overflowedRightKeys.value.has(key);
@@ -368,12 +393,7 @@ const checkingUpdates = computed(() => props.checkingUpdates);
         :show-chevron="true"
         check-position="none"
         align="start"
-        @update:model-value="
-          (value) => {
-            const item = moreItems.find((i) => i.value === value);
-            item?.action();
-          }
-        "
+        @update:model-value="runMoreItem"
       />
     </template>
 
@@ -389,12 +409,7 @@ const checkingUpdates = computed(() => props.checkingUpdates);
         :show-chevron="true"
         check-position="none"
         align="start"
-        @update:model-value="
-          (value) => {
-            const item = collapsedItems.find((i) => i.value === value);
-            item?.action();
-          }
-        "
+        @update:model-value="runCollapsedItem"
       />
     </template>
 
@@ -448,22 +463,9 @@ const checkingUpdates = computed(() => props.checkingUpdates);
 
       <Tooltip v-if="toolbarItems.theme">
         <TooltipTrigger as-child>
-          <span v-show="isRightItemVisible('theme')" class="inline-flex shrink-0">
-            <LightDropdown
-              :model-value="themeMode"
-              :items="themeItems"
-              :aria-label="t('toolbar.theme')"
-              :trigger-icon="themeTriggerIcon"
-              trigger-class="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
-              trigger-icon-class="h-4 w-4"
-              item-icon-class="h-4 w-4"
-              :show-trigger-label="false"
-              :show-chevron="false"
-              check-position="right"
-              align="end"
-              @update:model-value="(value) => emit('set-theme-mode', value as AppThemeMode)"
-            />
-          </span>
+          <Button v-show="isRightItemVisible('theme')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :aria-label="t('toolbar.theme')" @click="cycleThemeMode">
+            <component :is="themeTriggerIcon" class="h-4 w-4" />
+          </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.theme") }}</TooltipContent>
       </Tooltip>

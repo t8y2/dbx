@@ -47,33 +47,39 @@ export interface AiRequestInput {
   context: AiContext;
 }
 
-function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { messages: api.AiMessage[]; systemPrompt: string; maxTokens: number; temperature: number } {
+function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number; temperature: number } {
   const isZh = isChineseLocale(currentLocale());
   const skill = aiSkillForAction(input.action);
   const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
   const instruction = isZh ? skill.userInstruction.zh : skill.userInstruction.en;
   const userPrompt = [`Action: ${input.action}`, instruction, "", "User request:", input.instruction.trim() || "(No extra instruction provided.)"].join("\n");
+  const taskContract: api.AiTaskContract = {
+    action: input.action,
+    mode: input.mode || "ask",
+    userRequest: input.instruction.trim(),
+  };
 
   const messages: api.AiMessage[] = [...(history || []), { role: "user", content: userPrompt }];
 
   const params = actionParams(input.action);
   const maxTokens = input.config.enableThinking ? Math.max(params.maxTokens, 8192) : params.maxTokens;
-  return { messages, systemPrompt, maxTokens, temperature: params.temperature };
+  return { messages, systemPrompt, taskContract, maxTokens, temperature: params.temperature };
 }
 
 export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
-  const { messages, systemPrompt, maxTokens, temperature } = buildAgentRequest(input, history);
+  const { messages, systemPrompt, taskContract, maxTokens, temperature } = buildAgentRequest(input, history);
   return api.aiComplete({
     config: input.config,
     systemPrompt,
     messages,
+    taskContract,
     maxTokens,
     temperature,
   });
 }
 
 export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void): Promise<void> {
-  const { messages, systemPrompt, maxTokens, temperature } = buildAgentRequest(input, history);
+  const { messages, systemPrompt, taskContract, maxTokens, temperature } = buildAgentRequest(input, history);
   const sid = sessionId || uuid();
 
   await api.aiStream(
@@ -82,6 +88,7 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
       config: input.config,
       systemPrompt,
       messages,
+      taskContract,
       maxTokens,
       temperature,
     },
@@ -95,7 +102,7 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
 }
 
 export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string): Promise<string> {
-  const { messages, systemPrompt, maxTokens, temperature } = buildAgentRequest(input, history);
+  const { messages, systemPrompt, taskContract, maxTokens, temperature } = buildAgentRequest(input, history);
   const sid = sessionId || uuid();
 
   return api.aiAgentStream(
@@ -104,6 +111,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
       config: input.config,
       systemPrompt,
       messages,
+      taskContract,
       maxTokens,
       temperature,
     },

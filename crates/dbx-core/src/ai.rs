@@ -155,12 +155,25 @@ pub struct ToolCallRef {
     pub arguments: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTaskContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_request: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiCompletionRequest {
     pub config: AiConfig,
     pub system_prompt: String,
     pub messages: Vec<AiMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_contract: Option<AiTaskContract>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
 }

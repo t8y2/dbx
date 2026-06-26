@@ -252,10 +252,17 @@ export interface AiMessage {
   content: string;
 }
 
+export interface AiTaskContract {
+  action?: string;
+  mode?: string;
+  userRequest?: string;
+}
+
 export interface AiCompletionRequest {
   config: AiConfig;
   systemPrompt: string;
   messages: AiMessage[];
+  taskContract?: AiTaskContract;
   maxTokens?: number;
   temperature?: number;
 }

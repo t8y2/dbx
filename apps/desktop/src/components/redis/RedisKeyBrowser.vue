@@ -21,7 +21,6 @@ import * as api from "@/lib/api";
 import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
@@ -31,11 +30,11 @@ import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
 import { redisKeySearchPattern } from "@/lib/redisKeyPattern";
+import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redisKeyPattern";
 
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
-const settingsStore = useSettingsStore();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 
 type RedisSearchMode = "key" | "value" | "all";
@@ -115,6 +114,7 @@ const searchPlaceholder = computed(() => {
 });
 const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
+const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
 watch(redisKeySeparator, () => {
   if (flatKeys.value.length > 0) rebuildTree(false);
 });
@@ -202,14 +202,14 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
 }
 
 async function fetchScanPage(): Promise<RedisScanResult> {
-  const pageSize = settingsStore.editorSettings.redisScanPageSize;
+  const pageSize = redisScanPageSize.value;
   return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, 1, false);
 }
 
 /// Batch-scan variant that performs multiple SCAN iterations server-side.
 /// Dramatically reduces frontend↔backend roundtrips for bulk loading.
 async function fetchScanBatchPage(maxIterations: number, options: { count?: number; includeTypes?: boolean } = {}): Promise<RedisScanResult> {
-  const pageSize = options.count ?? settingsStore.editorSettings.redisScanPageSize;
+  const pageSize = options.count ?? redisScanPageSize.value;
   // Value search cannot be batched because each key requires a GET.
   if (isValueSearchMode.value) {
     return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
@@ -269,19 +269,19 @@ async function streamValueSearch(requestId: number) {
 }
 
 async function fillInitialKeyBatch(requestId: number) {
-  const targetCount = Math.max(1, settingsStore.editorSettings.redisScanPageSize);
-  // Use server-side batching to fill the initial view quickly.
-  // Each batch iteration does one SCAN round-trip; 5 iterations with
-  // COUNT=1000 should return enough keys for most cases.
-  const maxIter = Math.max(1, Math.ceil(targetCount / Math.max(1, settingsStore.editorSettings.redisScanPageSize)));
-  const result = await fetchScanBatchPage(Math.min(maxIter, 8));
-  if (requestId !== searchRequestId) return;
-  appendScanResult(result);
-  // If we still need more keys, do one more batch
-  if (flatKeys.value.length < targetCount && hasMore.value && requestId === searchRequestId) {
-    const result2 = await fetchScanBatchPage(Math.min(maxIter, 8));
+  // Initial batch should fetch a substantial number of keys regardless of
+  // redisScanPageSize.  We scan in batches of at most 8 iterations each and
+  // keep going until we've done at least 16 total iterations (enough to cover
+  // most key spaces even with COUNT=200) or hasMore becomes false.
+  const MAX_TOTAL_ITERATIONS = 16;
+  const BATCH_ITERATIONS = 8;
+  let totalIters = 0;
+  while (requestId === searchRequestId && hasMore.value && totalIters < MAX_TOTAL_ITERATIONS) {
+    const batchSize = Math.min(BATCH_ITERATIONS, MAX_TOTAL_ITERATIONS - totalIters);
+    const result = await fetchScanBatchPage(batchSize);
     if (requestId !== searchRequestId) return;
-    appendScanResult(result2);
+    appendScanResult(result);
+    totalIters += batchSize;
   }
 }
 

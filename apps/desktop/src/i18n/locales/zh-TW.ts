@@ -2431,6 +2431,7 @@ export default {
     mcpConfig: "MCP 設定",
     mcpCodexConfig: "Codex 設定",
     mcpCodexConfigPath: "Codex 可放在 ~/.codex/config.toml 或專案級 .codex/config.toml。",
+    mcpOpenCodeConfigPath: "全域 ~/.config/opencode/opencode.json，專案級 opencode.json。",
     mcpReadonlyMode: "唯讀模式",
     mcpReadonlyModeDescription: "開啟後會為示例配置附加 DBX_MCP_ALLOW_WRITES=0，MCP 會話只允許查詢。",
     mcpAllowDangerous: "允許危險 SQL",

@@ -206,7 +206,6 @@ const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPL
 const tableColumnTemplateSectionRef = ref<HTMLElement | null>(null);
 const draggedTableColumnTemplateRowId = ref<string | null>(null);
 let tableColumnTemplatePointerDragCleanup: (() => void) | null = null;
-const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
 const sqlFormatterConfigValid = ref(true);
@@ -226,7 +225,6 @@ const editExportRowLimitEnabled = ref(settingsStore.editorSettings.exportRowLimi
 const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
-const redisScanPageSizeOptions = [200, 1000, 5000, 10000];
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
@@ -477,7 +475,6 @@ watch(
       editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
       editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
       editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
-      editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
       editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
       sqlFormatterConfigValid.value = true;
@@ -540,7 +537,6 @@ function hasChanges(): boolean {
     editInfiniteScroll.value !== settingsStore.editorSettings.infiniteScroll ||
     editInfiniteScrollMaxRows.value !== settingsStore.editorSettings.infiniteScrollMaxRows ||
     JSON.stringify(normalizedEditTableColumnTemplateFields.value) !== JSON.stringify(settingsStore.editorSettings.tableColumnTemplateFields) ||
-    editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
     JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
@@ -584,7 +580,6 @@ async function persistSettings() {
     infiniteScroll: editInfiniteScroll.value,
     infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
-    redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
@@ -674,8 +669,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
     editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
     editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
-  } else if (tab === "redis") {
-    editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   } else if (tab === "shortcuts") {
     editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   } else if (tab === "snippets") {
@@ -708,7 +701,6 @@ function resetAllDefaults() {
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
   editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
-  editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
   sqlFormatterConfigValid.value = true;
@@ -910,11 +902,6 @@ function onLocaleChange(v: any) {
   if (typeof v === "string") void setLocale(v as Locale);
 }
 
-function onRedisScanPageSizeChange(v: any) {
-  const value = Number(v);
-  if (redisScanPageSizeOptions.includes(value)) editRedisScanPageSize.value = value;
-}
-
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
   editSidebarObjectDisplay.value = value;
 }
@@ -1007,14 +994,13 @@ function setSidebarActivation(value: "single" | "double") {
 const activeSettingsTab = ref("editor");
 const isWeb = !isTauriRuntime();
 const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
-type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "redis" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
+type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
   { value: "editor", label: t("settings.editorTab") },
   { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "appearance", label: t("settings.appearanceTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
-  { value: "redis", label: t("settings.redisTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
   { value: "snippets", label: t("settings.snippetsTab") },
   ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
@@ -1023,7 +1009,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "redis", "shortcuts", "snippets"]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
@@ -1068,8 +1054,8 @@ async function exportDebugLogs() {
 const mcpStatus = ref<McpServerStatus | null>(null);
 const mcpStatusLoading = ref(false);
 const mcpStatusError = ref("");
-const mcpCopied = ref<"" | "install" | "claude-config" | "codex-config">("");
-const mcpConfigTab = ref<"claude" | "codex">("claude");
+const mcpCopied = ref<"" | "install" | "claude-config" | "codex-config" | "opencode-config">("");
+const mcpConfigTab = ref<"claude" | "codex" | "opencode">("claude");
 const mcpReadonlyMode = ref(false);
 const mcpAllowDangerous = ref(false);
 const mcpInstalling = ref(false);
@@ -1114,6 +1100,22 @@ const mcpCodexRecommendedConfig = computed(() => {
   return lines.join("\n");
 });
 
+const mcpOpenCodeRecommendedConfig = computed(() => {
+  const config: Record<string, unknown> = {
+    mcp: {
+      dbx: {
+        type: "local",
+        command: ["dbx-mcp-server"],
+      } as Record<string, unknown>,
+    },
+  };
+  if (mcpEnvEntries.value.length > 0) {
+    const env = Object.fromEntries(mcpEnvEntries.value);
+    ((config.mcp as Record<string, unknown>).dbx as Record<string, unknown>).environment = env;
+  }
+  return JSON.stringify(config, null, 2);
+});
+
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
   if (!mcpStatus.value.installed || mcpStatus.value.update_available || mcpStatus.value.error) return "warning";
@@ -1151,7 +1153,7 @@ async function refreshMcpStatus() {
   }
 }
 
-async function copyMcpText(kind: "install" | "claude-config" | "codex-config", value: string) {
+async function copyMcpText(kind: "install" | "claude-config" | "codex-config" | "opencode-config", value: string) {
   mcpCopied.value = kind;
   try {
     await copyToClipboard(value);
@@ -2729,23 +2731,6 @@ watch(
               </div>
             </section>
 
-            <section v-else-if="activeSettingsTab === 'redis'" class="flex flex-col gap-5 py-2">
-              <div class="space-y-2">
-                <Label>{{ t("settings.redisScanPageSize") }}</Label>
-                <Select :model-value="String(editRedisScanPageSize)" @update:model-value="onRedisScanPageSizeChange">
-                  <SelectTrigger>
-                    <SelectValue :placeholder="t('settings.redisScanPageSize')" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="size in redisScanPageSizeOptions" :key="size" :value="String(size)">
-                      {{ t("settings.redisScanPageSizeOption", { count: size }) }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
-              </div>
-            </section>
-
             <section v-else-if="activeSettingsTab === 'shortcuts'" class="flex flex-col gap-2 py-2">
               <div class="overflow-hidden rounded-md border border-border/70 bg-background">
                 <div v-for="definition in SHORTCUT_DEFINITIONS" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
@@ -3285,6 +3270,7 @@ watch(
                   <TabsList>
                     <TabsTrigger value="claude">Claude Code</TabsTrigger>
                     <TabsTrigger value="codex">Codex</TabsTrigger>
+                    <TabsTrigger value="opencode">OpenCode</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="claude" class="m-0">
@@ -3306,6 +3292,21 @@ watch(
                         <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpCodexRecommendedConfig }}</code></pre>
                         <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'codex-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="opencode" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpOpenCodeConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpOpenCodeRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('opencode-config', mcpOpenCodeRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'opencode-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
                       </div>

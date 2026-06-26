@@ -4,6 +4,53 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
 
+pub const MIN_FUZZY_FILTER_CHARS: usize = 2;
+
+pub fn fuzzy_filter_enabled(filter: &str) -> bool {
+    filter.trim().chars().count() >= MIN_FUZZY_FILTER_CHARS
+}
+
+pub fn fuzzy_subsequence_match(text: &str, filter: &str) -> bool {
+    let filter = filter.trim().to_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let text = text.to_lowercase();
+    let mut chars = text.chars();
+    for needle in filter.chars() {
+        if !chars.any(|candidate| candidate == needle) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn contains_or_fuzzy_match(text: &str, filter: &str) -> bool {
+    let filter = filter.trim().to_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let text = text.to_lowercase();
+    text.contains(&filter) || (fuzzy_filter_enabled(&filter) && fuzzy_subsequence_match(&text, &filter))
+}
+
+pub fn fuzzy_like_pattern_with_escape(value: &str, mut escape: impl FnMut(&str) -> String) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        return "%%".to_string();
+    }
+
+    let mut pattern = String::with_capacity(value.len() * 2 + 2);
+    pattern.push('%');
+    for ch in value.chars() {
+        pattern.push_str(&escape(&ch.to_string()));
+        pattern.push('%');
+    }
+    pattern
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SqlFileRequest {
@@ -1973,11 +2020,34 @@ mod tests {
     use crate::models::connection::DatabaseType;
 
     use super::{
-        decode_sql_file_bytes, find_statement_at_cursor_for_database, optimize_sql_file_import_statements,
+        contains_or_fuzzy_match, decode_sql_file_bytes, find_statement_at_cursor_for_database, fuzzy_filter_enabled,
+        fuzzy_like_pattern_with_escape, fuzzy_subsequence_match, optimize_sql_file_import_statements,
         prepare_sql_file_statement, split_sql_script, split_sql_statements_for_database,
         starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database, SqlDialectProfile,
         SqlFileStatementAction, SqlStatementSplitter,
     };
+
+    #[test]
+    fn fuzzy_subsequence_match_matches_ordered_characters() {
+        assert!(fuzzy_subsequence_match("system_user", "sysu"));
+        assert!(contains_or_fuzzy_match("user_order", "uo"));
+        assert!(!contains_or_fuzzy_match("alpha", "uo"));
+    }
+
+    #[test]
+    fn contains_or_fuzzy_match_skips_fuzzy_for_single_character_filters() {
+        assert!(fuzzy_filter_enabled("uo"));
+        assert!(!fuzzy_filter_enabled("u"));
+        assert!(contains_or_fuzzy_match("user_order", "u"));
+        assert!(!contains_or_fuzzy_match("orders", "u"));
+    }
+
+    #[test]
+    fn fuzzy_like_pattern_with_escape_keeps_wildcards_literal() {
+        let pattern = fuzzy_like_pattern_with_escape("user_%", |value| value.replace('%', "\\%").replace('_', "\\_"));
+
+        assert_eq!(pattern, "%u%s%e%r%\\_%\\%%");
+    }
 
     #[test]
     fn splits_semicolon_delimited_statements() {

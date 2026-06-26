@@ -39,15 +39,6 @@ function withMockLocalStorage(initial: Record<string, string>, run: () => void) 
   }
 }
 
-test("defaults Redis scan page size to 1000 keys", () => {
-  assert.equal(DEFAULT_EDITOR_SETTINGS.redisScanPageSize, 1000);
-  assert.equal(normalizeEditorSettings({}).redisScanPageSize, 1000);
-});
-
-test("keeps a saved Redis scan page size", () => {
-  assert.equal(normalizeEditorSettings({ redisScanPageSize: 5000 }).redisScanPageSize, 5000);
-});
-
 test("normalizes saved query result page size", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.pageSize, 100);
   assert.equal(normalizeEditorSettings({ pageSize: 5000 }).pageSize, 5000);

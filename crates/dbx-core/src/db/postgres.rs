@@ -1170,13 +1170,16 @@ pub async fn list_tables_filtered(
     offset: Option<usize>,
 ) -> Result<Vec<TableInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
-    let filter_pattern = like_contains_pattern(filter.unwrap_or("").trim());
+    let filter = filter.unwrap_or("").trim();
+    let filter_pattern = like_contains_pattern(filter);
+    let fuzzy_filter_pattern =
+        if crate::sql::fuzzy_filter_enabled(filter) { like_fuzzy_pattern(filter) } else { String::new() };
     let limit_param = limit.and_then(|value| i64::try_from(value).ok());
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let stmt = client.prepare_cached(postgres_tables_sql()).await.map_err(|e| e.to_string())?;
     let rows = client
-        .query(&stmt, &[&schema, &filter_pattern, &limit_param, &offset_param])
+        .query(&stmt, &[&schema, &filter_pattern, &fuzzy_filter_pattern, &limit_param, &offset_param])
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1415,9 +1418,9 @@ fn postgres_tables_sql() -> &'static str {
          LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
          LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
-           AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
+           AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~' OR ($3 <> '' AND c.relname ILIKE $3 ESCAPE '~')) \
          ORDER BY c.relname \
-         LIMIT $3 OFFSET $4"
+         LIMIT $4 OFFSET $5"
 }
 
 fn like_contains_pattern(value: &str) -> String {
@@ -1435,6 +1438,19 @@ fn like_contains_pattern(value: &str) -> String {
     }
     pattern.push('%');
     pattern
+}
+
+fn like_fuzzy_pattern(value: &str) -> String {
+    crate::sql::fuzzy_like_pattern_with_escape(value, |value| {
+        let mut escaped = String::with_capacity(value.len() + 1);
+        for ch in value.chars() {
+            if ch == '~' || ch == '%' || ch == '_' {
+                escaped.push('~');
+            }
+            escaped.push(ch);
+        }
+        escaped
+    })
 }
 
 fn list_objects_sql(include_timestamps: bool) -> &'static str {
@@ -3025,10 +3041,21 @@ mod tests {
     }
 
     #[test]
+    fn like_fuzzy_pattern_escapes_wildcards() {
+        assert_eq!(like_fuzzy_pattern(""), "%%");
+        assert_eq!(like_fuzzy_pattern("sysu"), "%s%y%s%u%");
+        assert_eq!(like_fuzzy_pattern("user_%"), "%u%s%e%r%~_%~%%");
+        assert_eq!(like_fuzzy_pattern("tilde~name"), "%t%i%l%d%e%~~%n%a%m%e%");
+    }
+
+    #[test]
     fn postgres_tables_sql_uses_non_backslash_like_escape() {
         let sql = postgres_tables_sql();
 
         assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
+        assert!(sql.contains("$3 <> ''"));
+        assert!(sql.contains("ILIKE $3 ESCAPE '~'"));
+        assert!(sql.contains("LIMIT $4 OFFSET $5"));
     }
 
     #[test]

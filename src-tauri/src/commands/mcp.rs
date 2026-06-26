@@ -143,10 +143,14 @@ fn installed_mcp_bin_script() -> Option<String> {
 
 #[cfg(windows)]
 fn locate_windows_command(command: &str) -> Option<String> {
-    command_stdout("where", &[command]).ok().and_then(first_non_empty_line).or_else(|| {
-        let script = format!("(Get-Command {} -ErrorAction SilentlyContinue).Source", windows_shell_quote(command));
-        command_stdout("powershell.exe", &["-NoProfile", "-Command", &script]).ok().and_then(first_non_empty_line)
-    })
+    command_stdout("where", &[command])
+        .ok()
+        .and_then(first_non_empty_line)
+        .or_else(|| {
+            let script = format!("(Get-Command {} -ErrorAction SilentlyContinue).Source", windows_shell_quote(command));
+            command_stdout("powershell.exe", &["-NoProfile", "-Command", &script]).ok().and_then(first_non_empty_line)
+        })
+        .or_else(|| windows_command_candidates(command).into_iter().find(|candidate| Path::new(candidate).is_file()))
 }
 
 fn command_success(command: &str, args: &[&str]) -> bool {
@@ -221,7 +225,34 @@ fn windows_command_candidates(command: &str) -> Vec<String> {
     if Path::new(command).extension().is_some() {
         return Vec::new();
     }
-    ["cmd", "exe", "ps1"].iter().map(|extension| format!("{command}.{extension}")).collect()
+    let names = ["cmd", "exe", "ps1"].iter().map(|extension| format!("{command}.{extension}"));
+    names
+        .clone()
+        .chain(
+            windows_common_command_dirs()
+                .into_iter()
+                .flat_map(|dir| names.clone().map(move |name| dir.join(name).to_string_lossy().to_string())),
+        )
+        .collect()
+}
+
+#[cfg(windows)]
+fn windows_common_command_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+        dirs.push(nvm_symlink.into());
+    }
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        dirs.push(std::path::PathBuf::from(app_data).join("npm"));
+    }
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        dirs.push(std::path::PathBuf::from(program_files).join("nodejs"));
+    }
+    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+        dirs.push(std::path::PathBuf::from(program_files_x86).join("nodejs"));
+    }
+    dirs.push(std::path::PathBuf::from(r"C:\nvm4w\nodejs"));
+    dirs
 }
 
 #[cfg(windows)]

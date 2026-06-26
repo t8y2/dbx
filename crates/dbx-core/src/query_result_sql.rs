@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::connection::DatabaseType;
 use crate::sql::find_statement_at_cursor;
 use crate::sql_dialect::{pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy};
-use sqlparser::ast::{GroupByExpr, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{Expr, GroupByExpr, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
@@ -405,13 +405,50 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         return (offset == 0).then(|| statement.to_string());
     }
 
-    let has_order_by = find_top_level_trailing_order_by(statement).is_some();
-    if !has_order_by && has_top_level_select_distinct(statement) {
+    let order_by_index = find_top_level_trailing_order_by(statement);
+    if order_by_index.is_none() && has_top_level_select_distinct(statement) {
         return (offset == 0).then(|| add_sql_server_top(statement, limit));
     }
 
-    let order_by = if has_order_by { String::new() } else { " ORDER BY (SELECT NULL)".to_string() };
-    Some(format!("{statement}{order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY;"))
+    if offset == 0 {
+        return Some(add_sql_server_top(statement, limit));
+    }
+
+    let statement_without_order = order_by_index.map(|index| statement[..index].trim_end()).unwrap_or(statement);
+    if !sql_server_row_number_pagination_safe(statement_without_order) {
+        return None;
+    }
+
+    let row_number_order = order_by_index
+        .map(|index| statement[index..].trim().to_string())
+        .unwrap_or_else(|| "ORDER BY (SELECT NULL)".to_string());
+    let end = offset + limit;
+    Some(format!(
+        "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({statement_without_order}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
+    ))
+}
+
+fn sql_server_row_number_pagination_safe(statement: &str) -> bool {
+    let dialect = GenericDialect {};
+    let Ok(statements) = Parser::parse_sql(&dialect, statement) else {
+        return false;
+    };
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return false;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+
+    select.projection.iter().all(|item| match item {
+        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => false,
+        SelectItem::UnnamedExpr(expr) => sql_server_derived_projection_has_name(expr),
+        SelectItem::ExprWithAlias { .. } | SelectItem::ExprWithAliases { .. } => true,
+    })
+}
+
+fn sql_server_derived_projection_has_name(expr: &Expr) -> bool {
+    matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
 }
 
 fn add_sql_server_top(sql: &str, limit: usize) -> String {
@@ -883,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_sqlserver_offset_fetch_pagination_for_first_page() {
+    fn uses_sqlserver_top_pagination_for_first_page() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM users ORDER BY id DESC".to_string(),
             database_type: Some(DatabaseType::SqlServer),
@@ -892,14 +929,11 @@ mod tests {
         });
 
         assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT id FROM users ORDER BY id DESC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;"
-        );
+        assert_eq!(result.sql.unwrap(), "SELECT TOP (100) id FROM users ORDER BY id DESC");
     }
 
     #[test]
-    fn uses_sqlserver_offset_fetch_for_count_queries_without_derived_table() {
+    fn uses_sqlserver_top_for_count_queries_without_derived_table() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT COUNT(*) FROM TicketInfo".to_string(),
             database_type: Some(DatabaseType::SqlServer),
@@ -908,10 +942,7 @@ mod tests {
         });
 
         assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT COUNT(*) FROM TicketInfo ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;"
-        );
+        assert_eq!(result.sql.unwrap(), "SELECT TOP (100) COUNT(*) FROM TicketInfo");
     }
 
     #[test]
@@ -943,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn paginates_sqlserver_all_queries_with_offset_fetch() {
+    fn paginates_sqlserver_all_queries_with_top() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT ALL ProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data".to_string(),
             database_type: Some(DatabaseType::SqlServer),
@@ -952,10 +983,7 @@ mod tests {
         });
 
         assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT ALL ProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;"
-        );
+        assert_eq!(result.sql.unwrap(), "SELECT ALL TOP (100) ProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data");
     }
 
     #[test]
@@ -968,10 +996,7 @@ mod tests {
         });
 
         assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT AllProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;"
-        );
+        assert_eq!(result.sql.unwrap(), "SELECT TOP (100) AllProjectType FROM JDDR_sys_BasicConfig_ProjectInfo_Data");
     }
 
     #[test]
@@ -1092,14 +1117,11 @@ WHERE u.id = picked.id;
         });
 
         assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT @@version ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;"
-        );
+        assert_eq!(result.sql.unwrap(), "SELECT TOP (100) @@version");
     }
 
     #[test]
-    fn uses_sqlserver_offset_fetch_pagination_for_later_pages() {
+    fn uses_sqlserver_row_number_pagination_for_later_pages() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM users".to_string(),
             database_type: Some(DatabaseType::SqlServer),
@@ -1109,12 +1131,12 @@ WHERE u.id = picked.id;
 
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT id FROM users ORDER BY (SELECT NULL) OFFSET 300 ROWS FETCH NEXT 100 ROWS ONLY;"
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [__dbx_row_num] FROM (SELECT id FROM users) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 300 AND [__dbx_row_num] <= 400 ORDER BY [__dbx_row_num];"
         );
     }
 
     #[test]
-    fn sqlserver_join_pagination_does_not_wrap_duplicate_columns() {
+    fn rejects_sqlserver_wildcard_later_pages_to_avoid_duplicate_columns() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql:
                 "SELECT b.ProjectType,* FROM VesselBusinessOpportunity a LEFT JOIN JDDR_sys_BasicConfig_ProjectInfo_Data b ON a.ProjectID = b.ID"
@@ -1124,10 +1146,7 @@ WHERE u.id = picked.id;
             offset: 100,
         });
 
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT b.ProjectType,* FROM VesselBusinessOpportunity a LEFT JOIN JDDR_sys_BasicConfig_ProjectInfo_Data b ON a.ProjectID = b.ID ORDER BY (SELECT NULL) OFFSET 100 ROWS FETCH NEXT 100 ROWS ONLY;"
-        );
+        assert_eq!(result, err("unsupported"));
     }
 
     #[test]

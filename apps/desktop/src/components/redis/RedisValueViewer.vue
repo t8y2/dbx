@@ -3,7 +3,7 @@ import { computed, ref, nextTick, onBeforeUnmount, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Braces, Copy, Eye, FileText, Terminal, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, IndentIncrease, IndentDecrease } from "@lucide/vue";
+import { Braces, Copy, Eye, FileText, Terminal, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, IndentIncrease, IndentDecrease, ArrowUp, ArrowDown, ArrowUpDown } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -76,6 +76,41 @@ const stringValueView = ref<RedisValueView>("raw");
 const memberValueView = ref<RedisValueView>("raw");
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<RedisJsonHighlighter>();
+const hashSortBy = ref<"field" | "value" | null>(null);
+const hashSortDir = ref<"asc" | "desc">("asc");
+
+function toggleHashSort(column: "field" | "value") {
+  if (hashSortBy.value === column && hashSortDir.value === "desc") {
+    hashSortBy.value = null;
+  } else if (hashSortBy.value === column) {
+    hashSortDir.value = "desc";
+  } else {
+    hashSortBy.value = column;
+    hashSortDir.value = "asc";
+  }
+}
+
+const sortedHashItems = computed<any[]>(() => {
+  if (!hashSortBy.value) return collectionItems.value;
+  const items = [...collectionItems.value];
+  const multiplier = hashSortDir.value === "asc" ? 1 : -1;
+  const key = hashSortBy.value;
+  items.sort((a, b) => {
+    const av = String(a[key] ?? "");
+    const bv = String(b[key] ?? "");
+    return av.localeCompare(bv) * multiplier;
+  });
+  return items;
+});
+
+const hashCollectionRows = computed<RedisCollectionRow[]>(() =>
+  sortedHashItems.value.map((value, index) => ({
+    id: `hash-sorted-${index}`,
+    index,
+    value,
+  })),
+);
+
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value));
 const selectedMemberJsonDetail = computed(() => selectedMemberDetail.value.json ?? null);
 const stringValueDetail = computed(() => (data.value?.key_type === "string" ? formatRedisMemberDetail(data.value.value) : null));
@@ -940,14 +975,27 @@ onBeforeUnmount(() => {
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="hashSet"><Plus class="w-3 h-3 mr-1" />Set</Button>
         </div>
         <div class="grid border-b bg-muted/50 shrink-0" :style="hashGridStyle">
-          <div class="relative px-3 py-1 text-xs font-medium text-muted-foreground border-r select-none">
+          <div
+            class="relative px-3 py-1 text-xs font-medium text-muted-foreground border-r select-none cursor-pointer hover:bg-accent/50 flex items-center gap-1"
+            role="columnheader"
+            :aria-sort="hashSortBy === 'field' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'"
+            @click="toggleHashSort('field')"
+          >
             Field
+            <ArrowUp v-if="hashSortBy === 'field' && hashSortDir === 'asc'" class="h-3 w-3 shrink-0" />
+            <ArrowDown v-else-if="hashSortBy === 'field' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
+            <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
             <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.prevent="startResizeHashColumns" />
           </div>
-          <div class="px-3 py-1 text-xs font-medium text-muted-foreground">Value</div>
+          <div class="px-3 py-1 text-xs font-medium text-muted-foreground cursor-pointer hover:bg-accent/50 flex items-center gap-1 select-none" role="columnheader" :aria-sort="hashSortBy === 'value' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'" @click="toggleHashSort('value')">
+            Value
+            <ArrowUp v-if="hashSortBy === 'value' && hashSortDir === 'asc'" class="h-3 w-3 shrink-0" />
+            <ArrowDown v-else-if="hashSortBy === 'value' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
+            <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
+          </div>
           <div />
         </div>
-        <RecycleScroller class="flex-1 overflow-y-auto" :items="collectionRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
+        <RecycleScroller class="flex-1 overflow-y-auto" :items="hashCollectionRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
           <template #default="{ item: row }">
             <div
               data-redis-value-row

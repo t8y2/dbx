@@ -83,6 +83,38 @@ describe("connectionStore MQ sidebar tree", () => {
     expect(node.isExpanded).toBe(true);
   });
 
+  it("reuses an in-flight connection attempt instead of recording stale superseded errors", async () => {
+    let resolveConnect: ((value: string) => void) | undefined;
+    const connectDb = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveConnect = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mqConnection();
+    store.connections = [connection];
+
+    const first = store.ensureConnected(connection.id);
+    const second = store.ensureConnected(connection.id);
+    await Promise.resolve();
+
+    expect(connectDb).toHaveBeenCalledTimes(1);
+    resolveConnect?.(connection.id);
+    await Promise.all([first, second]);
+
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+  });
+
   it("stores the selected tenant when opening an MQ admin tab", async () => {
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useQueryStore } = await import("@/stores/queryStore");

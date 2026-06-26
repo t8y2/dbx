@@ -67,6 +67,8 @@ pub struct ConnectionConfig {
     pub redis_cluster_nodes: String,
     #[serde(default = "default_redis_key_separator", skip_serializing_if = "is_default_redis_separator")]
     pub redis_key_separator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_scan_page_size: Option<u64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -397,6 +399,8 @@ struct ConnectionConfigData {
     #[serde(default = "default_redis_key_separator")]
     pub redis_key_separator: String,
     #[serde(default)]
+    pub redis_scan_page_size: Option<u64>,
+    #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
     pub gbase_server: String,
@@ -452,6 +456,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_sentinel_tls: data.redis_sentinel_tls,
             redis_cluster_nodes: data.redis_cluster_nodes,
             redis_key_separator: data.redis_key_separator,
+            redis_scan_page_size: data.redis_scan_page_size,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
             informix_server: data.informix_server,
@@ -1582,6 +1587,7 @@ mod tests {
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
+            redis_scan_page_size: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

@@ -2363,6 +2363,7 @@ export default {
     mcpConfig: "Configurazione MCP",
     mcpCodexConfig: "Configurazione Codex",
     mcpCodexConfigPath: "Codex può utilizzare ~/.codex/config.toml o un .codex/config.toml a livello di progetto.",
+    mcpOpenCodeConfigPath: "~/.config/opencode/opencode.json globalmente, o opencode.json a livello di progetto.",
     mcpReadonlyMode: "Modalità sola lettura",
     mcpReadonlyModeDescription: "Aggiunge DBX_MCP_ALLOW_WRITES=0 alla configurazione di esempio in modo che la sessione MCP rimanga di sola query.",
     mcpAllowDangerous: "Consenti SQL pericoloso",

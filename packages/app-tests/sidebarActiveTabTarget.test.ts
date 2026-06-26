@@ -213,6 +213,7 @@ test("sidebar node scrolling keeps visible rows in place and reveals hidden rows
   assert.equal(scrollTopForSidebarNode({ index: 2, currentScrollTop: 0, viewportHeight: 140 }), 0);
   assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140 }), 448);
   assert.equal(scrollTopForSidebarNode({ index: 1, currentScrollTop: 280, viewportHeight: 140 }), 28);
+  assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28 }), 280);
 });
 
 test("active sidebar selection only scrolls on tab or setting changes", () => {

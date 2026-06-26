@@ -101,6 +101,7 @@ pub async fn ai_agent_stream(
         &cancelled,
         request.max_tokens,
         request.temperature,
+        request.task_contract.as_ref(),
         is_agent_mode,
     )
     .await;

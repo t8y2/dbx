@@ -239,6 +239,7 @@ pub async fn ai_agent_stream(
     let req_config = request.config;
     let req_system_prompt = request.system_prompt;
     let req_messages = request.messages;
+    let req_task_contract = request.task_contract;
     let req_max_tokens = request.max_tokens;
     let req_temperature = request.temperature;
     let is_agent_mode = body.mode == "agent";
@@ -259,6 +260,7 @@ pub async fn ai_agent_stream(
                 &cancelled,
                 req_max_tokens,
                 req_temperature,
+                req_task_contract.as_ref(),
                 is_agent_mode,
             )
             .await;

@@ -1086,12 +1086,12 @@ fn filter_table_infos(
     offset: Option<usize>,
     object_types: Option<&[String]>,
 ) -> Vec<db::TableInfo> {
-    let filter = filter.unwrap_or("").to_lowercase();
+    let filter = filter.unwrap_or("");
     let limit = limit.unwrap_or(usize::MAX);
     let offset = offset.unwrap_or(0);
     tables
         .into_iter()
-        .filter(|table| filter.is_empty() || table.name.to_lowercase().contains(&filter))
+        .filter(|table| crate::sql::contains_or_fuzzy_match(&table.name, filter))
         .filter(|table| table_info_matches_object_types(table, object_types))
         .skip(offset)
         .take(limit)
@@ -1311,6 +1311,7 @@ mod tests {
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -1428,6 +1429,35 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
+    }
+
+    #[test]
+    fn filter_table_infos_matches_fuzzy_subsequences() {
+        let tables = vec![test_table_info("system_user"), test_table_info("user_order"), test_table_info("alpha")];
+
+        let system_user = filter_table_infos(tables.clone(), Some("sysu"), None, None, None);
+        assert_eq!(system_user.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["system_user"]);
+
+        let user_order = filter_table_infos(tables, Some("uo"), None, None, None);
+        assert_eq!(user_order.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_order"]);
+    }
+
+    #[test]
+    fn filter_table_infos_skips_fuzzy_for_single_character_filters() {
+        let tables = vec![test_table_info("orders"), test_table_info("user_order")];
+
+        let filtered = filter_table_infos(tables, Some("u"), None, None, None);
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_order"]);
+    }
+
+    #[test]
+    fn filter_table_infos_keeps_special_filter_characters_literal() {
+        let tables = vec![test_table_info("user_%"), test_table_info("user_account"), test_table_info("userXpercent")];
+
+        let filtered = filter_table_infos(tables, Some("user_%"), None, None, None);
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_%"]);
     }
 
     #[test]
@@ -2441,7 +2471,15 @@ pub async fn get_columns_core(
             }
             PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
                 let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
-                db::mysql::get_columns_show(p, metadata_database, table).await.map(deduplicate_column_infos)
+                // Doris/StarRocks previously went straight to `SHOW COLUMNS` for
+                // speed (see perf(doris) commit), but `SHOW COLUMNS` reports the
+                // `Key` column as `YES`/`NO` rather than MySQL's `PRI`, so primary
+                // keys were never detected. `get_columns` queries
+                // information_schema.COLUMNS first — where `COLUMN_KEY = 'PRI'`
+                // correctly identifies primary keys (and only real primary keys,
+                // not duplicate-key sort columns) — and falls back to `SHOW COLUMNS`
+                // automatically when information_schema is unavailable.
+                db::mysql::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
             }
             PoolKind::Mysql(p, mode) => {
                 dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, database, table)
@@ -3435,7 +3473,12 @@ mod ddl_tests {
 pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, table: &str) -> Result<String, String> {
     use mysql_async::prelude::*;
     let sql = format!("SHOW CREATE TABLE `{}`", table.replace('`', "``"));
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    // Use the health-checked getter so a stale pooled connection (server closed
+    // it after an idle timeout, NAT/firewall dropped the TCP state, etc.) is
+    // detected and replaced before issuing the query. Without this, the first
+    // DDL request after a period of inactivity could surface a low-level
+    // connection error that a manual refresh would have masked.
+    let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let row = rows.first().ok_or("DDL not found")?;

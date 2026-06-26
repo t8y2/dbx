@@ -405,6 +405,7 @@ export const loadSidebarLayout = forward("loadSidebarLayout");
 export type {
   AiMessage,
   AiCompletionRequest,
+  AiTaskContract,
   AiStreamChunk,
   AiModelInfo,
   AiChatMessage,

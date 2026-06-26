@@ -180,16 +180,16 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
 }
 
-export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number }): number {
+export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number; topOcclusionHeight?: number }): number {
   const rowHeight = options.rowHeight ?? SIDEBAR_TREE_ROW_HEIGHT;
   if (options.index < 0 || options.viewportHeight <= 0) return options.currentScrollTop;
 
   const rowTop = options.index * rowHeight;
   const rowBottom = rowTop + rowHeight;
-  const viewportTop = options.currentScrollTop;
+  const viewportTop = options.currentScrollTop + (options.topOcclusionHeight ?? 0);
   const viewportBottom = options.currentScrollTop + options.viewportHeight;
 
-  if (rowTop < viewportTop) return rowTop;
+  if (rowTop < viewportTop) return Math.max(0, rowTop - (options.topOcclusionHeight ?? 0));
   if (rowBottom > viewportBottom) return Math.max(0, rowBottom - options.viewportHeight);
   return options.currentScrollTop;
 }

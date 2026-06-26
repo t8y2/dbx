@@ -400,6 +400,12 @@ const pendingRenameGroupId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
 
+function topOcclusionHeightForSidebarNode(nodeId: string): number {
+  const sticky = stickyNode.value;
+  if (!useVirtualTree.value || !sticky || sticky.id === nodeId) return 0;
+  return SIDEBAR_TREE_ROW_HEIGHT;
+}
+
 async function scrollToSidebarNode(nodeId: string) {
   await nextTick();
 
@@ -411,6 +417,7 @@ async function scrollToSidebarNode(nodeId: string) {
     index,
     currentScrollTop: scroller.scrollTop,
     viewportHeight: scroller.clientHeight,
+    topOcclusionHeight: topOcclusionHeightForSidebarNode(nodeId),
   });
   if (nextScrollTop !== scroller.scrollTop) {
     scroller.scrollTop = nextScrollTop;
@@ -486,6 +493,12 @@ async function locateActiveTabInSidebar() {
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
 
+  if (!nodePath && cursorCandidate) {
+    await store.loadTableForLocate(cursorCandidate);
+    target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
+    nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
+  }
+
   if (!nodePath && cursorCandidate && fallbackTarget) {
     await ensureTreeLoadedForTarget(fallbackTarget);
     target = fallbackTarget;
@@ -506,6 +519,8 @@ async function locateActiveTabInSidebar() {
   if (!match) return;
 
   store.selectedTreeNodeId = match.id;
+  store.selectedTreeNodeIds = [match.id];
+  store.treeSelectionAnchorId = match.id;
   await nextTick();
 
   window.clearTimeout(highlightTimer);
@@ -694,6 +709,7 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
     index,
     currentScrollTop: scroller.scrollTop,
     viewportHeight: scroller.clientHeight,
+    topOcclusionHeight: topOcclusionHeightForSidebarNode(match.id),
   });
   if (nextScrollTop !== scroller.scrollTop) {
     scroller.scrollTop = nextScrollTop;

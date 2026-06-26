@@ -5,6 +5,7 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { isSingleDatabase } from "@/lib/databaseCapabilities";
 import { classifySqlActivityKind } from "@/lib/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
@@ -42,6 +43,7 @@ export function useSqlExecution(deps: {
   resolveExecutableSql?: (snapshot?: SqlExecutionSnapshot) => Promise<string>;
   activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
   blockDangerousRedisCommands?: Ref<boolean>;
+  onMissingDatabase?: () => void;
 }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
@@ -70,6 +72,10 @@ export function useSqlExecution(deps: {
     const tab = deps.activeTab.value;
     const sql = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value)) {
+      deps.onMissingDatabase?.();
+      return;
+    }
     if (supportsSqlTemplateParameters(deps.activeConnection.value) && prepareSqlParameterDialog(sql)) return;
     await continueExecute(sql);
   }
@@ -112,6 +118,10 @@ export function useSqlExecution(deps: {
     sql ??= await resolvedExecutableSql();
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value)) {
+      deps.onMissingDatabase?.();
+      return;
+    }
     deps.activeOutputView.value = "result";
     const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
     const start = Date.now();
@@ -214,4 +224,11 @@ export function useSqlExecution(deps: {
 function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined): boolean {
   if (!connection) return false;
   return connection.db_type !== "redis" && connection.db_type !== "mongodb";
+}
+
+function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined): boolean {
+  if (tab.mode !== "query") return false;
+  if (!connection || tab.database) return false;
+  if (isSingleDatabase(connection.db_type)) return false;
+  return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
 }

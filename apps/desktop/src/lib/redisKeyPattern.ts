@@ -10,3 +10,10 @@ export function redisKeySearchPattern(value: string, fuzzy: boolean): string {
   if (!pattern) return "*";
   return fuzzy ? `*${escapeRedisGlobText(pattern, fuzzy)}*` : pattern;
 }
+
+// Redis scan page size (COUNT parameter per SCAN round-trip) — shared defaults
+// and validation bounds used by the connection form and key browser.
+export const REDIS_SCAN_PAGE_SIZE_DEFAULT = 1000;
+export const REDIS_SCAN_PAGE_SIZE_MIN = 200;
+export const REDIS_SCAN_PAGE_SIZE_MAX = 10_000;
+export const REDIS_SCAN_PAGE_SIZE_OPTIONS = [200, 1000, 5000, 10_000] as const;

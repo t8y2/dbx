@@ -1113,7 +1113,7 @@ fn filter_list_tables_fallback(
     offset: Option<usize>,
     object_types: Option<&[String]>,
 ) -> Vec<TableInfo> {
-    let filter = filter.unwrap_or("").trim().to_ascii_lowercase();
+    let filter = filter.unwrap_or("").trim();
     let normalized_object_types: Vec<String> = object_types
         .unwrap_or(&[])
         .iter()
@@ -1126,7 +1126,7 @@ fn filter_list_tables_fallback(
 
     tables
         .into_iter()
-        .filter(|table| filter.is_empty() || table.name.to_ascii_lowercase().contains(&filter))
+        .filter(|table| crate::sql::contains_or_fuzzy_match(&table.name, filter))
         .filter(|table| if table.table_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
         .skip(offset.unwrap_or(0))
         .take(limit.unwrap_or(usize::MAX))
@@ -1163,7 +1163,18 @@ fn list_tables_sql(
     if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
         let escaped = filter.to_ascii_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let pattern = format!("%{}%", escaped);
-        sql.push_str(&format!(" AND LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\'", quote_value(&pattern)));
+        if crate::sql::fuzzy_filter_enabled(filter) {
+            let fuzzy_pattern = crate::sql::fuzzy_like_pattern_with_escape(&filter.to_ascii_lowercase(), |value| {
+                value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            });
+            sql.push_str(&format!(
+                " AND (LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\' OR LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\')",
+                quote_value(&pattern),
+                quote_value(&fuzzy_pattern)
+            ));
+        } else {
+            sql.push_str(&format!(" AND LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\'", quote_value(&pattern)));
+        }
     }
     sql.push_str(" ORDER BY TABLE_NAME");
     if let Some(limit) = limit {
@@ -2580,9 +2591,27 @@ mod tests {
         assert!(sql.contains("FROM information_schema.TABLES"));
         assert!(sql.contains("TABLE_SCHEMA = 'app'"));
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%user\\\\_\\\\%%' ESCAPE '\\\\'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%s%e%r%\\\\_%\\\\%%' ESCAPE '\\\\'"));
         assert!(sql.contains("ORDER BY TABLE_NAME"));
         assert!(sql.contains("LIMIT 101"));
         assert!(sql.contains("OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_list_tables_sql_adds_fuzzy_filter_pattern() {
+        let sql = list_tables_sql("app", Some("sysu"), Some(100), None, None);
+
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%sysu%' ESCAPE '\\\\'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%s%y%s%u%' ESCAPE '\\\\'"));
+    }
+
+    #[test]
+    fn mysql_list_tables_sql_skips_fuzzy_filter_for_single_character() {
+        let sql = list_tables_sql("app", Some("u"), Some(100), None, None);
+
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%' ESCAPE '\\\\'"));
+        assert_eq!(sql.matches("LOWER(TABLE_NAME) LIKE").count(), 1);
+        assert!(!sql.contains(" OR LOWER(TABLE_NAME) LIKE"));
     }
 
     #[test]

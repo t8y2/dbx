@@ -40,6 +40,72 @@ pub(super) fn quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn is_sql_string_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some(inner) = trimmed.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) else {
+        return false;
+    };
+
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.next_if_eq(&'\'').is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+fn postgres_string_default_literal(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let inner = trimmed.strip_prefix('\'')?;
+    let mut literal_end = 1;
+    let mut chars = inner.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\'' {
+            if chars.next_if(|(_, next)| *next == '\'').is_some() {
+                continue;
+            }
+            literal_end += index + ch.len_utf8();
+            break;
+        }
+    }
+    if literal_end == 1 {
+        return None;
+    }
+
+    let literal = &trimmed[..literal_end];
+    if !is_sql_string_literal(literal) {
+        return None;
+    }
+    let cast_type = trimmed[literal_end..].trim().strip_prefix("::")?.trim();
+    if is_postgres_textual_cast_type(cast_type) {
+        Some(literal)
+    } else {
+        None
+    }
+}
+
+fn is_postgres_textual_cast_type(value: &str) -> bool {
+    let normalized =
+        value.trim().trim_matches('"').split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let base_type = normalized.split('(').next().unwrap_or(&normalized).trim();
+    matches!(
+        base_type,
+        "char"
+            | "character"
+            | "varchar"
+            | "character varying"
+            | "text"
+            | "bpchar"
+            | "name"
+            | "json"
+            | "jsonb"
+            | "xml"
+            | "bytea"
+            | "uuid"
+    )
+}
+
 pub(super) fn clean(value: &str) -> String {
     value.trim().to_string()
 }
@@ -211,7 +277,11 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
     if is_string_type_for_default(dialect, base_type) {
         // Only skip quoting for function-call expressions like `gen_random_uuid()`.
         // Simple identifiers like `CURRENT_TIMESTAMP` are not valid defaults for string columns.
-        if default_value.contains('(') || default_value.contains(')') {
+        if is_sql_string_literal(default_value)
+            || (dialect == StructureDialect::Postgres && postgres_string_default_literal(default_value).is_some())
+            || default_value.contains('(')
+            || default_value.contains(')')
+        {
             return default_value.to_string();
         }
         return quote_string(default_value);
@@ -223,6 +293,8 @@ pub(super) fn normalize_default(value: Option<&String>) -> String {
     let trimmed = value.map(|value| value.trim()).unwrap_or("");
     if trimmed.eq_ignore_ascii_case("null") {
         String::new()
+    } else if let Some(literal) = postgres_string_default_literal(trimmed) {
+        literal.to_string()
     } else {
         trimmed.to_string()
     }

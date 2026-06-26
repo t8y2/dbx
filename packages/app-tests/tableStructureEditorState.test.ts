@@ -92,6 +92,48 @@ test("creates editable column drafts from column metadata", () => {
   );
 });
 
+test("normalizes PostgreSQL string default casts in editable column drafts", () => {
+  const drafts = createColumnDrafts(
+    [
+      {
+        name: "category",
+        data_type: "character varying",
+        is_nullable: true,
+        column_default: "''::character varying",
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+      {
+        name: "status",
+        data_type: "user_status",
+        is_nullable: true,
+        column_default: "'active'::public.user_status",
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+      {
+        name: "stock",
+        data_type: "integer",
+        is_nullable: true,
+        column_default: "0",
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+    ],
+    "postgres",
+  );
+
+  assert.equal(drafts[0].defaultValue, "''");
+  assert.equal(drafts[0].original?.column_default, "''");
+  assert.equal(drafts[1].defaultValue, "'active'::public.user_status");
+  assert.equal(drafts[1].original?.column_default, "'active'::public.user_status");
+  assert.equal(drafts[2].defaultValue, "0");
+  assert.equal(drafts[2].original?.column_default, "0");
+});
+
 test("applies manticore column properties from ddl", () => {
   const manticoreColumns: ColumnInfo[] = [
     { name: "name", data_type: "string", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },

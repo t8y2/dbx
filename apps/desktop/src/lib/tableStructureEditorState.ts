@@ -520,20 +520,40 @@ export function applyManticoreDdlColumnExtras(columns: ColumnInfo[], ddl: string
   });
 }
 
+function isPostgresTextualType(dataType: string): boolean {
+  const baseType = dataType.split("(")[0]?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+  return ["char", "character", "varchar", "character varying", "text", "bpchar", "name", "json", "jsonb", "xml", "bytea", "uuid"].includes(baseType);
+}
+
+function stripPostgresStringDefaultCast(defaultValue: string, dataType: string): string {
+  if (!isPostgresTextualType(dataType)) return defaultValue;
+  const trimmed = defaultValue.trim();
+  const match = trimmed.match(/^('(?:''|[^'])*')::\s*((?:character\s+varying)|character|varchar|char|text|bpchar|name|jsonb?|xml|bytea|uuid)(?:\s*\(\s*\d+\s*\))?$/i);
+  return match?.[1] ?? defaultValue;
+}
+
+function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+  const defaultValue = column.column_default ?? "";
+  return databaseType === "postgres" ? stripPostgresStringDefaultCast(defaultValue, column.data_type) : defaultValue;
+}
+
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {
-  return columns.map((column, index) => ({
-    id: `existing:${column.name}`,
-    name: column.name,
-    dataType: column.data_type,
-    isNullable: column.is_nullable,
-    defaultValue: column.column_default ?? "",
-    comment: column.comment ?? "",
-    isPrimaryKey: column.is_primary_key,
-    extra: parseExtraToColumnExtra(column.extra, databaseType),
-    original: column,
-    originalPosition: index,
-    markedForDrop: false,
-  }));
+  return columns.map((column, index) => {
+    const defaultValue = columnDefaultForEditor(column, databaseType);
+    return {
+      id: `existing:${column.name}`,
+      name: column.name,
+      dataType: column.data_type,
+      isNullable: column.is_nullable,
+      defaultValue,
+      comment: column.comment ?? "",
+      isPrimaryKey: column.is_primary_key,
+      extra: parseExtraToColumnExtra(column.extra, databaseType),
+      original: { ...column, column_default: column.column_default === null ? null : defaultValue },
+      originalPosition: index,
+      markedForDrop: false,
+    };
+  });
 }
 
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {

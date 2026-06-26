@@ -415,7 +415,7 @@ impl Analyzer {
 fn table_reference_from_name(name: &ObjectName, alias: Option<String>) -> Option<SqlTableReference> {
     let parts: Vec<&Ident> = name.0.iter().filter_map(ObjectNamePart::as_ident).collect();
     let table = parts.last()?;
-    let schema = parts.get(parts.len().saturating_sub(2)).map(|ident| ident.value.clone());
+    let schema = if parts.len() >= 2 { parts.get(parts.len() - 2).map(|ident| ident.value.clone()) } else { None };
 
     Some(SqlTableReference { name: table.value.clone(), schema, alias, span: table.span.into() })
 }

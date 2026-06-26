@@ -11,6 +11,9 @@ export interface SqlSemanticDiagnostic {
 export interface SqlSemanticDiagnosticSchema {
   tables: SqlCompletionTable[];
   columnsByTable: Map<string, SqlCompletionColumn[]>;
+  missingTables?: Set<string>;
+  loadedColumnTables?: Set<string>;
+  sql?: string;
 }
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
@@ -24,11 +27,21 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     if (table.schema) knownTables.set(normalizeName(`${table.schema}.${table.name}`), table);
   }
 
-  for (const column of analysis.columns) {
-    const table = resolveColumnTable(column, tables, knownTables);
-    if (!table) continue;
+  for (const table of tables) {
+    if (!schema.missingTables?.has(tableReferenceKey(table))) continue;
+    diagnostics.push({
+      span: table.span,
+      message: `Unknown table ${displayTableName(table)}`,
+      severity: "error",
+    });
+  }
 
-    const columns = columnsForTable(table, schema.columnsByTable);
+  for (const column of analysis.columns) {
+    const table = resolveColumnTable(column, tables, knownTables, schema.sql);
+    if (!table) continue;
+    if (schema.missingTables?.has(tableReferenceKey(table))) continue;
+
+    const columns = columnsForTable(table, schema.columnsByTable, schema.loadedColumnTables);
     if (!columns) continue;
 
     const columnNames = new Set(columns.map((item) => normalizeName(item.name)));
@@ -38,7 +51,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     diagnostics.push({
       span: column.span,
       message: `Unknown column ${displayName}`,
-      severity: "warning",
+      severity: "error",
     });
   }
 
@@ -82,28 +95,92 @@ export function areSqlSemanticDiagnosticsEqual(left: readonly SqlSemanticDiagnos
 export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
   if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
   const context = getSqlCompletionContext(sql, cursor);
-  if (context.suggestTables || context.exclusiveTableSuggestions || context.exclusiveColumnSuggestions) return false;
+  if (context.exclusiveColumnSuggestions) return false;
   if (context.qualifier) return false;
+  if ((context.suggestTables || context.exclusiveTableSuggestions) && isCursorAfterTableTrigger(sql, cursor)) return false;
   return true;
 }
 
-function resolveColumnTable(column: SqlColumnReference, tables: SqlTableReference[], knownTables: Map<string, SqlTableReference>): SqlTableReference | null {
-  if (column.qualifier) {
-    return knownTables.get(normalizeName(column.qualifier)) ?? null;
-  }
-  if (tables.length !== 1) return null;
-  return tables[0];
+export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
+  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
+  const context = getSqlCompletionContext(sql, cursor);
+  return context.exclusiveColumnSuggestions || !!context.qualifier || ((context.suggestTables || context.exclusiveTableSuggestions) && isCursorAfterTableTrigger(sql, cursor));
 }
 
-function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] | null {
-  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
-  for (const key of keys) {
-    const columns = columnsByTable.get(key) ?? columnsByTable.get(normalizeName(key));
-    // Empty metadata usually means the upstream schema lookup was inconclusive,
-    // so avoid surfacing a false "unknown column" warning.
-    if (columns && columns.length > 0) return columns;
+function resolveColumnTable(column: SqlColumnReference, tables: SqlTableReference[], knownTables: Map<string, SqlTableReference>, sql?: string): SqlTableReference | null {
+  const candidateTables = sql ? tablesInSameStatement(tables, column, sql) : tables;
+  if (column.qualifier) {
+    return tableLookupFor(candidateTables).get(normalizeName(column.qualifier)) ?? (sql ? null : (knownTables.get(normalizeName(column.qualifier)) ?? null));
   }
+  if (candidateTables.length !== 1) return null;
+  return candidateTables[0];
+}
+
+function tableLookupFor(tables: SqlTableReference[]): Map<string, SqlTableReference> {
+  const lookup = new Map<string, SqlTableReference>();
+  for (const table of tables) {
+    lookup.set(normalizeName(table.name), table);
+    if (table.alias) lookup.set(normalizeName(table.alias), table);
+    if (table.schema) lookup.set(normalizeName(`${table.schema}.${table.name}`), table);
+  }
+  return lookup;
+}
+
+function tablesInSameStatement(tables: SqlTableReference[], column: SqlColumnReference, sql: string): SqlTableReference[] {
+  const columnOffset = spanStartOffset(sql, column.span);
+  if (columnOffset == null) return tables;
+  return tables.filter((table) => {
+    const tableOffset = spanStartOffset(sql, table.span);
+    return tableOffset != null && statementIndexAt(sql, tableOffset) === statementIndexAt(sql, columnOffset);
+  });
+}
+
+function spanStartOffset(sql: string, span: SqlTextSpan): number | null {
+  if (!span.start_line || !span.start_column) return null;
+  const lines = sql.split(/\r?\n/);
+  const lineIndex = span.start_line - 1;
+  if (lineIndex < 0 || lineIndex >= lines.length) return null;
+  let offset = 0;
+  for (let index = 0; index < lineIndex; index++) offset += lines[index].length + 1;
+  return Math.min(offset + span.start_column - 1, offset + lines[lineIndex].length);
+}
+
+function statementIndexAt(sql: string, offset: number): number {
+  let statementIndex = 0;
+  for (let index = 0; index < Math.min(offset, sql.length); index++) {
+    if (sql[index] === ";") statementIndex++;
+  }
+  return statementIndex;
+}
+
+function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>): SqlCompletionColumn[] | null {
+  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name, ...keysWithTableName(columnsByTable, table.name)];
+  for (const key of keys) {
+    const normalizedKey = normalizeName(key);
+    const columns = columnsByTable.get(key) ?? columnsByTable.get(normalizedKey);
+    if (!columns) continue;
+    if (columns.length > 0 || loadedColumnTables?.has(normalizedKey)) return columns;
+  }
+  if (loadedColumnTables?.has(tableReferenceKey(table))) return [];
   return null;
+}
+
+function keysWithTableName(columnsByTable: Map<string, SqlCompletionColumn[]>, tableName: string): string[] {
+  const suffix = `.${normalizeName(tableName)}`;
+  return [...columnsByTable.keys()].filter((key) => normalizeName(key).endsWith(suffix));
+}
+
+export function tableReferenceKey(table: Pick<SqlTableReference, "name" | "schema">): string {
+  return normalizeName(table.schema ? `${table.schema}.${table.name}` : table.name);
+}
+
+function displayTableName(table: SqlTableReference): string {
+  return table.schema ? `${table.schema}.${table.name}` : table.name;
+}
+
+function isCursorAfterTableTrigger(sql: string, cursor: number): boolean {
+  const beforeCursor = sql.slice(0, cursor).trimEnd();
+  return /\b(from|join|update|into|table)(?:\s+[\w$`"'\[\].]*)?$/i.test(beforeCursor);
 }
 
 function normalizeName(value: string): string {

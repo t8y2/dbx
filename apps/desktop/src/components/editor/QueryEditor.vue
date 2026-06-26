@@ -43,7 +43,7 @@ import { isSchemaAware, isSingleDatabase } from "@/lib/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/completionMetadataPolicy";
 import { qualifiedTableNameAtSqlPosition } from "@/lib/queryCursorTableTarget";
 import * as api from "@/lib/api";
-import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, shouldRunSqlSemanticDiagnostics, type SqlSemanticDiagnostic } from "@/lib/sqlSemanticDiagnostics";
+import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, tableReferenceKey, type SqlSemanticDiagnostic } from "@/lib/sqlSemanticDiagnostics";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redisSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionTable } from "@/lib/sqlCompletion";
@@ -59,6 +59,7 @@ const props = defineProps<{
   formatDialect?: SqlFormatDialect;
   formatRequestId?: number;
   executionError?: string;
+  executionErrorSql?: string;
   readOnly?: boolean;
   forceWordWrap?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
@@ -145,6 +146,7 @@ const completionTranslations = computed(() => ({
 }));
 const MAX_COMPLETION_TABLES = 200;
 const MAX_JOIN_FK_PREFETCH_TABLES = 24;
+const MAX_SEMANTIC_DIAGNOSTIC_COLUMN_TABLES = 4;
 const liveFontSize = ref(settingsStore.editorSettings.fontSize);
 const gestureStartFontSize = ref(settingsStore.editorSettings.fontSize);
 const isGestureZooming = ref(false);
@@ -222,6 +224,7 @@ let cachedCompletionObjects: SqlCompletionObject[] = [];
 // Persistent column cache keyed by "schema.table" or "table"
 const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
 const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
+const loadedColumnsByTable = new Set<string>();
 
 const zoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
   if (settingsStore.editorSettings.fontSize === fontSize) return;
@@ -667,14 +670,34 @@ function completionTablesMatch(left: { name: string; schema?: string | null }, r
   return left.schema.toLowerCase() === right.schema.toLowerCase();
 }
 
-async function ensureColumnsForTable(table: { name: string; schema?: string | null }) {
-  const cacheKey = completionCacheKey(table);
-  if (cachedColumnsByTable.has(cacheKey) || !props.connectionId || props.database == null) return;
+async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promise<{ name: string; schema?: string; type?: "table" | "view" } | null> {
+  if (!props.connectionId || props.database == null) return null;
   const target = completionMetadataTarget(table);
-  if (!target) return;
+  if (!target) return null;
+  const localMatches = connectionStore.lookupLocalCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema);
+  const localExact = localMatches.find((item) => completionTablesMatch(item, table));
+  if (localExact) return localExact;
+
+  const remoteMatches = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema);
+  cachedTables = mergeCompletionTables(cachedTables, remoteMatches);
+  return remoteMatches.find((item) => completionTablesMatch(item, table)) ?? null;
+}
+
+async function ensureColumnsForTable(table: { name: string; schema?: string | null }): Promise<boolean> {
+  const cacheKey = completionCacheKey(table);
+  if (cachedColumnsByTable.has(cacheKey)) return true;
+  if (!props.connectionId || props.database == null) return false;
+  const target = completionMetadataTarget(table);
+  if (!target) return false;
   const columns = await connectionStore.listCompletionColumns(props.connectionId, target.database, table.name, target.schema);
-  if (columns.length === 0) return;
   cachedColumnsByTable.set(cacheKey, columns);
+  loadedColumnsByTable.add(cacheKey.toLowerCase());
+  return true;
+}
+
+function isMissingTableMetadataError(error: unknown) {
+  const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  return message.includes("42s02") || message.includes("1146") || message.includes("doesn't exist") || message.includes("does not exist") || message.includes("unknown table");
 }
 
 async function ensureForeignKeysForTable(table: { name: string; schema?: string | null }) {
@@ -821,6 +844,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
 
 function sqlErrorDecorationRange(currentState: import("@codemirror/state").EditorState) {
   if (!props.executionError) return [];
+  if (!props.executionErrorSql || props.executionErrorSql !== currentState.doc.toString()) return [];
   const location = parseSqlErrorLocation(props.executionError);
   if (!location) return [];
   const offset = lineColumnToOffset(currentState.doc.toString(), location);
@@ -875,36 +899,50 @@ function setSemanticDiagnostics(next: SqlSemanticDiagnostic[]) {
   reconfigureDiagnostics();
 }
 
-async function enrichSemanticDiagnosticTables(tables: SqlTableReference[]) {
-  if (!props.connectionId || props.database == null) return tables;
+async function enrichSemanticDiagnosticTables(tables: SqlTableReference[]): Promise<{ tables: SqlTableReference[]; missingTables: Set<string> }> {
+  if (!props.connectionId || props.database == null) return { tables, missingTables: new Set() };
 
   const enriched: SqlTableReference[] = [];
+  const missingTables = new Set<string>();
   for (const table of tables) {
-    if (table.schema) {
-      enriched.push(table);
-      continue;
-    }
-    const cached = cachedTables.find((item) => item.name.toLowerCase() === table.name.toLowerCase());
-    if (cached?.schema) {
-      enriched.push({ ...table, schema: cached.schema });
-      continue;
-    }
     try {
-      if (usesLocalOnlyCompletionMetadata()) {
-        const matches = connectionStore.lookupLocalCompletionTables(props.connectionId, props.database, table.name, MAX_COMPLETION_TABLES, props.schema);
-        const match = matches.find((item) => item.name.toLowerCase() === table.name.toLowerCase());
-        enriched.push(match?.schema ? { ...table, schema: match.schema } : table);
-        continue;
-      }
-      const matches = await connectionStore.listCompletionTables(props.connectionId, props.database, table.name, MAX_COMPLETION_TABLES, props.schema);
-      cachedTables = [...cachedTables, ...matches];
-      const match = matches.find((item) => item.name.toLowerCase() === table.name.toLowerCase());
+      const match = await findExactSemanticDiagnosticTable(table);
+      if (!match) missingTables.add(tableReferenceKey(table));
       enriched.push(match?.schema ? { ...table, schema: match.schema } : table);
     } catch {
       enriched.push(table);
     }
   }
-  return enriched;
+  return { tables: enriched, missingTables };
+}
+
+async function ensureColumnsForSemanticDiagnostics(tables: SqlTableReference[]): Promise<Set<string>> {
+  const missingTables = new Set<string>();
+  const seen = new Set<string>();
+  const targets: SqlTableReference[] = [];
+  for (const table of tables) {
+    const tableWithInlineColumns = table as SqlTableReference & { columns?: string[] };
+    if (tableWithInlineColumns.columns && tableWithInlineColumns.columns.length > 0) continue;
+    const cacheKey = completionCacheKey(table);
+    if (cachedColumnsByTable.has(cacheKey)) continue;
+    const normalizedKey = cacheKey.toLowerCase();
+    if (seen.has(normalizedKey)) continue;
+    seen.add(normalizedKey);
+    targets.push(table);
+    if (targets.length >= MAX_SEMANTIC_DIAGNOSTIC_COLUMN_TABLES) break;
+  }
+  await Promise.all(
+    targets.map(async (table) => {
+      try {
+        await ensureColumnsForTable(table);
+      } catch (error) {
+        if (isMissingTableMetadataError(error)) {
+          missingTables.add(tableReferenceKey(table));
+        }
+      }
+    }),
+  );
+  return missingTables;
 }
 
 async function refreshSemanticDiagnostics() {
@@ -937,7 +975,7 @@ async function refreshSemanticDiagnostics() {
     scheduleSemanticDiagnostics(1200);
     return;
   }
-  if (codeMirrorCompletionStatus?.(currentView.state)) {
+  if (codeMirrorCompletionStatus?.(currentView.state) && isSqlSemanticDiagnosticInputContext(sql, currentView.state.selection.main.head, { databaseType: props.databaseType })) {
     scheduleSemanticDiagnostics(900);
     return;
   }
@@ -946,10 +984,9 @@ async function refreshSemanticDiagnostics() {
     const analysis = await api.analyzeSqlReferences(sql, props.formatDialect ?? props.dialect ?? "generic");
     if (runId !== semanticDiagnosticRunId) return;
 
-    const tables = await enrichSemanticDiagnosticTables(analysis.tables);
-    if (!usesOnDemandOnlyCompletionColumns()) {
-      await Promise.all(tables.map((table) => ensureColumnsForTable(table)));
-    }
+    const { tables, missingTables } = await enrichSemanticDiagnosticTables(analysis.tables);
+    const columnMetadataMissingTables = await ensureColumnsForSemanticDiagnostics(tables);
+    for (const tableKey of columnMetadataMissingTables) missingTables.add(tableKey);
     if (runId !== semanticDiagnosticRunId) return;
 
     const enrichedAnalysis: SqlReferenceAnalysis = { ...analysis, tables };
@@ -957,6 +994,9 @@ async function refreshSemanticDiagnostics() {
       buildSqlSemanticDiagnostics(enrichedAnalysis, {
         tables: cachedTables,
         columnsByTable: cachedColumnsByTable,
+        missingTables,
+        loadedColumnTables: loadedColumnsByTable,
+        sql,
       }),
     );
   } catch (error) {
@@ -1782,6 +1822,7 @@ async function refreshCompletionCache() {
   cachedTables = [];
   cachedCompletionObjects = [];
   cachedColumnsByTable.clear();
+  loadedColumnsByTable.clear();
   cachedForeignKeysByTable.clear();
 }
 
@@ -2233,6 +2274,7 @@ watch(
       view.value.dispatch({
         changes: { from: 0, to: view.value.state.doc.length, insert: val },
       });
+      scheduleSemanticDiagnostics();
     }
   },
 );

@@ -192,7 +192,6 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
             run: () => openReplace(),
           },
         ]),
-        EditorView.lineWrapping,
         languageComp.of(currentIsJson ? json() : []),
         themeComp.of(theme),
         fontThemeComp.of(fontTheme),

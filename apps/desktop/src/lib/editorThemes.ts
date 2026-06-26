@@ -283,7 +283,7 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       ...(opts?.fixedHeight ? { height: "100%" } : {}),
       fontSize: `var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px)`,
     },
-    ...(opts?.scrollable ? { ".cm-scroller": { overflow: "auto" } } : {}),
+    ...(opts?.scrollable ? { ".cm-scroller": { overflowX: "auto", overflowY: "auto" } } : {}),
     ".cm-content": {
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
       lineHeight: "1.6",

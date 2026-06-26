@@ -4456,8 +4456,9 @@ const canvasDetailButtonStyle = computed(() => {
   const cell = canvasDetailButtonCell.value;
   if (!cell) return {};
   const actionWidth = cell.canQuickDownload ? 44 : 22;
+  const edgeGap = 6;
   return {
-    left: `${Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left + cell.rect.width - actionWidth)}px`,
+    left: `${Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left + cell.rect.width - actionWidth - edgeGap)}px`,
     top: `${cell.rect.top + 2}px`,
   };
 });
@@ -5907,6 +5908,10 @@ const TABLE_INFO_DRAWER_MIN_WIDTH = 240;
 const CELL_DETAIL_PANEL_MIN_HEIGHT = 180;
 const CELL_DETAIL_PANEL_MIN_WIDTH = 260;
 const CELL_DETAIL_PANEL_MAX_HEIGHT = 520;
+const CELL_DETAIL_TABLE_HEADER_HEIGHT = 28;
+const CELL_DETAIL_TABLE_MIN_VISIBLE_ROWS = 1.5;
+const CELL_DETAIL_TABLE_HORIZONTAL_SCROLLBAR_HEIGHT = 10;
+const CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT = Math.ceil(CELL_DETAIL_TABLE_HEADER_HEIGHT + CANVAS_DATA_GRID_ROW_HEIGHT * CELL_DETAIL_TABLE_MIN_VISIBLE_ROWS + CELL_DETAIL_TABLE_HORIZONTAL_SCROLLBAR_HEIGHT);
 const DRAWER_MAX_WIDTH = 900;
 function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.value): number {
   const min = layout === "bottom" ? CELL_DETAIL_PANEL_MIN_HEIGHT : CELL_DETAIL_PANEL_MIN_WIDTH;
@@ -5971,13 +5976,19 @@ const ddlDrawerStyle = computed(() => ({
   width: `${ddlWidth.value}px`,
 }));
 
-const detailPanelStyle = computed(() => (cellDetailPanelIsBottom.value ? { height: `${detailPanelHeight.value}px`, maxHeight: `min(70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px)` } : { width: `${detailPanelHeight.value}px` }));
-
-const contentGridStyle = computed(() =>
+const detailPanelStyle = computed(() =>
   cellDetailPanelIsBottom.value
     ? {
+        height: "100%",
+      }
+    : { width: `${detailPanelHeight.value}px` },
+);
+
+const contentGridStyle = computed(() =>
+  cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value
+    ? {
         gridTemplateColumns: "minmax(0, 1fr) auto",
-        gridTemplateRows: "minmax(0, 1fr) auto",
+        gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
       }
     : {
         gridTemplateColumns: "minmax(0, 1fr) auto auto",
@@ -7166,7 +7177,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </template>
                       <template v-else>
                         {{ cell.display }}
-                        <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
+                        <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-0.5 flex items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
                             :items="binaryCellDownloadMenuItems"
@@ -7697,7 +7708,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </template>
                       <template v-else>
                         {{ formatCellCached(item.data[col.actualColIdx], col.actualColIdx) }}
-                        <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
+                        <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-0.5 flex items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
                             :items="binaryCellDownloadMenuItems"
@@ -7945,7 +7956,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
-                <div data-native-clipboard class="flex-1 min-h-0 overflow-auto p-3 text-xs" :class="isEditingDetail ? 'flex flex-col gap-3' : 'space-y-3'">
+                <div data-native-clipboard class="flex-1 min-h-0 overflow-auto p-3 text-xs" :class="cellDetailPanelIsBottom || isEditingDetail ? 'flex flex-col gap-3' : 'space-y-3'">
                   <div v-if="cellDetailPanelIsBottom" class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2">
                     <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
@@ -8010,7 +8021,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </div>
                   </template>
-                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, cellDetailPanelIsBottom && isEditingDetail ? 'flex-1' : '']">
+                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, cellDetailPanelIsBottom ? 'flex-1' : '']">
                     <div class="flex min-h-5 items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
@@ -8069,9 +8080,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </Button>
                       </div>
                     </template>
-                    <pre v-else class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50" :class="{ 'cursor-text': activeCellDetail.isEditable }" @dblclick="startDetailEdit">{{
-                      sideDetailJsonView && activeCellDetail.formattedJson ? activeCellDetail.formattedJson : activeCellDetail.rawValuePreview
-                    }}</pre>
+                    <pre
+                      v-else
+                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : '']"
+                      @dblclick="startDetailEdit"
+                      >{{ sideDetailJsonView && activeCellDetail.formattedJson ? activeCellDetail.formattedJson : activeCellDetail.rawValuePreview }}</pre
+                    >
                     <div v-if="activeCellDetail.isValuePreviewTruncated && !sideDetailJsonView" class="text-[11px] text-muted-foreground">
                       {{
                         t("grid.largeValuePreviewHint", {
@@ -8082,7 +8097,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </div>
                 </div>
 
-                <div class="border-t p-1.5 flex gap-1" :class="cellDetailPanelIsBottom ? 'items-center' : 'flex-col'">
+                <div class="border-t flex gap-1 overflow-hidden bg-background p-1.5" :class="cellDetailPanelIsBottom ? 'shrink-0 items-center' : 'shrink-0 flex-col'">
                   <div v-if="isEditingDetail && cellDetailPanelIsBottom" class="flex shrink-0 gap-1 mr-auto">
                     <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
                       {{ t("dangerDialog.confirm") }}
@@ -8799,8 +8814,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-horizontal-scrollbar {
   position: absolute;
-  inset-inline: calc(var(--row-num-w) + 8px) 10px;
-  bottom: 2px;
+  inset-inline: calc(var(--row-num-w) + 8px) 4px;
+  bottom: 0;
   z-index: 30;
   height: 10px;
   cursor: pointer;

@@ -3520,7 +3520,9 @@ function openExternalUrl(url: string) {
                                 ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
                                 : form.db_type === 'informix'
                                   ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                  : 'sslmode=disable'
+                                  : form.db_type === 'influxdb'
+                                    ? 'epoch=ms'
+                                    : 'sslmode=disable'
                       "
                     />
                   </div>

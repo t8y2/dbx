@@ -13,18 +13,26 @@ pub struct InfluxdbClient {
     base_url: String,
     username: Option<String>,
     password: Option<String>,
+    url_params: Option<String>,
 }
 
 impl InfluxdbClient {
-    pub fn new(url: &str, username: Option<String>, password: Option<String>, timeout: Duration) -> Self {
+    pub fn new(
+        url: &str,
+        username: Option<String>,
+        password: Option<String>,
+        url_params: Option<String>,
+        timeout: Duration,
+    ) -> Self {
         let http = HttpClient::builder().connect_timeout(timeout).build().unwrap_or_else(|_| HttpClient::new());
-        Self { http, base_url: url.trim_end_matches('/').to_string(), username, password }
+        Self { http, base_url: url.trim_end_matches('/').to_string(), username, password, url_params }
     }
 
     pub fn new_with_ca_cert(
         url: &str,
         username: Option<String>,
         password: Option<String>,
+        url_params: Option<String>,
         ca_cert_path: Option<&str>,
         timeout: Duration,
     ) -> Result<Self, String> {
@@ -39,7 +47,7 @@ impl InfluxdbClient {
             builder = builder.add_root_certificate(cert);
         }
         let http = builder.build().map_err(|e| format!("Failed to configure InfluxDB HTTP client: {e}"))?;
-        Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), username, password })
+        Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), username, password, url_params })
     }
 }
 
@@ -75,6 +83,7 @@ impl Clone for InfluxdbClient {
             base_url: self.base_url.clone(),
             username: self.username.clone(),
             password: self.password.clone(),
+            url_params: self.url_params.clone(),
         }
     }
 }
@@ -112,21 +121,17 @@ struct InfluxSeries {
     values: Vec<Vec<serde_json::Value>>,
 }
 
-fn build_query_url(base_url: &str, database: Option<&str>, sql: &str) -> String {
-    let mut url = format!("{}/query", base_url);
-    let mut has_param = false;
-    if let Some(db) = database {
-        url.push_str(&format!("?db={db}"));
-        has_param = true;
+fn build_query_url(client: &InfluxdbClient, database: Option<&str>, sql: &str) -> String {
+    let mut params: Vec<String> = vec![];
+    if let Some(url_params) = &client.url_params {
+        params.push(url_params.to_string())
     }
-    if has_param {
-        url.push('&');
-    } else {
-        url.push('?');
+    if let Some(db) = database {
+        params.push(format!("db={db}"));
     }
     let encoded_sql = utf8_percent_encode(sql, NON_ALPHANUMERIC);
-    url.push_str(&format!("q={encoded_sql}"));
-    url
+    params.push(format!("q={encoded_sql}"));
+    format!("{}/query?{}", &client.base_url, params.join("&").as_str())
 }
 
 fn build_request(client: &InfluxdbClient, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -138,7 +143,7 @@ fn build_request(client: &InfluxdbClient, req: reqwest::RequestBuilder) -> reqwe
 }
 
 async fn influx_query(client: &InfluxdbClient, sql: &str, database: Option<&str>) -> Result<InfluxJsonResult, String> {
-    let url = build_query_url(&client.base_url, database, sql);
+    let url = build_query_url(&client, database, sql);
     log::info!("[influxdb] query url={url} username={:?} password={}", client.username, client.password.is_some());
 
     let req = if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW"]) {
@@ -263,7 +268,7 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
 
 pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
-    let url = build_query_url(&client.base_url, Some(database), sql);
+    let url = build_query_url(&client, Some(database), sql);
     let req = if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW"]) {
         build_request(client, client.http.get(&url))
     } else {
@@ -309,7 +314,14 @@ mod tests {
 
     #[test]
     fn query_url() {
-        let url = build_query_url("http://localhost:8086", Some("sample"), "SHOW DATABASES");
+        let client = InfluxdbClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:8086".to_string(),
+            username: None,
+            password: None,
+            url_params: None,
+        };
+        let url = build_query_url(&client, Some("sample"), "SHOW DATABASES");
 
         assert_eq!(url, "http://localhost:8086/query?db=sample&q=SHOW%20DATABASES");
     }

@@ -858,6 +858,7 @@ impl AppState {
                     &url,
                     username,
                     password,
+                    db_config.url_params.clone(),
                     Some(&db_config.ca_cert_path),
                     connect_timeout,
                 )?;

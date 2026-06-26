@@ -779,6 +779,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     &url,
                     username,
                     password,
+                    config.url_params,
                     Some(&config.ca_cert_path),
                     connect_timeout,
                 )?;
@@ -1063,6 +1064,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 &url,
                 username,
                 password,
+                db_config.url_params,
                 Some(&db_config.ca_cert_path),
                 connect_timeout,
             )?;

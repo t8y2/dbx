@@ -1,6 +1,8 @@
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
+import dayjs from "dayjs";
 
 export type DateTimeFormatterUnit = "seconds" | "milliseconds" | "auto";
+export const DateTimePatterns = ["HH:mm:ss", "HH:mm:ss.SSS", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ssZ[Z]", "YYYY-MM-DDTHH:mm:ss.SSSZ[Z]", "YYYY-MM-DDTHH:mm:ssZ[Z]", "YYYY-MM-DDTHH:mm:ss.SSSZ[Z]"];
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -8,7 +10,7 @@ export interface CustomColumnFormatterConfig {
   template: string;
 }
 
-export type ColumnFormatterConfig = { kind: "datetime"; unit: DateTimeFormatterUnit } | { kind: "json-path"; path: string } | { kind: "mask"; prefix: number; suffix: number } | { kind: "custom-template"; template: string } | { kind: "custom-ref"; formatterId: string };
+export type ColumnFormatterConfig = { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string } | { kind: "json-path"; path: string } | { kind: "mask"; prefix: number; suffix: number } | { kind: "custom-template"; template: string } | { kind: "custom-ref"; formatterId: string };
 
 export interface ColumnFormatterKeyParts {
   connectionId: string;
@@ -27,7 +29,13 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
   const config = value as Record<string, unknown>;
 
   if (config.kind === "datetime") {
-    return config.unit === "seconds" || config.unit === "milliseconds" || config.unit === "auto" ? { kind: "datetime", unit: config.unit } : undefined;
+    return config.unit === "seconds" || config.unit === "milliseconds" || config.unit === "auto"
+      ? {
+          kind: "datetime",
+          unit: config.unit,
+          pattern: (config.pattern as string) || "YYYY-MM-DD HH:mm:ss",
+        }
+      : undefined;
   }
 
   if (config.kind === "json-path") {
@@ -75,7 +83,7 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
   if (!formatter) return displayCellValue(value);
 
   try {
-    if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit);
+    if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit, formatter.pattern);
     if (formatter.kind === "json-path") return formatJsonPath(value, formatter.path);
     if (formatter.kind === "mask") return formatMask(value, formatter);
     if (formatter.kind === "custom-template") return formatCustomTemplate(value, formatter.template);
@@ -85,23 +93,26 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
   }
 }
 
-function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit): string {
+function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit, pattern: string): string {
   if (value === null) return displayCellValue(value);
-  if (typeof value === "string" && !isTimestampString(value, unit)) return displayCellValue(value);
-  const numeric = typeof value === "number" ? value : Number(String(value).trim());
-  if (!Number.isFinite(numeric)) return displayCellValue(value);
-  const timestamp = unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? displayCellValue(value) : date.toLocaleString();
-}
-
-function isTimestampString(value: string, unit: DateTimeFormatterUnit): boolean {
-  const text = value.trim();
-  if (!/^-?\d+$/.test(text)) return false;
-  const digits = text.startsWith("-") ? text.length - 1 : text.length;
-  if (unit === "seconds") return digits === 10;
-  if (unit === "milliseconds") return digits === 13;
-  return digits === 10 || digits === 13;
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "object") return JSON.stringify(value);
+  try {
+    let dayjsInstance: dayjs.Dayjs;
+    if (typeof value === "string") {
+      dayjsInstance = dayjs(value);
+    } else {
+      const numeric = value;
+      if (!Number.isFinite(numeric)) {
+        return displayCellValue(value);
+      }
+      const timestamp = unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
+      dayjsInstance = dayjs(timestamp);
+    }
+    return dayjsInstance.format(pattern ?? "YYYY-MM-DD HH:mm:ss");
+  } catch {
+    return displayCellValue(value);
+  }
 }
 
 function formatJsonPath(value: CellValue, path: string): string {

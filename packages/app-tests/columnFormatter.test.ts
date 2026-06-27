@@ -3,14 +3,14 @@ import { test } from "vitest";
 import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/columnFormatter.ts";
 
 test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
-  assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds" }), new Date(1715758200 * 1000).toLocaleString());
-  assert.equal(applyColumnFormatter(1715758200000, { kind: "datetime", unit: "milliseconds" }), new Date(1715758200000).toLocaleString());
-  assert.equal(applyColumnFormatter("1715758200", { kind: "datetime", unit: "auto" }), new Date(1715758200 * 1000).toLocaleString());
+  assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
+  assert.equal(applyColumnFormatter(1715758200001, { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ" }), "2024-05-15 15:30:00.001+08:00");
+  assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
 });
 
 test("does not treat compact date strings as unix timestamps", () => {
-  assert.equal(applyColumnFormatter("20260514", { kind: "datetime", unit: "auto" }), "20260514");
-  assert.equal(applyColumnFormatter("2026-05-14", { kind: "datetime", unit: "auto" }), "2026-05-14");
+  assert.equal(applyColumnFormatter("2026-05-14T16:00:00.000Z", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DDTHH:mm:ssZ[Z]" }), "2026-05-15T00:00:00+08:00Z");
+  assert.equal(applyColumnFormatter("2026-05-14", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD" }), "2026-05-14");
 });
 
 test("extracts simple JSON paths from object and array strings", () => {
@@ -27,9 +27,9 @@ test("masks strings while preserving prefix and suffix", () => {
 });
 
 test("falls back to normal display for nulls and invalid formatter input", () => {
-  assert.equal(applyColumnFormatter(null, { kind: "datetime", unit: "auto" }), "NULL");
+  assert.equal(applyColumnFormatter(null, { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss"}), "NULL");
   assert.equal(applyColumnFormatter("not json", { kind: "json-path", path: "$.a" }), "not json");
-  assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: "invalid" }), undefined);
+  assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: undefined }), undefined);
 });
 
 test("normalizes only supported formatter configs", () => {

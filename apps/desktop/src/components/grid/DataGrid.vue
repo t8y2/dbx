@@ -4944,7 +4944,7 @@ function applyVisibleCellValue(item: RowItem, visibleCol: number, value: string 
   return true;
 }
 
-function fillSelectionWithValue(value: string): boolean {
+function fillSelectionWithValue(value: string | null): boolean {
   const range = selectedRange.value;
   let applied = false;
   if (range) {
@@ -5003,7 +5003,9 @@ function openBulkEditDialog() {
 }
 
 function applyBulkEditValue() {
-  if (!fillSelectionWithValue(bulkEditValue.value)) return;
+  // Empty input sets the selected cells to SQL NULL (the placeholder hints "Value, or NULL").
+  const value = bulkEditValue.value === "" ? null : bulkEditValue.value;
+  if (!fillSelectionWithValue(value)) return;
   bulkEditDialogOpen.value = false;
 }
 

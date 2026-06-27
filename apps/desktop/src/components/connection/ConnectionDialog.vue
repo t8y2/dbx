@@ -844,11 +844,6 @@ function dremioDefaultDriverClass(mode = dremioConnectionMode.value) {
   return mode === "legacy" ? DREMIO_LEGACY_JDBC_DRIVER_CLASS : DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS;
 }
 
-function isDremioGeneratedDefaultConnectionUrl(value: string) {
-  const url = value.trim();
-  return url === DREMIO_ARROW_FLIGHT_SQL_JDBC_URL || url === `${DREMIO_ARROW_FLIGHT_SQL_JDBC_URL}?useEncryption=false` || url === DREMIO_LEGACY_JDBC_URL;
-}
-
 function isDremioGeneratedDefaultDriverClass(value: string | undefined) {
   const driverClass = value?.trim() || "";
   return !driverClass || driverClass === DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS || driverClass === DREMIO_LEGACY_JDBC_DRIVER_CLASS;

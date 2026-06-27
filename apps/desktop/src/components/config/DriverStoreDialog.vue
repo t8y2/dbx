@@ -1006,7 +1006,7 @@ watch(driverStoreTab, (tab) => {
       <div class="max-w-4xl mx-auto px-6 py-6">
         <Tabs v-model="driverStoreTab" default-value="agent">
           <div class="flex items-center justify-between">
-            <TabsList class="w-fit">
+            <TabsList class="grid w-[360px] grid-cols-3">
               <TabsTrigger value="agent" class="gap-1.5 relative">
                 {{ t("driverStore.agentDrivers") }}
                 <span v-if="agentTabUpdateCount > 0" class="inline-block h-2 w-2 rounded-full bg-red-500" />

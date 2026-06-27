@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "../../apps/desktop/src/lib/connectionUrl.ts";
+import { h2FileJdbcUrlWithPath } from "../../apps/desktop/src/lib/h2Connection.ts";
 
 test("parses postgres connection URLs", () => {
   assert.deepEqual(parseConnectionUrl("postgresql://alice:secret@db.example.com:5433/app?sslmode=require"), {
@@ -310,6 +311,10 @@ test("uses H2 JDBC URL credentials when they are included", () => {
 
   assert.equal(applied.username, "url-user");
   assert.equal(applied.password, "url-secret");
+});
+
+test("rebuilds H2 split JDBC URLs with an edited file path", () => {
+  assert.equal(h2FileJdbcUrlWithPath("jdbc:h2:split:28:C:/dbx-test/h2/sample-db;AUTO_SERVER=TRUE", "D:/dbx/new-sample.mv.db"), "jdbc:h2:split:28:D:/dbx/new-sample;AUTO_SERVER=TRUE");
 });
 
 test("parses Oracle JDBC service URLs", () => {

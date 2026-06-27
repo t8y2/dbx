@@ -88,6 +88,17 @@ export function isH2SplitJdbcUrl(value: string | undefined | null): value is str
   return (value || "").trim().toLowerCase().startsWith(H2_SPLIT_PREFIX);
 }
 
+export function h2FileJdbcUrlWithPath(source: string | undefined | null, path: string): string {
+  const trimmed = (source || "").trim();
+  if (!isH2SplitJdbcUrl(trimmed)) return h2FileJdbcUrl(path);
+
+  const rest = trimmed.slice(H2_SPLIT_PREFIX.length);
+  const [rawPath, ...optionParts] = rest.split(";");
+  const blockPrefix = rawPath.match(/^\d+:/)?.[0] || "";
+  const options = optionParts.length > 0 ? `;${optionParts.join(";")}` : "";
+  return `${H2_SPLIT_PREFIX}${blockPrefix}${h2JdbcFileBasePath(path)}${options}`;
+}
+
 export function parseH2JdbcUrl(source: string) {
   const trimmed = source.trim();
   if (!/^jdbc:h2:/i.test(trimmed)) return null;

@@ -26,7 +26,7 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connectionUrl";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connectionPresentation";
-import { h2ConnectionModeForConfig, h2FileJdbcUrl, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/h2Connection";
+import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeperConnection";
 import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
@@ -302,6 +302,7 @@ const agentDrivers = ref<AgentDriverInstallState[]>([]);
 const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
 const connectionUrlInput = ref("");
+const appliedConnectionUrlInput = ref("");
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
 const dialogStep = ref<DialogStep>("select");
@@ -933,6 +934,7 @@ watch(
         visible_databases: config.visible_databases,
       };
       connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
+      appliedConnectionUrlInput.value = connectionUrlInput.value.trim();
       if (config.db_type === "mq") {
         hydrateMqFields(config.external_config);
       } else {
@@ -1477,6 +1479,8 @@ function applyConnectionUrlToForm(input: string): boolean {
     const draft = parseConnectionDeepLink(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
+      resetTestState();
+      appliedConnectionUrlInput.value = input.trim();
       return true;
     }
 
@@ -1492,6 +1496,7 @@ function applyConnectionUrlToForm(input: string): boolean {
       form.value.name = parsed.database || parsed.host || parsed.driverLabel;
     }
     resetTestState();
+    appliedConnectionUrlInput.value = input.trim();
     return true;
   } catch (e: any) {
     toast(t("connection.parseConnectionUrlFailed", { message: e?.message || String(e) }), 5000);
@@ -1499,15 +1504,19 @@ function applyConnectionUrlToForm(input: string): boolean {
   }
 }
 
-function ensureConnectionHostResolvedFromUrl(): boolean {
+function hasPendingConnectionUrlInput(): boolean {
   const url = connectionUrlInput.value.trim();
-  if (!url) return true;
-  return applyConnectionUrlToForm(url);
+  return !!url && url !== appliedConnectionUrlInput.value;
+}
+
+function ensureConnectionHostResolvedFromUrl(): boolean {
+  if (!hasPendingConnectionUrlInput()) return true;
+  return applyConnectionUrlToForm(connectionUrlInput.value.trim());
 }
 
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
   const url = connectionUrlInput.value.trim();
-  if (!url) return form.value;
+  if (!url || url === appliedConnectionUrlInput.value) return form.value;
 
   const draft = parseConnectionDeepLink(url);
   if (draft) {
@@ -1697,13 +1706,13 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     const h2Mode = connectionUrlInput.value.trim() ? h2ConnectionModeForConfig(config) : h2ConnectionMode.value;
     if (h2Mode === "file") {
       const jdbcFilePath = h2FilePathFromJdbcUrl(config.connection_string);
-      const filePath = (isH2SplitJdbcUrl(config.connection_string) ? jdbcFilePath || config.host?.trim() : config.host?.trim() || jdbcFilePath) || "";
+      const filePath = config.host?.trim() || jdbcFilePath || "";
       if (!filePath) {
         throw new Error(t("connection.h2FilePathRequired"));
       }
       config.host = filePath;
       config.port = 0;
-      config.connection_string = isH2SplitJdbcUrl(config.connection_string) ? config.connection_string.trim() : h2FileJdbcUrl(filePath);
+      config.connection_string = isH2SplitJdbcUrl(config.connection_string) ? h2FileJdbcUrlWithPath(config.connection_string, filePath) : h2FileJdbcUrlWithPath(undefined, filePath);
       config.transport_layers = [];
     } else {
       config.host = config.host?.trim() || "127.0.0.1";
@@ -2155,6 +2164,7 @@ function resetForm() {
   jdbcDriverPathsInput.value = "";
   selectedJdbcDriverPath.value = "";
   connectionUrlInput.value = "";
+  appliedConnectionUrlInput.value = "";
   dialogStep.value = "select";
   dbPickerView.value = "icon";
   dbSearchQuery.value = "";

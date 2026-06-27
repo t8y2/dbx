@@ -179,7 +179,6 @@ type ConditionSuggestion = {
 };
 
 type SortMenuValue = "local-asc" | "local-desc" | "database-asc" | "database-desc" | "clear";
-type CellEditInputLimitReason = "length" | "type";
 
 const props = defineProps<{
   result: QueryResult;
@@ -1635,7 +1634,6 @@ let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
 let resetCellEditTextareaScrollOnResize = false;
-let lastCellEditLimitToastAt = 0;
 let gridHorizontalScrollbarDragState: {
   trackRect: DOMRect;
   thumbOffsetPx: number;
@@ -2954,11 +2952,6 @@ function isEnumGridColumnNullable(columnIndex: number): boolean {
   return tableColumnForGridColumn(columnIndex)?.is_nullable ?? false;
 }
 
-function cellEditMaxLengthForColumn(columnIndex: number): number | undefined {
-  const length = tableColumnForGridColumn(columnIndex)?.character_maximum_length;
-  return typeof length === "number" && Number.isFinite(length) && length > 0 ? length : undefined;
-}
-
 function cellEditInputModeForColumn(columnIndex: number): "decimal" | "numeric" | undefined {
   const dataType = normalizedColumnDataType(tableColumnForGridColumn(columnIndex));
   if (isIntegerColumnType(dataType)) return "numeric";
@@ -2976,64 +2969,6 @@ function isIntegerColumnType(dataType: string): boolean {
 
 function isDecimalColumnType(dataType: string): boolean {
   return /^(decimal|numeric|number|float|double|real|money|smallmoney|dec|fixed)\b/.test(dataType);
-}
-
-function isBooleanColumnType(dataType: string): boolean {
-  return /^(bool|boolean|bit)\b/.test(dataType);
-}
-
-function clampCellEditTextLength(value: string, maxLength: number | undefined): string {
-  if (!maxLength || value.length <= maxLength) return value;
-  return value.slice(0, maxLength);
-}
-
-function normalizeSignedIntegerText(value: string, maxDigits?: number | null): string {
-  const negative = value.trimStart().startsWith("-");
-  let digits = value.replace(/\D/g, "");
-  if (typeof maxDigits === "number" && maxDigits > 0) digits = digits.slice(0, maxDigits);
-  return `${negative ? "-" : ""}${digits}`;
-}
-
-function normalizeDecimalText(value: string, column: ColumnInfo | undefined): string {
-  const negative = value.trimStart().startsWith("-");
-  const unsigned = value.replace(/[^\d.]/g, "");
-  const dotIndex = unsigned.indexOf(".");
-  let integerPart = dotIndex === -1 ? unsigned : unsigned.slice(0, dotIndex);
-  let fractionPart = dotIndex === -1 ? "" : unsigned.slice(dotIndex + 1).replace(/\./g, "");
-  const precision = column?.numeric_precision;
-  const scale = column?.numeric_scale;
-  if (typeof scale === "number" && scale >= 0) fractionPart = fractionPart.slice(0, scale);
-  if (typeof precision === "number" && precision > 0) {
-    const integerDigits = Math.max(0, precision - Math.max(0, scale ?? 0));
-    if (integerDigits > 0) integerPart = integerPart.slice(0, integerDigits);
-  }
-  return `${negative ? "-" : ""}${integerPart}${dotIndex === -1 ? "" : `.${fractionPart}`}`;
-}
-
-function normalizeBooleanText(value: string): string {
-  return value.replace(/[^01a-z]/gi, "").slice(0, 5);
-}
-
-function normalizeCellEditTextForColumn(value: string, columnIndex: number): { value: string; reason?: CellEditInputLimitReason } {
-  const column = tableColumnForGridColumn(columnIndex);
-  const dataType = normalizedColumnDataType(column);
-  const maxLength = cellEditMaxLengthForColumn(columnIndex);
-  let nextValue = value;
-  let reason: CellEditInputLimitReason | undefined;
-  if (isIntegerColumnType(dataType)) {
-    nextValue = normalizeSignedIntegerText(value, column?.numeric_precision);
-    reason = nextValue === value ? undefined : "type";
-  } else if (isDecimalColumnType(dataType)) {
-    nextValue = normalizeDecimalText(value, column);
-    reason = nextValue === value ? undefined : "type";
-  } else if (isBooleanColumnType(dataType)) {
-    nextValue = normalizeBooleanText(value);
-    reason = nextValue === value ? undefined : "type";
-  } else {
-    nextValue = clampCellEditTextLength(value, maxLength);
-    reason = nextValue === value ? undefined : "length";
-  }
-  return { value: nextValue, reason };
 }
 
 function canDeleteRowItem(item: RowItem | undefined): boolean {
@@ -6027,15 +5962,6 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
 function onCellEditTextareaInput(event: Event) {
   resetCellEditTextareaScrollOnResize = false;
   const input = event.currentTarget as HTMLInputElement | HTMLTextAreaElement | null;
-  const columnIndex = editingCell.value?.col;
-  if (input && columnIndex !== undefined) {
-    const normalized = normalizeCellEditTextForColumn(input.value, columnIndex);
-    if (normalized.value !== input.value) {
-      input.value = normalized.value;
-      editValue.value = normalized.value;
-      showCellEditInputLimitToast(normalized.reason);
-    }
-  }
   if (input instanceof HTMLTextAreaElement) {
     resizeCellEditTextareaElement(input);
     scheduleCellEditTextareaResize(input);
@@ -6044,27 +5970,7 @@ function onCellEditTextareaInput(event: Event) {
 
 function onCellEditTextareaPaste(event: ClipboardEvent) {
   const input = event.currentTarget as HTMLInputElement | HTMLTextAreaElement | null;
-  const columnIndex = editingCell.value?.col;
-  const pastedText = event.clipboardData?.getData("text") ?? "";
-  if (input && columnIndex !== undefined && pastedText) {
-    const nextText = textAfterCellEditPaste(input, pastedText);
-    const normalized = normalizeCellEditTextForColumn(nextText, columnIndex);
-    if (normalized.value !== nextText) showCellEditInputLimitToast(normalized.reason);
-  }
   if (input instanceof HTMLTextAreaElement) scheduleCellEditTextareaResize(input);
-}
-
-function textAfterCellEditPaste(input: HTMLInputElement | HTMLTextAreaElement, pastedText: string): string {
-  const start = input.selectionStart ?? input.value.length;
-  const end = input.selectionEnd ?? start;
-  return `${input.value.slice(0, start)}${pastedText}${input.value.slice(end)}`;
-}
-
-function showCellEditInputLimitToast(reason: CellEditInputLimitReason | undefined) {
-  const now = Date.now();
-  if (now - lastCellEditLimitToastAt < 1500) return;
-  lastCellEditLimitToastAt = now;
-  toast(t(reason === "length" ? "grid.cellEditLengthLimited" : "grid.cellEditTypeLimited"), 1800);
 }
 
 function resizeCellEditTextareaElement(textarea: HTMLTextAreaElement | null) {
@@ -7473,7 +7379,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           v-model="editValue"
                           data-expanded-cell-editor="true"
                           rows="1"
-                          :maxlength="cellEditMaxLengthForColumn(cell.valueIndex)"
                           :inputmode="cellEditInputModeForColumn(cell.valueIndex)"
                           autocapitalize="off"
                           autocorrect="off"
@@ -7489,7 +7394,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <input
                           v-else
                           v-model="editValue"
-                          :maxlength="cellEditMaxLengthForColumn(cell.valueIndex)"
                           :inputmode="cellEditInputModeForColumn(cell.valueIndex)"
                           autocapitalize="off"
                           autocorrect="off"
@@ -7915,7 +7819,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         v-model="editValue"
                         data-expanded-cell-editor="true"
                         rows="1"
-                        :maxlength="cellEditMaxLengthForColumn(canvasEditingCell.actualColIdx)"
                         :inputmode="cellEditInputModeForColumn(canvasEditingCell.actualColIdx)"
                         autocapitalize="off"
                         autocorrect="off"
@@ -7931,7 +7834,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <input
                         v-else
                         v-model="editValue"
-                        :maxlength="cellEditMaxLengthForColumn(canvasEditingCell.actualColIdx)"
                         :inputmode="cellEditInputModeForColumn(canvasEditingCell.actualColIdx)"
                         autocapitalize="off"
                         autocorrect="off"
@@ -8049,7 +7951,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           v-model="editValue"
                           data-expanded-cell-editor="true"
                           rows="1"
-                          :maxlength="cellEditMaxLengthForColumn(col.actualColIdx)"
                           :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
                           autocapitalize="off"
                           autocorrect="off"
@@ -8065,7 +7966,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <input
                           v-else
                           v-model="editValue"
-                          :maxlength="cellEditMaxLengthForColumn(col.actualColIdx)"
                           :inputmode="cellEditInputModeForColumn(col.actualColIdx)"
                           autocapitalize="off"
                           autocorrect="off"

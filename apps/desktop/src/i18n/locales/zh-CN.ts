@@ -779,8 +779,6 @@ export default {
     formatJson: "格式化 JSON",
     setNull: "设为 NULL",
     restoreOriginalValue: "恢复原值",
-    cellEditLengthLimited: "已按字段长度限制截断输入",
-    cellEditTypeLimited: "已按字段类型限制过滤输入",
     copyColumnName: "复制列名",
     copyAlterColumnSql: "复制为SQL ALTER",
     alterSqlCopied: "SQL ALTER 已复制到剪贴板",

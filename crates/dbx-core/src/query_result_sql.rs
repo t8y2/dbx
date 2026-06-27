@@ -219,7 +219,7 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     } else {
         statement
     };
-    ok(format!("SELECT COUNT(*) AS dbx_total_rows FROM ({wrapped_sql}) {alias};"))
+    ok(derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};")))
 }
 
 pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildResult {
@@ -763,9 +763,9 @@ fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
     }
     if offset > 0 {
         let upper_bound = offset + limit;
-        format!("{statement} LIMIT {offset}, {upper_bound};")
+        append_sql_suffix(statement, &format!("LIMIT {offset}, {upper_bound};"))
     } else {
-        format!("{statement} LIMIT {limit};")
+        append_sql_suffix(statement, &format!("LIMIT {limit};"))
     }
 }
 
@@ -810,12 +810,16 @@ fn add_fetch_first_limit(statement: &str, limit: usize, offset: usize) -> String
     if has_top_level_fetch_first(statement) {
         if offset > 0 {
             let alias = quote_table_identifier(None, "dbx_page");
-            return format!("SELECT * FROM ({statement}) {alias} OFFSET {offset} ROWS FETCH FIRST {limit} ROWS ONLY;");
+            return derived_table_sql(
+                "SELECT * FROM",
+                statement,
+                &format!("{alias} OFFSET {offset} ROWS FETCH FIRST {limit} ROWS ONLY;"),
+            );
         }
         return format!("{statement};");
     }
     let offset_sql = if offset > 0 { format!(" OFFSET {offset} ROWS") } else { String::new() };
-    format!("{statement}{offset_sql} FETCH FIRST {limit} ROWS ONLY;")
+    append_sql_suffix(statement, &format!("{offset_sql} FETCH FIRST {limit} ROWS ONLY;"))
 }
 
 fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {
@@ -823,12 +827,15 @@ fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {
         return format!("{statement};");
     }
     if offset == 0 {
-        return format!("SELECT * FROM ({statement}) WHERE ROWNUM <= {limit};");
+        return derived_table_sql("SELECT * FROM", statement, &format!("WHERE ROWNUM <= {limit};"));
     }
     let end = offset + limit;
-    format!(
-        "SELECT * FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM ({statement}) dbx_inner WHERE ROWNUM <= {end}) WHERE \"__dbx_row_num\" > {offset};"
-    )
+    let inner = derived_table_sql(
+        "SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM",
+        statement,
+        &format!("dbx_inner WHERE ROWNUM <= {end}"),
+    );
+    format!("SELECT * FROM ({inner}) WHERE \"__dbx_row_num\" > {offset};")
 }
 
 fn add_standard_limit(
@@ -855,7 +862,7 @@ fn add_standard_limit(
         return format!("{statement};");
     }
     let offset_sql = if offset > 0 { format!(" OFFSET {offset}") } else { String::new() };
-    format!("{statement}{order_sql} LIMIT {limit}{offset_sql};")
+    append_sql_suffix(statement, &format!("{order_sql} LIMIT {limit}{offset_sql};"))
 }
 
 fn add_outer_standard_limit(
@@ -866,7 +873,69 @@ fn add_outer_standard_limit(
     order_sql: &str,
 ) -> String {
     let alias = quote_table_identifier(database_type, "dbx_page");
-    format!("SELECT * FROM ({statement}) {alias}{order_sql} LIMIT {limit} OFFSET {offset};")
+    derived_table_sql("SELECT * FROM", statement, &format!("{alias}{order_sql} LIMIT {limit} OFFSET {offset};"))
+}
+
+fn derived_table_sql(prefix: &str, statement: &str, suffix: &str) -> String {
+    format!("{prefix} ({}) {suffix}", statement_for_sql_suffix(statement))
+}
+
+fn append_sql_suffix(statement: &str, suffix: &str) -> String {
+    let separator = if sql_suffix_needs_newline(statement) { "\n" } else { " " };
+    format!("{}{separator}{}", statement.trim_end(), suffix.trim_start())
+}
+
+fn statement_for_sql_suffix(statement: &str) -> String {
+    let trimmed = statement.trim_end();
+    if sql_suffix_needs_newline(trimmed) {
+        format!("{trimmed}\n")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sql_suffix_needs_newline(sql: &str) -> bool {
+    let Some(last_line_start) = sql.rfind(['\n', '\r']).map(|index| index + 1) else {
+        return line_has_open_line_comment(sql);
+    };
+    line_has_open_line_comment(&sql[last_line_start..])
+}
+
+fn line_has_open_line_comment(line: &str) -> bool {
+    let mut index = 0;
+    while index < line.len() {
+        let ch = next_char(line, index);
+        let next = next_char_at(line, index + ch.len_utf8());
+        if matches!(ch, '\'' | '"' | '`') {
+            index = skip_sql_quoted(line, index, ch);
+            continue;
+        }
+        if ch == '[' {
+            index = skip_sql_bracket_identifier(line, index);
+            continue;
+        }
+        if ch == '/' && next == Some('*') {
+            index += 2;
+            while index < line.len() {
+                let current = next_char(line, index);
+                let following = next_char_at(line, index + current.len_utf8());
+                index += current.len_utf8();
+                if current == '*' && following == Some('/') {
+                    index += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '-' && next == Some('-') {
+            return true;
+        }
+        if ch == '#' {
+            return true;
+        }
+        index += ch.len_utf8();
+    }
+    false
 }
 
 /// For dedup queries (DISTINCT / GROUP BY) without an ORDER BY clause, generate
@@ -1626,6 +1695,30 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn mysql_pagination_keeps_limit_outside_trailing_line_comment() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT 1 AS id\n-- tail comment".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 50,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT 1 AS id\n-- tail comment\nLIMIT 50;");
+    }
+
+    #[test]
+    fn mysql_pagination_keeps_limit_outside_trailing_hash_comment() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT 1 AS id\n# tail comment".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 50,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT 1 AS id\n# tail comment\nLIMIT 50;");
+    }
+
+    #[test]
     fn mysql_pagination_keeps_existing_top_level_limit() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM users LIMIT 20;".to_string(),
@@ -1701,6 +1794,32 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM (WITH cte AS (SELECT 1 AS id) SELECT * FROM cte) `dbx_count`;"
+        );
+    }
+
+    #[test]
+    fn count_query_keeps_wrapper_outside_trailing_line_comment() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT 1 AS id\n-- tail comment".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT 1 AS id\n-- tail comment\n) `dbx_count`;"
+        );
+    }
+
+    #[test]
+    fn count_query_keeps_wrapper_outside_trailing_hash_comment() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT 1 AS id\n# tail comment".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT 1 AS id\n# tail comment\n) `dbx_count`;"
         );
     }
 

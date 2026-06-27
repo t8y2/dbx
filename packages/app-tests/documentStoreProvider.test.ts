@@ -24,7 +24,8 @@ test("providers build store-specific query previews", () => {
   const elasticsearch = documentStoreProviderFor("elasticsearch");
 
   assert.equal(mongo.documentsLabel({ total: 7, t }), "mongo.documents:7");
-  assert.equal(mongo.queryPreview({ collection: "orders", filterJson: '{"city":"长治"}', sortJson: '{"createdAt":-1}', skip: 20, limit: 10 }), 'db.orders.find({"city":"长治"}).sort({"createdAt":-1}).skip(20).limit(10)');
+  assert.equal(mongo.queryPreview({ collection: "orders", filterJson: '{"city":"长治"}', sortJson: '{"createdAt":-1}', skip: 20, limit: 10 }), 'db.getCollection("orders").find({"city":"长治"}).sort({"createdAt":-1}).skip(20).limit(10)');
+  assert.equal(mongo.queryPreview({ collection: "order-events", filterJson: '{"city":"长治"}', sortJson: undefined, skip: 0, limit: 100 }), 'db.getCollection("order-events").find({"city":"长治"}).skip(0).limit(100)');
   assert.equal(elasticsearch.documentsLabel({ total: 7, t }), "Documents");
   assert.equal(elasticsearch.filterInputLabel, "filter");
   assert.equal(

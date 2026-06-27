@@ -47,7 +47,8 @@ const mongoDocumentProvider: DocumentStoreProvider = {
   sortInputLabel: "sort",
   documentsLabel: ({ total, t }) => t("mongo.documents", { count: total }),
   queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
-    const parts = [`db.${collection}.find(${filterJson || "{}"})`];
+    const collectionRef = `db.getCollection(${JSON.stringify(collection)})`;
+    const parts = [`${collectionRef}.find(${filterJson || "{}"})`];
     if (sortJson?.trim()) parts.push(`.sort(${sortJson.trim()})`);
     parts.push(`.skip(${skip}).limit(${limit})`);
     return parts.join("");

@@ -248,6 +248,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
                     primary_key,
                     row.get(primary_key_indexes[index]).unwrap_or(&Value::Null),
                     column_info_for(column_info, primary_key),
+                    false,
                 )
             })
             .collect::<Vec<_>>()
@@ -753,7 +754,7 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
             column_info,
         )];
         predicates.extend(writable_changes.iter().map(|((_, value), column)| {
-            build_column_predicate(options.database_type, column, value, column_info_for(column_info, column))
+            build_column_predicate(options.database_type, column, value, column_info_for(column_info, column), true)
         }));
         statements.push(data_grid_statement(
             options.database_type,
@@ -1205,7 +1206,7 @@ fn build_primary_key_where(
                         .unwrap_or(usize::MAX),
                 )
                 .unwrap_or(&Value::Null);
-            build_column_predicate(database_type, primary_key, value, column_info_for(column_info, primary_key))
+            build_column_predicate(database_type, primary_key, value, column_info_for(column_info, primary_key), false)
         })
         .collect::<Vec<_>>()
         .join(" AND ")
@@ -1230,6 +1231,7 @@ fn build_row_where(
                 column,
                 row.get(index).unwrap_or(&Value::Null),
                 column_info_for(column_info, column),
+                true,
             ))
         })
         .collect::<Vec<_>>()
@@ -1241,11 +1243,12 @@ fn build_column_predicate(
     column: &str,
     value: &Value,
     column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
 ) -> String {
     let ident = predicate_ident(database_type, column);
     if value.is_null() {
         format!("{ident} IS NULL")
-    } else if uses_mysql_binary_text_predicate(database_type, value, column_info) {
+    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
         format!("BINARY {ident} = {}", format_grid_sql_literal(value, database_type, column_info))
     } else {
         format!("{ident} = {}", format_grid_sql_literal(value, database_type, column_info))
@@ -2190,7 +2193,31 @@ mod tests {
     }
 
     #[test]
-    fn mysql_text_predicates_use_binary_comparison_for_width_sensitive_edits() {
+    fn mysql_primary_key_text_predicates_do_not_use_binary_comparison() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "school".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "varchar(32)", true, None), column("age", "varchar(8)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "age".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("0001492305e412e88086bd582d2678e0"), json!("17")]],
+            dirty_rows: vec![(0, vec![(1, json!("18"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `school` SET `age` = '18' WHERE `id` = '0001492305e412e88086bd582d2678e0';"]
+        );
+    }
+
+    #[test]
+    fn mysql_row_text_predicates_use_binary_comparison_for_width_sensitive_edits() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {

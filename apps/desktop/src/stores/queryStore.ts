@@ -1001,6 +1001,10 @@ export const useQueryStore = defineStore("query", () => {
   function openSavedSql(file: SavedSqlFile) {
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
+      if (!existing.sql && file.sql) {
+        existing.sql = file.sql;
+        existing.originalSql = file.sql;
+      }
       activeTabId.value = existing.id;
       return existing.id;
     }
@@ -1024,6 +1028,21 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value.push(tab);
     activeTabId.value = id;
     return id;
+  }
+
+  async function hydrateSavedSqlTabs() {
+    const savedSqlStore = useSavedSqlStore();
+    const linkedTabs = tabs.value.filter((tab) => tab.savedSqlId && tab.sql === "");
+    for (const tab of linkedTabs) {
+      const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
+      if (!file) continue;
+      tab.title = tab.customTitle ? tab.title : file.name;
+      tab.connectionId = file.connectionId;
+      tab.database = file.database;
+      tab.schema = file.schema;
+      tab.sql = file.sql;
+      tab.originalSql = file.sql;
+    }
   }
 
   function togglePinnedTab(id: string) {
@@ -1084,9 +1103,9 @@ export const useQueryStore = defineStore("query", () => {
     // Sync connection change back to the saved SQL file if this tab is linked
     if (tab.savedSqlId) {
       const savedSqlStore = useSavedSqlStore();
-      const existing = savedSqlStore.getFile(tab.savedSqlId);
-      if (existing) {
-        void savedSqlStore.saveFile({
+      void savedSqlStore.ensureFileContent(tab.savedSqlId).then((existing) => {
+        if (!existing) return;
+        return savedSqlStore.saveFile({
           id: existing.id,
           connectionId,
           name: existing.name,
@@ -1094,7 +1113,7 @@ export const useQueryStore = defineStore("query", () => {
           schema: existing.schema,
           sql: existing.sql,
         });
-      }
+      });
     }
   }
 
@@ -2376,6 +2395,7 @@ export const useQueryStore = defineStore("query", () => {
     linkSavedSql,
     linkExternalSqlPath,
     openSavedSql,
+    hydrateSavedSqlTabs,
     togglePinnedTab,
     reorderTab,
     updateDatabase,

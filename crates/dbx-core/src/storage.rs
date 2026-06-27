@@ -1146,6 +1146,7 @@ impl Storage {
                         database: row.get(4)?,
                         schema: row.get(5)?,
                         sql: row.get(6)?,
+                        sql_loaded: true,
                         order_index: row.get(7)?,
                         open_count: row.get(8)?,
                         opened_at: row.get(9)?,
@@ -1158,6 +1159,97 @@ impl Storage {
                 .map_err(|e| e.to_string())?;
 
             Ok(SavedSqlLibrary { folders, files })
+        })
+        .await
+    }
+
+    pub async fn load_saved_sql_library_summary(&self) -> Result<SavedSqlLibrary, String> {
+        self.with_conn(|conn| {
+            let mut folder_stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
+                     FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let folders = folder_stmt
+                .query_map([], |row| {
+                    Ok(SavedSqlFolder {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        parent_folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        order_index: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            let mut file_stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
+                     FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let files = file_stmt
+                .query_map([], |row| {
+                    Ok(SavedSqlFile {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        database: row.get(4)?,
+                        schema: row.get(5)?,
+                        sql: String::new(),
+                        sql_loaded: false,
+                        order_index: row.get(6)?,
+                        open_count: row.get(7)?,
+                        opened_at: row.get(8)?,
+                        created_at: row.get(9)?,
+                        updated_at: row.get(10)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            Ok(SavedSqlLibrary { folders, files })
+        })
+        .await
+    }
+
+    pub async fn load_saved_sql_file(&self, id: &str) -> Result<Option<SavedSqlFile>, String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                     FROM saved_sql_files WHERE id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            match stmt.query_row([id], |row| {
+                Ok(SavedSqlFile {
+                    id: row.get(0)?,
+                    connection_id: row.get(1)?,
+                    folder_id: row.get(2)?,
+                    name: row.get(3)?,
+                    database: row.get(4)?,
+                    schema: row.get(5)?,
+                    sql: row.get(6)?,
+                    sql_loaded: true,
+                    order_index: row.get(7)?,
+                    open_count: row.get(8)?,
+                    opened_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                })
+            }) {
+                Ok(file) => Ok(Some(file)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(err) => Err(err.to_string()),
+            }
         })
         .await
     }
@@ -1233,7 +1325,7 @@ impl Storage {
                  name = excluded.name, \
                  database_name = excluded.database_name, \
                  schema_name = excluded.schema_name, \
-                 sql_text = excluded.sql_text, \
+                 sql_text = CASE WHEN ?13 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
                  order_index = excluded.order_index, \
                  open_count = excluded.open_count, \
                  opened_at = excluded.opened_at, \
@@ -1250,7 +1342,8 @@ impl Storage {
                     file.open_count,
                     file.opened_at,
                     file.created_at,
-                    file.updated_at
+                    file.updated_at,
+                    file.sql_loaded
                 ],
             )
             .map(|_| ())
@@ -1866,6 +1959,7 @@ mod tests {
     use super::{DesktopIconTheme, DesktopSettings, Storage};
     use crate::connection_secrets::{MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY};
     use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::saved_sql::SavedSqlFile;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -2240,5 +2334,70 @@ mod tests {
 
         storage.delete_tab_runtime_cache("tab:1:result").await.unwrap();
         assert_eq!(storage.load_tab_runtime_cache("tab:1:result").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn saved_sql_summary_omits_sql_text_and_loads_file_on_demand() {
+        let path = temp_db_path("saved-sql-summary");
+        let storage = Storage::open(&path).await.unwrap();
+        let file = SavedSqlFile {
+            id: "sql-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            folder_id: None,
+            name: "large.sql".to_string(),
+            database: "main".to_string(),
+            schema: None,
+            sql: "SELECT * FROM very_large_table;".repeat(100),
+            sql_loaded: true,
+            order_index: 0,
+            open_count: 0,
+            opened_at: None,
+            created_at: "2026-06-27T00:00:00Z".to_string(),
+            updated_at: "2026-06-27T00:00:00Z".to_string(),
+        };
+
+        storage.save_saved_sql_file(&file).await.unwrap();
+
+        let summary = storage.load_saved_sql_library_summary().await.unwrap();
+        assert_eq!(summary.files.len(), 1);
+        assert_eq!(summary.files[0].sql, "");
+        assert!(!summary.files[0].sql_loaded);
+
+        let loaded = storage.load_saved_sql_file("sql-1").await.unwrap().unwrap();
+        assert_eq!(loaded.sql, file.sql);
+        assert!(loaded.sql_loaded);
+    }
+
+    #[tokio::test]
+    async fn saved_sql_metadata_update_preserves_unloaded_sql_text() {
+        let path = temp_db_path("saved-sql-preserve-unloaded-text");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut file = SavedSqlFile {
+            id: "sql-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            folder_id: None,
+            name: "query.sql".to_string(),
+            database: "main".to_string(),
+            schema: None,
+            sql: "SELECT 1;".to_string(),
+            sql_loaded: true,
+            order_index: 0,
+            open_count: 0,
+            opened_at: None,
+            created_at: "2026-06-27T00:00:00Z".to_string(),
+            updated_at: "2026-06-27T00:00:00Z".to_string(),
+        };
+        storage.save_saved_sql_file(&file).await.unwrap();
+
+        file.name = "renamed.sql".to_string();
+        file.sql.clear();
+        file.sql_loaded = false;
+        file.open_count = 1;
+        storage.save_saved_sql_file(&file).await.unwrap();
+
+        let loaded = storage.load_saved_sql_file("sql-1").await.unwrap().unwrap();
+        assert_eq!(loaded.name, "renamed.sql");
+        assert_eq!(loaded.open_count, 1);
+        assert_eq!(loaded.sql, "SELECT 1;");
     }
 }

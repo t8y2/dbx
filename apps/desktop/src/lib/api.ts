@@ -92,6 +92,7 @@ export const reinstallJre = forward("reinstallJre");
 export const uninstallJre = forward("uninstallJre");
 export const listenAgentInstallProgress = forward("listenAgentInstallProgress");
 export const loadSavedSqlLibrary = forward("loadSavedSqlLibrary");
+export const loadSavedSqlFile = forward("loadSavedSqlFile");
 export const saveSavedSqlFolder = forward("saveSavedSqlFolder");
 export const deleteSavedSqlFolder = forward("deleteSavedSqlFolder");
 export const saveSavedSqlFile = forward("saveSavedSqlFile");

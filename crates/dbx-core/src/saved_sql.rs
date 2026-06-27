@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_sql_loaded() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedSqlFolder {
@@ -23,6 +27,8 @@ pub struct SavedSqlFile {
     pub database: String,
     pub schema: Option<String>,
     pub sql: String,
+    #[serde(default = "default_sql_loaded")]
+    pub sql_loaded: bool,
     #[serde(default)]
     pub order_index: i64,
     #[serde(default)]

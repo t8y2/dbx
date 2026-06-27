@@ -35,7 +35,12 @@ struct SavedSqlSyncManifest {
 
 #[tauri::command]
 pub async fn load_saved_sql_library(state: State<'_, Arc<AppState>>) -> Result<SavedSqlLibrary, String> {
-    state.storage.load_saved_sql_library().await
+    state.storage.load_saved_sql_library_summary().await
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_file(state: State<'_, Arc<AppState>>, id: String) -> Result<Option<SavedSqlFile>, String> {
+    state.storage.load_saved_sql_file(&id).await
 }
 
 #[tauri::command]

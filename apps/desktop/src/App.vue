@@ -867,8 +867,8 @@ async function openConnectionQuery(connectionId: string) {
   }
 }
 
-function openSavedSqlFromWelcome(fileId: string) {
-  const file = savedSqlStore.getFile(fileId);
+async function openSavedSqlFromWelcome(fileId: string) {
+  const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
   queryStore.openSavedSql(file);
   connectionStore.activeConnectionId = file.connectionId;
@@ -1273,9 +1273,16 @@ function initApp() {
   settingsStore
     .initDesktopSettings()
     .catch(() => {})
-    .then(() => savedSqlStore.initFromStorage())
     .then(() => {
-      console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
+      void savedSqlStore
+        .initFromStorage()
+        .then(() => {
+          console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
+          void queryStore.hydrateSavedSqlTabs();
+        })
+        .catch((e: any) => {
+          toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+        });
       return connectionStore.initFromDisk();
     })
     .then(() => {

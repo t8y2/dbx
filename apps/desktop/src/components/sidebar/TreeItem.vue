@@ -836,10 +836,10 @@ function openMongoCollectionData(node: TreeNode) {
   queryStore.updateSql(tab, node.label);
 }
 
-function openSavedSqlFile() {
+async function openSavedSqlFile() {
   const node = props.node;
   if (node.type !== "saved-sql-file" || !node.savedSqlId) return;
-  const file = savedSqlStore.getFile(node.savedSqlId);
+  const file = await savedSqlStore.ensureFileContent(node.savedSqlId);
   if (!file) return;
   queryStore.openSavedSql(file);
   connectionStore.activeConnectionId = file.connectionId;
@@ -3479,8 +3479,8 @@ function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | nul
   return null;
 }
 
-function openSavedSqlHistoryFile(fileId: string) {
-  const file = savedSqlStore.getFile(fileId);
+async function openSavedSqlHistoryFile(fileId: string) {
+  const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
   queryStore.openSavedSql(file);
   connectionStore.activeConnectionId = file.connectionId;

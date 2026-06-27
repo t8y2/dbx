@@ -673,6 +673,7 @@ export interface SavedSqlFile {
   database: string;
   schema?: string;
   sql: string;
+  sqlLoaded?: boolean;
   orderIndex?: number;
   openCount?: number;
   openedAt?: string;

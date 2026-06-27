@@ -109,6 +109,8 @@ async function downloadText(content: string, fileName: string) {
 
 async function exportSingleFile(file: SavedSqlFile) {
   try {
+    const loadedFile = await savedSqlStore.ensureFileContent(file.id);
+    if (!loadedFile) return;
     const defaultFileName = sanitizeFileSystemSegment(ensureSqlExtension(file.name));
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
@@ -118,9 +120,9 @@ async function exportSingleFile(file: SavedSqlFile) {
         filters: [{ name: "SQL", extensions: ["sql"] }],
       });
       if (!path) return;
-      await writeTextFile(path, file.sql);
+      await writeTextFile(path, loadedFile.sql);
     } else {
-      await downloadText(file.sql, defaultFileName);
+      await downloadText(loadedFile.sql, defaultFileName);
     }
     toast(t("sqlLibrary.exported"), 2000);
   } catch (e: any) {
@@ -158,8 +160,10 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
         await writeFolder(child, childDir);
       }
       for (const file of savedSqlStore.filesInFolder(libraryFolder.id)) {
+        const loadedFile = await savedSqlStore.ensureFileContent(file.id);
+        if (!loadedFile) continue;
         const filePath = await join(dir, sanitizeFileSystemSegment(ensureSqlExtension(file.name)));
-        await writeTextFile(filePath, file.sql);
+        await writeTextFile(filePath, loadedFile.sql);
       }
     };
 
@@ -177,8 +181,10 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
         const unfiledDir = await join(rootDir, sanitizeFileSystemSegment(t("sqlLibrary.unfiled")));
         await mkdir(unfiledDir, { recursive: true });
         for (const file of unfiled) {
+          const loadedFile = await savedSqlStore.ensureFileContent(file.id);
+          if (!loadedFile) continue;
           const filePath = await join(unfiledDir, sanitizeFileSystemSegment(ensureSqlExtension(file.name)));
-          await writeTextFile(filePath, file.sql);
+          await writeTextFile(filePath, loadedFile.sql);
         }
       }
     }
@@ -579,11 +585,13 @@ async function executeBatchDelete() {
   toast(t("sqlLibrary.batchDeleteSuccess", { count: fileIds.length + folderIds.length }), 2000);
 }
 
-function openFile(file: SavedSqlFile) {
+async function openFile(file: SavedSqlFile) {
   if (suppressNextRowClick.value) return;
-  queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = file.connectionId;
-  void savedSqlStore.recordFileUsage(file.id);
+  const loadedFile = await savedSqlStore.ensureFileContent(file.id);
+  if (!loadedFile) return;
+  queryStore.openSavedSql(loadedFile);
+  connectionStore.activeConnectionId = loadedFile.connectionId;
+  void savedSqlStore.recordFileUsage(loadedFile.id);
 }
 
 function handleFileClick(file: SavedSqlFile, event: MouseEvent) {

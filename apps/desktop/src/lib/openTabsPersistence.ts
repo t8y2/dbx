@@ -53,6 +53,11 @@ export interface RestoredOpenTabs {
   activeTabId: string | null;
 }
 
+function shouldPersistTabSql(tab: QueryTab) {
+  if (!tab.savedSqlId) return true;
+  return tab.originalSql !== undefined && tab.sql !== tab.originalSql;
+}
+
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
   return tabs.map((tab) => ({
     id: tab.id,
@@ -61,7 +66,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     connectionId: tab.connectionId,
     database: tab.database,
     schema: tab.schema,
-    sql: tab.sql,
+    sql: shouldPersistTabSql(tab) ? tab.sql : "",
     savedSqlId: tab.savedSqlId,
     externalSqlPath: tab.externalSqlPath,
     ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: tab.lastExecutedSql } : {}),
@@ -108,7 +113,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
 function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   if (!value || typeof value !== "object") return false;
   const tab = value as Record<string, unknown>;
-  return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && typeof tab.sql === "string";
+  return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");
 }
 
 export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean } = {}): RestoredOpenTabs {
@@ -134,13 +139,14 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
       return {
         ...tab,
         mode,
+        sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
         editorViewport: undefined,
         editorSelection: undefined,
         isExplaining: false,
-        originalSql: mode === "query" && tab.externalSqlPath ? tab.sql : undefined,
+        originalSql: mode === "query" && tab.externalSqlPath ? tab.sql : mode === "query" && tab.savedSqlId && tab.sql ? "" : undefined,
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
         resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,

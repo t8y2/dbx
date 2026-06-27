@@ -1044,6 +1044,10 @@ export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return invoke("load_saved_sql_library");
 }
 
+export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
+  return invoke("load_saved_sql_file", { id });
+}
+
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
   return invoke("save_saved_sql_folder", { folder });
 }

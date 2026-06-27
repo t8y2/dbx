@@ -381,7 +381,10 @@ async fn main() {
             "/saved-sql",
             get(routes::saved_sql::load_saved_sql_library).post(routes::saved_sql::save_saved_sql_file),
         )
-        .route("/saved-sql/{id}", delete(routes::saved_sql::delete_saved_sql_file))
+        .route(
+            "/saved-sql/{id}",
+            get(routes::saved_sql::load_saved_sql_file).delete(routes::saved_sql::delete_saved_sql_file),
+        )
         .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
         // AI

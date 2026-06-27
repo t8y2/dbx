@@ -81,6 +81,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   const files = ref<SavedSqlFile[]>([]);
   const isLoaded = ref(false);
   let pendingSync: Promise<void> | null = null;
+  let initFromStoragePromise: Promise<void> | null = null;
   const pendingFolderCreates = new Map<string, Promise<SavedSqlFolder>>();
 
   const version = ref(0);
@@ -90,7 +91,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   function applyLibrary(library: SavedSqlLibrary) {
     folders.value = library.folders;
-    files.value = library.files;
+    files.value = library.files.map((file) => ({ ...file, sqlLoaded: file.sqlLoaded ?? Boolean(file.sql) }));
     bumpVersion();
   }
 
@@ -108,10 +109,17 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   }
 
   async function initFromStorage() {
-    await migrateLegacyLocalStorage();
-    applyLibrary(await api.loadSavedSqlLibrary());
-    isLoaded.value = true;
-    await syncToLocalDirectory();
+    if (isLoaded.value) return;
+    if (!initFromStoragePromise) {
+      initFromStoragePromise = (async () => {
+        await migrateLegacyLocalStorage();
+        applyLibrary(await api.loadSavedSqlLibrary());
+        isLoaded.value = true;
+      })().finally(() => {
+        initFromStoragePromise = null;
+      });
+    }
+    await initFromStoragePromise;
   }
 
   function listFolders(connectionId: string) {
@@ -132,6 +140,19 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   function getFile(id: string) {
     return files.value.find((file) => file.id === id);
+  }
+
+  async function ensureFileContent(id: string) {
+    const existing = getFile(id);
+    if (!existing) return undefined;
+    if (existing.sqlLoaded !== false) return existing;
+
+    const loaded = await api.loadSavedSqlFile(id);
+    if (!loaded) return existing;
+    const hydrated = { ...loaded, sqlLoaded: true };
+    files.value = files.value.map((file) => (file.id === id ? hydrated : file));
+    bumpVersion();
+    return hydrated;
   }
 
   async function createFolder(connectionId: string, name: string, parentFolderId?: string) {
@@ -196,6 +217,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
           database: input.database,
           schema: input.schema,
           sql: input.sql,
+          sqlLoaded: true,
           connectionId: input.connectionId,
           updatedAt: timestamp,
         }
@@ -207,12 +229,13 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
           database: input.database,
           schema: input.schema,
           sql: input.sql,
+          sqlLoaded: true,
           orderIndex: maxOrderIndex(files.value.filter((file) => file.connectionId === input.connectionId && (file.folderId || "") === (input.folderId || undefined || ""))) + 1,
           createdAt: timestamp,
           updatedAt: timestamp,
         };
     const saved = await api.saveSavedSqlFile(file);
-    files.value = [...files.value.filter((item) => item.id !== saved.id), saved];
+    files.value = [...files.value.filter((item) => item.id !== saved.id), { ...saved, sqlLoaded: true }];
     bumpVersion();
     await syncToLocalDirectory();
     return saved;
@@ -222,7 +245,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const existing = getFile(id);
     if (!existing) return;
     const saved = await api.saveSavedSqlFile({ ...existing, name, updatedAt: nowIso() });
-    files.value = files.value.map((file) => (file.id === id ? saved : file));
+    files.value = files.value.map((file) => (file.id === id ? { ...saved, sql: file.sql, sqlLoaded: file.sqlLoaded } : file));
     bumpVersion();
     await syncToLocalDirectory();
   }
@@ -236,7 +259,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         openCount: (existing.openCount ?? 0) + 1,
         openedAt: nowIso(),
       });
-      files.value = files.value.map((file) => (file.id === id ? saved : file));
+      files.value = files.value.map((file) => (file.id === id ? { ...saved, sql: file.sql, sqlLoaded: file.sqlLoaded } : file));
       bumpVersion();
       return saved;
     } catch (error) {
@@ -269,13 +292,16 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   }
 
   async function persistFiles(nextFiles: SavedSqlFile[]) {
-    await Promise.all(nextFiles.map((file) => api.saveSavedSqlFile(file)));
-    files.value = nextFiles;
+    const savedFiles = await Promise.all(nextFiles.map((file) => api.saveSavedSqlFile(file)));
+    files.value = savedFiles.map((saved) => {
+      const existing = files.value.find((file) => file.id === saved.id);
+      return { ...saved, sql: existing?.sql ?? saved.sql, sqlLoaded: existing?.sqlLoaded ?? saved.sqlLoaded };
+    });
     bumpVersion();
     await syncToLocalDirectory();
   }
 
-  function syncEntries() {
+  async function syncEntries() {
     const folderById = new Map(folders.value.map((folder) => [folder.id, folder]));
     const folderPath = (folderId?: string): string | undefined => {
       if (!folderId) return undefined;
@@ -289,7 +315,8 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       }
       return parts.join("/");
     };
-    return sortFilesByOrder(files.value).map((file) => ({
+    const loadedFiles = await Promise.all(sortFilesByOrder(files.value).map((file) => ensureFileContent(file.id)));
+    return loadedFiles.filter((file): file is SavedSqlFile => Boolean(file)).map((file) => ({
       folderName: folderPath(file.folderId),
       fileName: file.name,
       sql: file.sql,
@@ -302,7 +329,8 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const targetDir = settingsStore.desktopSettings.saved_sql_sync_dir?.trim();
     if (!targetDir) return;
 
-    const syncPromise = pendingSync?.catch(() => {}).then(() => api.syncSavedSqlDirectory({ targetDir, entries: syncEntries() })) ?? api.syncSavedSqlDirectory({ targetDir, entries: syncEntries() });
+    const entries = await syncEntries();
+    const syncPromise = pendingSync?.catch(() => {}).then(() => api.syncSavedSqlDirectory({ targetDir, entries })) ?? api.syncSavedSqlDirectory({ targetDir, entries });
     pendingSync = syncPromise;
     try {
       await syncPromise;
@@ -476,6 +504,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     listChildFolders,
     listFiles,
     getFile,
+    ensureFileContent,
     createFolder,
     renameFolder,
     deleteFolder,

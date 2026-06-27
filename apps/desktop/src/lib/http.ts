@@ -404,6 +404,10 @@ export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return get("/api/saved-sql");
 }
 
+export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
+  return get(`/api/saved-sql/${encodeURIComponent(id)}`);
+}
+
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
   return post("/api/saved-sql/folders", folder);
 }

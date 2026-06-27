@@ -1,4 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/h2Connection";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -423,6 +424,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (!input) {
     throw new Error("Connection URL is empty");
   }
+  const jdbcH2 = parseH2JdbcUrl(input);
+  if (jdbcH2) return jdbcH2;
   const jdbcUCanAccess = parseJdbcUCanAccessUrl(input);
   if (jdbcUCanAccess) return jdbcUCanAccess;
   const jdbcGbase8s = parseJdbcGbase8sUrl(input);
@@ -515,6 +518,20 @@ function zookeeperConnectStringFromUrl(parsed: URL, defaultPort: number): string
   return `${host}:${port}${chroot}`;
 }
 
+function applyParsedUsername(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): string {
+  if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasUserParam(parsed.connectionString)) {
+    return config.username || parsed.username;
+  }
+  return parsed.username;
+}
+
+function applyParsedPassword(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): string {
+  if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasPasswordParam(parsed.connectionString)) {
+    return config.password || parsed.password;
+  }
+  return parsed.password;
+}
+
 export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): Omit<ConnectionConfig, "id"> {
   return {
     ...config,
@@ -524,8 +541,8 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     host: parsed.host,
     port: parsed.port,
     name: parsed.name?.trim() || config.name,
-    username: parsed.username,
-    password: parsed.password,
+    username: applyParsedUsername(config, parsed),
+    password: applyParsedPassword(config, parsed),
     database: parsed.database,
     url_params: parsed.urlParams,
     ssl: parsed.ssl,

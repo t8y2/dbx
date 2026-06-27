@@ -143,11 +143,24 @@ pub fn h2_jdbc_file_base_path(path: &str) -> String {
 
 pub fn h2_file_path_from_jdbc_url(connection_string: &str) -> Option<String> {
     let connection_string = connection_string.trim();
-    let prefix = "jdbc:h2:file:";
-    if connection_string.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
-        return Some(connection_string[prefix.len()..].split(';').next().unwrap_or("").to_string());
-    }
-    None
+    h2_file_jdbc_url_prefix(connection_string).map(|prefix| {
+        let raw_path = connection_string[prefix.len()..].split(';').next().unwrap_or("");
+        if prefix.eq_ignore_ascii_case("jdbc:h2:split:") {
+            raw_path
+                .split_once(':')
+                .and_then(|(block_size, path)| block_size.chars().all(|ch| ch.is_ascii_digit()).then_some(path))
+                .unwrap_or(raw_path)
+                .to_string()
+        } else {
+            raw_path.to_string()
+        }
+    })
+}
+
+fn h2_file_jdbc_url_prefix(connection_string: &str) -> Option<&'static str> {
+    ["jdbc:h2:file:", "jdbc:h2:split:"]
+        .into_iter()
+        .find(|prefix| connection_string.get(..prefix.len()).is_some_and(|value| value.eq_ignore_ascii_case(prefix)))
 }
 
 fn normalize_h2_file_jdbc_url(connection_string: &str) -> Option<String> {
@@ -167,10 +180,7 @@ fn normalize_h2_file_jdbc_url(connection_string: &str) -> Option<String> {
 }
 
 fn is_h2_file_jdbc_url(connection_string: &str) -> bool {
-    connection_string
-        .trim()
-        .get(.."jdbc:h2:file:".len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:h2:file:"))
+    h2_file_jdbc_url_prefix(connection_string.trim()).is_some()
 }
 
 fn mongo_uri_database(uri: &str) -> Option<String> {
@@ -661,6 +671,23 @@ mod tests {
         assert_eq!(params["port"], 0);
         assert_eq!(params["database"], "file:/tmp/app;AUTO_SERVER=TRUE");
         assert_eq!(params["connection_string"], "jdbc:h2:file:/tmp/app;AUTO_SERVER=TRUE");
+    }
+
+    #[test]
+    fn h2_split_connection_string_is_treated_as_file_mode() {
+        let mut cfg = config(DatabaseType::H2, None);
+        cfg.connection_string = Some("jdbc:h2:split:28:C:/dbx-test/h2/sample-db;AUTO_SERVER=TRUE".to_string());
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+
+        assert_eq!(
+            h2_file_path_from_jdbc_url(cfg.connection_string.as_deref().unwrap()).as_deref(),
+            Some("C:/dbx-test/h2/sample-db")
+        );
+        assert_eq!(params["host"], "");
+        assert_eq!(params["port"], 0);
+        assert_eq!(params["database"], "split:28:C:/dbx-test/h2/sample-db;AUTO_SERVER=TRUE");
+        assert_eq!(params["connection_string"], "jdbc:h2:split:28:C:/dbx-test/h2/sample-db;AUTO_SERVER=TRUE");
     }
 
     #[test]

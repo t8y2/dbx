@@ -26,7 +26,7 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connectionUrl";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connectionPresentation";
-import { h2ConnectionModeForConfig, h2FileJdbcUrl, h2FilePathFromJdbcUrl, type H2ConnectionMode } from "@/lib/h2Connection";
+import { h2ConnectionModeForConfig, h2FileJdbcUrl, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeperConnection";
 import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
@@ -898,7 +898,7 @@ watch(
         driver_profile: oceanbasePatch?.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
         url_params: config.url_params || "",
-        host: config.db_type === "h2" ? config.host || h2FilePathFromJdbcUrl(config.connection_string) : config.host,
+        host: config.db_type === "h2" && h2FilePathFromJdbcUrl(config.connection_string) ? h2FilePathFromJdbcUrl(config.connection_string) : config.host,
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
@@ -932,6 +932,7 @@ watch(
         read_only: config.read_only || false,
         visible_databases: config.visible_databases,
       };
+      connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
       if (config.db_type === "mq") {
         hydrateMqFields(config.external_config);
       } else {
@@ -1484,6 +1485,9 @@ function applyConnectionUrlToForm(input: string): boolean {
     selectedType.value = parsed.driverProfile;
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
+    if (form.value.db_type === "h2") {
+      h2ConnectionMode.value = h2ConnectionModeForConfig(form.value);
+    }
     if (!form.value.name.trim()) {
       form.value.name = parsed.database || parsed.host || parsed.driverLabel;
     }
@@ -1496,10 +1500,21 @@ function applyConnectionUrlToForm(input: string): boolean {
 }
 
 function ensureConnectionHostResolvedFromUrl(): boolean {
-  if (form.value.host.trim()) return true;
   const url = connectionUrlInput.value.trim();
   if (!url) return true;
   return applyConnectionUrlToForm(url);
+}
+
+function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
+  const url = connectionUrlInput.value.trim();
+  if (!url) return form.value;
+
+  const draft = parseConnectionDeepLink(url);
+  if (draft) {
+    return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+  }
+
+  return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
 }
 
 function generateConnectionName(): string {
@@ -1509,8 +1524,8 @@ function generateConnectionName(): string {
 }
 
 function connectionConfigForSubmit(id: string): ConnectionConfig {
-  const config = { ...form.value, id } as LegacyConnectionConfig;
-  if (selectedType.value === "oceanbase") {
+  const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
+  if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));
   }
   if (!config.name?.trim()) {
@@ -1679,14 +1694,16 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
       .filter(Boolean);
   }
   if (config.db_type === "h2") {
-    if (h2ConnectionMode.value === "file") {
-      const filePath = config.host?.trim() || h2FilePathFromJdbcUrl(config.connection_string);
+    const h2Mode = connectionUrlInput.value.trim() ? h2ConnectionModeForConfig(config) : h2ConnectionMode.value;
+    if (h2Mode === "file") {
+      const jdbcFilePath = h2FilePathFromJdbcUrl(config.connection_string);
+      const filePath = (isH2SplitJdbcUrl(config.connection_string) ? jdbcFilePath || config.host?.trim() : config.host?.trim() || jdbcFilePath) || "";
       if (!filePath) {
         throw new Error(t("connection.h2FilePathRequired"));
       }
       config.host = filePath;
       config.port = 0;
-      config.connection_string = h2FileJdbcUrl(filePath);
+      config.connection_string = isH2SplitJdbcUrl(config.connection_string) ? config.connection_string.trim() : h2FileJdbcUrl(filePath);
       config.transport_layers = [];
     } else {
       config.host = config.host?.trim() || "127.0.0.1";
@@ -2161,25 +2178,32 @@ function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
   void nextTick(() => save());
 }
 
-function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
-  applyProfile(draft.driverProfile);
-  form.value = {
-    ...form.value,
+function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draft: ConnectionDeepLinkDraft): Omit<ConnectionConfig, "id"> {
+  return {
+    ...config,
     db_type: draft.dbType,
     driver_profile: draft.driverProfile,
     driver_label: draft.driverLabel,
-    host: draft.host ?? form.value.host,
-    port: draft.port ?? form.value.port,
-    username: draft.username ?? form.value.username,
-    password: draft.password ?? form.value.password,
-    database: draft.database ?? form.value.database,
-    url_params: draft.urlParams ?? form.value.url_params,
-    ssl: draft.ssl ?? form.value.ssl,
-    connection_string: draft.connectionString ?? form.value.connection_string,
-    oracle_connection_type: draft.oracleConnectionType ?? form.value.oracle_connection_type,
+    host: draft.host ?? config.host,
+    port: draft.port ?? config.port,
+    username: draft.username ?? config.username,
+    password: draft.password ?? config.password,
+    database: draft.database ?? config.database,
+    url_params: draft.urlParams ?? config.url_params,
+    ssl: draft.ssl ?? config.ssl,
+    connection_string: draft.connectionString ?? config.connection_string,
+    oracle_connection_type: draft.oracleConnectionType ?? config.oracle_connection_type,
     one_time: draft.oneTime || undefined,
   };
+}
+
+function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
+  applyProfile(draft.driverProfile);
+  form.value = applyConnectionDraftToConfig(form.value, draft);
   selectedType.value = draft.driverProfile;
+  if (form.value.db_type === "h2") {
+    h2ConnectionMode.value = h2ConnectionModeForConfig(form.value);
+  }
   if (draft.driverProfile === "oceanbase-oracle") {
     oceanbaseSubMode.value = "oracle";
     selectedType.value = "oceanbase";

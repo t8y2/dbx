@@ -1178,7 +1178,7 @@ watch(
           </div>
           <div v-else-if="syncPlan.syncSql.trim()" class="space-y-1">
             <Label class="text-xs font-medium">{{ t("diff.generatedSql") }}</Label>
-            <textarea :value="syncPlan.syncSql" readonly class="w-full h-48 rounded-lg border bg-muted/20 p-3 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring" />
+            <textarea :value="syncPlan.syncSql" readonly class="w-full h-48 rounded-[6px] border bg-muted/20 p-3 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring" />
           </div>
           <div v-else-if="differentTableCount === 0 && failedTableCount === 0" class="text-sm text-muted-foreground">
             {{ t("dataCompare.noDifferences") }}

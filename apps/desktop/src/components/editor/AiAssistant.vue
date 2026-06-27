@@ -1196,7 +1196,7 @@ async function openExternalUrl(url: string) {
     </ScrollArea>
 
     <div class="p-2">
-      <div ref="promptPanelRef" class="relative rounded-lg border bg-background">
+      <div ref="promptPanelRef" class="relative rounded-[6px] border bg-background">
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
@@ -1308,14 +1308,14 @@ async function openExternalUrl(url: string) {
               v-model="assistantMode"
               :items="assistantModeItems"
               :aria-label="activeModeHint"
-              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               item-class="text-xs px-2"
             />
             <LightDropdown
               :model-value="activeAction"
               :items="actionMenuItems"
               content-class="w-max min-w-0"
-              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               item-class="text-xs px-2"
               @update:model-value="(value) => selectAction(value as AiAction)"
             />
@@ -1330,7 +1330,7 @@ async function openExternalUrl(url: string) {
               :loading-text="t('ai.loadingModels')"
               :loading="modelLoading"
               :display-name="displayModelName"
-              trigger-class="min-w-0 w-auto max-w-[220px] shrink justify-end rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              trigger-class="min-w-0 w-auto max-w-[220px] shrink justify-end rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               content-class="w-72"
               item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
               @update:model-value="handleModelSelect"

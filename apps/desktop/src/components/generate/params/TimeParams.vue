@@ -48,7 +48,7 @@ function refresh() {
             }
           "
           type="time"
-          class="h-7 w-24 min-w-0 rounded-lg border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
+          class="h-7 w-24 min-w-0 rounded-[6px] border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
         />
         <Label class="text-muted-foreground shrink-0">{{ t("dataGenerate.endTime") }}</Label>
         <input
@@ -59,7 +59,7 @@ function refresh() {
             }
           "
           type="time"
-          class="h-7 w-24 min-w-0 rounded-lg border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
+          class="h-7 w-24 min-w-0 rounded-[6px] border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
         />
       </div>
     </div>

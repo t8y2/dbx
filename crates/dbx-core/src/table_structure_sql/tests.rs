@@ -1000,6 +1000,159 @@ fn builds_sql_server_quoted_column_and_index_statements() {
     );
 }
 
+#[test]
+fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
+    let mut email = column("email");
+    email.data_type = "nvarchar(255)".to_string();
+    email.is_nullable = false;
+
+    let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "users", "id");
+    user_fk.ref_schema = "dbo".to_string();
+    user_fk.original = Some(ForeignKeyInfo {
+        name: "fk_orders_user_id".to_string(),
+        column: "user_id".to_string(),
+        ref_schema: Some("dbo".to_string()),
+        ref_table: "users".to_string(),
+        ref_column: "id".to_string(),
+        on_update: None,
+        on_delete: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![email],
+        indexes: Vec::new(),
+        foreign_keys: vec![user_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [email] nvarchar(255) NOT NULL;"]);
+}
+
+#[test]
+fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
+    let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "accounts", "id");
+    user_fk.ref_schema = "dbo".to_string();
+    user_fk.original = Some(ForeignKeyInfo {
+        name: "fk_orders_user_id".to_string(),
+        column: "user_id".to_string(),
+        ref_schema: Some("dbo".to_string()),
+        ref_table: "users".to_string(),
+        ref_column: "id".to_string(),
+        on_update: None,
+        on_delete: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: vec![user_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(result.warnings, vec!["Editing foreign keys is not supported for sqlserver from this editor."]);
+}
+
+#[test]
+fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
+    let mut id = column("id");
+    id.data_type = "int".to_string();
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: true,
+        extra: Some("IDENTITY(1,1)".to_string()),
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
+fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key_warning() {
+    let mut id = column("id");
+    id.data_type = "int".to_string();
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: true,
+        extra: None,
+        comment: None,
+    });
+
+    let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "users", "id");
+    user_fk.ref_schema = "dbo".to_string();
+    user_fk.original = Some(ForeignKeyInfo {
+        name: "fk_orders_user_id".to_string(),
+        column: "user_id".to_string(),
+        ref_schema: Some("dbo".to_string()),
+        ref_table: "users".to_string(),
+        ref_column: "id".to_string(),
+        on_update: None,
+        on_delete: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: vec![user_fk],
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(
+        result.warnings,
+        vec!["Changing SQL Server IDENTITY for existing column \"id\" is not supported from this editor."]
+    );
+}
+
 #[cfg(feature = "duckdb-bundled")]
 #[test]
 fn builds_duckdb_create_table_statements() {

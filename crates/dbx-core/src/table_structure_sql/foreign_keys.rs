@@ -11,7 +11,9 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
     let capabilities = super::dialect::capabilities_for(options.database_type);
     let dialect = capabilities.dialect;
     if !capabilities.foreign_key {
-        warnings.push(format!("Editing foreign keys is not supported for {database_label} from this editor."));
+        if has_foreign_key_edits(&options.foreign_keys) {
+            warnings.push(format!("Editing foreign keys is not supported for {database_label} from this editor."));
+        }
         return Vec::new();
     }
 
@@ -39,6 +41,29 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
     }
 
     statements
+}
+
+fn has_foreign_key_edits(foreign_keys: &[EditableStructureForeignKey]) -> bool {
+    foreign_keys.iter().any(|foreign_key| {
+        if foreign_key.marked_for_drop {
+            return foreign_key.original.is_some();
+        }
+
+        match &foreign_key.original {
+            Some(original) => has_foreign_key_change(foreign_key, original),
+            None => has_foreign_key_definition(foreign_key),
+        }
+    })
+}
+
+fn has_foreign_key_definition(foreign_key: &EditableStructureForeignKey) -> bool {
+    !clean(&foreign_key.name).is_empty()
+        || !clean(&foreign_key.column).is_empty()
+        || !clean(&foreign_key.ref_schema).is_empty()
+        || !clean(&foreign_key.ref_table).is_empty()
+        || !clean(&foreign_key.ref_column).is_empty()
+        || !clean(&foreign_key.on_update).is_empty()
+        || !clean(&foreign_key.on_delete).is_empty()
 }
 
 fn has_foreign_key_change(foreign_key: &EditableStructureForeignKey, original: &ForeignKeyInfo) -> bool {

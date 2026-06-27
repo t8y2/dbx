@@ -127,6 +127,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 column,
                 options.schema.as_deref(),
                 &options.table_name,
+                warnings,
             )),
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),

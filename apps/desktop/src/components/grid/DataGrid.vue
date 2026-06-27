@@ -4438,6 +4438,8 @@ const canvasDetailButtonCell = computed(() => {
   if (!useCanvasGridRows.value || isScrolling.value) return null;
   const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
   if (!target || !cellDetailButtonVisible(target.rowIndex, target.col)) return null;
+  const editing = editingCell.value;
+  if (editing?.rowId === displayItems.value[target.rowIndex]?.id && editing.col === target.col) return null;
   const visibleColIdx = visibleColumnIndexes.value.indexOf(target.col);
   if (visibleColIdx < 0) return null;
   const rect = canvasCellViewportRect(target.rowIndex, visibleColIdx);

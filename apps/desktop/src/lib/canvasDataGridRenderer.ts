@@ -93,7 +93,7 @@ export function clearFitCanvasTextCache(): void {
   fitCanvasTextCache.clear();
 }
 
-function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
   if (maxWidth <= 0) return "";
   const font = ctx.font;
   const cacheKey = `${font}|${text}|${maxWidth}`;
@@ -367,12 +367,10 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         ctx.font = value === null ? italicFont : tabularFont;
         setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
         const textLeft = alignCanvasPixel(x + 12, dpr);
-        const paddedMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
+        const textMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
         const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
         const displayText = isEditingThisCell ? "" : formatCell(value, actualColIdx);
-        const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
-        const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
-        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
+        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth);
         ctx.fillText(text, textLeft, textY);
         if (item.isDeleted && text) {
           const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);

@@ -177,6 +177,62 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(
+            r#"
+            (() => {
+              const active = document.activeElement;
+              if (active instanceof HTMLElement) active.blur();
+              if (document.body) {
+                if (!document.body.hasAttribute("tabindex")) {
+                  document.body.setAttribute("tabindex", "-1");
+                }
+                document.body.focus({ preventScroll: true });
+              }
+            })();
+            "#,
+        );
+    }
+}
+
+fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, window: &tauri::Window<R>) {
+    clear_main_webview_focus(app);
+
+    #[cfg(target_os = "macos")]
+    {
+        if window.is_fullscreen().unwrap_or(false) {
+            let app = app.clone();
+            let window = window.clone();
+            let _ = window.set_fullscreen(false);
+            tauri::async_runtime::spawn(async move {
+                for _ in 0..40 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    if !window.is_fullscreen().unwrap_or(false) {
+                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                        let app_to_hide = app.clone();
+                        let window_to_hide = window.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            let _ = window_to_hide.hide();
+                            let _ = app_to_hide.hide();
+                        });
+                        return;
+                    }
+                }
+                let app_to_hide = app.clone();
+                let window_to_hide = window.clone();
+                let _ = app.run_on_main_thread(move || {
+                    let _ = window_to_hide.hide();
+                    let _ = app_to_hide.hide();
+                });
+            });
+            return;
+        }
+    }
+
+    let _ = window.hide();
+}
+
 fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
@@ -548,8 +604,8 @@ pub fn run() {
                 }
                 let app = window.app_handle();
                 let Some(state) = app.try_state::<CloseBehaviorState>() else {
-                    let _ = window.hide();
                     api.prevent_close();
+                    hide_main_window_for_close(&app, window);
                     return;
                 };
                 if !state.prompted() {
@@ -561,8 +617,8 @@ pub fn run() {
                     app.exit(0);
                     return;
                 }
-                let _ = window.hide();
                 api.prevent_close();
+                hide_main_window_for_close(&app, window);
             }
         })
         .invoke_handler(tauri::generate_handler![

@@ -4089,8 +4089,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
             {{ t("editor.defaultDatabase") }}
           </Badge>
-          <span v-if="columnComment" class="ml-auto truncate text-muted-foreground/60 text-[10px] max-w-[20%] shrink-0 text-right">{{ columnComment }}</span>
-          <span v-if="tableComment" class="ml-auto truncate text-muted-foreground/60 text-[10px] max-w-[20%] shrink-0 text-right">{{ tableComment }}</span>
+          <span v-if="columnComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right">{{ columnComment }}</span>
+          <span v-if="tableComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right">{{ tableComment }}</span>
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
           <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
           <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
@@ -4455,6 +4455,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
 </template>
 
 <style>
+.sidebar-object-comment {
+  color: var(--muted-foreground);
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  opacity: 1;
+  text-rendering: optimizeLegibility;
+}
+
 .tree-item-connection-tint {
   isolation: isolate;
   background-color: transparent !important;

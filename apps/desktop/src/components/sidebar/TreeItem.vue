@@ -100,6 +100,7 @@ import {
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
+import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sqlFormatter";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
@@ -1278,7 +1279,8 @@ async function generateDdlTemplate() {
         source: result.source,
       });
     }
-    openSqlTemplateTab(node.connectionId, node.database, node.schema, ddl, `DDL - ${node.label}`);
+    const formatted = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(currentDatabaseType()), settingsStore.editorSettings.sqlFormatter);
+    openSqlTemplateTab(node.connectionId, node.database, node.schema, formatted, `DDL - ${node.label}`);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
@@ -1619,7 +1621,8 @@ function viewObjectSource() {
     })
     .then(async (result) => {
       const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
-      queryStore.updateSql(tabId, result.source);
+      const formatted = await formatSqlForDisplay(result.source, sqlFormatDialectForDbType(currentDatabaseType()), settingsStore.editorSettings.sqlFormatter);
+      queryStore.updateSql(tabId, formatted);
       if (objectType !== "SEQUENCE") {
         queryStore.setObjectSource(tabId, {
           schema,
@@ -1653,8 +1656,9 @@ function viewObjectDdl() {
         name: node.label,
         source: result.source,
       });
+      const formatted = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(effectiveDatabaseTypeForConnection(connection)), settingsStore.editorSettings.sqlFormatter);
       const tabId = queryStore.createTab(node.connectionId!, node.database!, `DDL - ${node.label}`);
-      queryStore.updateSql(tabId, ddl);
+      queryStore.updateSql(tabId, formatted);
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);

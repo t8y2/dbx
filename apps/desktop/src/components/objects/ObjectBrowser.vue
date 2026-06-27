@@ -67,7 +67,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import DdlViewDialog from "./DdlViewDialog.vue";
-import type { SqlFormatDialect } from "@/lib/sqlFormatter";
+import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -178,25 +178,7 @@ const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
-const sourceFormatDialect = computed<SqlFormatDialect>(() => {
-  switch (effectiveDatabaseType.value) {
-    case "mysql":
-    case "postgres":
-    case "sqlite":
-    case "sqlserver":
-      return effectiveDatabaseType.value;
-    case "rqlite":
-    case "turso":
-      return "sqlite";
-    case "gaussdb":
-    case "kwdb":
-    case "opengauss":
-    case "questdb":
-      return "postgres";
-    default:
-      return "generic";
-  }
-});
+const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
 const objectFilters = computed<ObjectFilter[]>(() =>
   (
     [
@@ -437,8 +419,9 @@ async function openSource(row: ObjectBrowserRow) {
       name: row.name,
       source: result.source,
     });
-    sourceContent.value = editable;
-    sourceDraft.value = editable;
+    const formatted = await formatSqlForDisplay(editable, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
+    sourceContent.value = formatted;
+    sourceDraft.value = formatted;
     sourceEditing.value = row.type !== "SEQUENCE";
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
@@ -457,8 +440,9 @@ async function openViewDdl(row: ObjectBrowserRow) {
       name: row.name,
       source: result.source,
     });
+    const formatted = await formatSqlForDisplay(ddl, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
     const tabId = queryStore.createTab(props.connection.id, props.database, `DDL - ${row.name}`);
-    queryStore.updateSql(tabId, ddl);
+    queryStore.updateSql(tabId, formatted);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }

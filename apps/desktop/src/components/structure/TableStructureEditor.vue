@@ -20,6 +20,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sqlHighlighter";
 import { copyToClipboard } from "@/lib/clipboard";
+import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/tableColumnTemplates";
@@ -101,7 +102,8 @@ async function fetchDdl() {
   if (!props.connectionId || !props.database || !props.tableName || ddlFetched.value || !tableMetadataCapabilities.value.ddl) return;
   ddlLoading.value = true;
   try {
-    ddlContent.value = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    const ddl = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
     ddlFetched.value = true;
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e?.message || e}`;
@@ -794,7 +796,7 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
           const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
-          ddlContent.value = ddl;
+          ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
         } catch {

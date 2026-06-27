@@ -63,7 +63,7 @@ import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
-import type { SqlFormatDialect } from "@/lib/sqlFormatter";
+import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sqlFormatter";
 
 type DataGridHandle = {
   onToolbarRefresh: () => Promise<void> | void;
@@ -196,23 +196,7 @@ const activeTabDimension = computed(() => {
   return meta && "dimension" in meta ? (meta as VectorCollectionMeta).dimension : undefined;
 });
 
-const activeSqlFormatDialect = computed<SqlFormatDialect>(() => {
-  switch (activeEffectiveDatabaseType.value) {
-    case "mysql":
-      return "mysql";
-    case "postgres":
-    case "kwdb":
-      return "postgres";
-    case "sqlite":
-    case "rqlite":
-    case "turso":
-      return "sqlite";
-    case "sqlserver":
-      return "sqlserver";
-    default:
-      return "generic";
-  }
-});
+const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => {
   if (activeEffectiveDatabaseType.value === "postgres" || activeEffectiveDatabaseType.value === "kwdb") return "postgres";

@@ -8,6 +8,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/clipboard";
+import { formatSqlForDisplay } from "@/lib/sqlFormatter";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -54,7 +55,7 @@ watch(
     try {
       const schema = props.schema || props.database;
       const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName);
-      ddlContent.value = ddl;
+      ddlContent.value = await formatSqlForDisplay(ddl, props.dialect, settingsStore.editorSettings.sqlFormatter);
     } catch (e: any) {
       ddlError.value = e?.message || String(e);
     } finally {
@@ -160,8 +161,8 @@ function retry() {
   const schema = props.schema || props.database;
   api
     .getTableDdl(props.connectionId, props.database, schema, props.tableName)
-    .then((ddl) => {
-      ddlContent.value = ddl;
+    .then(async (ddl) => {
+      ddlContent.value = await formatSqlForDisplay(ddl, props.dialect, settingsStore.editorSettings.sqlFormatter);
     })
     .catch((e: any) => {
       ddlError.value = e?.message || String(e);

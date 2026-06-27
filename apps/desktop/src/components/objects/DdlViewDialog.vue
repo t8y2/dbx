@@ -8,7 +8,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/clipboard";
-import { formatSqlForDisplay } from "@/lib/sqlFormatter";
+import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import * as api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -24,6 +24,8 @@ const props = withDefaults(
     tableName: string;
     /** SQL dialect for syntax highlighting. Non-PG/non-MSSQL databases fall back to MySQL (same as QueryEditor's source viewer). */
     dialect: "mysql" | "postgres" | "sqlserver";
+    /** SQL formatter dialect. Kept separate from the syntax-highlighting dialect because several PG-compatible DBs highlight as MySQL. */
+    formatDialect?: SqlFormatDialect;
   }>(),
   {},
 );
@@ -55,7 +57,7 @@ watch(
     try {
       const schema = props.schema || props.database;
       const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName);
-      ddlContent.value = await formatSqlForDisplay(ddl, props.dialect, settingsStore.editorSettings.sqlFormatter);
+      ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     } catch (e: any) {
       ddlError.value = e?.message || String(e);
     } finally {
@@ -162,7 +164,7 @@ function retry() {
   api
     .getTableDdl(props.connectionId, props.database, schema, props.tableName)
     .then(async (ddl) => {
-      ddlContent.value = await formatSqlForDisplay(ddl, props.dialect, settingsStore.editorSettings.sqlFormatter);
+      ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     })
     .catch((e: any) => {
       ddlError.value = e?.message || String(e);

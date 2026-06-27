@@ -122,6 +122,7 @@ const sourceRow = ref<ObjectBrowserRow | null>(null);
 const sourceEditing = ref(false);
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const sourceEditableText = ref("");
 const sourceDraft = ref("");
 const sourceSaving = ref(false);
 const sourceSaveError = ref("");
@@ -407,6 +408,7 @@ async function openSource(row: ObjectBrowserRow) {
   sourceContent.value = "";
   sourceError.value = "";
   sourceEditing.value = false;
+  sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
   sourceLoading.value = true;
@@ -419,9 +421,9 @@ async function openSource(row: ObjectBrowserRow) {
       name: row.name,
       source: result.source,
     });
-    const formatted = await formatSqlForDisplay(editable, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
-    sourceContent.value = formatted;
-    sourceDraft.value = formatted;
+    sourceEditableText.value = editable;
+    sourceContent.value = await formatSqlForDisplay(editable, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
+    sourceDraft.value = editable;
     sourceEditing.value = row.type !== "SEQUENCE";
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
@@ -614,6 +616,7 @@ function closeSource() {
   sourceContent.value = "";
   sourceError.value = "";
   sourceEditing.value = false;
+  sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
 }
@@ -1024,8 +1027,8 @@ async function copySource() {
 }
 
 function editSource() {
-  if (!sourceRow.value || !sourceContent.value) return;
-  sourceDraft.value = sourceContent.value;
+  if (!sourceRow.value || !sourceEditableText.value) return;
+  sourceDraft.value = sourceEditableText.value;
   sourceSaveError.value = "";
   sourceEditing.value = true;
 }
@@ -1668,7 +1671,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" v-model:open="showDdlDialog" />
+  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" :format-dialect="sourceFormatDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style scoped>

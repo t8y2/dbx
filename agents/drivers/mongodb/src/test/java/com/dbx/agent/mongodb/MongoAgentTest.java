@@ -135,11 +135,11 @@ class MongoAgentTest {
     }
 
     @Test
-    void fallsBackToDefaultDatabaseWhenAuthSourceIsMissing() {
+    void fallsBackToAdminWhenAuthSourceIsMissing() {
         JsonObject connection = new JsonObject();
         connection.addProperty("database", "gray_lite_twin_fat");
 
-        assertEquals("gray_lite_twin_fat", MongoAgent.authenticationDatabase(connection));
+        assertEquals("admin", MongoAgent.authenticationDatabase(connection));
     }
 
     // ─── TLS: configureBuilder JSON parsing ───

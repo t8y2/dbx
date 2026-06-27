@@ -257,7 +257,7 @@ public final class MongoAgent {
         if (authSource != null && !authSource.isBlank()) {
             return authSource;
         }
-        return defaultString(stringOrNull(connObj, "database"), "admin");
+        return "admin";
     }
 
     private static String urlParam(String urlParams, String key) {

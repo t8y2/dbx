@@ -1,14 +1,20 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/columnFormatter.ts";
+import timezone  from "dayjs/plugin/timezone";
+import dayjs from "dayjs";
 
 test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
+  dayjs.extend(timezone);
+  dayjs.tz.setDefault("Asia/Shanghai")
   assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
   assert.equal(applyColumnFormatter(1715758200001, { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ" }), "2024-05-15 15:30:00.001+08:00");
   assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
 });
 
 test("does not treat compact date strings as unix timestamps", () => {
+  dayjs.extend(timezone);
+  dayjs.tz.setDefault("Asia/Shanghai")
   assert.equal(applyColumnFormatter("2026-05-14T16:00:00.000Z", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DDTHH:mm:ssZ[Z]" }), "2026-05-15T00:00:00+08:00Z");
   assert.equal(applyColumnFormatter("2026-05-14", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD" }), "2026-05-14");
 });

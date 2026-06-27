@@ -176,7 +176,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             SELECT o.OBJECT_NAME AS TABLE_NAME, c.COMMENTS
             FROM ALL_OBJECTS o
             LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
-            WHERE o.OWNER = ? AND o.OBJECT_TYPE = '%s'
+            WHERE o.OWNER = ? AND o.OBJECT_TYPE = '%s' AND ( (o.OBJECT_TYPE = 'TABLE' AND o.OBJECT_NAME NOT LIKE 'MTAB$_%%') OR o.OBJECT_TYPE = 'VIEW')
             ORDER BY o.OBJECT_NAME
             """).formatted(tableType).stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -196,7 +196,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
         String sql = ("""
             SELECT TABLE_NAME, COMMENTS
             FROM ALL_TAB_COMMENTS
-            WHERE OWNER = ? AND TABLE_TYPE = '%s'
+            WHERE OWNER = ? AND TABLE_TYPE = '%s' AND ( (o.OBJECT_TYPE = 'TABLE' AND o.OBJECT_NAME NOT LIKE 'MTAB$_%') OR o.OBJECT_TYPE = 'VIEW')
             ORDER BY TABLE_NAME
             """).formatted(tableType).stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -213,16 +213,16 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private void loadMaterializedViews(String schema, Map<String, TableInfo> tablesByName) {
         loadMaterializedViewsFromAllObjects(schema, tablesByName);
-        loadMaterializedViewsFromUserMviews(schema, tablesByName);
+        //loadMaterializedViewsFromUserMviews(schema, tablesByName);
     }
 
     private void loadMaterializedViewsFromAllObjects(String schema, Map<String, TableInfo> tablesByName) {
         String sql = """
-            SELECT o.OBJECT_NAME AS TABLE_NAME, c.COMMENTS
-            FROM ALL_OBJECTS o
-            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
-            WHERE o.OWNER = ? AND o.OBJECT_TYPE IN ('MATERIALIZED VIEW', 'MATERIALIZED_VIEW')
-            ORDER BY o.OBJECT_NAME
+            SELECT m.MVIEW_NAME AS TABLE_NAME, c.COMMENTS
+			FROM USER_MVIEWS m LEFT JOIN ALL_OBJECTS o ON m.SCHID = o.OBJECT_ID
+			LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = m.MVIEW_NAME
+			WHERE o.OWNER = ?
+			ORDER BY TABLE_NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
@@ -256,9 +256,9 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     private void removeMaterializedViewsFromRegularViews(String schema, Map<String, TableInfo> tablesByName) {
-        if (!schemaMatchesConnectedUser(schema)) {
+        /*if (!schemaMatchesConnectedUser(schema)) {
             return;
-        }
+        }*/
         for (String name : listUserMviewNames()) {
             tablesByName.remove(name);
         }

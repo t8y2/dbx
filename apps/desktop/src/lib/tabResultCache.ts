@@ -20,6 +20,7 @@ export interface TabResultSnapshot {
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
+  mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
   resultPageSql?: string;
   resultPageLimit?: number;
@@ -367,6 +368,7 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,
+    mongoEditTarget: tab.mongoEditTarget ? clonePlain(tab.mongoEditTarget) : undefined,
     tableMeta: tab.tableMeta ? clonePlain(tab.tableMeta) : undefined,
     resultPageSql: tab.resultPageSql,
     resultPageLimit: tab.resultPageLimit,

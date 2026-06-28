@@ -2499,13 +2499,17 @@ const canGoNextPage = computed(() => {
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(() => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql));
-const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && !!props.tableMeta);
+const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && (!!props.tableMeta || !!props.customSaveHandler));
+const queryEditReadyTargetLabel = computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel ?? "");
 const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && canUseKeylessRowPredicate(props.databaseType, props.tableMeta.primaryKeys ?? []));
 const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsContext.value);
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
 type DataGridTableMeta = NonNullable<typeof props.tableMeta>;
 const hiveTableTransactional = ref<boolean | undefined>(undefined);
 const canEditExistingRows = computed(() => !!props.customSaveHandler || canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []));
+const customReadonlyColumns = computed(() => new Set((props.customSaveHandler?.readonlyColumns ?? []).map((column) => column.toLowerCase())));
+const canInsertRows = computed(() => !props.customSaveHandler || props.customSaveHandler.canInsert !== false);
+const canDeleteRows = computed(() => !props.customSaveHandler || props.customSaveHandler.canDelete !== false);
 watch(
   () => [props.databaseType, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
   async () => {
@@ -2909,8 +2913,9 @@ function canEditRowItem(item: RowItem | undefined): boolean {
 
 function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolean {
   if (!canEditRowItem(item) || !canEditColumn(columnIndex)) return false;
+  const column = props.result.columns[columnIndex] ?? "";
+  if (customReadonlyColumns.value.has(column.toLowerCase())) return false;
   if (!item?.isNew) {
-    const column = props.result.columns[columnIndex] ?? "";
     const sourceColumn = props.sourceColumns?.[columnIndex] ?? column;
     if (isClickHouseExistingRowReadonlyColumn(props.databaseType, sourceColumn, props.tableMeta?.primaryKeys ?? [], props.tableMeta?.columns ?? [])) return false;
     if (isTdengineExistingRowReadonlyColumn(props.databaseType, column, props.tableMeta?.columns ?? [])) return false;
@@ -3010,7 +3015,7 @@ function isDecimalColumnType(dataType: string): boolean {
 }
 
 function canDeleteRowItem(item: RowItem | undefined): boolean {
-  return !!props.editable && !!item && !item.isDeleted && (item.isNew || canEditExistingRows.value);
+  return !!props.editable && canDeleteRows.value && !!item && !item.isDeleted && (item.isNew || canEditExistingRows.value);
 }
 
 function resetInfiniteScrollState() {
@@ -3050,6 +3055,7 @@ function onToolbarRollback() {
 }
 
 function addRow() {
+  if (!canInsertRows.value) return;
   addEditorRow();
   focusAppendedTransposeRecord();
 }
@@ -4441,7 +4447,7 @@ function onCanvasContext(event: MouseEvent) {
   }
   const actualColIdx = visibleColumnIndexes.value[hit.visibleColIdx];
   if (actualColIdx === undefined) return;
-  onCellContext(item.id, item.displayIndex, actualColIdx, hit.visibleColIdx);
+  onCellContext(item.id, item.displayIndex, actualColIdx, hit.visibleColIdx, event);
 }
 
 function onCanvasDblClick(event: MouseEvent) {
@@ -5355,7 +5361,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "n") {
-    if (props.editable && (props.tableMeta || props.customSaveHandler)) {
+    if (props.editable && (props.tableMeta || props.customSaveHandler) && canInsertRows.value) {
       event.preventDefault();
       event.stopPropagation();
       addRow();
@@ -5981,7 +5987,13 @@ async function copyAlterColumnSql() {
     toast(t("grid.copyAlterSqlFailed", { message: e?.message || String(e) }), 5000);
   }
 }
-function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleColIdx: number) {
+function clearNativeTextSelection() {
+  window.getSelection()?.removeAllRanges();
+}
+
+function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleColIdx: number, event?: MouseEvent) {
+  event?.preventDefault();
+  clearNativeTextSelection();
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: colIdx };
@@ -6806,11 +6818,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   if (props.editable && contextRowItem.value) {
     const labels = rowActionLabels();
     items.push({ label: "", separator: true });
-    items.push({
-      label: labels.clone,
-      action: () => (isMultiRow.value ? cloneRows(affectedRowIds()) : cloneRow(contextRowItem.value!.id)),
-      icon: CopyPlus,
-    });
+    if (canInsertRows.value) {
+      items.push({
+        label: labels.clone,
+        action: () => (isMultiRow.value ? cloneRows(affectedRowIds()) : cloneRow(contextRowItem.value!.id)),
+        icon: CopyPlus,
+      });
+    }
     if (contextRowItem.value.isDeleted) {
       items.push({
         label: labels.restore,
@@ -7163,7 +7177,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </div>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("grid.queryEditReadyHint", { table: tableMeta?.tableName }) }}
+                  {{ t("grid.queryEditReadyHint", { table: queryEditReadyTargetLabel }) }}
                 </TooltipContent>
               </Tooltip>
               <Tooltip v-if="showKeylessEditWarning">
@@ -7216,7 +7230,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{{ t("grid.goToColumn") }}</TooltipContent>
               </Tooltip>
-              <Tooltip v-if="editable && (tableMeta || customSaveHandler)">
+              <Tooltip v-if="editable && (tableMeta || customSaveHandler) && canInsertRows">
                 <TooltipTrigger as-child>
                   <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']" @click="addRow">
                     <Plus class="data-grid-topbar-action-icon w-3 h-3" />
@@ -7999,7 +8013,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
                       @dblclick="canEditCellItem(item, col.actualColIdx) && startDomCellEdit(item.id, col.actualColIdx, formatCellCached(item.data[col.actualColIdx], col.actualColIdx), $event)"
                       :data-visible-col-index="col.visibleColIdx"
-                      @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx)"
+                      @contextmenu="onCellContext(item.id, item.displayIndex, col.actualColIdx, col.visibleColIdx, $event)"
                     >
                       <template v-if="editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx">
                         <TemporalCellEditor v-if="temporalEditorKindForColumn(col.actualColIdx)" v-model="editValue" :kind="temporalEditorKindForColumn(col.actualColIdx)!" @cancel="cancelEdit" @commit="commitGridEdit" />

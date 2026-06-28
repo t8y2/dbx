@@ -430,6 +430,7 @@ export interface QueryResultRun {
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
+  mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
 }
 
@@ -652,6 +653,10 @@ export interface QueryTab {
   };
   querySourceColumns?: Array<string | undefined>;
   queryEditabilityReason?: "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
+  mongoEditTarget?: {
+    collection: string;
+    idColumn: "_id";
+  };
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;

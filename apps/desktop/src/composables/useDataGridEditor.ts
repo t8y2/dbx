@@ -34,6 +34,10 @@ type GridScrollerRef =
 export interface CustomSaveHandler {
   save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
   preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
+  canInsert?: boolean;
+  canDelete?: boolean;
+  readonlyColumns?: string[];
+  targetLabel?: string;
 }
 
 export interface UseDataGridEditorOptions {
@@ -834,6 +838,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     options.emit("reload", sql.value, searchText.value, options.currentWhereInput.value, orderByInput.value.trim() || undefined, pageSize.value, (currentPage.value - 1) * pageSize.value);
   }
 
+  function applyDirtyRowsToResult() {
+    for (const [sourceIndex, changes] of dirtyRows.value) {
+      const row = result.value.rows[sourceIndex];
+      if (row) {
+        for (const [colIdx, value] of changes) {
+          row[colIdx] = value;
+        }
+      }
+    }
+  }
+
   async function saveChanges() {
     saveError.value = "";
     isSaving.value = true;
@@ -853,6 +868,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         isSaving.value = false;
         return;
       }
+      applyDirtyRowsToResult();
       dirtyRows.value.clear();
       newRows.value = [];
       deletedRows.value.clear();
@@ -931,14 +947,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     } catch (e) {
       console.warn("[DBX] failed to record data grid history", e);
     }
-    for (const [sourceIndex, changes] of dirtyRows.value) {
-      const row = result.value.rows[sourceIndex];
-      if (row) {
-        for (const [colIdx, value] of changes) {
-          row[colIdx] = value;
-        }
-      }
-    }
+    applyDirtyRowsToResult();
     dirtyRows.value.clear();
     newRows.value = [];
     deletedRows.value.clear();

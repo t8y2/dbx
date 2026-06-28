@@ -12,6 +12,7 @@ import {
   parseMongoGetIndexesCommand,
   parseMongoWriteCommand,
 } from "../../apps/desktop/src/lib/mongoShellCommand.ts";
+import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongoDocumentValues.ts";
 
 test("parseMongoFindCommand parses db collection find with an empty JSON filter", () => {
   assert.deepEqual(parseMongoFindCommand("db.users.find({})"), {
@@ -196,4 +197,26 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
   assert.equal(result.affected_rows, 12);
   assert.equal(result.execution_time_ms, 5);
   assert.equal(result.truncated, true);
+});
+
+test("buildMongoUpdateDocument ignores _id and preserves typed values", () => {
+  const changes = new Map<number, string | number | boolean | null>([
+    [0, "other-id"],
+    [1, "42"],
+    [2, '{"role":"admin"}'],
+    [3, null],
+  ]);
+
+  const update = buildMongoDocumentUpdate(changes, ["_id", "age", "profile", "nickname"]);
+
+  assert.deepEqual(update, {
+    $set: {
+      age: 42,
+      profile: { role: "admin" },
+    },
+    $unset: {
+      nickname: "",
+    },
+  });
+  assert.equal(formatMongoDocumentShellLiteral(update), '{"$set":{"age":42,"profile":{"role":"admin"}},"$unset":{"nickname":""}}');
 });

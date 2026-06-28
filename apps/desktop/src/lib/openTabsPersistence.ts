@@ -41,6 +41,7 @@ export interface SavedOpenTab {
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   tableMeta?: QueryTab["tableMeta"];
+  mongoEditTarget?: QueryTab["mongoEditTarget"];
   resultEvicted?: boolean;
   resultCacheKey?: string;
   resultRuns?: SavedQueryResultRun[];
@@ -89,6 +90,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     tableMeta: tab.tableMeta,
+    ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
     ...(tab.mode === "query" && tab.resultRuns?.length

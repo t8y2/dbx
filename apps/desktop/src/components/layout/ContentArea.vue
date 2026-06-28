@@ -60,9 +60,12 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/chartData";
+import * as api from "@/lib/api";
+import { buildMongoUpdateDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
+import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sqlFormatter";
 
@@ -279,6 +282,60 @@ const hasTabularResult = computed(() => {
   return visibleResultItems.value.length > 0;
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
+type MongoQueryGridChanges = {
+  dirtyRows: Map<number, Map<number, MongoInputValue>>;
+  deletedRows: Set<number>;
+  newRows: MongoInputValue[][];
+  columns: string[];
+  rows: MongoInputValue[][];
+};
+function mongoIdPreview(val: unknown): string {
+  if (val === null || val === undefined) return "null";
+  if (typeof val === "string" && /^[a-fA-F0-9]{24}$/.test(val)) return `ObjectId("${val}")`;
+  return formatMongoShellLiteral(val);
+}
+function mongoCollectionExpression(collection: string): string {
+  return `db.getCollection(${JSON.stringify(collection)})`;
+}
+const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() => {
+  const tab = props.activeTab;
+  const target = tab.mongoEditTarget;
+  if (tab.mode !== "query" || activeEffectiveDatabaseType.value !== "mongodb" || !target || !tab.connectionId || !tab.database || !tab.result) return undefined;
+  if (!tab.result.columns.includes(target.idColumn)) return undefined;
+
+  const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
+    if (changes.newRows.length > 0 || changes.deletedRows.size > 0) {
+      throw new Error("MongoDB query result editing only supports updating existing rows.");
+    }
+    const idColIdx = changes.columns.indexOf(target.idColumn);
+    if (idColIdx < 0) throw new Error("No _id column");
+    for (const [rowIdx, dirtyCols] of changes.dirtyRows) {
+      const row = changes.rows[rowIdx];
+      const id = row?.[idColIdx];
+      if (id === null || id === undefined || String(id).trim() === "") continue;
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns);
+      if (Object.keys(updateDoc).length === 0) continue;
+      await api.mongoUpdateDocument(tab.connectionId, tab.database, target.collection, String(id), JSON.stringify(updateDoc));
+    }
+  };
+
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => {
+    const idColIdx = changes.columns.indexOf(target.idColumn);
+    if (idColIdx < 0) return [];
+    const stmts: string[] = [];
+    for (const [rowIdx, dirtyCols] of changes.dirtyRows) {
+      const row = changes.rows[rowIdx];
+      const id = row?.[idColIdx];
+      if (id === null || id === undefined || String(id).trim() === "") continue;
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns);
+      if (Object.keys(updateDoc).length === 0) continue;
+      stmts.push(`${mongoCollectionExpression(target.collection)}.updateOne({_id: ${mongoIdPreview(id)}}, ${formatMongoShellLiteral(updateDoc)})`);
+    }
+    return stmts;
+  };
+
+  return { save, preview, canInsert: false, canDelete: false, readonlyColumns: [target.idColumn], targetLabel: target.collection };
+});
 const resultsPaneOpen = ref(false);
 const resultsPaneSize = ref(Number(safeLocalStorageGet("dbx-results-pane-size")) || DEFAULT_QUERY_RESULTS_PANE_SIZE);
 const editorPaneSize = computed(() => (resultsPaneOpen.value ? 100 - resultsPaneSize.value : 100));
@@ -821,8 +878,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 :initial-order-by-input="activeTab.orderByInput"
                 :sql="activeTab.lastExecutedSql || activeTab.sql"
                 :loading="activeTab.isExecuting"
-                :editable="!!activeTab.queryAnalysis"
+                :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
+                :custom-save-handler="mongoQueryResultSaveHandler"
                 context="results"
                 :database-type="activeEffectiveDatabaseType"
                 :connection-id="activeTab.connectionId"

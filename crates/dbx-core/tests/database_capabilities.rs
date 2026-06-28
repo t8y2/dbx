@@ -4,6 +4,7 @@ use dbx_core::database_capabilities::{
 };
 use dbx_core::models::connection::DatabaseType;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +117,17 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Postgres, None), None);
+}
+
+#[test]
+fn driver_store_entries_do_not_repeat_agent_keys() {
+    let entries: Vec<_> = agent_catalog::driver_store_entries().collect();
+    let mut seen = HashSet::new();
+    let duplicate_keys: Vec<_> = entries.iter().map(|(key, _)| *key).filter(|key| !seen.insert(*key)).collect();
+
+    assert!(duplicate_keys.is_empty(), "driver store agent keys should be unique: {duplicate_keys:?}");
+    assert_eq!(entries.iter().filter(|(key, _)| *key == "gbase8a").count(), 1);
+    assert_eq!(entries.iter().filter(|(key, _)| *key == "gbase8s").count(), 1);
 }
 
 #[test]

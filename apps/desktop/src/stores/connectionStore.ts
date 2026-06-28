@@ -134,6 +134,7 @@ interface TreeClipboardTableStructure {
 
 interface LoadTreeOptions {
   force?: boolean;
+  expectedSidebarSearchQuery?: string;
 }
 
 interface PersistedTreeChildrenLoadResult {
@@ -798,12 +799,18 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function refreshStaleTreeNode(node: TreeNode) {
+    const searchFilter = sidebarSearchQuery.value || "";
+    if (searchFilter) return;
     if (staleTreeRefreshIds.has(node.id)) return;
     staleTreeRefreshIds.add(node.id);
     const expandedIds = collectExpandedNodeIds([node]);
     clearLoadedChildrenCache(node.id);
-    void loadTreeNodeChildren(node, { force: true })
-      .then(() => restoreExpandedChildren(node, expandedIds, { force: true }))
+    const refreshOptions = { force: true, expectedSidebarSearchQuery: searchFilter };
+    void loadTreeNodeChildren(node, refreshOptions)
+      .then(() => {
+        if ((sidebarSearchQuery.value || "") !== searchFilter) return;
+        return restoreExpandedChildren(node, expandedIds, refreshOptions);
+      })
       .finally(() => staleTreeRefreshIds.delete(node.id));
   }
 
@@ -832,6 +839,10 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     node.isExpanded = true;
     return true;
+  }
+
+  function isSidebarSearchQueryChanged(options?: LoadTreeOptions) {
+    return options?.expectedSidebarSearchQuery !== undefined && (sidebarSearchQuery.value || "") !== options.expectedSidebarSearchQuery;
   }
 
   function isTreeNodeChildrenLoaded(nodeId: string): boolean {
@@ -1332,6 +1343,7 @@ export const useConnectionStore = defineStore("connection", () => {
         }
         const [databases, schemas] = await Promise.all([withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases"), withMetadataLoadTimeout(connectionId, api.listSchemas(connectionId, "main"), "schemas")]);
         const children = withSavedSqlRoot(connectionId, buildDuckDbConnectionTreeNodes(connectionId, databases, schemas), node);
+        if (isSidebarSearchQueryChanged(options)) return;
         setChildren(node, children);
         await savePersistedTreeChildren(cacheKey, children);
       } else if (config && connectionUsesVisibleSchemaFilter(config)) {
@@ -1357,6 +1369,7 @@ export const useConnectionStore = defineStore("connection", () => {
           isExpanded: false,
           children: [],
         }));
+        if (isSidebarSearchQueryChanged(options)) return;
         setChildren(node, withSavedSqlRoot(connectionId, schemaNodes, node));
         await savePersistedTreeChildren(cacheKey, schemaNodes);
       } else {
@@ -1399,6 +1412,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (linkedServers.length > 0) loadedTreeNodeChildrenIds.value.add(sqlServerLinkedRootId(connectionId));
         }
         const children = withSavedSqlRoot(connectionId, databaseNodes, node);
+        if (isSidebarSearchQueryChanged(options)) return;
         setChildren(node, children);
         await savePersistedTreeChildren(cacheKey, children);
       }
@@ -1793,6 +1807,7 @@ export const useConnectionStore = defineStore("connection", () => {
             children: [],
           };
         });
+      if (isSidebarSearchQueryChanged(options)) return;
       setChildren(node, children);
       await savePersistedTreeChildren(cacheKey, children);
       node.isExpanded = true;
@@ -1825,6 +1840,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const config = getConfig(connectionId);
       const schemas = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), config, database);
       const children = buildSqlServerDatabaseTreeNodes(connectionId, database, schemas);
+      if (isSidebarSearchQueryChanged(options)) return;
       setChildren(node, children);
       await savePersistedTreeChildren(cacheKey, children);
       node.isExpanded = true;
@@ -1956,7 +1972,8 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options)) return;
       const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
       const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v3" : "objects-grouped-v3");
-      if (!options?.force) {
+      const searchFilter = sidebarSearchQuery.value || "";
+      if (!options?.force && !searchFilter) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
           if (cached.isStale) refreshStaleTreeNode(node);
@@ -1980,8 +1997,9 @@ export const useConnectionStore = defineStore("connection", () => {
           nonTableObjectTypes,
           offset: 0,
           pageSize,
+          searchFilter: searchFilter || undefined,
         });
-        children = page.hasMore && !sidebarSearchQuery.value ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize)] : page.children;
+        children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize)] : page.children;
         node.objectCount = page.objectCount;
       } else {
         children = buildObjectGroupPlaceholderNodes({
@@ -1992,8 +2010,11 @@ export const useConnectionStore = defineStore("connection", () => {
           objectTypes: supportedSidebarObjectTypes(config),
         });
       }
+      if ((sidebarSearchQuery.value || "") !== searchFilter || isSidebarSearchQueryChanged(options)) return;
       setChildren(node, children);
-      await savePersistedTreeChildren(cacheKey, children);
+      if (!searchFilter) {
+        await savePersistedTreeChildren(cacheKey, children);
+      }
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
@@ -2017,7 +2038,8 @@ export const useConnectionStore = defineStore("connection", () => {
       const querySchema = connectionObjectTreeQuerySchema(config, node.database, node.schema);
       const effectiveSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
       const cacheKey = objectGroupCacheKey(node);
-      if (!options?.force && !sidebarSearchQuery.value) {
+      const searchFilter = sidebarSearchQuery.value || "";
+      if (!options?.force && !searchFilter) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
           if (cached.isStale) refreshStaleTreeNode(node);
@@ -2036,8 +2058,9 @@ export const useConnectionStore = defineStore("connection", () => {
           objectTypes,
           offset: 0,
           pageSize: sidebarObjectGroupPageSize(),
+          searchFilter: searchFilter || undefined,
         });
-        children = page.hasMore && !sidebarSearchQuery.value ? [...page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize())] : page.children;
+        children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize())] : page.children;
         node.objectCount = page.objectCount;
       } else {
         const objects = await api.listObjects(node.connectionId, node.database, querySchema, objectTypes);
@@ -2050,8 +2073,9 @@ export const useConnectionStore = defineStore("connection", () => {
         });
         node.objectCount = children.length;
       }
+      if ((sidebarSearchQuery.value || "") !== searchFilter || isSidebarSearchQueryChanged(options)) return;
       setChildren(node, children);
-      if (!sidebarSearchQuery.value) {
+      if (!searchFilter) {
         await savePersistedTreeChildren(cacheKey, children);
       }
       node.isExpanded = true;

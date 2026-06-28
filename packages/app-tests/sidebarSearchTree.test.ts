@@ -84,6 +84,33 @@ test("preserves loaded schema children when the database itself matches search",
   assert.equal(filtered[0]?.children?.[0]?.label, "public");
 });
 
+test("matches table comments during sidebar search", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:db",
+      label: "app",
+      type: "database",
+      connectionId: "conn",
+      database: "app",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:db:inventory",
+          label: "inventory",
+          type: "table",
+          connectionId: "conn",
+          database: "app",
+          comment: "purchase order history",
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "purchase", new Set());
+
+  assert.equal(filtered[0]?.children?.[0]?.label, "inventory");
+});
+
 test("search scope excludes non-selected node self matches", () => {
   const nodes: TreeNode[] = [
     {

@@ -63,6 +63,7 @@ import {
   PanelRight,
   TableProperties,
   Database,
+  Columns3,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -1647,6 +1648,14 @@ const nullColumnsHidden = ref(false);
 const autoHiddenNullColumnIndexes = ref<Set<number>>(new Set());
 const highlightedColumnIndex = ref<number | null>(null);
 let highlightedColumnTimer = 0;
+
+const goToColumnOpen = ref(false);
+const goToColumnSearch = ref("");
+const filteredGoToColumns = computed(() => {
+  const q = goToColumnSearch.value.trim().toLowerCase();
+  if (!q) return props.result.columns;
+  return props.result.columns.filter((column) => column.toLowerCase().includes(q));
+});
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
 const columnLayoutScopeKey = computed(() =>
   dataGridColumnLayoutScopeKey({
@@ -1779,6 +1788,24 @@ const firstVisibleColumnIndex = computed(() => visibleColumnIndexes.value[0] ?? 
 function actualColumnIndex(visibleColumnIndex: number): number {
   return visibleColumnIndexes.value[visibleColumnIndex] ?? visibleColumnIndex;
 }
+function scrollToColumn(columnName: string) {
+  goToColumnOpen.value = false;
+  goToColumnSearch.value = "";
+  scrollToTableInfoColumn(columnName);
+  gridRef.value?.focus();
+}
+
+function onGoToColumnKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    goToColumnOpen.value = false;
+    goToColumnSearch.value = "";
+  }
+}
+
+watch(goToColumnOpen, (open) => {
+  if (!open) goToColumnSearch.value = "";
+});
+
 function matchesTableInfoColumn(resultColumn: string, sourceColumn: string | undefined, columnName: string): boolean {
   const target = columnName.toLocaleLowerCase();
   return resultColumn.toLocaleLowerCase() === target || sourceColumn?.toLocaleLowerCase() === target;
@@ -7161,6 +7188,40 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="max-w-sm"> {{ dataGridRenderMode === "canvas" ? t("grid.canvasRenderMode") : t("grid.domRenderMode") }} · {{ t("grid.renderModeHint") }} </TooltipContent>
+              </Tooltip>
+              <Tooltip v-if="props.result.columns.length">
+                <TooltipTrigger as-child>
+                  <Popover v-model:open="goToColumnOpen">
+                    <PopoverTrigger as-child>
+                      <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
+                        <Columns3 class="data-grid-topbar-action-icon w-3 h-3" />
+                        <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.goToColumn") }}</span>
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" class="w-56 p-2" @keydown="onGoToColumnKeydown">
+                      <div class="relative mb-1">
+                        <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                        <input v-model="goToColumnSearch" :placeholder="t('grid.searchColumn')" class="h-8 w-full rounded-md border bg-transparent pl-7 pr-6 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25" />
+                        <button v-if="goToColumnSearch" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="goToColumnSearch = ''">
+                          <X class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      <div class="max-h-56 overflow-auto rounded border">
+                        <button
+                          v-for="column in filteredGoToColumns"
+                          :key="column"
+                          type="button"
+                          class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          @click="scrollToColumn(column)"
+                        >
+                          <span class="min-w-0 truncate">{{ column }}</span>
+                        </button>
+                        <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">{{ t("grid.noColumnsFound") }}</div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{{ t("grid.goToColumn") }}</TooltipContent>
               </Tooltip>
               <Tooltip v-if="editable && (tableMeta || customSaveHandler)">
                 <TooltipTrigger as-child>

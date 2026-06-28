@@ -354,29 +354,33 @@ function isRightItemVisible(key: string) {
 
 // Track checking updates state for the overflow menu disabled state
 const checkingUpdates = computed(() => props.checkingUpdates);
+
+const toolbarTextButtonClass = "h-8 px-2 text-xs gap-1 leading-none";
+const toolbarTextLabelClass = "inline-flex translate-y-px items-center leading-none";
+const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px`;
 </script>
 
 <template>
   <div ref="toolbarEl" class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }" data-tauri-drag-region @dblclick="onToolbarDblClick">
-    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('new-connection')">
+    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <DatabaseZap class="h-3.5 w-3.5" />
-      {{ t("toolbar.newConnection") }}
+      <span :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>
     </Button>
 
-    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('new-query')" :disabled="!hasConnections">
+    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')" :disabled="!hasConnections">
       <FilePlus2 class="h-3.5 w-3.5" />
-      {{ t("toolbar.newQuery") }}
+      <span :class="toolbarTextLabelClass">{{ t("toolbar.newQuery") }}</span>
     </Button>
 
     <template v-if="!toolbarCollapsed">
-      <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('open-transfer')" :disabled="!hasConnections">
+      <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
         <ArrowLeftRight class="h-3.5 w-3.5" />
-        {{ t("transfer.dataTransfer") }}
+        <span :class="toolbarTextLabelClass">{{ t("transfer.dataTransfer") }}</span>
       </Button>
 
-      <Button v-if="toolbarItems.driverManager" variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" :class="{ 'bg-accent': showDriverStore }" @click="emit('open-driver-store')">
+      <Button v-if="toolbarItems.driverManager" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showDriverStore }]" @click="emit('open-driver-store')">
         <Package class="h-3.5 w-3.5" />
-        {{ t("toolbar.driverManager") }}
+        <span :class="toolbarTextLabelClass">{{ t("toolbar.driverManager") }}</span>
         <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
           {{ agentDriverUpdateCount > 99 ? "99+" : agentDriverUpdateCount }}
         </span>
@@ -388,7 +392,7 @@ const checkingUpdates = computed(() => props.checkingUpdates);
         :items="moreItems"
         :aria-label="t('common.more')"
         :trigger-label="t('common.more')"
-        trigger-class="inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors"
+        :trigger-class="toolbarDropdownTriggerClass"
         :show-trigger-label="true"
         :show-chevron="true"
         check-position="none"
@@ -404,7 +408,7 @@ const checkingUpdates = computed(() => props.checkingUpdates);
         :items="collapsedItems"
         :aria-label="t('common.more')"
         :trigger-label="t('common.more')"
-        trigger-class="inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors"
+        :trigger-class="toolbarDropdownTriggerClass"
         :show-trigger-label="true"
         :show-chevron="true"
         check-position="none"

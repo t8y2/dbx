@@ -15,8 +15,12 @@ const apiMock = vi.hoisted(() => ({
   exportQueryResultMarkdown: vi.fn(),
   exportQueryResultsXlsx: vi.fn(),
 }));
+const clipboardMock = vi.hoisted(() => ({
+  copyToClipboard: vi.fn(),
+}));
 
 vi.mock("@/lib/api", () => apiMock);
+vi.mock("@/lib/clipboard", () => clipboardMock);
 vi.mock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -184,6 +188,7 @@ function buildTableDataExportHarness() {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  clipboardMock.copyToClipboard.mockResolvedValue(undefined);
   apiMock.startQueryResultExport.mockImplementation(async (_request, onProgress) => {
     onProgress({ exportId: _request.exportId, tableName: "", rowsExported: 2, totalRows: 2, status: "Done" });
     return { exportId: _request.exportId, tableName: "", rowsExported: 2, totalRows: 2, status: "Done" };
@@ -191,6 +196,101 @@ beforeEach(() => {
   apiMock.startTableExport.mockImplementation(async (_request, onProgress) => {
     onProgress({ exportId: _request.exportId, tableName: _request.tableName, rowsExported: 2, totalRows: 2, status: "Done" });
     return { exportId: _request.exportId, tableName: _request.tableName, rowsExported: 2, totalRows: 2, status: "Done" };
+  });
+});
+
+test("copy row JSON expands nested JSON strings", async () => {
+  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
+  const jsonString = '{"endingBalance":{"beginningBalance":"0","endingBalance":"20000","endingDate":"2024-10-30"},"financeChargeInfo":null,"interestChargeInfo":null,"Line":[]}';
+  const row = {
+    id: 1,
+    data: ["67218700e884ae1f527640b6", jsonString, "draft"],
+    isNew: false,
+    isDeleted: false,
+    isDirtyCol: [false, false, false],
+    status: "",
+  };
+  const composable = useDataGridExport({
+    columns: computed(() => ["_id", "data", "status"]),
+    displayItems: computed(() => [row]),
+    sql: computed(() => undefined),
+    tableMeta: computed(() => undefined),
+    databaseType: computed(() => "mongodb"),
+    connectionId: computed(() => "conn-1"),
+    database: computed(() => "db"),
+    context: computed(() => "results"),
+    sourceColumns: computed(() => undefined),
+    columnTypes: computed(() => undefined),
+    whereInput: computed(() => undefined),
+    orderBy: computed(() => undefined),
+    exportBatchSize: computed(() => 1000),
+    hasCellSelection: computed(() => false),
+    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    selectedRange: computed(() => null),
+    contextCell,
+    getRowItem: () => row,
+    selectedRowIds: ref(new Set<number>()),
+    hasRowSelection: computed(() => false),
+  });
+
+  await composable.copyRow();
+
+  assert.equal(clipboardMock.copyToClipboard.mock.calls.length, 1);
+  assert.deepEqual(JSON.parse(clipboardMock.copyToClipboard.mock.calls[0][0]), {
+    _id: "67218700e884ae1f527640b6",
+    data: {
+      endingBalance: {
+        beginningBalance: "0",
+        endingBalance: "20000",
+        endingDate: "2024-10-30",
+      },
+      financeChargeInfo: null,
+      interestChargeInfo: null,
+      Line: [],
+    },
+    status: "draft",
+  });
+});
+
+test("copy row JSON keeps nested JSON strings for non-MongoDB rows", async () => {
+  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
+  const jsonString = '{"enabled":true}';
+  const row = {
+    id: 1,
+    data: [1, jsonString],
+    isNew: false,
+    isDeleted: false,
+    isDirtyCol: [false, false],
+    status: "",
+  };
+  const composable = useDataGridExport({
+    columns: computed(() => ["id", "payload"]),
+    displayItems: computed(() => [row]),
+    sql: computed(() => undefined),
+    tableMeta: computed(() => undefined),
+    databaseType: computed(() => "mysql"),
+    connectionId: computed(() => "conn-1"),
+    database: computed(() => "db"),
+    context: computed(() => "table"),
+    sourceColumns: computed(() => undefined),
+    columnTypes: computed(() => undefined),
+    whereInput: computed(() => undefined),
+    orderBy: computed(() => undefined),
+    exportBatchSize: computed(() => 1000),
+    hasCellSelection: computed(() => false),
+    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    selectedRange: computed(() => null),
+    contextCell,
+    getRowItem: () => row,
+    selectedRowIds: ref(new Set<number>()),
+    hasRowSelection: computed(() => false),
+  });
+
+  await composable.copyRow();
+
+  assert.deepEqual(JSON.parse(clipboardMock.copyToClipboard.mock.calls[0][0]), {
+    id: 1,
+    payload: jsonString,
   });
 });
 

@@ -11,6 +11,7 @@ import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, ty
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { uuid } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { expandNestedJsonStringsForCopy } from "@/lib/jsonCopyValue";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/api";
 
@@ -395,7 +396,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function copyRowsAsJson(items: RowItem[]) {
     if (items.length === 0) return;
     const value = items.length === 1 ? rowToJsonObject(items[0]) : items.map(rowToJsonObject);
-    await copyText(JSON.stringify(value, null, 2));
+    const copyValue = options.databaseType.value === "mongodb" ? expandNestedJsonStringsForCopy(value) : value;
+    await copyText(JSON.stringify(copyValue, null, 2));
   }
 
   // --- Cell/row copy ---

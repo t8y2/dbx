@@ -38,6 +38,8 @@ interface ColumnarQueryResult {
   execution_time_ms: number;
   truncated?: boolean;
   has_more?: boolean;
+  sourceLabel?: string;
+  sourceStatement?: string;
 }
 
 type QueryResultRunSnapshot = NonNullable<QueryTab["resultRuns"]>[number];
@@ -129,6 +131,8 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
+    sourceLabel: result.sourceLabel,
+    sourceStatement: result.sourceStatement,
   };
 }
 
@@ -157,6 +161,8 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     execution_time_ms: result.execution_time_ms,
     truncated: result.truncated,
     has_more: result.has_more,
+    sourceLabel: result.sourceLabel,
+    sourceStatement: result.sourceStatement,
   });
 }
 
@@ -172,6 +178,8 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
+    sourceLabel: result.sourceLabel,
+    sourceStatement: result.sourceStatement,
   };
 }
 

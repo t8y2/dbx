@@ -123,12 +123,12 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   return lines;
 }
 
-export function tabularResultItems(results: QueryResult[] | undefined): { result: QueryResult; index: number; n: number }[] {
+export function tabularResultItems(results: QueryResult[] | undefined): { result: QueryResult; index: number; n: number; label?: string }[] {
   if (!results) return [];
   return results
     .map((result, index) => ({ result, index }))
     .filter((item) => item.result.columns.length > 0)
-    .map((item, ordinal) => ({ ...item, n: ordinal + 1 }));
+    .map((item, ordinal) => ({ ...item, n: ordinal + 1, label: item.result.sourceLabel }));
 }
 
 export function activeResultRun(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">) {

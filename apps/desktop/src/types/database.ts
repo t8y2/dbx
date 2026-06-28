@@ -395,6 +395,8 @@ export interface QueryResult {
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;
+  sourceLabel?: string;
+  sourceStatement?: string;
 }
 
 export interface QueryResultRun {

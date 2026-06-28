@@ -4745,6 +4745,7 @@ const {
   fullExportResult: props.fullExportResult,
   queryResultExportRequest: props.queryResultExportRequest,
   allExportResults: computed(() => props.allExportResults),
+  currentResultLabel: computed(() => props.result.sourceLabel),
   exportProgressDialog,
   exportProgressState,
   exportCancelHandler,

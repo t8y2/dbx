@@ -24,6 +24,8 @@ test("result snapshots strip live session handles and clone result rows", () => 
       affected_rows: 0,
       execution_time_ms: 1,
       session_id: "live-session",
+      sourceLabel: "public.users",
+      sourceStatement: "select * from public.users",
     },
     results: [
       {
@@ -40,6 +42,8 @@ test("result snapshots strip live session handles and clone result rows", () => 
   const snapshot = buildTabResultSnapshot(tab);
 
   assert.equal(snapshot?.result?.session_id, undefined);
+  assert.equal(snapshot?.result?.sourceLabel, "public.users");
+  assert.equal(snapshot?.result?.sourceStatement, "select * from public.users");
   assert.equal(snapshot?.results?.[0]?.session_id, undefined);
   assert.deepEqual(snapshot?.result?.rows, [[1]]);
   tab.result!.rows[0]![0] = 2;
@@ -61,6 +65,8 @@ test("result snapshots strip session handles from result runs", () => {
           affected_rows: 0,
           execution_time_ms: 1,
           session_id: "live-run-session",
+          sourceLabel: "users",
+          sourceStatement: "select * from users",
         },
       },
     ],
@@ -69,6 +75,8 @@ test("result snapshots strip session handles from result runs", () => {
   const snapshot = buildTabResultSnapshot(tab);
 
   assert.equal(snapshot?.resultRuns?.[0]?.result?.session_id, undefined);
+  assert.equal(snapshot?.resultRuns?.[0]?.result?.sourceLabel, "users");
+  assert.equal(snapshot?.resultRuns?.[0]?.result?.sourceStatement, "select * from users");
   assert.deepEqual(snapshot?.resultRuns?.[0]?.result?.rows, [[1]]);
 });
 
@@ -85,6 +93,8 @@ test("result snapshots encode as binary columnar payloads and decode back to row
         execution_time_ms: 3,
         session_id: "live-session",
         has_more: true,
+        sourceLabel: "public.users",
+        sourceStatement: "select id, name, active from public.users",
       },
     }),
   );
@@ -101,5 +111,7 @@ test("result snapshots encode as binary columnar payloads and decode back to row
   ]);
   assert.equal(decoded?.result?.session_id, undefined);
   assert.equal(decoded?.result?.has_more, true);
+  assert.equal(decoded?.result?.sourceLabel, "public.users");
+  assert.equal(decoded?.result?.sourceStatement, "select id, name, active from public.users");
   assert.equal(decoded?.cachedAt, snapshot.cachedAt);
 });

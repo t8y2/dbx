@@ -58,12 +58,13 @@ function queryTab(overrides: Partial<QueryTab> = {}): QueryTab {
   };
 }
 
-function result(columns: string[]): QueryResult {
+function result(columns: string[], overrides: Partial<QueryResult> = {}): QueryResult {
   return {
     columns,
     rows: [],
     affected_rows: 0,
     execution_time_ms: 1,
+    ...overrides,
   };
 }
 
@@ -146,6 +147,19 @@ test("tabular result items hide statement results without returned columns", () 
   );
   assert.deepEqual(tabularResultItems([result([])]), []);
   assert.deepEqual(tabularResultItems(undefined), []);
+});
+
+test("tabular result items expose source labels when available", () => {
+  const results = [result([]), result(["id"], { sourceLabel: "public.users" }), result(["name"])];
+
+  assert.deepEqual(
+    tabularResultItems(results).map((item) => ({ index: item.index, n: item.n, label: item.label })),
+    [
+      { index: 1, n: 1, label: "public.users" },
+      { index: 2, n: 2, label: undefined },
+    ],
+  );
+  assert.deepEqual(tabularResultItems([result(["id"], { sourceLabel: "db.users" })]).map((item) => item.label), ["db.users"]);
 });
 
 test("result run items expose ordered labels and active state", () => {

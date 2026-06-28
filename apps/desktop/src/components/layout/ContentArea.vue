@@ -245,10 +245,11 @@ const activeQueryError = computed(() => {
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
+const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
 const allResultExportSheets = computed(() =>
   tabularResults.value.map((item) => ({
-    sheetName: t("tabs.resultN", { n: item.n }),
+    sheetName: item.label || t("tabs.resultN", { n: item.n }),
     result: item.result,
   })),
 );
@@ -259,7 +260,7 @@ const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 watch(
-  () => tabularResults.value.map((item) => item.index).join(","),
+  () => visibleResultItems.value.map((item) => item.index).join(","),
   () => {
     nextTick(updateResultTabsScrollbar);
   },
@@ -268,7 +269,7 @@ const summaryItems = computed(() => executionSummaryItems(props.activeTab));
 const hasExecutionSummary = computed(() => summaryItems.value.length > 0 || props.activeTab.isExecuting);
 const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
-  return tabularResults.value.length > 0;
+  return visibleResultItems.value.length > 0;
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const resultsPaneOpen = ref(false);
@@ -655,7 +656,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   </DropdownMenuContent>
                 </DropdownMenu>
               </template>
-              <template v-if="tabularResults.length > 1">
+              <template v-if="visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div class="relative min-w-0 flex-1 self-stretch">
                   <div v-if="hasResultTabOverflow" class="result-tab-scrollbar" :class="{ 'result-tab-scrollbar--dragging': isResultTabsScrollbarDragging }" @pointerdown="startResultTabsScrollbarDrag">
@@ -663,17 +664,18 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   </div>
                   <div ref="resultTabsScrollerRef" class="result-tab-scroll flex h-full items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :style="resultTabsScrollerStyle" @scroll="updateResultTabsScrollbar" @wheel="onResultTabsWheel">
                     <Button
-                      v-for="item in tabularResults"
+                      v-for="item in visibleResultItems"
                       :key="item.index"
                       size="sm"
-                      :variant="activeOutputView === 'result' && activeTab.activeResultIndex === item.index ? 'default' : 'ghost'"
-                      class="h-6 px-2 text-xs shrink-0"
+                      :variant="activeOutputView === 'result' && (activeTab.activeResultIndex ?? 0) === item.index ? 'default' : 'ghost'"
+                      class="h-6 max-w-48 shrink-0 overflow-hidden text-ellipsis whitespace-nowrap px-2 text-xs"
+                      :title="item.label || t('tabs.resultN', { n: item.n })"
                       @click="
                         queryStore.setActiveResultIndex(activeTab.id, item.index);
                         emit('update:activeOutputView', 'result');
                       "
                     >
-                      {{ t("tabs.resultN", { n: item.n }) }}
+                      {{ item.label || t("tabs.resultN", { n: item.n }) }}
                     </Button>
                   </div>
                 </div>

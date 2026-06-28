@@ -193,12 +193,13 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     private void loadTableOrViewFromComments(String schema, String tableType, Map<String, TableInfo> tablesByName) {
+        String tableNameFilter = "TABLE".equals(tableType) ? " AND TABLE_NAME NOT LIKE 'MTAB$_%'" : "";
         String sql = ("""
             SELECT TABLE_NAME, COMMENTS
             FROM ALL_TAB_COMMENTS
-            WHERE OWNER = ? AND TABLE_TYPE = '%s' AND ( (o.OBJECT_TYPE = 'TABLE' AND o.OBJECT_NAME NOT LIKE 'MTAB$_%') OR o.OBJECT_TYPE = 'VIEW')
+            WHERE OWNER = ? AND TABLE_TYPE = '%s'%s
             ORDER BY TABLE_NAME
-            """).formatted(tableType).stripIndent().trim();
+            """).formatted(tableType, tableNameFilter).stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
             try (ResultSet rs = stmt.executeQuery()) {
@@ -213,7 +214,6 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private void loadMaterializedViews(String schema, Map<String, TableInfo> tablesByName) {
         loadMaterializedViewsFromAllObjects(schema, tablesByName);
-        //loadMaterializedViewsFromUserMviews(schema, tablesByName);
     }
 
     private void loadMaterializedViewsFromAllObjects(String schema, Map<String, TableInfo> tablesByName) {

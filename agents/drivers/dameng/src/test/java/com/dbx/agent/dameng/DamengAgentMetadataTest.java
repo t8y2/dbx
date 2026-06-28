@@ -229,11 +229,9 @@ class DamengAgentMetadataTest {
                             : List.of()
                     );
                 }
-                if (sql.contains("ALL_OBJECTS") && sql.contains("MATERIALIZED VIEW")) {
+                if (sql.contains("USER_MVIEWS") && sql.contains("ALL_OBJECTS")) {
                     return metadataStatement(
-                        includeMaterializedView
-                            ? List.of(Arrays.asList("USER_SUMMARY_MV", "mv comment"))
-                            : List.of()
+                        includeMaterializedView ? List.of(Arrays.asList("USER_SUMMARY_MV", "mv comment")) : List.of()
                     );
                 }
                 if (sql.contains("ALL_OBJECTS")) {

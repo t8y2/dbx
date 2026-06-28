@@ -14,6 +14,7 @@ const apiMock = vi.hoisted(() => ({
   exportQueryResultJson: vi.fn(),
   exportQueryResultMarkdown: vi.fn(),
   exportQueryResultsXlsx: vi.fn(),
+  buildDataGridCopyInsertStatement: vi.fn(),
 }));
 const clipboardMock = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
@@ -292,6 +293,90 @@ test("copy row JSON keeps nested JSON strings for non-MongoDB rows", async () =>
     id: 1,
     payload: jsonString,
   });
+});
+
+test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
+  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
+  const jsonString = '{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]}';
+  const row = {
+    id: 1,
+    data: ["6743e4bfa3f6f84bc3fff6c8", "577", "done", jsonString, 'ISODate("2024-11-25T02:45:36.184Z")'],
+    isNew: false,
+    isDeleted: false,
+    isDirtyCol: [false, false, false, false, false],
+    status: "",
+  };
+  const composable = useDataGridExport({
+    columns: computed(() => ["_id", "accountId", "status", "data", "lastUpdatedDate"]),
+    displayItems: computed(() => [row]),
+    sql: computed(() => undefined),
+    tableMeta: computed(() => undefined),
+    copyInsertTargetLabel: computed(() => "accounting_reconciliations"),
+    databaseType: computed(() => "mongodb"),
+    connectionId: computed(() => "conn-1"),
+    database: computed(() => "db"),
+    context: computed(() => "results"),
+    sourceColumns: computed(() => undefined),
+    columnTypes: computed(() => undefined),
+    whereInput: computed(() => undefined),
+    orderBy: computed(() => undefined),
+    exportBatchSize: computed(() => 1000),
+    hasCellSelection: computed(() => false),
+    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    selectedRange: computed(() => null),
+    contextCell,
+    getRowItem: () => row,
+    selectedRowIds: ref(new Set<number>()),
+    hasRowSelection: computed(() => false),
+  });
+
+  await composable.prefetchRowAsInsertStatement(false);
+  await composable.copyRowAsInsert();
+
+  assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
+  assert.equal(
+    clipboardMock.copyToClipboard.mock.calls[0][0],
+    'db.getCollection("accounting_reconciliations").insert({"_id":ObjectId("6743e4bfa3f6f84bc3fff6c8"),"accountId":577,"status":"done","data":{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]},"lastUpdatedDate":ISODate("2024-11-25T02:45:36.184Z")});',
+  );
+});
+
+test("copy MongoDB rows as INSERT excludes _id for insert without primary keys", async () => {
+  const selectedRowIds = ref(new Set([1, 2]));
+  const rows = [
+    { id: 1, data: ["6743e4bfa3f6f84bc3fff6c8", "done"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
+    { id: 2, data: ["6743e4bfa3f6f84bc3fff6c9", "draft"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
+  ];
+  const composable = useDataGridExport({
+    columns: computed(() => ["_id", "status"]),
+    displayItems: computed(() => rows),
+    sql: computed(() => undefined),
+    tableMeta: computed(() => ({
+      tableName: "accounting_reconciliations",
+      primaryKeys: ["_id"],
+    })),
+    databaseType: computed(() => "mongodb"),
+    connectionId: computed(() => "conn-1"),
+    database: computed(() => "db"),
+    context: computed(() => "results"),
+    sourceColumns: computed(() => undefined),
+    columnTypes: computed(() => undefined),
+    whereInput: computed(() => undefined),
+    orderBy: computed(() => undefined),
+    exportBatchSize: computed(() => 1000),
+    hasCellSelection: computed(() => false),
+    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    selectedRange: computed(() => null),
+    contextCell: ref(null),
+    getRowItem: (rowId: number) => rows.find((item) => item.id === rowId),
+    selectedRowIds,
+    hasRowSelection: computed(() => true),
+  });
+
+  await composable.prefetchRowAsInsertStatement(true);
+  await composable.copyRowAsInsertWithoutPrimaryKeys();
+
+  assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
+  assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], 'db.getCollection("accounting_reconciliations").insertMany([{"status":"done"},{"status":"draft"}]);');
 });
 
 test("default data grid export file names use sanitized base names and compact local timestamps", () => {

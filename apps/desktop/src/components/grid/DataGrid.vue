@@ -4764,6 +4764,7 @@ const {
   displayItems: visibleDisplayItems,
   sql: computed(() => props.sql),
   tableMeta: computed(() => (props.tableMeta ? { ...props.tableMeta } : undefined)),
+  copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),
   databaseType: computed(() => props.databaseType),
   connectionId: computed(() => props.connectionId),
   database: computed(() => props.database),

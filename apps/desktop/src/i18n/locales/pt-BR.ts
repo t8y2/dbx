@@ -296,6 +296,7 @@ export default withEnglishFallback({
     jreNotInstalled: "O runtime JRE {jre} não está instalado. Instale-o pelo Gerenciador de Drivers.",
     systemJavaNotFound: "O runtime Java do sistema não foi encontrado no PATH. Instale o Java ou escolha um executável Java personalizado.",
     customJavaPathEmpty: "O caminho do runtime Java personalizado está vazio. Escolha um executável Java.",
+    agentJavaTooOld: "Este driver requer Java 21. Use o JRE 21 gerenciado pelo DBX ou selecione um executável Java 21 no Gerenciador de Drivers.",
     jdbcPluginNotInstalled: "O plugin JDBC não está instalado. Instale o plugin JDBC opcional para usar esta conexão.",
     lastError: "Erro de conexão",
     clearError: "Limpar erro de conexão",

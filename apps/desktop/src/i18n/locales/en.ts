@@ -294,6 +294,7 @@ export default {
     jreNotInstalled: "JRE {jre} runtime is not installed. Please install it from the Driver Manager.",
     systemJavaNotFound: "System Java runtime was not found on PATH. Please install Java or choose a custom Java executable.",
     customJavaPathEmpty: "Custom Java runtime path is empty. Please choose a Java executable.",
+    agentJavaTooOld: "This driver requires Java 21. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.",
     jdbcPluginNotInstalled: "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.",
     lastError: "Connection error",
     clearError: "Clear connection error",

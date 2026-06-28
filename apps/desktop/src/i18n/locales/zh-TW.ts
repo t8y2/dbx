@@ -296,6 +296,7 @@ export default withEnglishFallback({
     jreNotInstalled: "JRE {jre} 執行環境未安裝，請在驅動程式管理器中安裝。",
     systemJavaNotFound: "未在 PATH 中找到系統 Java 執行環境，請安裝 Java 或選擇自訂 Java 可執行檔。",
     customJavaPathEmpty: "自訂 Java 執行環境路徑為空，請選擇 Java 可執行檔。",
+    agentJavaTooOld: "此驅動程式需要 Java 21。請在驅動程式管理器中使用 DBX 託管 JRE 21，或選擇 Java 21 可執行檔。",
     jdbcPluginNotInstalled: "JDBC 外掛程式未安裝，請先安裝 JDBC 外掛程式再使用此連線。",
     lastError: "連線錯誤",
     clearError: "清除連線錯誤",

@@ -289,6 +289,7 @@ export default withEnglishFallback({
     jreNotInstalled: "JRE {jre} ランタイムがインストールされていません。ドライバーマネージャーからインストールしてください。",
     systemJavaNotFound: "システムJavaランタイムがPATHに見つかりませんでした。Javaをインストールするか、カスタムJava実行ファイルを選択してください。",
     customJavaPathEmpty: "カスタムJavaランタイムのパスが空です。Java実行ファイルを選択してください。",
+    agentJavaTooOld: "このドライバーにはJava 21が必要です。ドライバーマネージャーでDBX管理JRE 21を使用するか、Java 21実行ファイルを選択してください。",
     jdbcPluginNotInstalled: "JDBCプラグインがインストールされていません。この接続を使用するにはオプションのJDBCプラグインをインストールしてください。",
     lastError: "接続エラー",
     clearError: "接続エラーをクリア",

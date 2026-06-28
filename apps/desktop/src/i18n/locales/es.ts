@@ -296,6 +296,7 @@ export default withEnglishFallback({
     jreNotInstalled: "El entorno JRE {jre} no está instalado. Instálelo desde el Administrador de controladores.",
     systemJavaNotFound: "No se encontró Java en el PATH del sistema. Instale Java o elija un ejecutable personalizado.",
     customJavaPathEmpty: "La ruta de Java personalizada está vacía. Elija un ejecutable de Java.",
+    agentJavaTooOld: "Este controlador requiere Java 21. Use el JRE 21 administrado por DBX o seleccione un ejecutable Java 21 en el Administrador de controladores.",
     jdbcPluginNotInstalled: "El plugin JDBC no está instalado. Instale el plugin JDBC opcional para usar esta conexión.",
     lastError: "Error de conexión",
     clearError: "Limpiar error de conexión",

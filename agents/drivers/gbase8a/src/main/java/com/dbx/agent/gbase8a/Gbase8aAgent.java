@@ -1,8 +1,12 @@
 package com.dbx.agent.gbase8a;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
+import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 
 import java.sql.PreparedStatement;
@@ -32,6 +36,21 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        return super.executeQuery(sql, schema, withoutFetchSize(options));
+    }
+
+    @Override
+    public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        return super.executeQueryPage(sql, schema, withoutFetchSize(options));
+    }
+
+    @Override
+    public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
+        return super.startTableRead(sql, schema, withoutFetchSize(options));
+    }
+
+    @Override
     public List<TableInfo> listTables(String schema) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
@@ -58,6 +77,14 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
             result.sort(Comparator.comparing(TableInfo::getName));
             return result;
         });
+    }
+
+    private static ExecuteQueryOptions withoutFetchSize(ExecuteQueryOptions options) {
+        return new ExecuteQueryOptions(options.getMaxRows(), null, options.getTimeoutSecs());
+    }
+
+    private static QueryPageOptions withoutFetchSize(QueryPageOptions options) {
+        return new QueryPageOptions(options.getPageSize(), null, options.getMaxRows(), options.getTimeoutSecs());
     }
 
     public static void main(String[] args) {

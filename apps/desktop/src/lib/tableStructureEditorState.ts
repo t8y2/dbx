@@ -693,6 +693,11 @@ export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, bas
   return combineDataType(baseType, normalizedParams);
 }
 
+export function dataTypeLengthInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
+  const parsed = splitDataType(rawDataType);
+  return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : parsed.params;
+}
+
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
   const p = params.trim();
   if (!p) return "";
@@ -770,6 +775,8 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     return key !== "bit" && key !== "float_vector";
   } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "vastbase" || _dbType === "kingbase") {
     return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+  } else if (isMysqlLikeStructureType(_dbType)) {
+    return key === "enum" || key === "set";
   } else {
     return DEFAULT_TYPE_LENGTH_DISABLES.includes(key);
   }

@@ -1651,11 +1651,6 @@ let highlightedColumnTimer = 0;
 
 const goToColumnOpen = ref(false);
 const goToColumnSearch = ref("");
-const filteredGoToColumns = computed(() => {
-  const q = goToColumnSearch.value.trim().toLowerCase();
-  if (!q) return props.result.columns;
-  return props.result.columns.filter((column) => column.toLowerCase().includes(q));
-});
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
 const columnLayoutScopeKey = computed(() =>
   dataGridColumnLayoutScopeKey({
@@ -1677,6 +1672,18 @@ const displayableColumnIndexes = computed(() =>
     .filter(({ column }) => !isHiddenGridColumn(props.databaseType, column, props.tableMeta?.primaryKeys ?? []))
     .map(({ index }) => index),
 );
+const goToColumnItems = computed(() =>
+  displayableColumnIndexes.value.map((index) => ({
+    index,
+    name: props.result.columns[index] ?? `#${index + 1}`,
+    sourceName: props.sourceColumns?.[index],
+  })),
+);
+const filteredGoToColumns = computed(() => {
+  const query = goToColumnSearch.value.trim().toLocaleLowerCase();
+  if (!query) return goToColumnItems.value;
+  return goToColumnItems.value.filter((column) => column.name.toLocaleLowerCase().includes(query) || column.sourceName?.toLocaleLowerCase().includes(query));
+});
 const orderedDisplayableColumnIndexes = computed(() =>
   orderedColumnIndexes({
     availableIndexes: displayableColumnIndexes.value,
@@ -1788,10 +1795,10 @@ const firstVisibleColumnIndex = computed(() => visibleColumnIndexes.value[0] ?? 
 function actualColumnIndex(visibleColumnIndex: number): number {
   return visibleColumnIndexes.value[visibleColumnIndex] ?? visibleColumnIndex;
 }
-function scrollToColumn(columnName: string) {
+function scrollToColumn(columnIndex: number) {
   goToColumnOpen.value = false;
   goToColumnSearch.value = "";
-  scrollToTableInfoColumn(columnName);
+  scrollToColumnIndex(columnIndex);
   gridRef.value?.focus();
 }
 
@@ -1812,6 +1819,9 @@ function matchesTableInfoColumn(resultColumn: string, sourceColumn: string | und
 }
 function scrollToTableInfoColumn(columnName: string) {
   const columnIndex = props.result.columns.findIndex((column, index) => matchesTableInfoColumn(column, props.sourceColumns?.[index], columnName));
+  scrollToColumnIndex(columnIndex);
+}
+function scrollToColumnIndex(columnIndex: number) {
   if (columnIndex < 0 || !displayableColumnIndexes.value.includes(columnIndex)) return;
 
   if (hiddenColumnIndexes.value.has(columnIndex)) {
@@ -7207,14 +7217,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </button>
                       </div>
                       <div class="max-h-56 overflow-auto rounded border">
-                        <button
-                          v-for="column in filteredGoToColumns"
-                          :key="column"
-                          type="button"
-                          class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          @click="scrollToColumn(column)"
-                        >
-                          <span class="min-w-0 truncate">{{ column }}</span>
+                        <button v-for="column in filteredGoToColumns" :key="column.index" type="button" class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="scrollToColumn(column.index)">
+                          <span class="min-w-0 truncate">{{ column.name }}</span>
+                          <span class="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
                         </button>
                         <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">{{ t("grid.noColumnsFound") }}</div>
                       </div>

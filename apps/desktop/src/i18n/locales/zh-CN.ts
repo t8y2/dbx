@@ -806,7 +806,7 @@ export default withEnglishFallback({
     tableInfoEmpty: "暂无元数据",
     tableInfoSearch: "搜索...",
     tableInfoNoResults: "无匹配结果",
-    goToColumn: "跳转到列",
+    goToColumn: "跳转列",
     searchColumn: "搜索列...",
     noColumnsFound: "未找到列",
     queryError: "查询出错",

@@ -3480,6 +3480,7 @@ function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetai
     columns: props.result.columns,
     columnIndex,
     typeByColumn: columnTypeMap.value,
+    resultColumnTypes: props.result.column_types,
     commentByColumn: columnCommentMap.value,
     displayValue: (value, index) => formatCellCached(value, index),
     isEditable: canEditCellItem(item, columnIndex),
@@ -3507,6 +3508,7 @@ const rowDetail = computed(() => {
     columns: props.result.columns,
     columnIndexes: visibleColumnIndexes.value,
     typeByColumn: columnTypeMap.value,
+    resultColumnTypes: props.result.column_types,
     commentByColumn: columnCommentMap.value,
     displayValue: (value, index) => formatCellCached(value, index),
     isEditableColumn: (columnIndex) => canEditCellItem(item, columnIndex),
@@ -3526,6 +3528,7 @@ const columnDetail = computed(() => {
     columns: props.result.columns,
     columnIndex,
     typeByColumn: columnTypeMap.value,
+    resultColumnTypes: props.result.column_types,
     commentByColumn: columnCommentMap.value,
     displayValue: (value, index) => formatCellCached(value, index),
   });
@@ -8365,7 +8368,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </div>
                   </template>
-                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, cellDetailPanelIsBottom ? 'flex-1' : '']">
+                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, cellDetailPanelIsBottom && !(activeCellDetail.imagePreviewUrl && !isEditingDetail) ? 'flex-1' : '', activeCellDetail.imagePreviewUrl && !isEditingDetail ? 'shrink-0' : '']">
                     <div class="flex min-h-5 items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
@@ -8404,14 +8407,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </Popover>
                       </div>
                     </div>
-                    <div v-if="activeCellDetail.imagePreviewUrl && !isEditingDetail" class="space-y-1.5">
+                    <div v-if="activeCellDetail.imagePreviewUrl && !isEditingDetail" class="shrink-0 space-y-1.5">
                       <div class="text-muted-foreground">{{ t("grid.imagePreview") }}</div>
-                      <a :href="activeCellDetail.imagePreviewUrl" role="button" class="block overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(activeCellDetail.imagePreviewUrl, activeCellDetail.column)">
-                        <img :src="activeCellDetail.imagePreviewUrl" :alt="activeCellDetail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
+                      <a :href="activeCellDetail.imagePreviewUrl" role="button" class="flex overflow-hidden rounded border bg-muted/20" :class="cellDetailPanelIsBottom ? 'max-h-28' : 'max-h-40'" @click.prevent="openImagePreview(activeCellDetail.imagePreviewUrl, activeCellDetail.column)">
+                        <img :src="activeCellDetail.imagePreviewUrl" :alt="activeCellDetail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-full w-full object-contain" />
                       </a>
                     </div>
                     <template v-if="isEditingDetail">
-                      <div class="min-h-0" :class="cellDetailPanelIsBottom ? 'flex-1' : ''" :style="sideDetailEditorStyle">
+                      <div class="min-h-32 shrink-0" :class="cellDetailPanelIsBottom ? 'h-32' : ''" :style="sideDetailEditorStyle">
                         <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelDetailEdit" @commit="commitDetailEdit" />
                         <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
                       </div>
@@ -8427,7 +8430,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <pre
                       v-else
                       class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
-                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : '']"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom && activeCellDetail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', cellDetailPanelIsBottom && !activeCellDetail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
                       @dblclick="startDetailEdit"
                       >{{ sideDetailJsonView && activeCellDetail.formattedJson ? activeCellDetail.formattedJson : activeCellDetail.rawValuePreview }}</pre
                     >

@@ -764,7 +764,7 @@ export default withEnglishFallback({
     layerPreview: "Visualização de Camada",
     zoomIn: "Aproximar",
     zoomOut: "Afastar",
-    fitImage: "Ajustar à Janela",
+    fitImage: "Ajustar à Visualização",
     openImage: "Abrir Imagem",
     columnName: "Coluna",
     columnType: "Tipo",

@@ -750,7 +750,7 @@ export default {
     layerPreview: "Layer Preview",
     zoomIn: "Zoom In",
     zoomOut: "Zoom Out",
-    fitImage: "Fit to Window",
+    fitImage: "Fit to View",
     openImage: "Open Image",
     columnName: "Column",
     columnType: "Type",

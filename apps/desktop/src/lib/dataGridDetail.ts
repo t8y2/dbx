@@ -44,9 +44,11 @@ export interface BuildDataGridCellDetailOptions {
   columns: readonly string[];
   columnIndex: number;
   typeByColumn?: ReadonlyMap<string, string>;
+  resultColumnTypes?: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
   isEditable: boolean;
+  includeBinaryImagePreview?: boolean;
 }
 
 export interface BuildDataGridRowDetailOptions {
@@ -56,6 +58,7 @@ export interface BuildDataGridRowDetailOptions {
   columns: readonly string[];
   columnIndexes: readonly number[];
   typeByColumn?: ReadonlyMap<string, string>;
+  resultColumnTypes?: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
   isEditableColumn?: (columnIndex: number) => boolean;
@@ -73,6 +76,7 @@ export interface BuildDataGridColumnDetailOptions {
   columns: readonly string[];
   columnIndex: number;
   typeByColumn?: ReadonlyMap<string, string>;
+  resultColumnTypes?: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
 }
@@ -87,13 +91,14 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
   const formattedJson = typeof value === "string" && looksLikeJsonContainer(value) ? (formatJsonText(value) ?? "") : "";
   const rawValuePreview = previewText(rawValue);
   const displayValuePreview = previewText(displayValue);
+  const type = detailColumnType(options.typeByColumn, options.resultColumnTypes, column, options.columnIndex);
 
   return {
     rowNumber: options.rowIndex + 1,
     rowId: options.rowId,
     colIndex: options.columnIndex,
     column,
-    type: options.typeByColumn?.get(column) ?? "",
+    type,
     comment: options.commentByColumn?.get(column) ?? "",
     value,
     rawValue,
@@ -101,7 +106,7 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     displayValue,
     displayValuePreview,
     isValuePreviewTruncated: rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
-    imagePreviewUrl: rawValue.length <= CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH ? cellImagePreviewUrl(value) : null,
+    imagePreviewUrl: cellImagePreviewUrl(value, type, { binary: options.includeBinaryImagePreview !== false }),
     length: value === null ? 0 : String(value).length,
     formattedJson,
     isEditable: options.isEditable,
@@ -121,9 +126,11 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
         columns: options.columns,
         columnIndex: options.columnIndex,
         typeByColumn: options.typeByColumn,
+        resultColumnTypes: options.resultColumnTypes,
         commentByColumn: options.commentByColumn,
         displayValue: options.displayValue,
         isEditable: row.isEditable ?? false,
+        includeBinaryImagePreview: false,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -131,7 +138,7 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
   return {
     colIndex: options.columnIndex,
     column,
-    type: options.typeByColumn?.get(column) ?? "",
+    type: detailColumnType(options.typeByColumn, options.resultColumnTypes, column, options.columnIndex),
     comment: options.commentByColumn?.get(column) ?? "",
     fields,
   };
@@ -147,9 +154,11 @@ export function buildDataGridRowDetail(options: BuildDataGridRowDetailOptions): 
         columns: options.columns,
         columnIndex,
         typeByColumn: options.typeByColumn,
+        resultColumnTypes: options.resultColumnTypes,
         commentByColumn: options.commentByColumn,
         displayValue: options.displayValue,
         isEditable: options.isEditableColumn?.(columnIndex) ?? false,
+        includeBinaryImagePreview: false,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -159,6 +168,12 @@ export function buildDataGridRowDetail(options: BuildDataGridRowDetailOptions): 
     rowId: options.rowId,
     fields,
   };
+}
+
+function detailColumnType(typeByColumn: ReadonlyMap<string, string> | undefined, resultColumnTypes: readonly string[] | undefined, column: string, columnIndex: number): string {
+  const fromMeta = typeByColumn?.get(column)?.trim();
+  if (fromMeta) return fromMeta;
+  return resultColumnTypes?.[columnIndex]?.trim() ?? "";
 }
 
 export function dataGridRowDetailJson(detail: DataGridRowDetail): string {

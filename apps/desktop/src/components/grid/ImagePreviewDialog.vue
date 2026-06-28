@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ExternalLink, Maximize2, X, ZoomIn, ZoomOut } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { imagePreviewFitScale, imagePreviewTransform, nextImagePreviewScale } from "@/lib/imagePreviewViewer";
+import { imagePreviewDialogSize, imagePreviewFitScale, imagePreviewTransform, nextImagePreviewScale } from "@/lib/imagePreviewViewer";
 
 const props = defineProps<{
   open: boolean;
@@ -25,6 +25,8 @@ const imageError = ref(false);
 const stageRef = ref<HTMLElement>();
 const naturalWidth = ref(0);
 const naturalHeight = ref(0);
+const viewportWidth = ref(typeof window === "undefined" ? 0 : window.innerWidth);
+const viewportHeight = ref(typeof window === "undefined" ? 0 : window.innerHeight);
 const dragStart = ref<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
 
 const hostLabel = computed(() => {
@@ -38,6 +40,7 @@ const hostLabel = computed(() => {
 
 const imageTitle = computed(() => props.title || t("grid.imagePreview"));
 const zoomLabel = computed(() => `${Math.round(scale.value * 100)}%`);
+const canOpenExternal = computed(() => !props.src.startsWith("data:"));
 const imageStyle = computed(() => ({
   width: naturalWidth.value ? `${naturalWidth.value}px` : "auto",
   height: naturalHeight.value ? `${naturalHeight.value}px` : "auto",
@@ -47,6 +50,25 @@ const imageStyle = computed(() => ({
     offsetY: offsetY.value,
   })}`,
 }));
+const dialogSize = computed(() =>
+  imagePreviewDialogSize({
+    imageWidth: naturalWidth.value,
+    imageHeight: naturalHeight.value,
+    viewportWidth: viewportWidth.value,
+    viewportHeight: viewportHeight.value,
+  }),
+);
+const dialogStyle = computed(() => ({
+  width: dialogSize.value ? `${dialogSize.value.width}px` : "min(92vw, 1280px)",
+  height: dialogSize.value ? `${dialogSize.value.height}px` : "min(86vh, 720px)",
+  maxWidth: "92vw",
+  maxHeight: "86vh",
+}));
+
+function updateViewportSize() {
+  viewportWidth.value = window.innerWidth;
+  viewportHeight.value = window.innerHeight;
+}
 
 function resetViewer() {
   scale.value = 1;
@@ -93,7 +115,7 @@ function onImageLoad(event: Event) {
   naturalWidth.value = img.naturalWidth;
   naturalHeight.value = img.naturalHeight;
   imageLoaded.value = true;
-  fitImage();
+  requestAnimationFrame(fitImage);
 }
 
 function onWheel(event: WheelEvent) {
@@ -136,14 +158,29 @@ async function openExternal() {
 watch(
   () => [props.open, props.src] as const,
   ([open]) => {
-    if (open) resetViewer();
+    if (open) {
+      updateViewportSize();
+      resetViewer();
+    }
   },
 );
+
+watch([viewportWidth, viewportHeight], () => {
+  if (props.open && imageLoaded.value) fitImage();
+});
+
+onMounted(() => {
+  window.addEventListener("resize", updateViewportSize);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("resize", updateViewportSize);
+});
 </script>
 
 <template>
   <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent :show-close-button="false" class="image-preview-dialog h-[min(86vh,920px)] w-[min(92vw,1280px)] max-w-none gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl" @escape-key-down="close">
+    <DialogContent :show-close-button="false" class="image-preview-dialog !flex !max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl sm:!max-w-[92vw]" :style="dialogStyle" @escape-key-down="close">
       <div class="flex h-12 shrink-0 items-center gap-3 border-b border-white/10 bg-white/[0.035] px-4">
         <div class="min-w-0 flex-1">
           <DialogTitle class="truncate text-sm font-semibold text-white">{{ imageTitle }}</DialogTitle>
@@ -160,7 +197,7 @@ watch(
           <Button variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.fitImage')" @click="fitImage">
             <Maximize2 class="h-3.5 w-3.5" />
           </Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.openImage')" @click="openExternal">
+          <Button v-if="canOpenExternal" variant="ghost" size="icon" class="h-7 w-7 text-white/75 hover:bg-white/10 hover:text-white" :title="t('grid.openImage')" @click="openExternal">
             <ExternalLink class="h-3.5 w-3.5" />
           </Button>
         </div>

@@ -748,7 +748,7 @@ export default withEnglishFallback({
     layerPreview: "レイヤープレビュー",
     zoomIn: "拡大",
     zoomOut: "縮小",
-    fitImage: "ウィンドウに合わせる",
+    fitImage: "表示領域に合わせる",
     openImage: "画像を開く",
     columnName: "列",
     columnType: "データ型",

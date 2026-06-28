@@ -753,7 +753,7 @@ export default withEnglishFallback({
     layerPreview: "图层预览",
     zoomIn: "放大",
     zoomOut: "缩小",
-    fitImage: "适应窗口",
+    fitImage: "适合显示区域",
     openImage: "打开图片",
     columnName: "列名",
     columnType: "类型",

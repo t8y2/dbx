@@ -1,18 +1,32 @@
-import { ref } from "vue";
+import { ref, type Ref } from "vue";
 
-const message = ref("");
-const visible = ref(false);
-let timer = 0;
+type ToastState = {
+  message: Ref<string>;
+  visible: Ref<boolean>;
+  timer: number;
+};
+
+declare global {
+  var __DBX_TOAST_STATE__: ToastState | undefined;
+}
+
+const toastState =
+  globalThis.__DBX_TOAST_STATE__ ??
+  (globalThis.__DBX_TOAST_STATE__ = {
+    message: ref(""),
+    visible: ref(false),
+    timer: 0,
+  });
 
 export function useToast() {
   function toast(msg: string, duration = 2000) {
-    message.value = msg;
-    visible.value = true;
-    clearTimeout(timer);
-    timer = window.setTimeout(() => {
-      visible.value = false;
+    toastState.message.value = msg;
+    toastState.visible.value = true;
+    clearTimeout(toastState.timer);
+    toastState.timer = window.setTimeout(() => {
+      toastState.visible.value = false;
     }, duration);
   }
 
-  return { message, visible, toast };
+  return { message: toastState.message, visible: toastState.visible, toast };
 }

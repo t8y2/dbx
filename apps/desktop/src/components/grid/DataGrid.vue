@@ -124,6 +124,7 @@ import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfinite
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editorThemes";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGridColumnFilter";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/paginationPageSize";
@@ -152,6 +153,7 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { isMacOS } from "@/lib/platform";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
+const FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-shown";
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -3721,8 +3723,12 @@ const detailTemporalEditorKind = computed(() => {
 // CodeMirror-based cell detail editors
 const detailsEditorContainer = ref<HTMLElement>();
 const valueEditorContainer = ref<HTMLElement>();
+const sideJsonPreviewContainer = ref<HTMLElement>();
+const dialogJsonPreviewContainer = ref<HTMLElement>();
 let detailsDetailEditor: UseCellDetailEditorReturn | null = null;
 let valueDetailEditor: UseCellDetailEditorReturn | null = null;
+let sideJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
+let dialogJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const editorThemeAccessor = () => settingsStore.editorSettings.theme;
 const editorAppAppearance = () => (isDark.value ? "dark" : "light") as import("@/lib/appTheme").AppThemeAppearance;
@@ -3782,6 +3788,54 @@ watch(valueEditorContainer, async (el) => {
   }
 });
 
+watch(sideJsonPreviewContainer, async (el) => {
+  if (el && !sideJsonPreviewEditor) {
+    sideJsonPreviewEditor = useCellDetailEditor({
+      language: "json",
+      readOnly: true,
+      editorTheme: editorThemeAccessor,
+      appAppearance: editorAppAppearance,
+      fontSize: editorFontSize,
+      fontFamily: editorFontFamily,
+    });
+    await sideJsonPreviewEditor.create(el, activeCellDetail.value?.formattedJson ?? "", "json");
+  } else if (!el && sideJsonPreviewEditor) {
+    sideJsonPreviewEditor.destroy();
+    sideJsonPreviewEditor = null;
+  }
+});
+
+watch(dialogJsonPreviewContainer, async (el) => {
+  if (el && !dialogJsonPreviewEditor) {
+    dialogJsonPreviewEditor = useCellDetailEditor({
+      language: "json",
+      readOnly: true,
+      editorTheme: editorThemeAccessor,
+      appAppearance: editorAppAppearance,
+      fontSize: editorFontSize,
+      fontFamily: editorFontFamily,
+    });
+    await dialogJsonPreviewEditor.create(el, dialogCellDetail.value?.formattedJson ?? "", "json");
+  } else if (!el && dialogJsonPreviewEditor) {
+    dialogJsonPreviewEditor.destroy();
+    dialogJsonPreviewEditor = null;
+  }
+});
+
+watch(
+  () => activeCellDetail.value?.formattedJson ?? "",
+  (value) => {
+    sideJsonPreviewEditor?.setValue(value, "json");
+  },
+);
+
+watch(
+  () => dialogCellDetail.value?.formattedJson ?? "",
+  (value) => {
+    dialogJsonPreviewEditor?.setValue(value, "json");
+  },
+);
+
 function resetDetailEdit() {
   isEditingDetail.value = false;
   detailEditValue.value = "";
@@ -3793,14 +3847,27 @@ function closeCellDetails() {
   detailCell.value = null;
 }
 
-function startDetailEdit() {
-  const detail = activeCellDetail.value;
-  if (!detail || !detail.isEditable) return;
-  detailEditValue.value = dataGridCellEditorText({
+function cellDetailEditText(detail: DataGridCellDetail): string {
+  if (sideDetailJsonView.value && detail.formattedJson) return detail.formattedJson;
+  return dataGridCellEditorText({
     value: detail.value,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+}
+
+function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false) {
+  if (!force && (!sideDetailJsonView.value || !detail.formattedJson)) return;
+  if (safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY) === "1") return;
+  toast(t("grid.formattedJsonEditWarning"), 10000);
+  safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY, "1");
+}
+
+function startDetailEdit() {
+  const detail = activeCellDetail.value;
+  if (!detail || !detail.isEditable) return;
+  warnFormattedJsonEditIfNeeded(detail);
+  detailEditValue.value = cellDetailEditText(detail);
   isEditingDetail.value = true;
 }
 
@@ -3881,6 +3948,7 @@ function formatValueEditorJson() {
   if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
   detailEditValue.value = formatJsonText(detailEditValue.value) ?? detailEditValue.value;
   syncEditorFromDetailEdit();
+  warnFormattedJsonEditIfNeeded(detail, true);
 }
 
 function setDetailNull() {
@@ -5557,11 +5625,14 @@ function copyDialogCellColumnName() {
   copyText(detail.column);
 }
 
-function openDialogCellInSidePanel() {
+async function openDialogCellInSidePanel() {
   const detail = dialogCellDetail.value;
   if (!detail) return;
   showCellDetails(detail.rowNumber - 1, detail.colIndex);
   cellDetailDialogOpen.value = false;
+  await nextTick();
+  sideDetailJsonView.value = cellDetailJsonView.value && !!detail.formattedJson;
+  if (detail.isEditable) startDetailEdit();
 }
 
 function copyRowDetailJson() {
@@ -8424,12 +8495,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </Button>
                       </div>
                     </template>
+                    <div
+                      v-else-if="sideDetailJsonView && activeCellDetail.formattedJson"
+                      ref="sideJsonPreviewContainer"
+                      data-cell-detail-editor-root
+                      class="overflow-hidden rounded border bg-muted/20 p-2"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
+                      @dblclick.capture="startDetailEdit"
+                    />
                     <pre
                       v-else
                       class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
                       :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : '']"
                       @dblclick="startDetailEdit"
-                      >{{ sideDetailJsonView && activeCellDetail.formattedJson ? activeCellDetail.formattedJson : activeCellDetail.rawValuePreview }}</pre
+                      >{{ activeCellDetail.rawValuePreview }}</pre
                     >
                     <div v-if="activeCellDetail.isValuePreviewTruncated && !sideDetailJsonView" class="text-[11px] text-muted-foreground">
                       {{
@@ -8706,9 +8785,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <a v-if="dialogCellDetail.imagePreviewUrl" :href="dialogCellDetail.imagePreviewUrl" role="button" class="block max-h-72 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(dialogCellDetail.imagePreviewUrl, dialogCellDetail.column)">
               <img :src="dialogCellDetail.imagePreviewUrl" :alt="dialogCellDetail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
             </a>
-            <pre class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }">{{
-              cellDetailJsonView && dialogCellDetail.formattedJson ? dialogCellDetail.formattedJson : dialogCellDetail.rawValuePreview
-            }}</pre>
+            <div v-if="cellDetailJsonView && dialogCellDetail.formattedJson" ref="dialogJsonPreviewContainer" data-cell-detail-editor-root class="h-[44vh] min-h-60 overflow-hidden rounded border bg-muted/20 p-3" />
+            <pre v-else class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }">{{ dialogCellDetail.rawValuePreview }}</pre>
             <div v-if="dialogCellDetail.isValuePreviewTruncated && !cellDetailJsonView" class="text-[11px] text-muted-foreground">
               {{ t("grid.largeValuePreviewHint", { count: dialogCellDetail.rawValuePreview.length }) }}
             </div>

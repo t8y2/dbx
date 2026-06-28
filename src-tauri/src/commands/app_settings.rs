@@ -176,14 +176,14 @@ fn default_store_dirs(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
 
 fn default_plugin_store_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(crate::data_dir::resolve_data_dir(default_data_dir).join("plugins"))
+    Ok(crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir.join("plugins"))
 }
 
 fn default_agent_store_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let data_dir = crate::data_dir::resolve_data_dir(default_data_dir);
-    Ok(if crate::data_dir::uses_custom_data_dir() {
-        data_dir.join("agents")
+    let data_dir_resolution = crate::data_dir::resolve_data_dir_with_mode(default_data_dir);
+    Ok(if data_dir_resolution.uses_custom_data_dir() {
+        data_dir_resolution.data_dir.join("agents")
     } else {
         dbx_core::connection::default_agent_dir()
     })

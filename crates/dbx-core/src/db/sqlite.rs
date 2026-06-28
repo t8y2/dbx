@@ -1,5 +1,6 @@
 use percent_encoding::percent_decode_str;
-use rusqlite::types::ValueRef;
+use rusqlite::functions::{Context, FunctionFlags};
+use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, LoadExtensionGuard, OpenFlags};
 use std::collections::HashSet;
 use std::io::Read;
@@ -106,8 +107,177 @@ fn open_sqlite_handle(
 
     conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?;
     load_sqlite_extensions(&conn, &extensions)?;
+    register_sqlite_compat_functions(&conn)?;
 
     Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) })
+}
+
+fn register_sqlite_compat_functions(conn: &Connection) -> Result<(), String> {
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC | FunctionFlags::SQLITE_INNOCUOUS;
+
+    if !sqlite_function_available(conn, "SELECT if(1, 2, 3)") {
+        conn.create_scalar_function("if", -1, flags, sqlite_if)
+            .map_err(|e| format!("SQLite compatibility function registration failed (if): {e}"))?;
+    }
+    if !sqlite_function_available(conn, "SELECT unistr('')") {
+        conn.create_scalar_function("unistr", 1, flags, sqlite_unistr)
+            .map_err(|e| format!("SQLite compatibility function registration failed (unistr): {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn sqlite_function_available(conn: &Connection, sql: &str) -> bool {
+    conn.query_row(sql, [], |_| Ok(())).is_ok()
+}
+
+fn sqlite_if(ctx: &Context<'_>) -> rusqlite::Result<Value> {
+    if ctx.len() < 2 {
+        return Err(sqlite_function_error("if() requires at least two arguments"));
+    }
+
+    let mut i = 0;
+    while i + 1 < ctx.len() {
+        if sqlite_truthy(ctx.get_raw(i)) {
+            return Ok(sqlite_value_ref_to_owned(ctx.get_raw(i + 1)));
+        }
+        i += 2;
+    }
+
+    if ctx.len() % 2 == 1 {
+        Ok(sqlite_value_ref_to_owned(ctx.get_raw(ctx.len() - 1)))
+    } else {
+        Ok(Value::Null)
+    }
+}
+
+fn sqlite_unistr(ctx: &Context<'_>) -> rusqlite::Result<Value> {
+    let input = match ctx.get_raw(0) {
+        ValueRef::Null => return Ok(Value::Null),
+        ValueRef::Integer(value) => value.to_string(),
+        ValueRef::Real(value) => value.to_string(),
+        ValueRef::Text(value) | ValueRef::Blob(value) => String::from_utf8_lossy(value).into_owned(),
+    };
+
+    sqlite_unistr_text(&input).map(Value::Text)
+}
+
+fn sqlite_truthy(value: ValueRef<'_>) -> bool {
+    match value {
+        ValueRef::Null => false,
+        ValueRef::Integer(value) => value != 0,
+        ValueRef::Real(value) => value != 0.0,
+        ValueRef::Text(value) | ValueRef::Blob(value) => sqlite_text_numeric_truthy(&String::from_utf8_lossy(value)),
+    }
+}
+
+fn sqlite_text_numeric_truthy(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    for end in (1..=trimmed.len()).rev() {
+        if trimmed.is_char_boundary(end) {
+            if let Ok(value) = trimmed[..end].parse::<f64>() {
+                return value != 0.0;
+            }
+        }
+    }
+    false
+}
+
+fn sqlite_value_ref_to_owned(value: ValueRef<'_>) -> Value {
+    match value {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(value) => Value::Integer(value),
+        ValueRef::Real(value) => Value::Real(value),
+        ValueRef::Text(value) => Value::Text(String::from_utf8_lossy(value).into_owned()),
+        ValueRef::Blob(value) => Value::Blob(value.to_vec()),
+    }
+}
+
+fn sqlite_unistr_text(input: &str) -> rusqlite::Result<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] != '\\' {
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= chars.len() {
+            result.push('\\');
+            i += 1;
+            continue;
+        }
+
+        match chars[i + 1] {
+            '\\' => {
+                result.push('\\');
+                i += 2;
+            }
+            '+' => {
+                if let Some(ch) = sqlite_unistr_codepoint(&chars, i + 2, 6)? {
+                    result.push(ch);
+                    i += 8;
+                } else {
+                    result.push('\\');
+                    i += 1;
+                }
+            }
+            'u' => {
+                if let Some(ch) = sqlite_unistr_codepoint(&chars, i + 2, 4)? {
+                    result.push(ch);
+                    i += 6;
+                } else {
+                    result.push('\\');
+                    i += 1;
+                }
+            }
+            'U' => {
+                if let Some(ch) = sqlite_unistr_codepoint(&chars, i + 2, 8)? {
+                    result.push(ch);
+                    i += 10;
+                } else {
+                    result.push('\\');
+                    i += 1;
+                }
+            }
+            _ => {
+                if let Some(ch) = sqlite_unistr_codepoint(&chars, i + 1, 4)? {
+                    result.push(ch);
+                    i += 5;
+                } else {
+                    result.push('\\');
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn sqlite_unistr_codepoint(chars: &[char], start: usize, digits: usize) -> rusqlite::Result<Option<char>> {
+    if start + digits > chars.len() {
+        return Ok(None);
+    }
+
+    let mut value = 0_u32;
+    for ch in &chars[start..start + digits] {
+        let Some(digit) = ch.to_digit(16) else {
+            return Ok(None);
+        };
+        value = (value << 4) | digit;
+    }
+
+    std::char::from_u32(value)
+        .map(Some)
+        .ok_or_else(|| sqlite_function_error(format!("invalid Unicode codepoint: {value:#X}")))
+}
+
+fn sqlite_function_error(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::UserFunctionError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())))
 }
 
 pub fn path_has_sqlite_header(path: &Path) -> Result<bool, String> {
@@ -330,6 +500,14 @@ mod tests {
         assert_eq!(normalize_sqlite_sql("SELECT if  (1, 'a', 'b')"), "SELECT IIF  (1, 'a', 'b')");
     }
 
+    #[test]
+    fn sqlite_unistr_decodes_documented_escapes() {
+        assert_eq!(
+            sqlite_unistr_text(r"a\0041\u0042\+000043\U00000044\\z").expect("decode unistr escapes"),
+            r"aABCD\z"
+        );
+    }
+
     #[tokio::test]
     async fn view_with_if_function_works_after_normalization() {
         let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
@@ -347,6 +525,23 @@ mod tests {
         assert_eq!(result.rows.len(), 3);
         assert_eq!(result.rows[0][1], serde_json::json!("small"));
         assert_eq!(result.rows[1][1], serde_json::json!("big"));
+    }
+
+    #[tokio::test]
+    async fn view_with_stored_if_and_unistr_functions_can_be_described_and_queried() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+        pool.with_connection(|conn| {
+            conn.execute_batch("CREATE VIEW a AS SELECT if(1, unistr('hello'), 'world') AS a;")
+                .map_err(|e| e.to_string())
+        })
+        .expect("create view with original SQLite 3.50 functions");
+
+        let columns = get_columns(&pool, "", "a").await.expect("describe view");
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "a");
+
+        let result = execute_query(&pool, "SELECT * FROM a").await.expect("query view");
+        assert_eq!(result.rows[0][0], serde_json::json!("hello"));
     }
 
     #[tokio::test]

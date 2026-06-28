@@ -215,6 +215,7 @@ const props = defineProps<{
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => Promise<api.QueryResultExportRequest | undefined>;
   allExportResults?: Array<{ sheetName: string; result: QueryResult }>;
+  exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
 }>();
 
@@ -4746,6 +4747,7 @@ const {
   queryResultExportRequest: props.queryResultExportRequest,
   allExportResults: computed(() => props.allExportResults),
   currentResultLabel: computed(() => props.result.sourceLabel),
+  exportFileBaseName: computed(() => props.exportFileBaseName),
   exportProgressDialog,
   exportProgressState,
   exportCancelHandler,

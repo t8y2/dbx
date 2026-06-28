@@ -21,7 +21,7 @@ vi.mock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
-const { useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
+const { defaultDataGridExportFileName, useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
 
 function installMemoryStorage() {
   const values = new Map<string, string>();
@@ -41,7 +41,7 @@ function installMemoryStorage() {
   };
 }
 
-function buildExportHarness(options: { currentResultLabel?: string } = {}) {
+function buildExportHarness(options: { currentResultLabel?: string; exportFileBaseName?: string } = {}) {
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -106,10 +106,11 @@ function buildExportHarness(options: { currentResultLabel?: string } = {}) {
     hasRowSelection: computed(() => false),
     fullExportResult,
     queryResultExportRequest,
+    currentResultLabel: computed(() => options.currentResultLabel),
+    exportFileBaseName: computed(() => options.exportFileBaseName),
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
-    currentResultLabel: computed(() => options.currentResultLabel),
   });
 
   return {
@@ -193,6 +194,19 @@ beforeEach(() => {
   });
 });
 
+test("default data grid export file names use sanitized base names and compact local timestamps", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(2026, 5, 2, 15, 4, 5));
+
+    assert.equal(defaultDataGridExportFileName("daily/report.sql", "export", "csv"), "daily_report_260602150405.csv");
+    assert.equal(defaultDataGridExportFileName("daily/report.sql", "export", "xlsx", { page: true }), "daily_report_page_260602150405.xlsx");
+    assert.equal(defaultDataGridExportFileName("  .sql  ", "query-result", "csv"), "query-result_260602150405.csv");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("full query result CSV export streams through the backend without loading all rows", async () => {
   const { composable, fullExportResult, queryResultExportRequest, exportProgressDialog, exportProgressState } = buildExportHarness();
 
@@ -204,6 +218,51 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 0);
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
+});
+
+test("full query result CSV export defaults to the saved SQL title", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(2026, 5, 2, 15, 4, 5));
+    const { composable, queryResultExportRequest } = buildExportHarness({ exportFileBaseName: "daily/report.sql" });
+
+    await composable.exportCsv();
+
+    assert.equal(queryResultExportRequest.mock.calls[0][0].filePath, "daily_report_260602150405.csv");
+    assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].filePath, "daily_report_260602150405.csv");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("selected query result CSV export defaults to the saved SQL title", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(2026, 5, 2, 15, 4, 5));
+    const { composable } = buildExportHarness({ exportFileBaseName: "daily/report.sql" });
+
+    await composable.exportCsv([1]);
+
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls[0][0], "daily_report_260602150405.csv");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("table data export keeps the table name as the default file base", async () => {
+  vi.useFakeTimers();
+  const restoreStorage = installMemoryStorage();
+  try {
+    vi.setSystemTime(new Date(2026, 5, 2, 15, 4, 5));
+    const { composable } = buildTableDataExportHarness();
+
+    await composable.exportCsv();
+
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].filePath, "users_260602150405.csv");
+  } finally {
+    vi.useRealTimers();
+    restoreStorage();
+  }
 });
 
 test("query result CSV cancel handler passes export and execution ids", async () => {

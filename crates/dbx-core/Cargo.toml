@@ -27,7 +27,7 @@ tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 tokio-postgres-rustls = "0.13"
 webpki-roots = "0.26"
-rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup"] }
+rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup", "functions"] }
 mysql_async = { version = "0.36", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }

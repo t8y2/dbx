@@ -110,12 +110,5 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "packageManager": "pnpm@10.27.0",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "keytar"
-    ]
-  }
+  "packageManager": "pnpm@10.27.0"
 }

@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed } from "@lucide/vue";
+import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -49,7 +49,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_DEFAULT, TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
@@ -175,6 +175,8 @@ const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+const dataGridViewOptionsActive = computed(() => dataGridRef.value?.nullColumnsHidden || dataGridRef.value?.multiRowTranspose || dataGridRenderMode.value === "dom" || tableFontSize.value !== TABLE_FONT_SIZE_DEFAULT);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
@@ -196,6 +198,18 @@ function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
 
 function setDataGridRenderMode(value: "canvas" | "dom") {
   settingsStore.updateEditorSettings({ dataGridRenderMode: value });
+}
+
+function setTableFontSize(value: number) {
+  settingsStore.updateEditorSettings({ tableFontSize: value });
+}
+
+function decreaseTableFontSize() {
+  setTableFontSize(tableFontSize.value - 1);
+}
+
+function increaseTableFontSize() {
+  setTableFontSize(tableFontSize.value + 1);
 }
 
 const activeTabDimension = computed(() => {
@@ -770,7 +784,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                       size="icon"
                       class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
                       :class="{
-                        'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose || dataGridRenderMode === 'dom',
+                        'bg-accent text-foreground': dataGridViewOptionsActive,
                       }"
                       :title="t('grid.viewOptions')"
                       :aria-label="t('grid.viewOptions')"
@@ -807,6 +821,33 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                           </button>
                         </div>
                       </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
+                        <span>{{ t("grid.tableFontSize") }}</span>
+                      </div>
+                      <div class="flex h-7 w-32 items-center rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                          :disabled="tableFontSize <= TABLE_FONT_SIZE_MIN"
+                          :aria-label="t('common.decrease')"
+                          @click="decreaseTableFontSize"
+                        >
+                          <Minus class="h-3.5 w-3.5" />
+                        </button>
+                        <span class="flex-1 text-center text-xs font-semibold tabular-nums">{{ tableFontSize }}</span>
+                        <button
+                          type="button"
+                          class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                          :disabled="tableFontSize >= TABLE_FONT_SIZE_MAX"
+                          :aria-label="t('common.increase')"
+                          @click="increaseTableFontSize"
+                        >
+                          <Plus class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
@@ -1062,7 +1103,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 size="icon"
                 class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
                 :class="{
-                  'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose || dataGridRenderMode === 'dom',
+                  'bg-accent text-foreground': dataGridViewOptionsActive,
                 }"
                 :title="t('grid.viewOptions')"
                 :aria-label="t('grid.viewOptions')"
@@ -1099,6 +1140,33 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                     </button>
                   </div>
                 </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
+                  <span>{{ t("grid.tableFontSize") }}</span>
+                </div>
+                <div class="flex h-7 w-32 items-center rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                    :disabled="tableFontSize <= TABLE_FONT_SIZE_MIN"
+                    :aria-label="t('common.decrease')"
+                    @click="decreaseTableFontSize"
+                  >
+                    <Minus class="h-3.5 w-3.5" />
+                  </button>
+                  <span class="flex-1 text-center text-xs font-semibold tabular-nums">{{ tableFontSize }}</span>
+                  <button
+                    type="button"
+                    class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                    :disabled="tableFontSize >= TABLE_FONT_SIZE_MAX"
+                    :aria-label="t('common.increase')"
+                    @click="increaseTableFontSize"
+                  >
+                    <Plus class="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
               <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">

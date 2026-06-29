@@ -190,6 +190,16 @@ test("normalizes data grid render mode", () => {
   assert.equal(normalizeEditorSettings({ dataGridRenderMode: "unknown" as any }).dataGridRenderMode, "canvas");
 });
 
+test("normalizes table font size", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableFontSize, 13);
+  assert.equal(normalizeEditorSettings({}).tableFontSize, 13);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 12 }).tableFontSize, 12);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 14.6 }).tableFontSize, 15);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 8 }).tableFontSize, 12);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 20 }).tableFontSize, 16);
+  assert.equal(normalizeEditorSettings({ tableFontSize: "large" as any }).tableFontSize, 13);
+});
+
 test("normalizes table structure editor density", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.structureEditorDensity, "compact");
   assert.equal(normalizeEditorSettings({}).structureEditorDensity, "compact");

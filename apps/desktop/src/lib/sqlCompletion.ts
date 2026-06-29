@@ -1215,12 +1215,12 @@ class SqlCompletionProvider {
     }
 
     if (context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
-      this.items.push(...buildAliasItems(context));
+      this.items.push(...buildAliasItems(context, this.databaseType));
     }
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
       this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect));
-      this.items.push(...buildTableItems(context.prefix, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables));
+      this.items.push(...buildTableItems(context.prefix, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType));
       if (isOracleLikeDatabase(this.databaseType)) {
         this.items.push(...buildOracleTableFunctionItems(context.prefix));
       }
@@ -2364,7 +2364,7 @@ function requiresPostgresIdentifierQuote(identifier: string): boolean {
 
 const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()).concat(["current_user", "session_user", "user"]));
 
-function buildTableItems(prefix: string, tables: SqlCompletionTable[], dialect?: "mysql" | "postgres" | "sqlserver", autoAliasTables = false, referencedTables: SqlCompletionReferencedTable[] = []): SqlCompletionItem[] {
+function buildTableItems(prefix: string, tables: SqlCompletionTable[], dialect?: "mysql" | "postgres" | "sqlserver", autoAliasTables = false, referencedTables: SqlCompletionReferencedTable[] = [], databaseType?: DatabaseType): SqlCompletionItem[] {
   const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   return tables
     .filter((table) => matchesPrefix(table.name, prefix))
@@ -2375,7 +2375,7 @@ function buildTableItems(prefix: string, tables: SqlCompletionTable[], dialect?:
         label: table.name,
         type: "table" as const,
         detail: table.schema ? `${table.schema}.${table.name}` : table.type,
-        apply: alias ? `${applyName} AS ${alias}` : applyName,
+        apply: formatTableAliasApply(applyName, alias, databaseType),
         boost: computeBoost(table.name, prefix) + 1000,
       };
     })
@@ -2662,7 +2662,7 @@ function buildComparisonValueItems(context: SqlCompletionContext, columnsByTable
   return items;
 }
 
-function buildAliasItems(context: SqlCompletionContext): SqlCompletionItem[] {
+function buildAliasItems(context: SqlCompletionContext, databaseType?: DatabaseType): SqlCompletionItem[] {
   const items: SqlCompletionItem[] = [];
   const existingAliases = new Set(context.referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   const seen = new Set<string>(existingAliases);
@@ -2676,11 +2676,20 @@ function buildAliasItems(context: SqlCompletionContext): SqlCompletionItem[] {
       label: candidate,
       type: "snippet" as const,
       detail: `alias for ${ref.name}`,
-      apply: `AS ${candidate} `,
+      apply: formatAliasCompletionApply(candidate, databaseType),
       boost: 1600 - items.length,
     });
   }
   return items;
+}
+
+function formatTableAliasApply(tableName: string, alias: string, databaseType?: DatabaseType): string {
+  if (!alias) return tableName;
+  return isOracleLikeDatabase(databaseType) ? `${tableName} ${alias}` : `${tableName} AS ${alias}`;
+}
+
+function formatAliasCompletionApply(alias: string, databaseType?: DatabaseType): string {
+  return isOracleLikeDatabase(databaseType) ? `${alias} ` : `AS ${alias} `;
 }
 
 function generateAlias(tableName: string, existing = new Set<string>()): string {

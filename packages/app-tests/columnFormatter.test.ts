@@ -11,6 +11,7 @@ test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
   assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
   assert.equal(applyColumnFormatter(1715758200001, { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ" }), "2024-05-15 15:30:00.001+08:00");
   assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
+  assert.equal(applyColumnFormatter("1715758200", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
 });
 
 test("does not treat compact date strings as unix timestamps", () => {

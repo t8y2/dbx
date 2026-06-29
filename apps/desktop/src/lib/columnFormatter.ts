@@ -103,18 +103,15 @@ function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit, pattern: 
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "object") return JSON.stringify(value);
   try {
-    let dayjsInstance: dayjs.Dayjs;
-    if (typeof value === "string") {
-      dayjsInstance = dayjs(value);
-    } else {
-      const numeric = value;
-      if (!Number.isFinite(numeric)) {
-        return displayCellValue(value);
-      }
-      const timestamp = unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
-      dayjsInstance = dayjs(timestamp);
+    if (typeof value === "string" && !/^\d+$/.test(value)) {
+      return dayjs(value).format(pattern ?? "YYYY-MM-DD HH:mm:ss");
     }
-    return dayjsInstance.format(pattern ?? "YYYY-MM-DD HH:mm:ss");
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return displayCellValue(value);
+    }
+    const timestamp = unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
+    return dayjs(timestamp).format(pattern ?? "YYYY-MM-DD HH:mm:ss");
   } catch {
     return displayCellValue(value);
   }

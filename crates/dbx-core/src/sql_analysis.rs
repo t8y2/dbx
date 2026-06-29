@@ -19,6 +19,9 @@ static CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(ANY|ALL|SEMI|ANTI|ASOF)\s+(LEFT|RIGHT|FULL|INNER|CROSS)(\s+OUTER)?\s+JOIN\b")
         .expect("valid ClickHouse join strictness regex")
 });
+static POSTGRES_DEFAULT_PRIVILEGES_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*ALTER\s+DEFAULT\s+PRIVILEGES\b").expect("valid PostgreSQL default privileges regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlReferenceAnalysis {
@@ -71,6 +74,9 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     if normalized_dialect == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
         return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![] });
     }
+    if normalized_dialect == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
+        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![] });
+    }
     let parser_sql = if normalized_dialect == "clickhouse" {
         normalize_clickhouse_join_order_for_parser(sql)
     } else {
@@ -99,6 +105,10 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
 fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
     starts_with_duckdb_result_sql_keyword(sql)
         && starts_with_executable_sql_keyword(sql, &["FROM", "SUMMARIZE", "SUMMARISE", "PIVOT", "UNPIVOT"])
+}
+
+fn starts_with_postgres_parser_gap_sql(sql: &str) -> bool {
+    POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql)
 }
 
 fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {

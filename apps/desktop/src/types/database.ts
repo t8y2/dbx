@@ -281,6 +281,7 @@ export interface ObjectInfo {
   name: string;
   object_type: DatabaseObjectType | string;
   schema?: string | null;
+  signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;

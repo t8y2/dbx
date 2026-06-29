@@ -1531,6 +1531,7 @@ fn list_object_relations_sql(include_timestamps: bool) -> &'static str {
        ) AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
+       NULL::text AS signature, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -1555,6 +1556,7 @@ fn list_object_relations_sql(include_timestamps: bool) -> &'static str {
        NULL::text AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
+       NULL::text AS signature, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -1575,6 +1577,7 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
          THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
        CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
@@ -1588,6 +1591,7 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
        NULL::text AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
        CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
@@ -1603,6 +1607,7 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
          THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
        3 AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
@@ -1616,6 +1621,7 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
        NULL::text AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
        3 AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
@@ -1671,6 +1677,7 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
             parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
             parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+            signature: row.try_get::<_, Option<String>>(7).ok().flatten(),
         })
         .collect())
 }
@@ -3218,6 +3225,8 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_inherits"));
         assert!(sql.contains("parent_schema"));
         assert!(sql.contains("parent_name"));
+        assert!(sql.contains("NULL::text AS signature"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(sql.contains("pc.relkind = 'p'"));
         assert!(sql.contains("pg_stat_file"));
         assert!(sql.contains("pg_xact_commit_timestamp"));
@@ -3255,6 +3264,7 @@ mod tests {
         assert!(!sql.contains("p.prokind"));
         assert!(sql.contains("NOT p.proisagg"));
         assert!(sql.contains("NOT p.proiswindow"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(sql.contains("'FUNCTION' AS object_type"));
         assert!(!sql.contains("'PROCEDURE'"));
     }

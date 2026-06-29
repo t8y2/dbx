@@ -1566,7 +1566,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </button>
                 <span v-else class="h-5 w-5 shrink-0" :class="{ 'ml-4': item.partitionParentId }" />
                 <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
-                <span class="truncate text-[13px] font-medium text-foreground">{{ item.name }}</span>
+                <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
                 <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
                   {{ t("objects.partitions", { count: item.partitionCount }) }}
                 </span>

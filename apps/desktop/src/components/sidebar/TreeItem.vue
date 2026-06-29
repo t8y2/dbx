@@ -575,16 +575,14 @@ async function toggle() {
 
 function runRowClickAction() {
   const node = props.node;
-  if (node.type === "load-more") {
-    void loadMoreObjectGroupChildren();
-    return;
-  }
   if (node.type === "object-browser") {
     void openObjectBrowser();
     return;
   }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
-  if (action === "open-data") {
+  if (action === "load-more") {
+    void loadMoreObjectGroupChildren();
+  } else if (action === "open-data") {
     openData();
   } else if (node.type === "mongo-collection") {
     openMongoCollectionData(node);

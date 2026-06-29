@@ -14,6 +14,11 @@ test("double click navigation mode selects rows on single click", () => {
   assert.equal(treeNodeRowAction("saved-sql-file", false, "double"), "none");
 });
 
+test("load more rows always run from a single click", () => {
+  assert.equal(treeNodeRowAction("load-more", false), "load-more");
+  assert.equal(treeNodeRowAction("load-more", false, "double"), "load-more");
+});
+
 test("double click navigation mode opens actionable rows on double click", () => {
   assert.equal(treeNodeRowDoubleClickAction("table", true, "double"), "open-data");
   assert.equal(treeNodeRowDoubleClickAction("view", true, "double"), "open-data");

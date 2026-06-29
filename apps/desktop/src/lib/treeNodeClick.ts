@@ -1,7 +1,7 @@
 import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "toggle" | "load-more" | "none";
 export type TreeNodeRowDoubleClickAction = "open-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
@@ -26,6 +26,7 @@ export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKin
 }
 
 export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single"): TreeNodeRowAction {
+  if (type === "load-more") return "load-more";
   if (activation === "double") return "none";
   if (dataNodeTypes.has(type)) return "open-data";
   if (toggleLeafNodeTypes.has(type)) return "toggle";

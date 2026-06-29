@@ -208,10 +208,12 @@ const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryS
 // ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
 const stickyScrollTop = ref(0);
 const sidebarScrollMetrics = ref({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
 let sidebarScrollbarResizeObserver: ResizeObserver | null = null;
 let sidebarScrollbarAnimationFrame = 0;
 let sidebarScrollbarDragOffset = 0;
+let sidebarScrollingTimer = 0;
 
 function updateSidebarScrollMetrics() {
   const scroller = currentTreeScroller();
@@ -234,6 +236,11 @@ function scheduleSidebarScrollMetricsUpdate() {
 }
 
 function onTreeScroll() {
+  isScrollingSidebar.value = true;
+  window.clearTimeout(sidebarScrollingTimer);
+  sidebarScrollingTimer = window.setTimeout(() => {
+    isScrollingSidebar.value = false;
+  }, 700);
   scheduleSidebarScrollMetricsUpdate();
 }
 
@@ -780,6 +787,7 @@ onUnmounted(() => {
   stopSidebarScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
+  window.clearTimeout(sidebarScrollingTimer);
 });
 
 defineExpose({ focusSearch, createNewGroup });
@@ -853,7 +861,7 @@ defineExpose({ focusSearch, createNewGroup });
       <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
         <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" @search-toggle="onSearchToggle" />
       </div>
-      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
         <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
       </div>
     </div>
@@ -871,7 +879,7 @@ defineExpose({ focusSearch, createNewGroup });
           @rename-started="pendingRenameGroupId = null"
         />
       </div>
-      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
         <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
       </div>
     </div>
@@ -889,10 +897,13 @@ defineExpose({ focusSearch, createNewGroup });
 .connection-tree-scroller {
   will-change: scroll-position;
   contain: content;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.connection-tree-scroller::-webkit-scrollbar:vertical {
+.connection-tree-scroller::-webkit-scrollbar {
   width: 0;
+  height: 0;
 }
 
 .connection-tree-scroller :deep(.vue-recycle-scroller__item-view) {
@@ -906,9 +917,9 @@ defineExpose({ focusSearch, createNewGroup });
 
 .sidebar-tree-scrollbar {
   position: absolute;
-  top: 4px;
+  top: 0;
   right: 0;
-  bottom: 4px;
+  bottom: 0;
   z-index: 10;
   width: 12px;
   cursor: default;
@@ -916,6 +927,7 @@ defineExpose({ focusSearch, createNewGroup });
   transition: opacity 120ms ease;
 }
 
+.sidebar-tree-scrollbar--scrolling,
 .sidebar-tree-scrollbar:hover,
 .sidebar-tree-scrollbar--dragging {
   opacity: 1;

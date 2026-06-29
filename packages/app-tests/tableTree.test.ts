@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren } from "../../apps/desktop/src/lib/tableTree.ts";
+import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, filterSimpleSidebarSupplementalObjects, mergeTableInfosIntoObjects, mergeTableTreePageChildren } from "../../apps/desktop/src/lib/tableTree.ts";
 import type { ObjectInfo, TableInfo, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function table(name: string, parent?: string): TableInfo {
@@ -292,6 +292,32 @@ test("mergeTableInfosIntoObjects restores views missing from object metadata", (
     [
       { name: "orders", type: "TABLE", schema: "public", comment: null },
       { name: "active_orders", type: "VIEW", schema: "public", comment: "current orders" },
+    ],
+  );
+});
+
+test("filterSimpleSidebarSupplementalObjects leaves paged tables and views to listTables", () => {
+  const supplemental = filterSimpleSidebarSupplementalObjects([
+    { name: "orders", object_type: "TABLE", schema: "public" },
+    { name: "active_orders", object_type: "VIEW", schema: "public" },
+    { name: "order_summary", object_type: "MATERIALIZED VIEW", schema: "public" },
+    { name: "refresh_stats", object_type: "PROCEDURE", schema: "public" },
+    { name: "total_due", object_type: "FUNCTION", schema: "public" },
+  ]);
+  const nodes = buildSimpleObjectTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    objects: mergeTableInfosIntoObjects(supplemental, [table("orders")], "public"),
+  });
+
+  assert.deepEqual(
+    nodes.map((node) => ({ label: node.label, type: node.type })),
+    [
+      { label: "orders", type: "table" },
+      { label: "refresh_stats", type: "procedure" },
+      { label: "total_due", type: "function" },
     ],
   );
 });

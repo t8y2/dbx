@@ -35,6 +35,7 @@ import {
   buildSimpleObjectTreeNodes,
   buildTableTreeNodes,
   expandCachedObjectBrowserNodes,
+  filterSimpleSidebarSupplementalObjects,
   mergeTableInfosIntoObjects,
   mergeTableTreePageChildren,
   objectGroupRefreshParentId,
@@ -770,7 +771,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId: options.connectionId,
           database: options.database,
           schema: options.effectiveSchema,
-          objects: mergeTableInfosIntoObjects(objects, pageTables, options.effectiveSchema),
+          objects: mergeTableInfosIntoObjects(filterSimpleSidebarSupplementalObjects(objects), pageTables, options.effectiveSchema),
         });
         return {
           children,

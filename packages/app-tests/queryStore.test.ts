@@ -2606,6 +2606,44 @@ test("table structure refresh versions are scoped by table target", () => {
   assert.equal(store.tableStructureRefreshVersion("conn-1", "db", "public", "orders"), 0);
 });
 
+test("duplicating a table structure tab clones its unsaved draft", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const tabId = store.openTableStructure("conn-1", "db", "public", "users");
+  const tab = store.tabs.find((item) => item.id === tabId)!;
+  tab.structureDraft = {
+    activeTab: "columns",
+    newTableName: "",
+    tableComment: "",
+    originalTableComment: "",
+    columns: [
+      {
+        id: "new:1",
+        name: "draft_name",
+        dataType: "varchar(255)",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+    ],
+    indexes: [],
+    foreignKeys: [],
+    triggers: [],
+    initialized: true,
+  };
+
+  store.duplicateTab(tabId);
+
+  const copy = store.tabs.find((item) => item.id !== tabId && item.mode === "structure")!;
+  assert.deepEqual(copy.structureDraft, tab.structureDraft);
+  copy.structureDraft!.columns[0]!.name = "copy_only";
+  assert.equal(tab.structureDraft.columns[0]!.name, "draft_name");
+});
+
 test("reorderTab keeps pinned tabs before unpinned tabs after reorder", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();

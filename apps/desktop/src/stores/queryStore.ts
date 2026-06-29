@@ -54,6 +54,10 @@ const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanba
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 
+function cloneTabDraft<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 interface BuildQueryResultExportRequestOptions {
   exportId: string;
   filePath: string;
@@ -909,6 +913,7 @@ export const useQueryStore = defineStore("query", () => {
       nacosNamespace: original.nacosNamespace,
       nacosNamespaceName: original.nacosNamespaceName,
       structureTableName: original.structureTableName,
+      structureDraft: original.structureDraft ? cloneTabDraft(original.structureDraft) : undefined,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
       tableMeta: original.tableMeta ? { ...original.tableMeta, columns: [...original.tableMeta.columns], primaryKeys: [...original.tableMeta.primaryKeys] } : undefined,

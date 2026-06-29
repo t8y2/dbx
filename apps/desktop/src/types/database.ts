@@ -559,6 +559,18 @@ export interface TreeNode {
 
 export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
 
+export interface TableStructureEditorDraft {
+  activeTab: TableInfoTab;
+  newTableName: string;
+  tableComment: string;
+  originalTableComment: string;
+  columns: import("@/lib/tableStructureEditorSql").EditableStructureColumn[];
+  indexes: import("@/lib/tableStructureEditorSql").EditableStructureIndex[];
+  foreignKeys: import("@/lib/tableStructureEditorSql").EditableStructureForeignKey[];
+  triggers: import("@/lib/tableStructureEditorSql").EditableStructureTrigger[];
+  initialized: boolean;
+}
+
 export interface QueryTab {
   id: string;
   title: string;
@@ -619,6 +631,7 @@ export interface QueryTab {
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureDraft?: TableStructureEditorDraft;
   objectBrowser?: {
     schema?: string;
     objectType?: "tables";

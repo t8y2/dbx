@@ -180,7 +180,14 @@ onUnmounted(() => {
 
 <template>
   <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent :show-close-button="false" class="image-preview-dialog !flex !max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl sm:!max-w-[92vw]" :style="dialogStyle" @escape-key-down="close">
+    <DialogContent
+      :show-close-button="false"
+      overlay-class="!z-[80]"
+      portal-class="!z-[81]"
+      class="image-preview-dialog !flex !max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl sm:!max-w-[92vw]"
+      :style="dialogStyle"
+      @escape-key-down="close"
+    >
       <div class="flex h-12 shrink-0 items-center gap-3 border-b border-white/10 bg-white/[0.035] px-4">
         <div class="min-w-0 flex-1">
           <DialogTitle class="truncate text-sm font-semibold text-white">{{ imageTitle }}</DialogTitle>

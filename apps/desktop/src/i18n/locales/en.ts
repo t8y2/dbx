@@ -1554,6 +1554,7 @@ export default {
     remove: "Remove",
     moveColumnUp: "Move column up",
     moveColumnDown: "Move column down",
+    dragColumn: "Drag to reorder column",
     yes: "Yes",
     no: "No",
     emptyReadonly: "No records",

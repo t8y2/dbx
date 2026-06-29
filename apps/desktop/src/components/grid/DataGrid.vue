@@ -64,6 +64,7 @@ import {
   TableProperties,
   Database,
   Columns3,
+  PencilRuler,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -144,9 +145,11 @@ import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { DataGridSortDirection, DataGridSortMode } from "@/lib/dataGridSort";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
+import { supportsTableStructureEditing } from "@/lib/databaseCapabilities";
 import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGridConditionHistory";
 import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
@@ -158,6 +161,7 @@ const FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY = "dbx-cell-detail-formatted-json-
 const { t } = useI18n();
 const slots = useSlots();
 const connectionStore = useConnectionStore();
+const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { isDark } = useTheme();
 const { toast } = useToast();
@@ -6545,6 +6549,7 @@ function toggleCellDetailPanelLayout() {
 }
 
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(props.databaseType));
+const canOpenTableStructureEditor = computed(() => !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsTableStructureEditing(resolvedDatabaseType.value));
 const tableInfoTabs = computed(() => {
   const tabs: TableInfoTabItem[] = [];
   if (tableMetadataCapabilities.value.columns) {
@@ -6683,6 +6688,11 @@ if (showTableInfo.value && props.tableMeta && props.connectionId) {
 
 function copyDdl() {
   copyText(ddlContent.value);
+}
+
+function openTableStructureEditor() {
+  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return;
+  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName);
 }
 
 function toggleDdlWrap() {
@@ -8401,15 +8411,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </template>
           </div>
           <!-- Table Info Drawer -->
-          <div v-if="showTableInfo" class="relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
+          <div v-if="showTableInfo" class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
             <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDdlResizeStart" />
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
-              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="sm" class="h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
-                <Copy class="w-3 h-3" />
-                <span>{{ t("grid.copyDdl") }}</span>
-              </Button>
+              <div v-if="activeTableInfoTab === 'ddl'" class="table-info-ddl-actions flex min-w-0 shrink-0 items-center gap-1">
+                <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-ddl-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
+                  <PencilRuler class="w-3 h-3" />
+                  <span class="table-info-ddl-action-label">{{ t("contextMenu.editStructure") }}</span>
+                </Button>
+                <Button variant="ghost" size="sm" class="table-info-ddl-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
+                  <Copy class="w-3 h-3" />
+                  <span class="table-info-ddl-action-label">{{ t("grid.copyDdl") }}</span>
+                </Button>
+              </div>
               <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
                 <WrapText class="w-3 h-3" />
               </Button>
@@ -9639,6 +9655,43 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .ddl-drawer-resizing {
   transition: none;
+}
+
+.table-info-drawer {
+  container-type: inline-size;
+}
+
+.table-info-ddl-action-button {
+  gap: 0.25rem;
+  max-width: 8rem;
+  overflow: hidden;
+  transition:
+    max-width 180ms ease,
+    padding-inline 180ms ease;
+}
+
+.table-info-ddl-action-label {
+  min-width: 0;
+  max-width: 6rem;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  transition:
+    max-width 180ms ease,
+    opacity 120ms ease;
+}
+
+@container (max-width: 360px) {
+  .table-info-ddl-action-button {
+    width: 1.5rem;
+    max-width: 1.5rem;
+    padding-inline: 0;
+  }
+
+  .table-info-ddl-action-label {
+    max-width: 0;
+    opacity: 0;
+  }
 }
 
 .detail-drawer-resizing {

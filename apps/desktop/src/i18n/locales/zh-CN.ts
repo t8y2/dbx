@@ -1557,6 +1557,7 @@ export default withEnglishFallback({
     remove: "移除",
     moveColumnUp: "上移字段",
     moveColumnDown: "下移字段",
+    dragColumn: "拖拽调整字段顺序",
     yes: "是",
     no: "否",
     emptyReadonly: "暂无记录",

@@ -1861,7 +1861,7 @@ pub async fn execute_statements(
         match result {
             Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
             Err(err) => {
-                if err.contains("Unknown method: execute_batch") {
+                if is_agent_execute_batch_unsupported(&err) {
                     log::warn!(
                         "Agent does not support execute_batch; falling back to statement-by-statement execution"
                     );
@@ -1926,6 +1926,11 @@ pub async fn execute_statements(
         session_id: None,
         has_more: false,
     })
+}
+
+fn is_agent_execute_batch_unsupported(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("execute_batch") && (lower.contains("unknown method") || lower.contains("method not found"))
 }
 
 /// Execute multiple SQL statements within a single transaction.
@@ -2402,6 +2407,19 @@ mod tests {
             one_time: false,
             read_only: false,
         }
+    }
+
+    #[test]
+    fn agent_execute_batch_unsupported_detects_case_insensitive_method_errors() {
+        assert!(is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_batch"));
+        assert!(is_agent_execute_batch_unsupported("Agent RPC error (-1): Unknown method: execute_batch"));
+        assert!(is_agent_execute_batch_unsupported("Agent RPC error (-32601): Method not found: execute_batch"));
+    }
+
+    #[test]
+    fn agent_execute_batch_unsupported_ignores_unrelated_errors() {
+        assert!(!is_agent_execute_batch_unsupported("ORA-00955: name is already used by an existing object"));
+        assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
     }
 
     #[tokio::test]

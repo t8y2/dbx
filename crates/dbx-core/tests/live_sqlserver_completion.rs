@@ -5,6 +5,55 @@ use dbx_core::storage::Storage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
+    dbx_core::models::connection::ConnectionConfig {
+        id: id.to_string(),
+        name: id.to_string(),
+        db_type: DatabaseType::SqlServer,
+        driver_profile: None,
+        driver_label: None,
+        url_params: None,
+        host: std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+        port: std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433),
+        username: std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string()),
+        password: std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD"),
+        database: Some(database.to_string()),
+        visible_databases: None,
+        visible_schemas: None,
+        attached_databases: Vec::new(),
+        color: None,
+        transport_layers: Vec::new(),
+        connect_timeout_secs: 10,
+        query_timeout_secs: 30,
+        idle_timeout_secs: 60,
+        keepalive_interval_secs: 0,
+        ssl: false,
+        ca_cert_path: String::new(),
+        client_cert_path: String::new(),
+        client_key_path: String::new(),
+        sysdba: false,
+        oracle_connection_type: None,
+        connection_string: None,
+        redis_connection_mode: None,
+        redis_sentinel_master: String::new(),
+        redis_sentinel_nodes: String::new(),
+        redis_sentinel_username: String::new(),
+        redis_sentinel_password: String::new(),
+        redis_sentinel_tls: false,
+        redis_cluster_nodes: String::new(),
+        redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
+        redis_scan_page_size: None,
+        etcd_endpoints: String::new(),
+        gbase_server: String::new(),
+        informix_server: String::new(),
+        external_config: None,
+        jdbc_driver_class: None,
+        jdbc_driver_paths: Vec::new(),
+        one_time: false,
+        read_only: false,
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
 async fn live_sqlserver_execute_query_creates_schema() {
@@ -179,6 +228,96 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
     assert!(csv.contains("\"1\",\"alpha\""));
     assert!(csv.contains("\"2\",\"beta\""));
     assert!(!csv.contains("\n\n"));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let target_database = std::env::var("DBX_LIVE_SQLSERVER_TARGET_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut setup_client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+    let mut target_client = dbx_core::db::sqlserver::connect(
+        &host,
+        port,
+        &user,
+        &password,
+        Some(&target_database),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("connect target SQL Server database");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_table = format!("dbx_rowversion_src_{suffix}");
+    let target_table = source_table.to_uppercase();
+    let cleanup_source = format!("DROP TABLE IF EXISTS [dbo].[{source_table}];");
+    let cleanup_target = format!("DROP TABLE IF EXISTS [dbo].[{target_table}];");
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut setup_client, &cleanup_source).await;
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut target_client, &cleanup_target).await;
+
+    let setup = format!(
+        "CREATE TABLE [dbo].[{source_table}] (id INT NOT NULL PRIMARY KEY, name NVARCHAR(64) NULL, TimeSpan timestamp NOT NULL);\
+         INSERT INTO [dbo].[{source_table}] (id, name) VALUES (1, N'alpha'), (2, N'beta');"
+    );
+    dbx_core::db::sqlserver::execute_batch(&mut setup_client, &setup).await.expect("create rowversion source table");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-rowversion-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let config = live_sqlserver_config("live-sqlserver-rowversion", &database);
+    state.configs.write().await.insert(config.id.clone(), config);
+    let source_pool_key =
+        state.get_or_create_pool("live-sqlserver-rowversion", Some(&database)).await.expect("connect transfer pool");
+    let target_pool_key = state
+        .get_or_create_pool("live-sqlserver-rowversion", Some(&target_database))
+        .await
+        .expect("connect target transfer pool");
+    let request = dbx_core::transfer::TransferRequest {
+        transfer_id: format!("live-sqlserver-rowversion-{suffix}"),
+        source_connection_id: "live-sqlserver-rowversion".to_string(),
+        source_database: database.clone(),
+        source_schema: "dbo".to_string(),
+        target_connection_id: "live-sqlserver-rowversion".to_string(),
+        target_database: target_database.clone(),
+        target_schema: "dbo".to_string(),
+        tables: vec![source_table.clone()],
+        create_table: true,
+        mode: dbx_core::transfer::TransferMode::Append,
+        target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
+        batch_size: 100,
+    };
+    let result = dbx_core::transfer::transfer_table(
+        &state,
+        &request,
+        &source_table,
+        0,
+        &DatabaseType::SqlServer,
+        &DatabaseType::SqlServer,
+        &source_pool_key,
+        &target_pool_key,
+        |_| {},
+    )
+    .await;
+    let verify_sql =
+        format!("SELECT COUNT(*) AS row_count, COUNT([TimeSpan]) AS rowversion_count FROM [dbo].[{target_table}];");
+    let verify_result = dbx_core::db::sqlserver::execute_query(&mut target_client, &verify_sql).await;
+
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut target_client, &cleanup_target).await;
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut setup_client, &cleanup_source).await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(result.expect("transfer rowversion table"), 2);
+    let verify_result = verify_result.expect("verify target rowversion rows");
+    assert_eq!(verify_result.rows[0][0], serde_json::json!(2));
+    assert_eq!(verify_result.rows[0][1], serde_json::json!(2));
 }
 
 #[tokio::test]

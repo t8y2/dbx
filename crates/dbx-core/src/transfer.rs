@@ -175,6 +175,32 @@ fn selected_columns_include_identity_columns(columns: &[String], all_columns: &[
     })
 }
 
+fn is_sqlserver_rowversion_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    matches!(normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or(""), "timestamp" | "rowversion")
+}
+
+fn is_sqlserver_non_insertable_transfer_column(
+    column: &db::ColumnInfo,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::SqlServer, DatabaseType::SqlServer))
+        && is_sqlserver_rowversion_type(&column.data_type)
+}
+
+fn writable_transfer_columns(
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> Vec<db::ColumnInfo> {
+    columns
+        .iter()
+        .filter(|column| !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type))
+        .cloned()
+        .collect()
+}
+
 fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
     let full_table = qualified_table(table, schema, &DatabaseType::Dameng);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
@@ -3156,10 +3182,15 @@ where
         return Err(format!("No columns found for table {table}"));
     }
 
-    let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-    let col_types: Vec<Option<String>> = columns.iter().map(|c| Some(c.data_type.clone())).collect();
+    let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
+    if writable_columns.is_empty() {
+        return Err(format!("No writable columns found for table {table}"));
+    }
+
+    let col_names: Vec<String> = writable_columns.iter().map(|c| c.name.clone()).collect();
+    let col_types: Vec<Option<String>> = writable_columns.iter().map(|c| Some(c.data_type.clone())).collect();
     let primary_key_columns: Vec<String> =
-        columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+        writable_columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
     log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
 
     // Fetch source table comment
@@ -3327,7 +3358,11 @@ where
             )
             .await
             .unwrap_or_default();
-            let pks: Vec<String> = target_columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+            let pks: Vec<String> = target_columns
+                .iter()
+                .filter(|c| c.is_primary_key && col_names.iter().any(|name| name.eq_ignore_ascii_case(&c.name)))
+                .map(|c| c.name.clone())
+                .collect();
             if pks.is_empty() {
                 log::warn!("[transfer] table {} has no primary key, falling back to append", table);
                 (TransferMode::Append, vec![])
@@ -3956,6 +3991,37 @@ mod tests {
 
         assert!(selected_columns_include_identity_columns(&[String::from("id")], &target_columns));
         assert!(!selected_columns_include_identity_columns(&[String::from("name")], &target_columns));
+    }
+
+    #[test]
+    fn sqlserver_writable_transfer_columns_skip_rowversion_types() {
+        let columns = vec![
+            test_column("id", "int"),
+            test_column("TimeSpan", "timestamp"),
+            test_column("rv", "ROWVERSION"),
+            test_column("name", "nvarchar(64)"),
+        ];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::SqlServer, &DatabaseType::SqlServer);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn non_sqlserver_target_writable_transfer_columns_keep_timestamp_type() {
+        let columns = vec![test_column("id", "int"), test_column("updated_at", "timestamp")];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Postgres, &DatabaseType::Postgres);
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "updated_at"]);
+    }
+
+    #[test]
+    fn sqlserver_target_keeps_timestamp_from_other_source_databases() {
+        let columns = vec![test_column("id", "int"), test_column("updated_at", "timestamp")];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Postgres, &DatabaseType::SqlServer);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "updated_at"]);
     }
 
     #[test]

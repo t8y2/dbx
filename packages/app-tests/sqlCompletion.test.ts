@@ -650,6 +650,35 @@ test("suggests SQL Server IIF and CHOOSE scalar functions", () => {
   );
 });
 
+test("suggests SQL Server IDENTITY_INSERT after SET", () => {
+  const sql = "set  iden";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "sqlserver",
+  });
+
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "IDENTITY_INSERT"));
+});
+
+test("suggests common SQL Server SET options", () => {
+  for (const [sql, expected] of [
+    ["set noc", "NOCOUNT"],
+    ["set xact", "XACT_ABORT"],
+    ["set ansi", "ANSI_NULLS"],
+    ["set stat", "STATISTICS IO"],
+    ["set transaction iso", "TRANSACTION ISOLATION LEVEL"],
+  ] as const) {
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables,
+      columnsByTable,
+      databaseType: "sqlserver",
+    });
+
+    assert.ok(items.some((item) => item.type === "keyword" && item.label === expected), `${expected} should appear for ${sql}`);
+  }
+});
+
 test("suggests SQL Server data types in CREATE TABLE column definitions", () => {
   const sql = "CREATE TABLE dbo.jobs (id ";
   const items = buildSqlCompletionItems(sql, sql.length, {

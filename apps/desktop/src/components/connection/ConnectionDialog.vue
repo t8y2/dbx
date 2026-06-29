@@ -32,7 +32,7 @@ import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
-import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
+import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
@@ -757,6 +757,11 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
+  if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
+  return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
+}
+
 async function testConnectionWithTimeout(config: ConnectionConfig, runId: number): Promise<string> {
   const timeoutMs = connectionAttemptTimeoutMs(config);
   const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
@@ -768,7 +773,7 @@ async function testConnectionWithTimeout(config: ConnectionConfig, runId: number
     if (runId !== testRunId) return;
     testResult.value = {
       ok: false,
-      message: connectionAttemptOriginalErrorMessage(timeoutMessage, errorMessage(error)),
+      message: connectionErrorWithDriverUpdateHint(config, connectionAttemptOriginalErrorMessage(timeoutMessage, errorMessage(error))),
     };
   });
   try {
@@ -1554,7 +1559,7 @@ async function testConnection() {
     testResult.value = { ok: true, message: msg };
   } catch (e: any) {
     if (runId !== testRunId) return;
-    const message = mongodbAuthFailureHint(String(e));
+    const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
     const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
     if (runId !== testRunId) return;
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };

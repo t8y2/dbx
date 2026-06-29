@@ -55,6 +55,8 @@ import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mon
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redisKeyPattern";
+import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
+import i18n from "@/i18n";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -167,6 +169,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
   const connectedIds = ref<Set<string>>(new Set());
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
+  const agentDrivers = ref<AgentDriverInstallState[]>([]);
+  let agentDriversRefreshPromise: Promise<void> | null = null;
   const loadedTreeNodeChildrenIds = ref<Set<string>>(new Set());
   const connectionErrors = ref<Record<string, string>>({});
   const editingConnectionId = ref<string | null>(null);
@@ -276,6 +280,44 @@ export const useConnectionStore = defineStore("connection", () => {
     connectionErrors.value[connectionId] = message;
   }
 
+  function agentDriverUpdateHint(): string {
+    return i18n.global.t("connection.agentDriverUpdateConnectionHint");
+  }
+
+  function connectionErrorWithDriverUpdateHint(config: ConnectionConfig | undefined, message: string): string {
+    if (!config) return message;
+    if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
+    return appendAgentDriverUpdateHint(message, agentDriverUpdateHint());
+  }
+
+  function refreshAgentDriversForErrorHint(): Promise<void> {
+    if (agentDriversRefreshPromise) return agentDriversRefreshPromise;
+    agentDriversRefreshPromise = api
+      .listInstalledAgents()
+      .then((drivers) => {
+        agentDrivers.value = drivers;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        agentDriversRefreshPromise = null;
+      });
+    return agentDriversRefreshPromise;
+  }
+
+  function maybeAppendAgentDriverUpdateHint(connectionId: string, baseMessage: string) {
+    const config = getConfig(connectionId);
+    const message = connectionErrorWithDriverUpdateHint(config, baseMessage);
+    if (message !== baseMessage) {
+      setConnectionError(connectionId, message);
+      return;
+    }
+    void refreshAgentDriversForErrorHint().then(() => {
+      if (connectionErrors.value[connectionId] !== baseMessage) return;
+      const refreshedMessage = connectionErrorWithDriverUpdateHint(config, baseMessage);
+      if (refreshedMessage !== baseMessage) setConnectionError(connectionId, refreshedMessage);
+    });
+  }
+
   function clearConnectionError(connectionId: string) {
     if (!connectionErrors.value[connectionId]) return;
     delete connectionErrors.value[connectionId];
@@ -368,6 +410,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function recordConnectionError(connectionId: string, error: unknown): string {
     const message = connectionErrorMessage(error);
     setConnectionError(connectionId, message);
+    maybeAppendAgentDriverUpdateHint(connectionId, message);
     return message;
   }
 

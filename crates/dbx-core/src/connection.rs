@@ -55,6 +55,19 @@ pub enum MysqlMode {
     OceanBaseOracle,
 }
 
+fn is_oceanbase_mysql_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Mysql
+        && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
+}
+
+fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
+    if !is_oceanbase_mysql_config(config) || config.query_timeout_secs == 0 {
+        return Vec::new();
+    }
+    let timeout_us = config.query_timeout_secs.saturating_mul(1_000_000);
+    vec![format!("SET ob_query_timeout = {timeout_us}")]
+}
+
 pub enum PoolKind {
     Mysql(db::mysql::MySqlPool, MysqlMode),
     Postgres(deadpool_postgres::Pool),
@@ -217,8 +230,16 @@ pub async fn connect_mysql_metadata_pool(
 ) -> Result<(db::mysql::MySqlPool, MysqlMode), String> {
     let url = connection_url_for_endpoint(db_config, host, port);
     let idle_timeout_secs = Some(db_config.idle_timeout_secs);
+    let extra_setup_queries = oceanbase_mysql_setup_queries(db_config);
     if db_config.needs_bare_mysql() {
-        return match db::mysql::connect_bare_with_pool_limit(&url, connect_timeout, max_connections).await {
+        return match db::mysql::connect_bare_with_pool_limit_and_setup(
+            &url,
+            connect_timeout,
+            max_connections,
+            &extra_setup_queries,
+        )
+        .await
+        {
             Ok(pool) => Ok((pool, MysqlMode::Bare)),
             Err(err) => {
                 let fallback_url = mysql_metadata_fallback_url(config, db_config, host, port);
@@ -226,9 +247,14 @@ pub async fn connect_mysql_metadata_pool(
                     log::info!(
                         "MySQL metadata connection without a default database failed ({err}); retrying with configured default database."
                     );
-                    db::mysql::connect_bare_with_pool_limit(&fallback_url, connect_timeout, max_connections)
-                        .await
-                        .map(|pool| (pool, MysqlMode::Bare))
+                    db::mysql::connect_bare_with_pool_limit_and_setup(
+                        &fallback_url,
+                        connect_timeout,
+                        max_connections,
+                        &extra_setup_queries,
+                    )
+                    .await
+                    .map(|pool| (pool, MysqlMode::Bare))
                 } else {
                     Err(err)
                 }
@@ -236,12 +262,13 @@ pub async fn connect_mysql_metadata_pool(
         };
     }
 
-    match db::mysql::connect_with_ca_cert_pool_limit_and_idle(
+    match db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup(
         &url,
         Some(&db_config.ca_cert_path),
         connect_timeout,
         max_connections,
         idle_timeout_secs,
+        &extra_setup_queries,
     )
     .await
     {
@@ -255,12 +282,13 @@ pub async fn connect_mysql_metadata_pool(
                 log::info!(
                     "MySQL metadata connection without a default database failed ({err}); retrying with configured default database."
                 );
-                let pool = db::mysql::connect_with_ca_cert_pool_limit_and_idle(
+                let pool = db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup(
                     &fallback_url,
                     Some(&config.ca_cert_path),
                     connect_timeout,
                     max_connections,
                     idle_timeout_secs,
+                    &extra_setup_queries,
                 )
                 .await?;
                 let mode = detect_ob_oracle_mode(config, &pool).await;
@@ -280,19 +308,38 @@ pub async fn connect_bare_metadata_pool(
     max_connections: usize,
 ) -> Result<db::mysql::MySqlPool, String> {
     let url = connection_url_for_endpoint(db_config, host, port);
+    let extra_setup_queries = oceanbase_mysql_setup_queries(db_config);
     if db_config.effective_database().is_none() {
-        return db::mysql::connect_bare_with_pool_limit(&url, connect_timeout, max_connections).await;
+        return db::mysql::connect_bare_with_pool_limit_and_setup(
+            &url,
+            connect_timeout,
+            max_connections,
+            &extra_setup_queries,
+        )
+        .await;
     }
 
     let mut unscoped_config = db_config.clone();
     unscoped_config.database = None;
     let unscoped_url = connection_url_for_endpoint(&unscoped_config, host, port);
     if unscoped_url == url {
-        return db::mysql::connect_bare_with_pool_limit(&url, connect_timeout, max_connections).await;
+        return db::mysql::connect_bare_with_pool_limit_and_setup(
+            &url,
+            connect_timeout,
+            max_connections,
+            &extra_setup_queries,
+        )
+        .await;
     }
 
-    let preferred = db::mysql::connect_bare_with_pool_limit(&url, connect_timeout, max_connections);
-    let unscoped = db::mysql::connect_bare_with_pool_limit(&unscoped_url, connect_timeout, max_connections);
+    let preferred =
+        db::mysql::connect_bare_with_pool_limit_and_setup(&url, connect_timeout, max_connections, &extra_setup_queries);
+    let unscoped = db::mysql::connect_bare_with_pool_limit_and_setup(
+        &unscoped_url,
+        connect_timeout,
+        max_connections,
+        &extra_setup_queries,
+    );
     tokio::pin!(preferred);
     tokio::pin!(unscoped);
 
@@ -2352,9 +2399,9 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        metadata_connection_config, mysql_metadata_fallback_url, prestosql_jdbc_config_for_endpoint,
-        redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe, validate_h2_database_path,
-        AppState, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_h2_database_path, AppState, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -2554,6 +2601,32 @@ mod tests {
             mongo_legacy_error_with_auth_hint(err),
             "Agent RPC error: Exception authenticating MongoCredential{mechanism=SCRAM-SHA-1, userName='rwuser', source='gray_lite_twin_fat'}\n\nCurrent authentication database: gray_lite_twin_fat. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
         );
+    }
+
+    #[test]
+    fn oceanbase_mysql_setup_queries_follow_query_timeout() {
+        let mut config = mysql_config(Some("dbx"));
+        config.driver_profile = Some("oceanbase".to_string());
+        config.query_timeout_secs = 30;
+
+        assert_eq!(oceanbase_mysql_setup_queries(&config), vec!["SET ob_query_timeout = 30000000"]);
+    }
+
+    #[test]
+    fn oceanbase_mysql_setup_queries_skip_disabled_timeout() {
+        let mut config = mysql_config(Some("dbx"));
+        config.driver_profile = Some("oceanbase".to_string());
+        config.query_timeout_secs = 0;
+
+        assert!(oceanbase_mysql_setup_queries(&config).is_empty());
+    }
+
+    #[test]
+    fn oceanbase_mysql_setup_queries_do_not_apply_to_plain_mysql() {
+        let mut config = mysql_config(Some("dbx"));
+        config.query_timeout_secs = 30;
+
+        assert!(oceanbase_mysql_setup_queries(&config).is_empty());
     }
 
     #[test]

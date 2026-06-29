@@ -578,6 +578,26 @@ test("undo and redo cover row add and delete operations", () => {
   assert.deepEqual([...editor.deletedRows.value], [0]);
 });
 
+test("keeps appended empty-table rows when parent refreshes an equivalent rows array", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = ref<{ columns: string[]; rows: CellValue[][] }>({ columns: ["id", "name"], rows: [] });
+  const editor = createPeopleGridEditor(computed(() => result.value));
+
+  editor.addRow();
+  await nextTick();
+  assert.equal(editor.newRows.value.length, 1);
+
+  result.value = { columns: ["id", "name"], rows: [] };
+  await nextTick();
+  assert.equal(editor.newRows.value.length, 1);
+
+  result.value = { columns: ["id", "name"], rows: [[1, "Ada"] as CellValue[]] };
+  await nextTick();
+  assert.equal(editor.newRows.value.length, 0);
+});
+
 test("saving manually typed JSON from a MySQL grid normalizes smart quotes", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

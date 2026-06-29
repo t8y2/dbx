@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, SquareDashed } from "@lucide/vue";
+import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -194,8 +194,8 @@ function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
   return undefined;
 }
 
-function setDataGridCanvasRenderMode(value: boolean) {
-  settingsStore.updateEditorSettings({ dataGridRenderMode: value ? "canvas" : "dom" });
+function setDataGridRenderMode(value: "canvas" | "dom") {
+  settingsStore.updateEditorSettings({ dataGridRenderMode: value });
 }
 
 const activeTabDimension = computed(() => {
@@ -782,34 +782,66 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                     <div class="border-b bg-muted/40 px-3 py-2">
                       <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
                     </div>
-                    <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                      <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                        <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                          <SquareDashed class="h-3.5 w-3.5 text-muted-foreground" />
-                          {{ t("grid.canvasRenderMode") }}
-                          <span class="text-muted-foreground">/ {{ t("grid.domRenderMode") }}</span>
-                        </span>
-                        <Switch size="sm" :model-value="dataGridRenderMode === 'canvas'" :aria-label="t('grid.renderModeHint')" @update:model-value="setDataGridCanvasRenderMode" />
-                      </label>
-                    </LightTooltip>
-                    <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                      <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                        <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                          {{ t("grid.transposeMultiRowToggle") }}
-                          <span class="text-muted-foreground">
-                            {{ dataGridRef?.multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
-                          </span>
-                        </span>
-                        <Switch size="sm" :model-value="!!dataGridRef?.multiRowTranspose" :aria-label="t('grid.transposeMultiRow')" @update:model-value="(value: boolean) => dataGridRef?.setMultiRowTranspose(value)" />
-                      </label>
-                    </LightTooltip>
-                    <label class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent" :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }">
-                      <input type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :checked="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" @change="dataGridRef?.toggleAllNullColumns()" />
-                      <span class="min-w-0 flex items-center gap-1.5 font-medium">
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <SquareDashed class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.renderMode") }}</span>
+                      </div>
+                      <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRenderMode === 'canvas' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRenderMode('canvas')"
+                          >
+                            {{ t("grid.canvasRenderMode") }}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRenderMode === 'dom' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRenderMode('dom')"
+                          >
+                            {{ t("grid.domRenderMode") }}
+                          </button>
+                        </div>
+                      </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.transposeMultiRowToggle") }}</span>
+                      </div>
+                      <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="!dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="dataGridRef?.setMultiRowTranspose(false)"
+                          >
+                            {{ t("grid.transposeSingleRow") }}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="dataGridRef?.setMultiRowTranspose(true)"
+                          >
+                            {{ t("grid.transposeMultiRow") }}
+                          </button>
+                        </div>
+                      </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
+                      <span class="min-w-0 flex items-center gap-2 font-medium">
+                        <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         {{ t("grid.hideNullColumns") }}
                         <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
                       </span>
-                    </label>
+                      <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
+                    </div>
                   </PopoverContent>
                 </Popover>
                 <Button v-if="activeOutputView === 'result' && hasTabularResult" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="activeTab.isExecuting" @click="refreshData">
@@ -1042,34 +1074,66 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               <div class="border-b bg-muted/40 px-3 py-2">
                 <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
               </div>
-              <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                  <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                    <SquareDashed class="h-3.5 w-3.5 text-muted-foreground" />
-                    {{ t("grid.canvasRenderMode") }}
-                    <span class="text-muted-foreground">/ {{ t("grid.domRenderMode") }}</span>
-                  </span>
-                  <Switch size="sm" :model-value="dataGridRenderMode === 'canvas'" :aria-label="t('grid.renderModeHint')" @update:model-value="setDataGridCanvasRenderMode" />
-                </label>
-              </LightTooltip>
-              <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                  <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                    {{ t("grid.transposeMultiRowToggle") }}
-                    <span class="text-muted-foreground">
-                      {{ dataGridRef?.multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
-                    </span>
-                  </span>
-                  <Switch size="sm" :model-value="!!dataGridRef?.multiRowTranspose" :aria-label="t('grid.transposeMultiRow')" @update:model-value="(value: boolean) => dataGridRef?.setMultiRowTranspose(value)" />
-                </label>
-              </LightTooltip>
-              <label class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent" :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }">
-                <input type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :checked="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" @change="dataGridRef?.toggleAllNullColumns()" />
-                <span class="min-w-0 flex items-center gap-1 font-medium">
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <SquareDashed class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.renderMode") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRenderMode === 'canvas' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRenderMode('canvas')"
+                    >
+                      {{ t("grid.canvasRenderMode") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRenderMode === 'dom' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRenderMode('dom')"
+                    >
+                      {{ t("grid.domRenderMode") }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.transposeMultiRowToggle") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="!dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="dataGridRef?.setMultiRowTranspose(false)"
+                    >
+                      {{ t("grid.transposeSingleRow") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="dataGridRef?.setMultiRowTranspose(true)"
+                    >
+                      {{ t("grid.transposeMultiRow") }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
+                <span class="min-w-0 flex items-center gap-2 font-medium">
+                  <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   {{ t("grid.hideNullColumns") }}
                   <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
                 </span>
-              </label>
+                <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
+              </div>
             </PopoverContent>
           </Popover>
         </div>

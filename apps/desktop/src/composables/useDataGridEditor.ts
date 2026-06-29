@@ -94,6 +94,12 @@ const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 const MAX_PENDING_CHANGES_HISTORY = 100;
 
+function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][]): boolean {
+  if (!previousRows) return true;
+  if (previousRows.length !== nextRows.length) return true;
+  return previousRows.some((row, index) => row !== nextRows[index]);
+}
+
 function cacheKeyBelongsToTab(cacheKey: string, tabId: string) {
   return cacheKey === tabId || cacheKey.startsWith(`${tabId}-`);
 }
@@ -972,9 +978,15 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   // Pending changes reference rows by sourceIndex. When the result set changes
   // (e.g. different WHERE clause, pagination), stale indices point to wrong rows.
+  let previousResultRows = result.value.rows;
   watch(
     () => result.value.rows,
-    () => {
+    (rows) => {
+      if (!dataGridRowsIdentityChanged(previousResultRows, rows)) {
+        previousResultRows = rows;
+        return;
+      }
+      previousResultRows = rows;
       pendingScrollRestore = undefined;
       discardChanges();
     },

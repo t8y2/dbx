@@ -602,6 +602,7 @@ export default withEnglishFallback({
     copied: "已复制",
     copyFailed: "复制失败：{message}",
     previewSqlEmpty: "暂无待预览的 SQL 更改",
+    renderMode: "渲染模式",
     domRenderMode: "DOM",
     canvasRenderMode: "Canvas",
     renderModeHint: "在 Canvas 渲染和 DOM 兜底表格之间切换。",

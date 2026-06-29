@@ -599,6 +599,7 @@ export default {
     copied: "Copied",
     copyFailed: "Copy failed: {message}",
     previewSqlEmpty: "No pending SQL changes to preview",
+    renderMode: "Render Mode",
     domRenderMode: "DOM",
     canvasRenderMode: "Canvas",
     renderModeHint: "Switch between Canvas rendering and the DOM fallback grid.",

@@ -601,6 +601,7 @@ export default withEnglishFallback({
     copied: "已複製",
     copyFailed: "複製失敗：{message}",
     previewSqlEmpty: "沒有待預覽的 SQL 變更",
+    renderMode: "渲染模式",
     domRenderMode: "DOM",
     canvasRenderMode: "Canvas",
     renderModeHint: "在 Canvas 渲染和 DOM 備援表格之間切換。",

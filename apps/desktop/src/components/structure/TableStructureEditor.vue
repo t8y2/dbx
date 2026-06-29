@@ -418,6 +418,7 @@ watch(
 watch(localStructureDensity, (density, previousDensity) => {
   if (density === previousDensity) return;
   applyStructureDensityWidths(density);
+  persistStructureDensity(density);
 });
 
 function onColResize(e: MouseEvent, col: number) {
@@ -969,10 +970,13 @@ function removeNewColumn(column: EditableStructureColumn) {
 type ColumnDragState = {
   columnId: string;
   sourceIndex: number;
-  insertionIndex: number;
+  insertionIndex: number | null;
 };
 
 const columnDragState = ref<ColumnDragState | null>(null);
+let columnDragPreviousBodyUserSelect = "";
+let columnDragPreviousBodyCursor = "";
+let columnDragTracking = false;
 
 function canDragColumn(index: number): boolean {
   if (loading.value || saving.value) return false;
@@ -1008,6 +1012,82 @@ function moveColumnTo(index: number, insertionIndex: number) {
   columns.value = nextColumns;
 }
 
+function onColumnDragPointerDown(index: number, event: PointerEvent) {
+  if (event.button !== 0 || !canDragColumn(index)) return;
+  const column = columns.value[index];
+  if (!column) return;
+  event.preventDefault();
+  event.stopPropagation();
+  columnDragState.value = {
+    columnId: column.id,
+    sourceIndex: index,
+    insertionIndex: null,
+  };
+  columnDragPreviousBodyUserSelect = document.body.style.userSelect;
+  columnDragPreviousBodyCursor = document.body.style.cursor;
+  columnDragTracking = true;
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "grabbing";
+  updateColumnDragInsertion(event.clientY);
+  window.addEventListener("pointermove", onColumnDragPointerMove, true);
+  window.addEventListener("pointerup", onColumnDragPointerUp, true);
+  window.addEventListener("pointercancel", onColumnDragPointerCancel, true);
+}
+
+function onColumnDragPointerMove(event: PointerEvent) {
+  if (!columnDragState.value) return;
+  event.preventDefault();
+  updateColumnDragInsertion(event.clientY);
+}
+
+function onColumnDragPointerUp(event: PointerEvent) {
+  event.preventDefault();
+  const state = columnDragState.value;
+  stopColumnDragTracking();
+  if (state && state.insertionIndex !== null && canDropColumnAt(state.sourceIndex, state.insertionIndex)) {
+    moveColumnTo(state.sourceIndex, state.insertionIndex);
+  }
+  columnDragState.value = null;
+}
+
+function onColumnDragPointerCancel() {
+  stopColumnDragTracking();
+  columnDragState.value = null;
+}
+
+function stopColumnDragTracking() {
+  if (!columnDragTracking) return;
+  columnDragTracking = false;
+  window.removeEventListener("pointermove", onColumnDragPointerMove, true);
+  window.removeEventListener("pointerup", onColumnDragPointerUp, true);
+  window.removeEventListener("pointercancel", onColumnDragPointerCancel, true);
+  document.body.style.userSelect = columnDragPreviousBodyUserSelect;
+  document.body.style.cursor = columnDragPreviousBodyCursor;
+}
+
+function updateColumnDragInsertion(clientY: number) {
+  const state = columnDragState.value;
+  if (!state) return;
+  const insertionIndex = columnDragInsertionIndexFromPoint(clientY);
+  state.insertionIndex = insertionIndex !== null && canDropColumnAt(state.sourceIndex, insertionIndex) ? insertionIndex : null;
+}
+
+function columnDragInsertionIndexFromPoint(clientY: number): number | null {
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []);
+  if (!rows.length) return null;
+  const firstRect = rows[0].getBoundingClientRect();
+  if (clientY < firstRect.top) return 0;
+  for (const row of rows) {
+    const rowIndex = Number(row.dataset.columnRowIndex);
+    if (!Number.isInteger(rowIndex)) continue;
+    const rect = row.getBoundingClientRect();
+    if (clientY <= rect.bottom) {
+      return clientY > rect.top + rect.height / 2 ? rowIndex + 1 : rowIndex;
+    }
+  }
+  return rows.length;
+}
+
 function onColumnDragStart(index: number, event: DragEvent) {
   if (!canDragColumn(index)) {
     event.preventDefault();
@@ -1018,7 +1098,7 @@ function onColumnDragStart(index: number, event: DragEvent) {
   columnDragState.value = {
     columnId: column.id,
     sourceIndex: index,
-    insertionIndex: index,
+    insertionIndex: null,
   };
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
@@ -1053,8 +1133,9 @@ function columnRowClass(column: EditableStructureColumn, index: number) {
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
     "opacity-55": dragState?.columnId === column.id,
-    "bg-primary/5 shadow-[inset_0_2px_0_var(--primary)]": dragState && canDropColumnAt(dragState.sourceIndex, index) && dragState.insertionIndex === index,
-    "bg-primary/5 shadow-[inset_0_-2px_0_var(--primary)]": dragState && canDropColumnAt(dragState.sourceIndex, index + 1) && dragState.insertionIndex === index + 1,
+    "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
+    "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
+    "[&>td]:border-b-2 [&>td]:border-b-primary": dragState?.insertionIndex === index + 1,
   };
 }
 
@@ -1441,6 +1522,7 @@ onActivated(() => {
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
+  stopColumnDragTracking();
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
   persistStructureDensity();
@@ -1637,7 +1719,7 @@ watch(activeTab, (tab) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
+                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" :data-column-row-index="index" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
                   <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
@@ -1872,7 +1954,8 @@ watch(activeTab, (tab) => {
                         :disabled="!canDragColumn(index)"
                         :title="t('structureEditor.dragColumn')"
                         :aria-label="t('structureEditor.dragColumn')"
-                        draggable="true"
+                        :draggable="canDragColumn(index)"
+                        @pointerdown="onColumnDragPointerDown(index, $event)"
                         @dragstart="onColumnDragStart(index, $event)"
                         @dragend="onColumnDragEnd"
                       >

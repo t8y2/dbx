@@ -747,6 +747,7 @@ impl ConnectionConfig {
                         suffix.push_str("&directConnection=true");
                     }
                 }
+                let db_part = mongo_uri_db_part_for_suffix(&db_part, &suffix);
                 format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
@@ -884,6 +885,7 @@ impl ConnectionConfig {
                         suffix.push_str("&directConnection=true");
                     }
                 }
+                let db_part = mongo_uri_db_part_for_suffix(&db_part, &suffix);
                 if self.username.is_empty() {
                     format!("mongodb://{host}:{port}{db_part}{suffix}")
                 } else {
@@ -1184,6 +1186,14 @@ fn normalize_mongo_url_params(value: &str, force_tls: bool, default_auth_source:
     }
 
     parts.join("&")
+}
+
+fn mongo_uri_db_part_for_suffix<'a>(db_part: &'a str, suffix: &str) -> &'a str {
+    if db_part.is_empty() && !suffix.is_empty() {
+        "/"
+    } else {
+        db_part
+    }
 }
 
 fn normalize_mongo_uri_direct_connection(uri: &str) -> String {
@@ -2155,6 +2165,14 @@ mod tests {
     }
 
     #[test]
+    fn mongodb_form_url_without_database_keeps_slash_before_params() {
+        let config = mongodb_config("root", "secret", None);
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/?authSource=admin");
+        assert_eq!(config.redacted_connection_url(), "mongodb://10.1.2.3:17000/?authSource=admin");
+    }
+
+    #[test]
     fn mongodb_form_url_without_username_does_not_default_auth_source() {
         let config = mongodb_config("", "", Some("app"));
 
@@ -2358,6 +2376,15 @@ mod tests {
             url,
             "mongodb://root:secret@127.0.0.1:54321/admin?replicaSet=rs0&authSource=admin&directConnection=true"
         );
+    }
+
+    #[test]
+    fn mongodb_form_url_without_database_keeps_slash_before_tunneled_params() {
+        let config = mongodb_config("root", "secret", None);
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(url, "mongodb://root:secret@127.0.0.1:54321/?authSource=admin&directConnection=true");
     }
 
     #[test]

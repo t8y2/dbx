@@ -134,6 +134,17 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.suggestColumns).toBe(true);
   });
 
+  it("classifies unqualified WHERE field input as column context", () => {
+    const sql = "SELECT * FROM A1User WHERE userc";
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.prefix).toBe("userc");
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "A1User" })]));
+    expect(context.suggestColumns).toBe(true);
+    expect(context.suggestRoutines).toBe(false);
+  });
+
   it("classifies CALL routine contexts", () => {
     const sql = "CALL usp_";
     const context = getSqlCompletionContext(sql, sql.length);

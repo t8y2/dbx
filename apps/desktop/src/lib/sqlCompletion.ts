@@ -1174,7 +1174,8 @@ class SqlCompletionProvider {
       return dedupeAndSort(buildMongoCompletionItemsFromContext({ mode: "root", prefix: context.prefix, from: 0 }).map(mongoCompletionItemToSqlCompletionItem));
     }
 
-    if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
+    const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
+    if (!preferReferencedColumns && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
       this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase));
       this.items.push(...buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType));
@@ -2786,6 +2787,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     const qualifiedTarget = qualifiedTableTargetFromContext(context);
     const relatedTables = context.referencedTables.filter((table) => referencedTableMatchesColumnQualifier(table, q, qLower, qualifiedTarget));
     relevantCols = allColumns.filter((column) => relatedTables.some((table) => columnMatchesReferencedTable(column, table)) || (!!qualifiedTarget && columnMatchesQualifiedTable(column, qualifiedTarget)));
+  } else if (context.referencedTables.length > 0) {
+    relevantCols = allColumns.filter((column) => context.referencedTables.some((table) => columnMatchesReferencedTable(column, table)));
   }
 
   // Count name frequencies to detect duplicates across tables
@@ -2831,6 +2834,21 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       };
     })
     .sort(compareCompletionItems);
+}
+
+function hasMatchingReferencedColumnPrefix(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>): boolean {
+  if (!context.suggestColumns || !context.prefix || context.referencedTables.length === 0) return false;
+
+  for (const [key, cols] of columnsByTable.entries()) {
+    for (const column of cols) {
+      if (!matchesPrefix(column.name, context.prefix)) continue;
+      if (context.referencedTables.some((table) => columnMatchesReferencedTable({ ...column, key }, table))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function qualifiedTableTargetFromContext(context: SqlCompletionContext): { schema: string; table: string } | null {

@@ -1356,7 +1356,8 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
       scheduleCompletionMetadataRefresh(completionContext);
       if (!explicit) return localResult;
     }
-    if (!explicit) {
+    const shouldResolveAsyncColumnCompletion = completionContext.suggestColumns && completionContext.referencedTables.length > 0 && completionContext.prefix.length > 0;
+    if (!explicit && !shouldResolveAsyncColumnCompletion) {
       scheduleCompletionMetadataRefresh(completionContext);
       return null;
     }

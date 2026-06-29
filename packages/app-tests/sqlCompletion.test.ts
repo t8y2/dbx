@@ -836,6 +836,65 @@ test("suggests stored procedures after CALL", () => {
   );
 });
 
+test("prioritizes referenced table columns in WHERE field input", () => {
+  const sql = "select * from A1User WHERE userc";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "A1User", schema: "dbo", type: "table" }],
+    objects: [
+      { name: "P1UserCodeGenerate", schema: "dbo", type: "procedure" },
+      { name: "F22UserAccUnit", schema: "dbo", type: "function" },
+    ],
+    columnsByTable: new Map([
+      [
+        "dbo.A1User",
+        [
+          { name: "UserCode", table: "A1User", schema: "dbo", dataType: "varchar" },
+          { name: "UserName", table: "A1User", schema: "dbo", dataType: "varchar" },
+        ],
+      ],
+      [
+        "dbo.OtherUserTable",
+        [
+          { name: "UserCheck", table: "OtherUserTable", schema: "dbo", dataType: "varchar" },
+        ],
+      ],
+    ]),
+    databaseType: "sqlserver",
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type]),
+    [["UserCode", "column"]],
+  );
+});
+
+test("keeps snippets below matching WHERE field columns", () => {
+  const sql = "select * from demo_2000_tables.t_0001 WHERE i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "t_0001", schema: "demo_2000_tables", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "demo_2000_tables.t_0001",
+        [
+          { name: "id", table: "t_0001", schema: "demo_2000_tables", dataType: "int", comment: "注释test" },
+          { name: "image_url", table: "t_0001", schema: "demo_2000_tables", dataType: "varchar(512)", comment: "xixixi" },
+          { name: "image_mime", table: "t_0001", schema: "demo_2000_tables", dataType: "varchar(64)", comment: "hahaha" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.deepEqual(
+    items.slice(0, 3).map((item) => [item.label, item.type]),
+    [
+      ["id", "column"],
+      ["image_url", "column"],
+      ["image_mime", "column"],
+    ],
+  );
+  assert.equal(items.some((item) => item.type === "snippet" && item.label === "insert into"), false);
+});
+
 test("suggests user functions and triggers with fuzzy matching", () => {
   const sql = "select fun";
   const items = buildSqlCompletionItems(sql, sql.length, {

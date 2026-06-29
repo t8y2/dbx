@@ -3664,6 +3664,47 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_keeps_composite_foreign_key_together() {
+        let columns = vec![column("a", "integer"), column("b", "integer"), column("c", "integer")];
+        let foreign_keys = vec![
+            db::ForeignKeyInfo {
+                name: "aaa_1".to_string(),
+                column: "a".to_string(),
+                ref_schema: Some("public".to_string()),
+                ref_table: "aaa_2".to_string(),
+                ref_column: "a".to_string(),
+                on_update: None,
+                on_delete: None,
+            },
+            db::ForeignKeyInfo {
+                name: "aaa_1".to_string(),
+                column: "b".to_string(),
+                ref_schema: Some("public".to_string()),
+                ref_table: "aaa_2".to_string(),
+                ref_column: "b".to_string(),
+                on_update: None,
+                on_delete: None,
+            },
+            db::ForeignKeyInfo {
+                name: "aaa_1".to_string(),
+                column: "c".to_string(),
+                ref_schema: Some("public".to_string()),
+                ref_table: "aaa_2".to_string(),
+                ref_column: "c".to_string(),
+                on_update: None,
+                on_delete: None,
+            },
+        ];
+
+        let ddl = render_postgres_table_ddl("public", "aaa_1", &columns, &[], &foreign_keys);
+
+        assert!(ddl.contains(
+            "CONSTRAINT \"aaa_1\" FOREIGN KEY (\"a\", \"b\", \"c\") REFERENCES \"aaa_2\"(\"a\", \"b\", \"c\")"
+        ));
+        assert_eq!(ddl.matches("CONSTRAINT \"aaa_1\" FOREIGN KEY").count(), 1);
+    }
+
+    #[test]
     fn sqlserver_table_ddl_includes_column_comments() {
         let mut display_name = column("display]name", "nvarchar(100)");
         display_name.comment = Some("User's display name".to_string());
@@ -3780,13 +3821,18 @@ pub fn render_postgres_table_ddl(
     if !pks.is_empty() {
         ddl.push_str(&format!(",\n  PRIMARY KEY ({})", pks.iter().map(|k| pg_ident(k)).collect::<Vec<_>>().join(", ")));
     }
-    for fk in fkeys {
+    for fk_group in group_foreign_keys_by_name(fkeys) {
+        let Some(first_fk) = fk_group.first() else {
+            continue;
+        };
+        let columns = fk_group.iter().map(|fk| pg_ident(&fk.column)).collect::<Vec<_>>().join(", ");
+        let ref_columns = fk_group.iter().map(|fk| pg_ident(&fk.ref_column)).collect::<Vec<_>>().join(", ");
         ddl.push_str(&format!(
             ",\n  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
-            pg_ident(&fk.name),
-            pg_ident(&fk.column),
-            pg_ident(&fk.ref_table),
-            pg_ident(&fk.ref_column)
+            pg_ident(&first_fk.name),
+            columns,
+            pg_ident(&first_fk.ref_table),
+            ref_columns
         ));
     }
     ddl.push_str("\n);\n");
@@ -3829,6 +3875,18 @@ pub fn render_postgres_table_ddl(
         }
     }
     ddl
+}
+
+fn group_foreign_keys_by_name(fkeys: &[db::ForeignKeyInfo]) -> Vec<Vec<&db::ForeignKeyInfo>> {
+    let mut groups: Vec<Vec<&db::ForeignKeyInfo>> = Vec::new();
+    for fk in fkeys {
+        if let Some(group) = groups.iter_mut().find(|group| group.first().is_some_and(|first| first.name == fk.name)) {
+            group.push(fk);
+        } else {
+            groups.push(vec![fk]);
+        }
+    }
+    groups
 }
 
 pub async fn build_sqlserver_ddl(

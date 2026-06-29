@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics } from "../../apps/desktop/src/lib/sqlSemanticDiagnostics.ts";
+import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport } from "../../apps/desktop/src/lib/sqlSemanticDiagnostics.ts";
 import type { SqlReferenceAnalysis } from "../../apps/desktop/src/types/database.ts";
 
 const span = (startColumn: number, endColumn: number) => ({
@@ -231,4 +231,41 @@ test("skips diagnostics for Elasticsearch connections", () => {
 
 test("still runs diagnostics for SQL connections", () => {
   assert.equal(shouldRunSqlSemanticDiagnostics("SELECT * FROM users WHERE id = 1", 42, { databaseType: "mysql" }), true);
+});
+
+test("selects complete SQL statements intersecting the visible viewport for diagnostics", () => {
+  const sql = "SELECT * FROM first;\nSELECT id, missing_field FROM second WHERE id > 1;\nSELECT * FROM third;";
+  const visibleFrom = sql.indexOf("missing_field");
+  const visibleTo = visibleFrom + "missing_field".length;
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: visibleFrom, to: visibleTo }], "mysql");
+
+  assert.equal(ranges.length, 1);
+  assert.equal(ranges[0]?.sql, "SELECT id, missing_field FROM second WHERE id > 1");
+  assert.equal(ranges[0]?.from, sql.indexOf("SELECT id"));
+  assert.equal(ranges[0]?.to, sql.indexOf(";\nSELECT * FROM third"));
+});
+
+test("keeps a long statement complete when only its middle is visible", () => {
+  const sql = "SELECT id,\n  name,\n  missing_field\nFROM users\nWHERE id > 1;";
+  const visibleFrom = sql.indexOf("missing_field");
+  const visibleTo = sql.indexOf("FROM users");
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: visibleFrom, to: visibleTo }], "mysql");
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    ["SELECT id,\n  name,\n  missing_field\nFROM users\nWHERE id > 1"],
+  );
+});
+
+test("uses executable soft statement ranges for viewport diagnostics", () => {
+  const sql = "SELECT * FROM first\nSELECT missing_field FROM second";
+  const visibleFrom = sql.indexOf("missing_field");
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: visibleFrom, to: visibleFrom + 1 }], "mysql");
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    ["SELECT missing_field FROM second"],
+  );
 });

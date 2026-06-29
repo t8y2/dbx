@@ -1,5 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletion";
 import { getSqlCompletionContext } from "@/lib/sqlCompletion";
+import { executableStatementRanges, type SqlTextRange } from "@/lib/sqlStatementRanges";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
@@ -14,6 +15,27 @@ export interface SqlSemanticDiagnosticSchema {
   missingTables?: Set<string>;
   loadedColumnTables?: Set<string>;
   sql?: string;
+}
+
+export interface SqlSemanticDiagnosticVisibleRange {
+  from: number;
+  to: number;
+}
+
+export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType): SqlTextRange[] {
+  const statements = executableStatementRanges(sql, databaseType);
+  if (statements.length === 0 || visibleRanges.length === 0) return [];
+
+  const selected: SqlTextRange[] = [];
+  const seen = new Set<string>();
+  for (const statement of statements) {
+    if (!visibleRanges.some((visibleRange) => rangesIntersect(statement, visibleRange))) continue;
+    const key = `${statement.from}:${statement.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push({ from: statement.from, to: statement.to, sql: sql.slice(statement.from, statement.to) });
+  }
+  return selected;
 }
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
@@ -170,6 +192,10 @@ function keysWithTableName(columnsByTable: Map<string, SqlCompletionColumn[]>, t
   return [...columnsByTable.keys()].filter((key) => normalizeName(key).endsWith(suffix));
 }
 
+function rangesIntersect(left: SqlSemanticDiagnosticVisibleRange, right: SqlSemanticDiagnosticVisibleRange): boolean {
+  return left.from < right.to && right.from < left.to;
+}
+
 export function tableReferenceKey(table: Pick<SqlTableReference, "name" | "schema">): string {
   return normalizeName(table.schema ? `${table.schema}.${table.name}` : table.name);
 }
@@ -180,7 +206,7 @@ function displayTableName(table: SqlTableReference): string {
 
 function isCursorAfterTableTrigger(sql: string, cursor: number): boolean {
   const beforeCursor = sql.slice(0, cursor).trimEnd();
-  return /\b(from|join|update|into|table)(?:\s+[\w$`"'\[\].]*)?$/i.test(beforeCursor);
+  return /\b(from|join|update|into|table)(?:\s+[\w$`"'[\].]*)?$/i.test(beforeCursor);
 }
 
 function normalizeName(value: string): string {

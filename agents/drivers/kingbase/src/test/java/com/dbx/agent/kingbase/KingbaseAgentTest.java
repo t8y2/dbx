@@ -3,6 +3,7 @@ package com.dbx.agent.kingbase;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.IndexInfo;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -238,6 +239,36 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("int", columns.get(0).getData_type());
         Assertions.assertTrue(sql.get(1).contains("FROM information_schema.columns"), sql.get(1));
+    }
+
+    @Test
+    void regularListIndexesIncludesPrimaryUniqueAndSecondaryIndexes() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"index_name", "index_type", "is_unique", "is_primary", "column_name", "ordinal_position"},
+            new Object[][]{
+                {"orders_pkey", "btree", true, true, "id", 1},
+                {"idx_orders_created", "btree", false, false, "created", 1},
+                {"idx_orders_name_created", "btree", false, false, "name", 1},
+                {"idx_orders_name_created", "btree", false, false, "created", 2}
+            }
+        )));
+
+        List<IndexInfo> indexes = agent.listIndexes("public", "orders");
+
+        Assertions.assertEquals(3, indexes.size());
+        Assertions.assertEquals("orders_pkey", indexes.get(0).getName());
+        Assertions.assertEquals(Arrays.asList("id"), indexes.get(0).getColumns());
+        Assertions.assertTrue(indexes.get(0).getIs_unique());
+        Assertions.assertTrue(indexes.get(0).getIs_primary());
+        Assertions.assertEquals("idx_orders_created", indexes.get(1).getName());
+        Assertions.assertEquals(Arrays.asList("created"), indexes.get(1).getColumns());
+        Assertions.assertFalse(indexes.get(1).getIs_unique());
+        Assertions.assertFalse(indexes.get(1).getIs_primary());
+        Assertions.assertEquals(Arrays.asList("name", "created"), indexes.get(2).getColumns());
+        Assertions.assertTrue(sql.get(0).contains("FROM SYS_CATALOG.SYS_INDEX"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("information_schema.table_constraints"), sql.get(0));
     }
 
     @Test

@@ -303,26 +303,32 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     public List<IndexInfo> listIndexes(String schema, String table) {
         return unchecked(() -> {
-            Map<String, ConstraintIndexBuilder> indexes = new LinkedHashMap<>();
-            String sql = "SELECT tc.constraint_name, tc.constraint_type, kcu.column_name " +
-                "FROM information_schema.table_constraints tc " +
-                "JOIN information_schema.key_column_usage kcu " +
-                "ON kcu.constraint_schema = tc.constraint_schema " +
-                "AND kcu.constraint_name = tc.constraint_name " +
-                "AND kcu.table_schema = tc.table_schema " +
-                "AND kcu.table_name = tc.table_name " +
-                "WHERE tc.table_schema = " + sqlString(effectiveSchema(schema)) +
-                " AND tc.table_name = " + sqlString(table) + " " +
-                "AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE') " +
-                "ORDER BY tc.constraint_name, kcu.ordinal_position";
+            Map<String, CatalogIndexBuilder> indexes = new LinkedHashMap<>();
+            String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
+                "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
+                "a.attname AS column_name, pos.n AS ordinal_position " +
+                "FROM SYS_CATALOG.SYS_INDEX ix " +
+                "JOIN SYS_CATALOG.SYS_CLASS t ON t.oid = ix.indrelid " +
+                "JOIN SYS_CATALOG.SYS_CLASS i ON i.oid = ix.indexrelid " +
+                "JOIN SYS_CATALOG.SYS_NAMESPACE n ON n.oid = t.relnamespace " +
+                "JOIN SYS_CATALOG.SYS_AM am ON am.oid = i.relam " +
+                "JOIN generate_series(1, 64) AS pos(n) ON pos.n <= array_length(string_to_array(ix.indkey::text, ' '), 1) " +
+                "JOIN SYS_CATALOG.SYS_ATTRIBUTE a ON a.attrelid = t.oid AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 " +
+                "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
+                " AND t.relname = " + sqlString(table) + " " +
+                "ORDER BY i.relname, pos.n";
             try (Statement stmt = requireConnected().createStatement()) {
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
-                        String name = rs.getString("constraint_name");
-                        String type = rs.getString("constraint_type");
-                        ConstraintIndexBuilder builder = indexes.get(name);
+                        String name = rs.getString("index_name");
+                        CatalogIndexBuilder builder = indexes.get(name);
                         if (builder == null) {
-                            builder = new ConstraintIndexBuilder(name, "PRIMARY KEY".equalsIgnoreCase(type));
+                            builder = new CatalogIndexBuilder(
+                                name,
+                                rs.getBoolean("is_unique"),
+                                rs.getBoolean("is_primary"),
+                                rs.getString("index_type")
+                            );
                             indexes.put(name, builder);
                         }
                         builder.columns.add(rs.getString("column_name"));
@@ -330,8 +336,8 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 }
             }
             List<IndexInfo> result = new ArrayList<>();
-            for (ConstraintIndexBuilder index : indexes.values()) {
-                result.add(new IndexInfo(index.name, index.columns, true, index.primary, null, index.primary ? "PRIMARY KEY" : "UNIQUE", null, null));
+            for (CatalogIndexBuilder index : indexes.values()) {
+                result.add(new IndexInfo(index.name, index.columns, index.unique, index.primary, null, index.indexType, null, null));
             }
             return result;
         });
@@ -485,14 +491,18 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         return "'" + coalesce(value).replace("'", "''") + "'";
     }
 
-    private static final class ConstraintIndexBuilder {
+    private static final class CatalogIndexBuilder {
         final String name;
-        final List<String> columns = new ArrayList<>();
+        final boolean unique;
         final boolean primary;
+        final String indexType;
+        final List<String> columns = new ArrayList<>();
 
-        ConstraintIndexBuilder(String name, boolean primary) {
+        CatalogIndexBuilder(String name, boolean unique, boolean primary, String indexType) {
             this.name = name;
+            this.unique = unique;
             this.primary = primary;
+            this.indexType = indexType;
         }
     }
 

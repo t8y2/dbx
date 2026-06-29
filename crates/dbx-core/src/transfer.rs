@@ -926,7 +926,10 @@ fn format_ch_array_element(val: &serde_json::Value) -> String {
 }
 
 fn format_literal_string(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> String {
-    if is_mysql_datetime_literal_database(db_type) && column_type.map(is_temporal_column_type).unwrap_or(true) {
+    if *db_type == DatabaseType::SqlServer {
+        crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(value, column_type)
+            .unwrap_or_else(|| value.to_string())
+    } else if is_mysql_datetime_literal_database(db_type) && column_type.map(is_temporal_column_type).unwrap_or(true) {
         normalize_mysql_temporal_literal(value, column_type).unwrap_or_else(|| value.to_string())
     } else {
         value.to_string()
@@ -4766,6 +4769,33 @@ mod tests {
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
+    }
+
+    #[test]
+    fn sqlserver_insert_formats_datetime_literals_with_supported_precision() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("date1"), String::from("date2"), String::from("note")],
+            &[
+                Some(String::from("int")),
+                Some(String::from("datetime")),
+                Some(String::from("datetime2(7)")),
+                Some(String::from("nvarchar(100)")),
+            ],
+            &[vec![
+                json!(1),
+                json!("2026-06-29 10:11:12.896666666"),
+                json!("2026-06-29T10:11:12.8966666Z"),
+                json!("2026-06-29 10:11:12.896666666"),
+            ]],
+            "test",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[test] ([id], [date1], [date2], [note]) VALUES\n(1, N'2026-06-29 10:11:12.897', N'2026-06-29 10:11:12.8966666', N'2026-06-29 10:11:12.896666666')"
+        );
     }
 
     #[test]

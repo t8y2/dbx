@@ -1053,6 +1053,12 @@ pub fn format_grid_sql_literal(
     }
     let literal_text = if database_type == Some(DatabaseType::Tdengine) {
         format_tdengine_timestamp_literal_text(&text)
+    } else if database_type == Some(DatabaseType::SqlServer) {
+        crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(
+            &text,
+            column_info.map(|column| column.data_type.as_str()),
+        )
+        .unwrap_or(text)
     } else if is_mysql_datetime_literal_database(database_type)
         && column_info.map(|column| is_temporal_column_type(&column.data_type)).unwrap_or(true)
     {
@@ -2153,6 +2159,38 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!("2026-05-12T00:00:00.123456Z"), Some(DatabaseType::Mysql), None),
             "'2026-05-12 00:00:00.123456'"
+        );
+    }
+
+    #[test]
+    fn formats_sqlserver_datetime_copy_literals_with_supported_precision() {
+        let datetime = column("date1", "datetime", true, None);
+        let datetime2 = column("date2", "datetime2(7)", true, None);
+        let raw_text = column("note", "nvarchar(64)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime)
+            ),
+            "N'2026-06-29 10:11:12.897'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.8966666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime2)
+            ),
+            "N'2026-06-29 10:11:12.8966666'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&raw_text)
+            ),
+            "N'2026-06-29 10:11:12.896666666'"
         );
     }
 

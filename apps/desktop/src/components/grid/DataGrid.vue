@@ -1902,7 +1902,7 @@ const visibleColumnTypes = computed(() =>
   visibleColumnIndexes.value.map((index) => {
     const resultColumn = props.result.columns[index]?.toLocaleLowerCase();
     const sourceColumn = props.sourceColumns?.[index]?.toLocaleLowerCase();
-    return (sourceColumn ? tableColumnTypesByName.value.get(sourceColumn) : undefined) || (resultColumn ? tableColumnTypesByName.value.get(resultColumn) : undefined);
+    return (sourceColumn ? tableColumnTypesByName.value.get(sourceColumn) : undefined) || (resultColumn ? tableColumnTypesByName.value.get(resultColumn) : undefined) || props.result.column_types?.[index];
   }),
 );
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);

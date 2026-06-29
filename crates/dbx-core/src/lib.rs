@@ -49,6 +49,7 @@ pub mod sql_editability;
 pub mod sql_file_import;
 pub mod sql_risk;
 pub mod sqlite_backup;
+pub(crate) mod sqlserver_temporal;
 pub mod storage;
 pub mod table_export;
 pub mod table_import;

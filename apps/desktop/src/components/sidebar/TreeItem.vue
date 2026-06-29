@@ -3468,6 +3468,14 @@ function copyStructureAsSubmenu(): ContextMenuItem {
   };
 }
 
+function moreActionsSubmenu(children: ContextMenuItem[]): ContextMenuItem {
+  return {
+    label: t("common.more"),
+    icon: ListTree,
+    children,
+  };
+}
+
 function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | null {
   if (!node.connectionId) return null;
   if (node.type === "connection") {
@@ -3727,17 +3735,22 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
     items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
-    if (canDropDatabase.value || canDropSchema.value) {
-      items.push({ label: "", separator: true });
-    }
+    const destructiveActions: ContextMenuItem[] = [];
     if (canDropDatabase.value) {
-      items.push({
+      destructiveActions.push({
         label: t("contextMenu.dropDatabase"),
         action: dropDatabase,
         icon: Trash2,
         shortcut: shortcutDelete,
         variant: "destructive" as const,
       });
+    }
+    if (destructiveActions.length > 0) {
+      items.push({ label: "", separator: true });
+      items.push(moreActionsSubmenu(destructiveActions));
+    }
+    if (canDropSchema.value) {
+      items.push({ label: "", separator: true });
     }
     if (canDropSchema.value) {
       items.push({
@@ -3775,7 +3788,17 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     if (canDropMongoDatabase.value) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.dropDatabase"), action: dropDatabase, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+      items.push(
+        moreActionsSubmenu([
+          {
+            label: t("contextMenu.dropDatabase"),
+            action: dropDatabase,
+            icon: Trash2,
+            shortcut: shortcutDelete,
+            variant: "destructive" as const,
+          },
+        ]),
+      );
     }
     return items;
   }
@@ -3818,6 +3841,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   // 6. Table / View / Materialized View
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
+    const destructiveActions: ContextMenuItem[] = [];
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openData, icon: TableProperties });
@@ -3848,7 +3872,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
       });
     }
     if (node.type === "view" || node.type === "materialized_view") {
-      items.push({
+      destructiveActions.push({
         label: deleteMenuLabel(t("contextMenu.dropView")),
         action: deleteMenuAction(requestDropObject),
         icon: Trash2,
@@ -3891,28 +3915,31 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (isTableNotView.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
-      items.push({ label: "", separator: true });
       if (supportsTruncate.value) {
-        items.push({
+        destructiveActions.push({
           label: t("contextMenu.truncateTable"),
           action: truncateTable,
           icon: Scissors,
           variant: "destructive" as const,
         });
       }
-      items.push({
+      destructiveActions.push({
         label: t("contextMenu.emptyTable"),
         action: emptyTable,
         icon: Eraser,
         variant: "destructive" as const,
       });
-      items.push({
+      destructiveActions.push({
         label: deleteMenuLabel(t("contextMenu.dropTable")),
         action: deleteMenuAction(dropTable),
         icon: Trash2,
         shortcut: shortcutDelete,
         variant: "destructive" as const,
       });
+    }
+    if (destructiveActions.length > 0) {
+      items.push({ label: "", separator: true });
+      items.push(moreActionsSubmenu(destructiveActions));
     }
     items.push({ label: "", separator: true });
     items.push({

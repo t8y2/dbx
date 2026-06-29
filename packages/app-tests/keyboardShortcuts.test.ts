@@ -14,11 +14,14 @@ import {
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
+  isSwitchToNextTabShortcut,
+  isSwitchToPreviousTabShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
   isToggleTransposeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  switchToTabIndexFromShortcut,
 } from "../../apps/desktop/src/lib/keyboardShortcuts.ts";
 import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/shortcutRegistry.ts";
 
@@ -56,6 +59,37 @@ test("matches Ctrl+Enter for SQL execution", () => {
 
 test("matches Cmd+T for opening a new query", () => {
   assert.equal(isNewQueryShortcut({ key: "t", metaKey: true }), true);
+});
+
+test("matches Shift+Mod+brackets for switching adjacent tabs", () => {
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", metaKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToNextTabShortcut({ key: "]", metaKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToNextTabShortcut({ key: "]", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", metaKey: true }), false);
+  assert.equal(isSwitchToNextTabShortcut({ key: "]", metaKey: true }), false);
+});
+
+test("matches Mod+number for switching to numbered tabs", () => {
+  assert.equal(switchToTabIndexFromShortcut({ key: "1", metaKey: true }), 0);
+  assert.equal(switchToTabIndexFromShortcut({ key: "5", ctrlKey: true }), 4);
+  assert.equal(switchToTabIndexFromShortcut({ key: "9", metaKey: true }), 8);
+  assert.equal(switchToTabIndexFromShortcut({ key: "0", metaKey: true }), null);
+  assert.equal(switchToTabIndexFromShortcut({ key: "1", metaKey: true, altKey: true }), null);
+});
+
+test("matches custom shortcut settings for tab switching", () => {
+  const shortcuts = {
+    switchToPreviousTab: "Alt+ArrowLeft",
+    switchToNextTab: "Alt+ArrowRight",
+    switchToTab3: "Shift+Mod+3",
+  } as any;
+
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", metaKey: true }, shortcuts), false);
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "ArrowLeft", altKey: true }, shortcuts), true);
+  assert.equal(isSwitchToNextTabShortcut({ key: "ArrowRight", altKey: true }, shortcuts), true);
+  assert.equal(switchToTabIndexFromShortcut({ key: "3", metaKey: true }, shortcuts), null);
+  assert.equal(switchToTabIndexFromShortcut({ key: "3", metaKey: true, shiftKey: true }, shortcuts), 2);
 });
 
 test("matches custom shortcut settings for opening a new query", () => {

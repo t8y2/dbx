@@ -58,9 +58,12 @@ import {
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
+  isSwitchToNextTabShortcut,
+  isSwitchToPreviousTabShortcut,
   isToggleSidebarShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  switchToTabIndexFromShortcut,
 } from "@/lib/keyboardShortcuts";
 import { isPreviewTab } from "@/lib/tabPresentation";
 import { supportsSqlFileExecution } from "@/lib/databaseCapabilities";
@@ -1161,10 +1164,37 @@ async function handleQuickOpenSelect(item: any) {
   }
 }
 
+function dispatchBeforeTabSwitch(tabId: string) {
+  if (tabId === queryStore.activeTabId) return;
+  window.dispatchEvent(new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId: queryStore.activeTabId } }));
+}
+
+function activateQueryTab(tabId: string): boolean {
+  if (!queryStore.tabs.some((tab) => tab.id === tabId)) return false;
+  dispatchBeforeTabSwitch(tabId);
+  queryStore.activeTabId = tabId;
+  driverStoreActive.value = false;
+  return true;
+}
+
+function activateTabByIndex(index: number): boolean {
+  const tab = queryStore.tabs[index];
+  return tab ? activateQueryTab(tab.id) : false;
+}
+
+function activateAdjacentTab(direction: -1 | 1): boolean {
+  const count = queryStore.tabs.length;
+  if (count < 2) return false;
+  const currentIndex = queryStore.tabs.findIndex((tab) => tab.id === queryStore.activeTabId);
+  const nextIndex = currentIndex < 0 ? (direction > 0 ? 0 : count - 1) : (currentIndex + direction + count) % count;
+  return activateTabByIndex(nextIndex);
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
+  const switchTabIndex = switchToTabIndexFromShortcut(e, shortcuts);
 
   if (isOpenSettingsShortcut(e, shortcuts)) {
     e.preventDefault();
@@ -1202,6 +1232,27 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     setSidebarOpen(!sidebarOpen.value);
+    return;
+  }
+  if (switchTabIndex != null) {
+    if (activateTabByIndex(switchTabIndex)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+  if (isSwitchToPreviousTabShortcut(e, shortcuts)) {
+    if (activateAdjacentTab(-1)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+  if (isSwitchToNextTabShortcut(e, shortcuts)) {
+    if (activateAdjacentTab(1)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     return;
   }
   if (isCloseTabShortcut(e, shortcuts)) {

@@ -13,6 +13,7 @@ import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/api";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/documentViewerFontStyle";
 import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, defaultDocumentFilterRule, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/documentStoreProvider";
@@ -28,6 +29,7 @@ import "splitpanes/dist/splitpanes.css";
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
+const connectionStore = useConnectionStore();
 
 const props = defineProps<{
   connectionId: string;
@@ -714,7 +716,14 @@ function highlightedJson(json: string): string {
   });
 }
 
-onMounted(load);
+onMounted(async () => {
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
+  load();
+});
 onBeforeUnmount(() => {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   stopDocumentLoadingTimer();

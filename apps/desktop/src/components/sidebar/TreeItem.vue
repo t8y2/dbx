@@ -494,30 +494,38 @@ async function toggle() {
         await connectionStore.loadDatabases(node.connectionId);
       }
     } else if (node.type === "redis-db" && node.connectionId && node.database) {
+      await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:db${node.database}`;
       queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
     } else if (node.type === "mq-tenant" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       queryStore.openMqAdmin(node.connectionId, { tenant: node.mqTenant || node.label });
     } else if (node.type === "nacos-namespace" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       queryStore.openNacosAdmin(node.connectionId, { namespace: node.nacosNamespace || "", namespaceName: node.nacosNamespaceName || node.label });
     } else if (node.type === "etcd-root" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd");
       refreshActiveKvBrowserAfterOpen("etcd", node.connectionId);
     } else if (node.type === "zookeeper-root" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "ZooKeeper"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "zookeeper");
       refreshActiveKvBrowserAfterOpen("zookeeper", node.connectionId);
     } else if (node.type === "user-admin" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       queryStore.openUserAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await connectionStore.loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "elasticsearch-index" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "mongo");
       queryStore.updateSql(tab, node.label);
     } else if (node.type === "vector-collection" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
       const collectionRef = node.id.includes("__vector_collection:") ? node.id.split("__vector_collection:").pop() || node.label : node.label;
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "vector");
       queryStore.updateSql(tab, collectionRef);

@@ -1236,11 +1236,16 @@ onBeforeUnmount(() => {
 
 watch(
   () => [props.connection.id, props.database, props.schema] as const,
-  () => {
+  async () => {
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
     clearTableSelection();
+    try {
+      await connectionStore.ensureConnected(props.connection.id);
+    } catch (e) {
+      console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
+    }
     void reload();
   },
   { immediate: true },

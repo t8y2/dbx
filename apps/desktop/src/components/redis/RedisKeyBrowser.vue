@@ -921,12 +921,29 @@ function onCommandInputKeydown(event: KeyboardEvent) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   resumeRedisBrowserBackgroundWork();
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
   void loadKeys();
 });
 
-onActivated(resumeRedisBrowserBackgroundWork);
+onActivated(async () => {
+  resumeRedisBrowserBackgroundWork();
+  // Ensure the connection is still alive after reactivation (e.g. tab switch).
+  // If keys failed to load previously (empty list), retry loading.
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
+  if (flatKeys.value.length === 0 && !loading.value) {
+    void loadKeys();
+  }
+});
 
 onDeactivated(pauseRedisBrowserBackgroundWork);
 

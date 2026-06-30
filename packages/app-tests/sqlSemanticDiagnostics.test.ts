@@ -50,6 +50,22 @@ test("flags confirmed missing tables", () => {
   assert.equal(diagnostics[0]?.severity, "error");
 });
 
+test("trims whitespace from missing table diagnostic spans", () => {
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "t_00011", span: span(32, 39) }],
+    columns: [],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [],
+    columnsByTable: new Map(),
+    missingTables: new Set(["t_00011"]),
+    sql: "SELECT * FROM demo_2000_tables.t_00011 AS t0",
+  });
+
+  assert.deepEqual(diagnostics[0]?.span, span(32, 38));
+});
+
 test("flags missing columns when column metadata is cached with a schema key", () => {
   const analysis: SqlReferenceAnalysis = {
     tables: [{ name: "t_10001", span: span(24, 32) }],

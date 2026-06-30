@@ -53,7 +53,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   for (const table of tables) {
     if (!schema.missingTables?.has(tableReferenceKey(table))) continue;
     diagnostics.push({
-      span: table.span,
+      span: trimSqlTextSpanWhitespace(schema.sql, table.span),
       message: `Unknown table ${displayTableName(table)}`,
       severity: "error",
     });
@@ -72,13 +72,77 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
 
     const displayName = column.qualifier ? `${column.qualifier}.${column.name}` : column.name;
     diagnostics.push({
-      span: column.span,
+      span: trimSqlTextSpanWhitespace(schema.sql, column.span),
       message: `Unknown column ${displayName}`,
       severity: "error",
     });
   }
 
   return diagnostics;
+}
+
+function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): SqlTextSpan {
+  if (!sql) return span;
+  const range = sqlTextSpanToOffsetRange(sql, span);
+  if (!range) return span;
+
+  let from = range.from;
+  let to = range.to;
+  while (from < to && /\s/.test(sql[from] ?? "")) from += 1;
+  while (to > from && /\s/.test(sql[to - 1] ?? "")) to -= 1;
+  if (from === range.from && to === range.to) return span;
+
+  const start = offsetToSqlTextStartPosition(sql, from);
+  const end = offsetToSqlTextEndPosition(sql, to);
+  if (!start || !end) return span;
+  return {
+    start_line: start.line,
+    start_column: start.column,
+    end_line: end.line,
+    end_column: Math.max(end.column, start.column),
+  };
+}
+
+function sqlTextSpanToOffsetRange(sql: string, span: SqlTextSpan): { from: number; to: number } | null {
+  if (!span.start_line || !span.start_column) return null;
+  const from = sqlTextPositionToOffset(sql, span.start_line, span.start_column - 1);
+  const to = sqlTextPositionToOffset(sql, Math.max(span.end_line, span.start_line), Math.max(span.end_column, span.start_column));
+  if (from == null || to == null || to <= from) return null;
+  return { from, to };
+}
+
+function sqlTextPositionToOffset(sql: string, line: number, column: number): number | null {
+  const lines = sql.split(/\r?\n/);
+  if (line < 1 || line > lines.length) return null;
+  let offset = 0;
+  for (let index = 0; index < line - 1; index += 1) {
+    offset += lines[index].length + 1;
+  }
+  return Math.min(offset + Math.max(column, 0), offset + lines[line - 1].length);
+}
+
+function offsetToSqlTextStartPosition(sql: string, offset: number): { line: number; column: number } | null {
+  const position = offsetToLineColumn(sql, offset);
+  return position ? { line: position.line, column: position.column + 1 } : null;
+}
+
+function offsetToSqlTextEndPosition(sql: string, offset: number): { line: number; column: number } | null {
+  return offsetToLineColumn(sql, offset);
+}
+
+function offsetToLineColumn(sql: string, offset: number): { line: number; column: number } | null {
+  if (offset < 0 || offset > sql.length) return null;
+  const lines = sql.split(/\r?\n/);
+  let remaining = offset;
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineLength = lines[index].length;
+    if (remaining <= lineLength) {
+      return { line: index + 1, column: remaining };
+    }
+    remaining -= lineLength + 1;
+  }
+  const lastLine = lines[lines.length - 1] ?? "";
+  return { line: lines.length, column: lastLine.length };
 }
 
 export function buildSqlParserErrorDiagnostic(error: unknown, sql: string): SqlSemanticDiagnostic | null {

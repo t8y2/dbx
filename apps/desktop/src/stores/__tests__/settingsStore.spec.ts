@@ -10,12 +10,20 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ autoAliasTables: false }).autoAliasTables).toBe(false);
   });
 
-  it("enables SQL semantic diagnostics by default", () => {
-    expect(normalizeEditorSettings({}).sqlSemanticDiagnosticsEnabled).toBe(true);
+  it("keeps SQL semantic diagnostics in auto mode and disabled by default", () => {
+    const settings = normalizeEditorSettings({});
+    expect(settings.sqlSemanticDiagnosticsMode).toBe("auto");
+    expect(settings.sqlSemanticDiagnosticsEnabled).toBe(false);
   });
 
-  it("preserves disabled SQL semantic diagnostics", () => {
-    expect(normalizeEditorSettings({ sqlSemanticDiagnosticsEnabled: false }).sqlSemanticDiagnosticsEnabled).toBe(false);
+  it("preserves explicit SQL semantic diagnostics modes", () => {
+    expect(normalizeEditorSettings({ sqlSemanticDiagnosticsMode: "enabled" }).sqlSemanticDiagnosticsEnabled).toBe(true);
+    expect(normalizeEditorSettings({ sqlSemanticDiagnosticsMode: "disabled" }).sqlSemanticDiagnosticsEnabled).toBe(false);
+  });
+
+  it("migrates legacy SQL semantic diagnostics booleans to explicit modes", () => {
+    expect(normalizeEditorSettings({ sqlSemanticDiagnosticsEnabled: true } as any).sqlSemanticDiagnosticsMode).toBe("enabled");
+    expect(normalizeEditorSettings({ sqlSemanticDiagnosticsEnabled: false } as any).sqlSemanticDiagnosticsMode).toBe("disabled");
   });
 
   it("defaults update downloads to the official source", () => {

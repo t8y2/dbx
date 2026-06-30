@@ -59,8 +59,10 @@ export type DesktopIconTheme = "default" | "black";
 export type InterfaceLayout = "separated" | "classic";
 
 export type UpdateDownloadSource = "official" | "cnb";
+export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 
 export const DEFAULT_SIDEBAR_TABLE_PAGE_SIZE = 1000;
+const SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED = false;
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
@@ -330,6 +332,7 @@ export interface EditorSettings {
   showExecutionTargetPicker: boolean;
   autoAliasTables: boolean;
   wordWrap: boolean;
+  sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
   sqlSemanticDiagnosticsEnabled: boolean;
   confirmDangerousSqlExecution: boolean;
   compactTabTitle: boolean;
@@ -437,7 +440,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showExecutionTargetPicker: false,
   autoAliasTables: true,
   wordWrap: false,
-  sqlSemanticDiagnosticsEnabled: true,
+  sqlSemanticDiagnosticsMode: "auto",
+  sqlSemanticDiagnosticsEnabled: SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED,
   confirmDangerousSqlExecution: true,
   compactTabTitle: false,
   appLayout: "classic",
@@ -516,6 +520,18 @@ function normalizeUpdateDownloadSource(value: unknown): UpdateDownloadSource {
   return value === "cnb" ? "cnb" : DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
 }
 
+function normalizeSqlSemanticDiagnosticsMode(value: unknown, legacyEnabled?: unknown): SqlSemanticDiagnosticsMode {
+  if (value === "auto" || value === "enabled" || value === "disabled") return value;
+  if (typeof legacyEnabled === "boolean") return legacyEnabled ? "enabled" : "disabled";
+  return DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+}
+
+function sqlSemanticDiagnosticsEnabledForMode(mode: SqlSemanticDiagnosticsMode): boolean {
+  if (mode === "enabled") return true;
+  if (mode === "disabled") return false;
+  return SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED;
+}
+
 function normalizeDisconnectTabHandlingMode(value: unknown, legacyCloseTabsOnDisconnect?: unknown): DisconnectTabHandlingMode {
   if (DISCONNECT_TAB_HANDLING_MODES.includes(value as DisconnectTabHandlingMode)) {
     return value as DisconnectTabHandlingMode;
@@ -584,6 +600,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
 }
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
+  const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   return {
     fontFamily: settings.fontFamily ?? DEFAULT_EDITOR_SETTINGS.fontFamily,
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -620,7 +637,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
-    sqlSemanticDiagnosticsEnabled: settings.sqlSemanticDiagnosticsEnabled ?? DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled,
+    sqlSemanticDiagnosticsMode,
+    sqlSemanticDiagnosticsEnabled: sqlSemanticDiagnosticsEnabledForMode(sqlSemanticDiagnosticsMode),
     confirmDangerousSqlExecution: settings.confirmDangerousSqlExecution ?? DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
@@ -794,7 +812,11 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showExecutionTargetPicker !== undefined) editorSettings.value.showExecutionTargetPicker = partial.showExecutionTargetPicker;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
-    if (partial.sqlSemanticDiagnosticsEnabled !== undefined) editorSettings.value.sqlSemanticDiagnosticsEnabled = partial.sqlSemanticDiagnosticsEnabled;
+    if (partial.sqlSemanticDiagnosticsMode !== undefined || partial.sqlSemanticDiagnosticsEnabled !== undefined) {
+      const nextMode = normalizeSqlSemanticDiagnosticsMode(partial.sqlSemanticDiagnosticsMode, partial.sqlSemanticDiagnosticsEnabled);
+      editorSettings.value.sqlSemanticDiagnosticsMode = nextMode;
+      editorSettings.value.sqlSemanticDiagnosticsEnabled = sqlSemanticDiagnosticsEnabledForMode(nextMode);
+    }
     if (partial.confirmDangerousSqlExecution !== undefined) editorSettings.value.confirmDangerousSqlExecution = partial.confirmDangerousSqlExecution;
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;

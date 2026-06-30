@@ -606,6 +606,8 @@ export default {
     renderModeHint: "Switch between Canvas rendering and the DOM fallback grid.",
     tableFontSize: "Table font size",
     filter: "Filter",
+    conditionHistoryEmpty: "No history yet",
+    conditionHistoryNoMatches: "No matching history",
     filterBuilder: "Filters",
     filterBuilderTitle: "Filters",
     filterBuilderHint: "Build point-and-click conditions and combine them with the WHERE input.",

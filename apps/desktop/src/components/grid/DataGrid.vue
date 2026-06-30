@@ -482,6 +482,7 @@ const suggestionLeft = ref(0);
 
 const whereSuggestions = ref<ConditionSuggestion[]>([]);
 const whereSuggestionIndex = ref(-1);
+const whereHistoryMenuOpen = ref(false);
 const whereFilterInputRef = ref<HTMLInputElement>();
 const whereMeasureRef = ref<HTMLSpanElement>();
 const whereSuggestionLeft = ref(0);
@@ -489,6 +490,7 @@ const whereSuggestionPosition = ref({ left: 0, top: 0 });
 
 const orderBySuggestions = ref<ConditionSuggestion[]>([]);
 const orderBySuggestionIndex = ref(-1);
+const orderByHistoryMenuOpen = ref(false);
 const orderByInputRef = ref<HTMLInputElement>();
 const orderByMeasureRef = ref<HTMLSpanElement>();
 const orderBySuggestionLeft = ref(0);
@@ -522,11 +524,15 @@ const whereSuggestionStyle = computed(() => ({
   left: `${whereSuggestionPosition.value.left}px`,
   top: `${whereSuggestionPosition.value.top}px`,
 }));
+const showWhereSuggestionDropdown = computed(() => whereSuggestions.value.length > 0 || whereHistoryMenuOpen.value);
+const whereHistoryEmptyText = computed(() => (whereFilterInput.value.trim() ? t("grid.conditionHistoryNoMatches") : t("grid.conditionHistoryEmpty")));
 
 const orderBySuggestionStyle = computed(() => ({
   left: `${orderBySuggestionPosition.value.left}px`,
   top: `${orderBySuggestionPosition.value.top}px`,
 }));
+const showOrderBySuggestionDropdown = computed(() => orderBySuggestions.value.length > 0 || orderByHistoryMenuOpen.value);
+const orderByHistoryEmptyText = computed(() => (orderByInput.value.trim() ? t("grid.conditionHistoryNoMatches") : t("grid.conditionHistoryEmpty")));
 
 type LocalFilterMode = "local" | "server";
 type LocalFilterOption = {
@@ -1536,6 +1542,7 @@ function acceptWhereSuggestion() {
     whereFilterInput.value = sug.value;
     whereSuggestions.value = [];
     whereSuggestionIndex.value = -1;
+    whereHistoryMenuOpen.value = false;
     whereFilterInputRef.value?.focus();
     return;
   }
@@ -1547,12 +1554,14 @@ function acceptWhereSuggestion() {
   }
   whereSuggestions.value = [];
   whereSuggestionIndex.value = -1;
+  whereHistoryMenuOpen.value = false;
   whereFilterInputRef.value?.focus();
 }
 
 function dismissWhereSuggestions() {
   whereSuggestions.value = [];
   whereSuggestionIndex.value = -1;
+  whereHistoryMenuOpen.value = false;
 }
 
 function navigateWhereSuggestion(delta: number) {
@@ -1568,7 +1577,13 @@ function showWhereHistorySuggestions() {
   const history = loadDataGridConditionHistory("where", conditionHistoryScope.value, whereFilterInput.value);
   whereSuggestions.value = history.map((value) => ({ value, kind: "history" }));
   whereSuggestionIndex.value = -1;
-  if (whereSuggestions.value.length) updateWhereSuggestionPosition();
+  updateWhereSuggestionPosition();
+}
+
+function openWhereHistoryMenu() {
+  whereHistoryMenuOpen.value = true;
+  showWhereHistorySuggestions();
+  whereFilterInputRef.value?.focus();
 }
 
 function deleteWhereHistorySuggestion(value: string) {
@@ -1577,6 +1592,8 @@ function deleteWhereHistorySuggestion(value: string) {
   const filtered = query.trim() ? loadDataGridConditionHistory("where", conditionHistoryScope.value, query) : history;
   whereSuggestions.value = filtered.map((item) => ({ value: item, kind: "history" }));
   whereSuggestionIndex.value = whereSuggestions.value.length ? Math.min(whereSuggestionIndex.value, whereSuggestions.value.length - 1) : -1;
+  whereHistoryMenuOpen.value = true;
+  updateWhereSuggestionPosition();
 }
 
 function onWhereFilterInput(event: Event) {
@@ -1612,6 +1629,7 @@ watch(whereFilterInput, (val) => {
   persistStructuredFilterState();
   previousWhereFilterInputValue = val;
   whereSuggestions.value = [];
+  whereHistoryMenuOpen.value = false;
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
   if (trimmed.length === 0) {
@@ -1717,6 +1735,7 @@ function acceptOrderBySuggestion() {
     orderByInput.value = sug.value;
     orderBySuggestions.value = [];
     orderBySuggestionIndex.value = -1;
+    orderByHistoryMenuOpen.value = false;
     orderByInputRef.value?.focus();
     return;
   }
@@ -1728,12 +1747,14 @@ function acceptOrderBySuggestion() {
   }
   orderBySuggestions.value = [];
   orderBySuggestionIndex.value = -1;
+  orderByHistoryMenuOpen.value = false;
   orderByInputRef.value?.focus();
 }
 
 function dismissOrderBySuggestions() {
   orderBySuggestions.value = [];
   orderBySuggestionIndex.value = -1;
+  orderByHistoryMenuOpen.value = false;
 }
 
 function navigateOrderBySuggestion(delta: number) {
@@ -1749,7 +1770,13 @@ function showOrderByHistorySuggestions() {
   const history = loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByInput.value);
   orderBySuggestions.value = history.map((value) => ({ value, kind: "history" }));
   orderBySuggestionIndex.value = -1;
-  if (orderBySuggestions.value.length) updateOrderBySuggestionPosition();
+  updateOrderBySuggestionPosition();
+}
+
+function openOrderByHistoryMenu() {
+  orderByHistoryMenuOpen.value = true;
+  showOrderByHistorySuggestions();
+  orderByInputRef.value?.focus();
 }
 
 function deleteOrderByHistorySuggestion(value: string) {
@@ -1758,11 +1785,14 @@ function deleteOrderByHistorySuggestion(value: string) {
   const filtered = query.trim() ? loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, query) : history;
   orderBySuggestions.value = filtered.map((item) => ({ value: item, kind: "history" }));
   orderBySuggestionIndex.value = orderBySuggestions.value.length ? Math.min(orderBySuggestionIndex.value, orderBySuggestions.value.length - 1) : -1;
+  orderByHistoryMenuOpen.value = true;
+  updateOrderBySuggestionPosition();
 }
 
 watch(orderByInput, (val) => {
   emit("update:orderByInput", val);
   orderBySuggestions.value = [];
+  orderByHistoryMenuOpen.value = false;
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
   if (trimmed.length === 0) {
@@ -7519,13 +7549,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     @click="updateWhereSuggestionPosition"
                     @blur="dismissWhereSuggestions"
                   />
-                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showWhereHistorySuggestions">
+                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openWhereHistoryMenu">
                     <ChevronDown class="w-3 h-3" />
                   </button>
                   <span ref="whereMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- WHERE suggestion dropdown -->
                   <Teleport to="body">
-                    <div v-if="whereSuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
+                    <div v-if="showWhereSuggestionDropdown" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
                       <div
                         v-for="(sug, idx) in whereSuggestions"
                         :key="`${sug.kind}:${sug.value}`"
@@ -7542,6 +7572,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteWhereHistorySuggestion(sug.value)">
                           <X class="h-3 w-3" />
                         </button>
+                      </div>
+                      <div v-if="whereSuggestions.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
+                        {{ whereHistoryEmptyText }}
                       </div>
                     </div>
                   </Teleport>
@@ -7581,13 +7614,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     @click="updateOrderBySuggestionPosition"
                     @blur="dismissOrderBySuggestions"
                   />
-                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showOrderByHistorySuggestions">
+                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openOrderByHistoryMenu">
                     <ChevronDown class="w-3 h-3" />
                   </button>
                   <span ref="orderByMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- ORDER BY suggestion dropdown -->
                   <Teleport to="body">
-                    <div v-if="orderBySuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
+                    <div v-if="showOrderBySuggestionDropdown" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
                       <div
                         v-for="(sug, idx) in orderBySuggestions"
                         :key="`${sug.kind}:${sug.value}`"
@@ -7604,6 +7637,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteOrderByHistorySuggestion(sug.value)">
                           <X class="h-3 w-3" />
                         </button>
+                      </div>
+                      <div v-if="orderBySuggestions.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
+                        {{ orderByHistoryEmptyText }}
                       </div>
                     </div>
                   </Teleport>

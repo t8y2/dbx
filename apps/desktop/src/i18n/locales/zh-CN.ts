@@ -609,6 +609,8 @@ export default withEnglishFallback({
     renderModeHint: "在 Canvas 渲染和 DOM 兜底表格之间切换。",
     tableFontSize: "表格字号",
     filter: "筛选",
+    conditionHistoryEmpty: "暂无历史记录",
+    conditionHistoryNoMatches: "没有匹配的历史记录",
     filterBuilder: "筛选器",
     filterBuilderTitle: "筛选器",
     filterBuilderHint: "点选筛选条件，并与手写 WHERE 一起生效。",

@@ -65,6 +65,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             }
             statements.extend(build_add_column_sql(
                 dialect,
+                options.database_type,
                 &table,
                 column,
                 &position_clause,
@@ -200,6 +201,7 @@ pub(super) fn build_primary_key_sql(
 
 pub(super) fn build_add_column_sql(
     dialect: StructureDialect,
+    database_type: Option<crate::models::connection::DatabaseType>,
     table: &str,
     column: &EditableStructureColumn,
     position_clause: &str,
@@ -210,7 +212,13 @@ pub(super) fn build_add_column_sql(
     let mut statements = if dialect == StructureDialect::Oracle || dialect == StructureDialect::Informix {
         vec![format!("ALTER TABLE {table} ADD ({definition});")]
     } else {
-        let add_keyword = if dialect == StructureDialect::SqlServer { "ADD" } else { "ADD COLUMN" };
+        let add_keyword = if dialect == StructureDialect::SqlServer
+            || database_type == Some(crate::models::connection::DatabaseType::Kingbase)
+        {
+            "ADD"
+        } else {
+            "ADD COLUMN"
+        };
         vec![format!("ALTER TABLE {table} {add_keyword} {definition}{position_clause};")]
     };
     if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle) && !clean(&column.comment).is_empty() {

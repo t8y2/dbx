@@ -803,6 +803,27 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
 }
 
 #[test]
+fn builds_kingbase_add_column_without_column_keyword() {
+    let mut flag = column("flag");
+    flag.data_type = "varchar(100)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Kingbase),
+        schema: Some("dbo".to_string()),
+        table_name: "dw_bill_info_copy".to_string(),
+        columns: vec![flag],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"dbo\".\"dw_bill_info_copy\" ADD \"flag\" varchar(100);"]);
+}
+
+#[test]
 fn builds_mysql_column_reorder_statements() {
     let mut id = column("id");
     id.data_type = "int".to_string();

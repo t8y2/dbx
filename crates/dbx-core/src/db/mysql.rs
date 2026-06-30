@@ -2180,6 +2180,19 @@ async fn execute_result_set_with_text_protocol_on_conn(
     start: Instant,
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    if !advance_to_result_set_with_columns(&mut result).await? {
+        return Ok(QueryResult {
+            columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
+            rows: vec![],
+            affected_rows: result.affected_rows(),
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        });
+    }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> =
         result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
@@ -2238,6 +2251,18 @@ async fn execute_result_set_with_text_protocol_on_conn(
         session_id: None,
         has_more: false,
     })
+}
+
+async fn advance_to_result_set_with_columns(
+    result: &mut mysql_async::QueryResult<'_, '_, mysql_async::TextProtocol>,
+) -> Result<bool, String> {
+    while result.columns_ref().is_empty() {
+        if result.is_empty() {
+            return Ok(false);
+        }
+        let _: Vec<mysql_async::Row> = result.collect().await.map_err(|e| e.to_string())?;
+    }
+    Ok(!result.columns_ref().is_empty())
 }
 
 async fn execute_result_set_with_prepared_protocol_on_conn(
@@ -2502,7 +2527,7 @@ fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
 }
 
 fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
-    starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"])
+    starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"])
         || dialect.supports_admin_show_results && is_admin_show_query(sql)
 }
 
@@ -3011,6 +3036,14 @@ mod tests {
     #[test]
     fn mysql_desc_queries_are_treated_as_result_sets() {
         assert!(is_result_set_query("DESC users", MySqlQueryDialect::default()));
+    }
+
+    #[test]
+    fn mysql_call_queries_are_treated_as_text_result_sets() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_result_set_query("CALL proc_test1()", dialect));
+        assert!(prefers_text_protocol_query("CALL proc_test1()", dialect));
     }
 
     #[test]

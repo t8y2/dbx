@@ -35,6 +35,66 @@ async fn live_mysql_compatible_limited_text_protocol_query_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires a remote MySQL endpoint"]
+async fn live_mysql_call_procedure_returns_select_result_set() {
+    let url = std::env::var("DBX_LIVE_MYSQL_PROCEDURE_URL").expect("DBX_LIVE_MYSQL_PROCEDURE_URL");
+
+    let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(10)).await.unwrap();
+    dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "DROP PROCEDURE IF EXISTS proc_test1",
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        r#"
+CREATE PROCEDURE proc_test1()
+READS SQL DATA
+BEGIN
+    DROP TEMPORARY TABLE IF EXISTS tb_tmp_001;
+    CREATE TEMPORARY TABLE tb_tmp_001(
+        id INT,
+        NAME VARCHAR(32) DEFAULT ''
+    );
+    INSERT INTO tb_tmp_001(id, NAME) VALUES(1, '测试数据001');
+    SELECT * FROM tb_tmp_001;
+END
+"#,
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    let result = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "CALL proc_test1()",
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "DROP PROCEDURE IF EXISTS proc_test1",
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.columns, vec!["id", "NAME"]);
+    assert_eq!(result.rows, vec![vec![serde_json::json!("1"), serde_json::json!("测试数据001")]]);
+}
+
+#[tokio::test]
 #[ignore = "requires a remote OceanBase MySQL-compatible endpoint"]
 async fn live_oceanbase_mysql_setup_applies_query_timeout() {
     let url = std::env::var("DBX_LIVE_OCEANBASE_MYSQL_URL").expect("DBX_LIVE_OCEANBASE_MYSQL_URL");

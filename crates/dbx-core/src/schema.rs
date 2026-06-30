@@ -2,6 +2,7 @@ use crate::connection::{connection_url_for_endpoint, database_connection_config,
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,6 +35,8 @@ macro_rules! try_sqlserver {
         }
     };
 }
+
+const ORACLE_TABLE_COMMENT_BATCH_SIZE: usize = 500;
 
 #[cfg(feature = "duckdb-bundled")]
 pub fn duckdb_query_tables(con: &duckdb::Connection) -> Result<Vec<db::TableInfo>, String> {
@@ -921,6 +924,160 @@ fn oracle_table_comment_from_query_result(result: db::QueryResult) -> Result<Opt
         .filter(|value| !value.trim().is_empty()))
 }
 
+fn oracle_table_comments_sql(schema: &str, table_names: &[String]) -> Option<String> {
+    if table_names.is_empty() {
+        return None;
+    }
+    let names = table_names.iter().map(|name| sql_string(name)).collect::<Vec<_>>().join(", ");
+    Some(format!(
+        "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = {} AND TABLE_NAME IN ({}) AND TABLE_TYPE IN ('TABLE', 'VIEW') AND COMMENTS IS NOT NULL",
+        oracle_owner_filter(schema),
+        names,
+    ))
+}
+
+fn oracle_table_comments_from_query_result(result: db::QueryResult) -> HashMap<String, String> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = row.first()?.as_str()?.to_string();
+            let comment = row.get(1)?.as_str()?.trim().to_string();
+            (!name.is_empty() && !comment.is_empty()).then_some((name, comment))
+        })
+        .collect()
+}
+
+fn comment_is_blank(comment: &Option<String>) -> bool {
+    comment.as_deref().map(str::trim).unwrap_or("").is_empty()
+}
+
+fn oracle_table_info_can_have_comment(table: &db::TableInfo) -> bool {
+    oracle_type_is_table_or_view(&table.table_type)
+}
+
+fn oracle_object_info_can_have_table_comment(object: &db::ObjectInfo) -> bool {
+    oracle_type_is_table_or_view(&object.object_type)
+}
+
+fn oracle_type_is_table_or_view(value: &str) -> bool {
+    let normalized = value.to_ascii_uppercase().replace(' ', "_").replace('-', "_");
+    matches!(normalized.as_str(), "TABLE" | "BASE_TABLE" | "VIEW")
+}
+
+fn oracle_missing_table_comment_names(tables: &[db::TableInfo]) -> Vec<String> {
+    unique_oracle_comment_names(
+        tables
+            .iter()
+            .filter(|table| oracle_table_info_can_have_comment(table) && comment_is_blank(&table.comment))
+            .map(|table| table.name.as_str()),
+    )
+}
+
+fn oracle_missing_object_table_comment_names(objects: &[db::ObjectInfo]) -> Vec<String> {
+    unique_oracle_comment_names(
+        objects
+            .iter()
+            .filter(|object| oracle_object_info_can_have_table_comment(object) && comment_is_blank(&object.comment))
+            .map(|object| object.name.as_str()),
+    )
+}
+
+fn unique_oracle_comment_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        unique.push(name.to_string());
+    }
+    unique
+}
+
+fn apply_oracle_table_comments(tables: &mut [db::TableInfo], comments: &HashMap<String, String>) {
+    for table in tables {
+        if !comment_is_blank(&table.comment) {
+            continue;
+        }
+        if let Some(comment) = comments.get(&table.name) {
+            table.comment = Some(comment.clone());
+        }
+    }
+}
+
+fn apply_oracle_object_table_comments(objects: &mut [db::ObjectInfo], comments: &HashMap<String, String>) {
+    for object in objects {
+        if !comment_is_blank(&object.comment) {
+            continue;
+        }
+        if let Some(comment) = comments.get(&object.name) {
+            object.comment = Some(comment.clone());
+        }
+    }
+}
+
+async fn oracle_table_comments_for_names(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    schema: &str,
+    table_names: &[String],
+    timeout_duration: Option<Duration>,
+) -> Result<HashMap<String, String>, String> {
+    let mut comments = HashMap::new();
+    for chunk in table_names.chunks(ORACLE_TABLE_COMMENT_BATCH_SIZE) {
+        let Some(sql) = oracle_table_comments_sql(schema, chunk) else {
+            continue;
+        };
+        let result = client
+            .execute_query_with_timeout::<db::QueryResult>(
+                agent_execute_query_params(
+                    &sql,
+                    if database.is_empty() { None } else { Some(database) },
+                    if schema.is_empty() { None } else { Some(schema) },
+                    QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+                ),
+                timeout_duration,
+            )
+            .await?;
+        comments.extend(oracle_table_comments_from_query_result(result));
+    }
+    Ok(comments)
+}
+
+async fn load_oracle_table_comments_for_tables(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    schema: &str,
+    tables: &mut [db::TableInfo],
+    timeout_duration: Option<Duration>,
+) -> Result<(), String> {
+    let table_names = oracle_missing_table_comment_names(tables);
+    if table_names.is_empty() {
+        return Ok(());
+    }
+    let comments = oracle_table_comments_for_names(client, database, schema, &table_names, timeout_duration).await?;
+    apply_oracle_table_comments(tables, &comments);
+    Ok(())
+}
+
+async fn load_oracle_table_comments_for_objects(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    schema: &str,
+    objects: &mut [db::ObjectInfo],
+    timeout_duration: Option<Duration>,
+) -> Result<(), String> {
+    let table_names = oracle_missing_object_table_comment_names(objects);
+    if table_names.is_empty() {
+        return Ok(());
+    }
+    let comments = oracle_table_comments_for_names(client, database, schema, &table_names, timeout_duration).await?;
+    apply_oracle_object_table_comments(objects, &comments);
+    Ok(())
+}
+
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -1014,20 +1171,28 @@ async fn list_tables_once(
         }
         try_sqlserver!(connections, &pool_key, list_tables, schema, filter, limit, offset);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+            let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             drop(connections);
             let mut client = client.lock().await;
             match client
-                .list_tables_filtered::<Vec<db::TableInfo>>(
-                    database,
-                    schema,
-                    object_types,
-                    agent_metadata_timeout(db_config.as_ref()),
-                )
+                .list_tables_filtered::<Vec<db::TableInfo>>(database, schema, object_types, timeout_duration)
                 .await
             {
                 Ok(tables) if !tables.is_empty() => {
-                    return Ok(filter_table_infos(tables, filter, limit, offset, object_types))
+                    let mut tables = filter_table_infos(tables, filter, limit, offset, object_types);
+                    if is_oracle {
+                        load_oracle_table_comments_for_tables(
+                            &mut client,
+                            database,
+                            schema,
+                            &mut tables,
+                            timeout_duration,
+                        )
+                        .await?;
+                    }
+                    return Ok(tables);
                 }
                 Ok(tables) => {
                     if let Some(config) = fallback_config.as_ref() {
@@ -1323,8 +1488,9 @@ mod tests {
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
         filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
         is_retryable_metadata_error, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, presto_like_information_schema_tables_sql,
-        presto_like_tables_from_query_result, visible_schema_filter,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
+        oracle_table_comments_sql, presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        visible_schema_filter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -1794,6 +1960,113 @@ mod tests {
         };
 
         assert_eq!(oracle_table_comment_from_query_result(empty).unwrap(), None);
+    }
+
+    #[test]
+    fn oracle_table_comments_sql_targets_current_page_tables() {
+        let sql = oracle_table_comments_sql("dbx_test", &["ORDERS".to_string(), "USER'S".to_string()]).unwrap();
+
+        assert!(sql.contains("ALL_TAB_COMMENTS"));
+        assert!(sql.contains("OWNER = 'DBX_TEST'"));
+        assert!(sql.contains("TABLE_NAME IN ('ORDERS', 'USER''S')"));
+        assert!(sql.contains("TABLE_TYPE IN ('TABLE', 'VIEW')"));
+        assert!(sql.contains("COMMENTS IS NOT NULL"));
+        assert_eq!(oracle_table_comments_sql("DBX_TEST", &[]), None);
+    }
+
+    #[test]
+    fn oracle_table_comments_from_query_result_maps_non_blank_comments() {
+        let result = db::QueryResult {
+            columns: vec!["TABLE_NAME".to_string(), "COMMENTS".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows: vec![
+                vec![serde_json::json!("ORDERS"), serde_json::json!("Orders table")],
+                vec![serde_json::json!("PRODUCTS"), serde_json::json!(" ")],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+
+        let comments = oracle_table_comments_from_query_result(result);
+        assert_eq!(comments.get("ORDERS").map(String::as_str), Some("Orders table"));
+        assert!(!comments.contains_key("PRODUCTS"));
+    }
+
+    #[test]
+    fn apply_oracle_table_comments_only_fills_missing_table_comments() {
+        let mut tables = vec![
+            super::db::TableInfo {
+                name: "ORDERS".to_string(),
+                table_type: "TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            super::db::TableInfo {
+                name: "PRODUCTS".to_string(),
+                table_type: "TABLE".to_string(),
+                comment: Some("Existing".to_string()),
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let comments = HashMap::from([
+            ("ORDERS".to_string(), "Orders table".to_string()),
+            ("PRODUCTS".to_string(), "Products table".to_string()),
+        ]);
+
+        super::apply_oracle_table_comments(&mut tables, &comments);
+
+        assert_eq!(tables[0].comment.as_deref(), Some("Orders table"));
+        assert_eq!(tables[1].comment.as_deref(), Some("Existing"));
+    }
+
+    #[test]
+    fn oracle_missing_object_table_comment_names_only_includes_tables_and_views() {
+        let objects = vec![
+            super::db::ObjectInfo {
+                name: "ORDERS".to_string(),
+                object_type: "TABLE".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                signature: None,
+                comment: None,
+                created_at: None,
+                updated_at: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            super::db::ObjectInfo {
+                name: "ORDERS_VIEW".to_string(),
+                object_type: "VIEW".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                signature: None,
+                comment: None,
+                created_at: None,
+                updated_at: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            super::db::ObjectInfo {
+                name: "REFRESH_ORDERS".to_string(),
+                object_type: "PROCEDURE".to_string(),
+                schema: Some("DBX_TEST".to_string()),
+                signature: None,
+                comment: None,
+                created_at: None,
+                updated_at: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+
+        assert_eq!(
+            super::oracle_missing_object_table_comment_names(&objects),
+            vec!["ORDERS".to_string(), "ORDERS_VIEW".to_string()]
+        );
     }
 }
 
@@ -3401,7 +3674,7 @@ async fn oracle_agent_list_objects(
     );
     let mut client = client.lock().await;
     let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;
-    Ok(result
+    let mut objects: Vec<db::ObjectInfo> = result
         .rows
         .into_iter()
         .filter_map(|row| {
@@ -3420,7 +3693,9 @@ async fn oracle_agent_list_objects(
                 parent_name: None,
             })
         })
-        .collect())
+        .collect();
+    load_oracle_table_comments_for_objects(&mut client, database, schema, &mut objects, timeout_duration).await?;
+    Ok(objects)
 }
 
 async fn oracle_agent_object_source(

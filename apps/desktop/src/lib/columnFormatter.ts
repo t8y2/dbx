@@ -1,14 +1,18 @@
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
 import dayjs, { Dayjs } from "dayjs";
+import customParseFormat from "dayjs/plugin/customParseFormat";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
 
+dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
 export type DateTimeFormatterUnit = "seconds" | "milliseconds" | "auto";
 const DEFAULT_DATETIME_PATTERN = "YYYY-MM-DD HH:mm:ss";
-export const DateTimePatterns = ["HH:mm:ss", "HH:mm:ss.SSS", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ssZ[Z]", "YYYY-MM-DDTHH:mm:ss.SSSZ[Z]", "YYYY/MM/DDTHH:mm:ssZ[Z]", "YYYY/MM/DDTHH:mm:ss.SSSZ[Z]"];
+export const DateTimePatterns = ["HH:mm:ss", "HH:mm:ss.SSS", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ssZ", "YYYY-MM-DDTHH:mm:ss.SSSZ", "YYYY/MM/DDTHH:mm:ssZ", "YYYY/MM/DDTHH:mm:ss.SSSZ"];
+const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = ["YYYY-MM-DD", "YYYY/MM/DD", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ss", "YYYY-MM-DDTHH:mm:ss.SSS", "YYYY/MM/DDTHH:mm:ss", "YYYY/MM/DDTHH:mm:ss.SSS"];
+const ISO_OFFSET_DATETIME_PATTERN = /^(\d{4})([-/])(\d{2})\2(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -39,7 +43,7 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
       ? {
           kind: "datetime",
           unit: config.unit,
-          pattern: (config.pattern as string) || "YYYY-MM-DD HH:mm:ss",
+          pattern: normalizeDateTimePattern(config.pattern),
         }
       : undefined;
   }
@@ -118,8 +122,9 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
       const parsedTimestamp = dayjs(timestamp);
       return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
     }
-    const parsedDate = dayjs(trimmed);
-    return parsedDate.isValid() ? parsedDate : undefined;
+    if (isIntegerString(trimmed)) return undefined;
+
+    return parseStrictDateTimeString(trimmed);
   }
 
   const timestamp = parseTimestampMilliseconds(value, unit);
@@ -127,6 +132,59 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
 
   const parsedTimestamp = dayjs(timestamp);
   return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
+}
+
+function normalizeDateTimePattern(pattern: unknown): string {
+  return typeof pattern === "string" && pattern.trim() ? pattern : DEFAULT_DATETIME_PATTERN;
+}
+
+function parseStrictDateTimeString(value: string): Dayjs | undefined {
+  const parsedIsoOffset = parseIsoOffsetDateTimeString(value);
+  if (parsedIsoOffset) return parsedIsoOffset;
+
+  for (const pattern of STRICT_LOCAL_DATETIME_INPUT_PATTERNS) {
+    // Day.js non-strict parsing normalizes overflow dates such as 2022-01-33.
+    // Keep cell text strict so invalid values fall back unchanged.
+    const parsed = dayjs(value, pattern, true);
+    if (parsed.isValid()) return parsed;
+  }
+  return undefined;
+}
+
+function parseIsoOffsetDateTimeString(value: string): Dayjs | undefined {
+  const match = value.match(ISO_OFFSET_DATETIME_PATTERN);
+  if (!match) return undefined;
+
+  const [, yearText, , monthText, dayText, hourText, minuteText, secondText, fractionText = "", zoneText] = match;
+  if (!isValidDateTimeParts(yearText, monthText, dayText, hourText, minuteText, secondText)) return undefined;
+  if (!isValidOffset(zoneText)) return undefined;
+
+  const normalized = `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}${fractionText}${zoneText}`;
+  const parsed = dayjs(normalized);
+  return parsed.isValid() ? parsed : undefined;
+}
+
+function isValidDateTimeParts(yearText: string, monthText: string, dayText: string, hourText: string, minuteText: string, secondText: string): boolean {
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (!Number.isInteger(year) || year < 1) return false;
+  if (!Number.isInteger(month) || month < 1 || month > 12) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (!Number.isInteger(day) || day < 1 || day > daysInMonth) return false;
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59;
+}
+
+function isValidOffset(offset: string): boolean {
+  if (offset === "Z") return true;
+  const match = offset.match(/^([+-])(\d{2}):(\d{2})$/);
+  if (!match) return false;
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
 }
 
 function parseTimestampMilliseconds(value: string | number, unit: DateTimeFormatterUnit): number | undefined {
@@ -159,13 +217,17 @@ function isAutoTimestampValue(originalValue: string | number, numericValue: numb
 function getTimestampDigits(value: string | number): number | undefined {
   if (typeof value === "string") {
     const trimmed = value.trim();
-    if (!/^-?\d+$/.test(trimmed)) return undefined;
+    if (!isIntegerString(trimmed)) return undefined;
     return trimmed.startsWith("-") ? trimmed.length - 1 : trimmed.length;
   } else if (!Number.isInteger(value)) {
     return undefined;
   } else {
     return Math.abs(value).toString().length;
   }
+}
+
+function isIntegerString(value: string): boolean {
+  return /^-?\d+$/.test(value);
 }
 
 function formatJsonPath(value: CellValue, path: string): string {

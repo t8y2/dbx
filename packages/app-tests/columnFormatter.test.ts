@@ -4,10 +4,11 @@ import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, 
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
 import dayjs from "dayjs";
+
 test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
-  dayjs.extend(utc)
-  dayjs.extend(timezone)
-  assert.equal(dayjs.tz.guess(), "Asia/Shanghai")
+  dayjs.extend(utc);
+  dayjs.extend(timezone);
+  assert.equal(dayjs.tz.guess(), "Asia/Shanghai");
   assert.equal(applyColumnFormatter(1715758200, { kind: "datetime", unit: "seconds", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
   assert.equal(applyColumnFormatter(1715758200001, { kind: "datetime", unit: "milliseconds", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ" }), "2024-05-15 15:30:00.001+08:00");
   assert.equal(applyColumnFormatter(1715758200001, { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss.SSSZ" }), "2024-05-15 15:30:00.001+08:00");
@@ -17,12 +18,13 @@ test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
 });
 
 test("does not treat compact date strings as unix timestamps", () => {
-  dayjs.extend(utc)
-  dayjs.extend(timezone)
-  assert.equal(dayjs.tz.guess(), "Asia/Shanghai")
+  dayjs.extend(utc);
+  dayjs.extend(timezone);
+  assert.equal(dayjs.tz.guess(), "Asia/Shanghai");
   assert.equal(applyColumnFormatter("20260514", { kind: "datetime", unit: "auto", pattern: "YYYYMMDD" }), "20260514");
+  assert.equal(applyColumnFormatter("20260514", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss" }), "20260514");
   assert.equal(applyColumnFormatter(20260514, { kind: "datetime", unit: "auto", pattern: "YYYYMMDD" }), "20260514");
-  assert.equal(applyColumnFormatter("2026-05-14T16:00:00Z", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DDTHH:mm:ssZ[Z]" }), "2026-05-15T00:00:00+08:00Z");
+  assert.equal(applyColumnFormatter("2026-05-14T16:00:00Z", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DDTHH:mm:ssZ" }), "2026-05-15T00:00:00+08:00");
   assert.equal(applyColumnFormatter("2026-05-14", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD" }), "2026-05-14");
 });
 
@@ -42,8 +44,10 @@ test("masks strings while preserving prefix and suffix", () => {
 test("falls back to normal display for nulls and invalid formatter input", () => {
   assert.equal(applyColumnFormatter(null, { kind: "datetime", unit: "auto", pattern: "YYYYMMDD" }), "NULL");
   assert.equal(applyColumnFormatter("abc", { kind: "datetime", unit: "auto", pattern: "YYYYMMDD" }), "abc");
+  assert.equal(applyColumnFormatter("2022-01-33", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD" }), "2022-01-33");
   assert.equal(applyColumnFormatter("not json", { kind: "json-path", path: "$.a" }), "not json");
   assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: "invalid" }), undefined);
+  assert.deepEqual(normalizeColumnFormatter({ kind: "datetime", unit: "auto", pattern: 123 }), { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss" });
 });
 
 test("normalizes only supported formatter configs", () => {

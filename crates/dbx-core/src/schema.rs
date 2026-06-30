@@ -954,6 +954,118 @@ fn oracle_table_comments_from_query_result(result: db::QueryResult) -> HashMap<S
         .collect()
 }
 
+fn oracle_object_statistics_sql(schema: &str) -> String {
+    oracle_object_statistics_owner_segments_sql(schema, "ALL_SEGMENTS")
+}
+
+fn oracle_object_statistics_dba_segments_sql(schema: &str) -> String {
+    oracle_object_statistics_owner_segments_sql(schema, "DBA_SEGMENTS")
+}
+
+fn oracle_object_statistics_owner_segments_sql(schema: &str, segment_view: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         LEFT JOIN ( \
+           SELECT owner, table_name, SUM(bytes) AS BYTES \
+           FROM ( \
+             SELECT s.OWNER, s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
+             FROM {segment_view} s \
+             WHERE s.OWNER = {} AND s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
+             UNION ALL \
+             SELECT i.TABLE_OWNER AS OWNER, i.TABLE_NAME, s.BYTES \
+             FROM ALL_INDEXES i \
+             JOIN {segment_view} s ON s.OWNER = i.OWNER AND s.SEGMENT_NAME = i.INDEX_NAME \
+             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
+             UNION ALL \
+             SELECT l.OWNER, l.TABLE_NAME, s.BYTES \
+             FROM ALL_LOBS l \
+             JOIN {segment_view} s ON s.OWNER = l.OWNER AND s.SEGMENT_NAME IN (l.SEGMENT_NAME, l.INDEX_NAME) \
+             WHERE l.OWNER = {} AND s.SEGMENT_TYPE IN ('LOBSEGMENT','LOB PARTITION','LOB SUBPARTITION','LOBINDEX') \
+           ) \
+           GROUP BY owner, table_name \
+         ) s ON s.OWNER = t.OWNER AND s.TABLE_NAME = t.TABLE_NAME \
+         WHERE t.OWNER = {} AND t.NESTED = 'NO' \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+    )
+}
+
+fn oracle_object_statistics_user_segments_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         LEFT JOIN ( \
+           SELECT table_name, SUM(bytes) AS BYTES \
+           FROM ( \
+             SELECT s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
+             FROM USER_SEGMENTS s \
+             WHERE s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
+             UNION ALL \
+             SELECT i.TABLE_NAME, s.BYTES \
+             FROM ALL_INDEXES i \
+             JOIN USER_SEGMENTS s ON s.SEGMENT_NAME = i.INDEX_NAME \
+             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
+             UNION ALL \
+             SELECT l.TABLE_NAME, s.BYTES \
+             FROM ALL_LOBS l \
+             JOIN USER_SEGMENTS s ON s.SEGMENT_NAME IN (l.SEGMENT_NAME, l.INDEX_NAME) \
+             WHERE l.OWNER = {} AND s.SEGMENT_TYPE IN ('LOBSEGMENT','LOB PARTITION','LOB SUBPARTITION','LOBINDEX') \
+           ) \
+           GROUP BY table_name \
+         ) s ON s.TABLE_NAME = t.TABLE_NAME \
+         WHERE t.OWNER = {} AND t.OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND t.NESTED = 'NO' \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+    )
+}
+
+fn oracle_object_statistics_rows_only_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, CAST(NULL AS NUMBER) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         WHERE t.OWNER = {} AND t.NESTED = 'NO' \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+    )
+}
+
+fn query_result_cell_i64(row: &[serde_json::Value], index: usize) -> Option<i64> {
+    let value = row.get(index)?;
+    if value.is_null() {
+        return None;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_f64().map(|value| value as i64))
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+}
+
+fn oracle_object_statistics_from_query_result(result: db::QueryResult) -> Vec<db::ObjectStatistics> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            if name.trim().is_empty() {
+                return None;
+            }
+            Some(db::ObjectStatistics {
+                name,
+                schema: query_result_cell_string(&row, 1),
+                estimated_rows: query_result_cell_i64(&row, 2),
+                total_bytes: query_result_cell_i64(&row, 3),
+            })
+        })
+        .collect()
+}
+
 fn comment_is_blank(comment: &Option<String>) -> bool {
     comment.as_deref().map(str::trim).unwrap_or("").is_empty()
 }
@@ -1007,7 +1119,7 @@ fn apply_oracle_table_comments(tables: &mut [db::TableInfo], comments: &HashMap<
         if !comment_is_blank(&table.comment) {
             continue;
         }
-        if let Some(comment) = comments.get(&table.name) {
+        if let Some(comment) = oracle_comment_for_name(comments, &table.name) {
             table.comment = Some(comment.clone());
         }
     }
@@ -1018,10 +1130,16 @@ fn apply_oracle_object_table_comments(objects: &mut [db::ObjectInfo], comments: 
         if !comment_is_blank(&object.comment) {
             continue;
         }
-        if let Some(comment) = comments.get(&object.name) {
+        if let Some(comment) = oracle_comment_for_name(comments, &object.name) {
             object.comment = Some(comment.clone());
         }
     }
+}
+
+fn oracle_comment_for_name<'a>(comments: &'a HashMap<String, String>, name: &str) -> Option<&'a String> {
+    comments
+        .get(name)
+        .or_else(|| comments.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value))
 }
 
 async fn oracle_table_comments_for_names(
@@ -1082,6 +1200,66 @@ async fn load_oracle_table_comments_for_objects(
     let comments = oracle_table_comments_for_names(client, database, schema, &table_names, timeout_duration).await?;
     apply_oracle_object_table_comments(objects, &comments);
     Ok(())
+}
+
+async fn oracle_agent_list_object_statistics(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ObjectStatistics>, String> {
+    let mut client = client.lock().await;
+    let queries = [
+        ("all-segments", oracle_object_statistics_sql(schema), true),
+        ("dba-segments", oracle_object_statistics_dba_segments_sql(schema), true),
+        ("user-segments", oracle_object_statistics_user_segments_sql(schema), false),
+        ("rows-only", oracle_object_statistics_rows_only_sql(schema), true),
+    ];
+    let mut last_error = None;
+    for (source, sql, accept_empty) in queries {
+        match oracle_agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
+            Ok(result) if accept_empty || !result.rows.is_empty() => {
+                return Ok(oracle_object_statistics_from_query_result(result));
+            }
+            Ok(_) => {
+                log::debug!(
+                    "[schema][oracle:list_object_statistics:empty-fallback] schema={} source={}",
+                    schema,
+                    source
+                );
+            }
+            Err(error) => {
+                log::debug!(
+                    "[schema][oracle:list_object_statistics:fallback-failed] schema={} source={} error={}",
+                    schema,
+                    source,
+                    error
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Oracle object statistics are unavailable".to_string()))
+}
+
+async fn oracle_agent_object_statistics_query(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    schema: &str,
+    sql: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    client
+        .execute_query_with_timeout(
+            agent_execute_query_params(
+                sql,
+                if database.is_empty() { None } else { Some(database) },
+                if schema.is_empty() { None } else { Some(schema) },
+                QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
+            ),
+            timeout_duration,
+        )
+        .await
 }
 
 async fn list_tables_once(
@@ -1496,9 +1674,11 @@ mod tests {
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
         filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
         is_retryable_metadata_error, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
-        oracle_table_comments_sql, presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        visible_schema_filter,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
+        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
+        oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, visible_schema_filter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -2005,6 +2185,75 @@ mod tests {
     }
 
     #[test]
+    fn oracle_object_statistics_sql_reads_rows_and_segment_bytes() {
+        let sql = oracle_object_statistics_sql("app's");
+
+        assert!(sql.contains("ALL_TABLES"));
+        assert!(sql.contains("ALL_SEGMENTS"));
+        assert!(sql.contains("ALL_INDEXES"));
+        assert!(sql.contains("ALL_LOBS"));
+        assert!(sql.contains("t.NUM_ROWS"));
+        assert!(sql.contains("OWNER = 'APP''S'"));
+        assert!(sql.contains("t.NESTED = 'NO'"));
+
+        let dba_sql = oracle_object_statistics_dba_segments_sql("app's");
+        assert!(dba_sql.contains("DBA_SEGMENTS"));
+        assert!(!dba_sql.contains("ALL_SEGMENTS"));
+
+        let user_sql = oracle_object_statistics_user_segments_sql("app's");
+        assert!(user_sql.contains("USER_SEGMENTS"));
+        assert!(user_sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"));
+
+        let rows_only_sql = oracle_object_statistics_rows_only_sql("app's");
+        assert!(rows_only_sql.contains("ALL_TABLES"));
+        assert!(rows_only_sql.contains("CAST(NULL AS NUMBER) AS TOTAL_BYTES"));
+        assert!(!rows_only_sql.contains("ALL_SEGMENTS"));
+    }
+
+    #[test]
+    fn oracle_object_statistics_from_query_result_maps_numbers() {
+        let result = db::QueryResult {
+            columns: vec![
+                "TABLE_NAME".to_string(),
+                "OWNER".to_string(),
+                "NUM_ROWS".to_string(),
+                "TOTAL_BYTES".to_string(),
+            ],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows: vec![
+                vec![
+                    serde_json::json!("ORDERS"),
+                    serde_json::json!("APP"),
+                    serde_json::json!("1200"),
+                    serde_json::json!(65536),
+                ],
+                vec![
+                    serde_json::json!("AUDIT_LOG"),
+                    serde_json::json!("APP"),
+                    serde_json::Value::Null,
+                    serde_json::json!("8192"),
+                ],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+
+        let stats = oracle_object_statistics_from_query_result(result);
+
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].name, "ORDERS");
+        assert_eq!(stats[0].schema.as_deref(), Some("APP"));
+        assert_eq!(stats[0].estimated_rows, Some(1200));
+        assert_eq!(stats[0].total_bytes, Some(65536));
+        assert_eq!(stats[1].estimated_rows, None);
+        assert_eq!(stats[1].total_bytes, Some(8192));
+    }
+
+    #[test]
     fn apply_oracle_table_comments_only_fills_missing_table_comments() {
         let mut tables = vec![
             super::db::TableInfo {
@@ -2364,6 +2613,18 @@ async fn list_object_statistics_once(
     let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     try_sqlserver!(connections, &pool_key, list_object_statistics, schema);
+    if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
+            drop(connections);
+            return oracle_agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+    }
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     match pool {
         PoolKind::Mysql(p, mode) => {
@@ -3230,6 +3491,16 @@ pub async fn get_table_ddl_core(
                     }
                 }
             }
+            if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
+                return oracle_agent_table_ddl(
+                    client,
+                    database,
+                    schema,
+                    table,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            }
             let mut client = client.lock().await;
             return client.get_table_ddl(database, schema, table, agent_metadata_timeout(db_config.as_ref())).await;
         }
@@ -3319,6 +3590,10 @@ fn sqlserver_ident(value: &str) -> String {
 
 fn sqlserver_n_string(value: &str) -> String {
     format!("N'{}'", value.replace('\'', "''"))
+}
+
+fn oracle_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn mysql_ident(value: &str) -> String {
@@ -3730,6 +4005,87 @@ async fn oracle_agent_object_source(
     first_string_cell(result)
 }
 
+async fn oracle_agent_table_ddl(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: &str,
+    table: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<String, String> {
+    let mut client = client.lock().await;
+    let ddl = client.get_table_ddl::<String>(database, schema, table, timeout_duration).await?;
+    match append_oracle_table_comment_ddl(&mut client, database, schema, table, &ddl, timeout_duration).await {
+        Ok(ddl) => Ok(ddl),
+        Err(error) => {
+            log::debug!(
+                "[schema][oracle:get_table_ddl:comments-fallback-failed] schema={} table={} error={}",
+                schema,
+                table,
+                error
+            );
+            Ok(ddl)
+        }
+    }
+}
+
+async fn append_oracle_table_comment_ddl(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    schema: &str,
+    table: &str,
+    ddl: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<String, String> {
+    let table_comment =
+        oracle_table_comments_for_names(client, database, schema, &[table.to_string()], timeout_duration)
+            .await?
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(table))
+            .map(|(_, comment)| comment);
+    let columns =
+        client.get_columns::<Vec<db::ColumnInfo>>(database, schema, table, timeout_duration).await.unwrap_or_default();
+    Ok(append_oracle_comments_to_ddl(ddl, schema, table, table_comment.as_deref(), &columns))
+}
+
+fn append_oracle_comments_to_ddl(
+    ddl: &str,
+    schema: &str,
+    table: &str,
+    table_comment: Option<&str>,
+    columns: &[db::ColumnInfo],
+) -> String {
+    let mut result = ddl.trim_end().trim_end_matches(';').to_string();
+    if result.trim().is_empty() {
+        return result;
+    }
+    result.push(';');
+    let existing_ddl_upper = ddl.to_ascii_uppercase();
+
+    let table_ref = if schema.trim().is_empty() {
+        oracle_ident(table)
+    } else {
+        format!("{}.{}", oracle_ident(schema), oracle_ident(table))
+    };
+
+    if !existing_ddl_upper.contains("COMMENT ON TABLE") {
+        if let Some(comment) = table_comment.map(str::trim).filter(|comment| !comment.is_empty()) {
+            result.push_str(&format!("\nCOMMENT ON TABLE {table_ref} IS {};", sql_string(comment)));
+        }
+    }
+    if !existing_ddl_upper.contains("COMMENT ON COLUMN") {
+        for column in columns {
+            if let Some(comment) = column.comment.as_deref().map(str::trim).filter(|comment| !comment.is_empty()) {
+                result.push_str(&format!(
+                    "\nCOMMENT ON COLUMN {table_ref}.{} IS {};",
+                    oracle_ident(&column.name),
+                    sql_string(comment)
+                ));
+            }
+        }
+    }
+    result
+}
+
 async fn postgres_object_source(
     pool: &deadpool_postgres::Pool,
     schema: &str,
@@ -3909,6 +4265,67 @@ mod object_source_tests {
         assert!(sql.contains("'PACKAGE BODY'"));
         assert!(sql.contains("CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'"));
         assert!(sql.contains("owner = 'HR'"));
+    }
+
+    #[test]
+    fn appends_oracle_table_and_column_comments_to_ddl() {
+        let column = db::ColumnInfo {
+            name: "DISPLAY\"NAME".to_string(),
+            data_type: "VARCHAR2(100)".to_string(),
+            is_nullable: true,
+            column_default: None,
+            is_primary_key: false,
+            extra: None,
+            comment: Some("User's display name".to_string()),
+            numeric_precision: None,
+            numeric_scale: None,
+            character_maximum_length: None,
+        };
+        let mut ignored = column.clone();
+        ignored.name = "EMPTY_COMMENT".to_string();
+        ignored.comment = Some(" ".to_string());
+
+        let ddl = append_oracle_comments_to_ddl(
+            "CREATE TABLE \"HR\".\"USERS\" (\n  \"ID\" NUMBER\n);\n",
+            "HR",
+            "USERS",
+            Some("User table"),
+            &[column, ignored],
+        );
+
+        assert!(ddl.contains("CREATE TABLE \"HR\".\"USERS\""));
+        assert!(ddl.contains("COMMENT ON TABLE \"HR\".\"USERS\" IS 'User table';"));
+        assert!(ddl.contains("COMMENT ON COLUMN \"HR\".\"USERS\".\"DISPLAY\"\"NAME\" IS 'User''s display name';"));
+        assert!(!ddl.contains("EMPTY_COMMENT\" IS"));
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_oracle_comment_ddl() {
+        let column = db::ColumnInfo {
+            name: "DISPLAY_NAME".to_string(),
+            data_type: "VARCHAR2(100)".to_string(),
+            is_nullable: true,
+            column_default: None,
+            is_primary_key: false,
+            extra: None,
+            comment: Some("New column comment".to_string()),
+            numeric_precision: None,
+            numeric_scale: None,
+            character_maximum_length: None,
+        };
+
+        let ddl = append_oracle_comments_to_ddl(
+            "CREATE TABLE \"HR\".\"USERS\" (\"ID\" NUMBER);\nCOMMENT ON TABLE \"HR\".\"USERS\" IS 'Existing';\nCOMMENT ON COLUMN \"HR\".\"USERS\".\"ID\" IS 'Existing';",
+            "HR",
+            "USERS",
+            Some("New table comment"),
+            &[column],
+        );
+
+        assert_eq!(ddl.matches("COMMENT ON TABLE").count(), 1);
+        assert_eq!(ddl.matches("COMMENT ON COLUMN").count(), 1);
+        assert!(!ddl.contains("New table comment"));
+        assert!(!ddl.contains("New column comment"));
     }
 }
 

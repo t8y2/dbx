@@ -923,6 +923,17 @@ function setSemanticDiagnostics(next: SqlSemanticDiagnostic[]) {
   reconfigureDiagnostics();
 }
 
+function clearScheduledSemanticDiagnostics() {
+  semanticDiagnosticRunId++;
+  if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
+  semanticDiagnosticTimer = null;
+  pendingSemanticDiagnosticPreserveOutsideRanges = false;
+}
+
+function shouldSkipSqlSemanticDiagnostics() {
+  return props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
+}
+
 function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {
   return left.from < right.to && right.from < left.to;
 }
@@ -1043,6 +1054,10 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     setSemanticDiagnostics(buildRedisSyntaxDiagnostics(sql));
     return;
   }
+  if (shouldSkipSqlSemanticDiagnostics()) {
+    setSemanticDiagnostics([]);
+    return;
+  }
   if (!shouldRunSqlSemanticDiagnostics(sql, currentView.state.selection.main.head, { databaseType: props.databaseType })) {
     scheduleSemanticDiagnostics(1200, { preserveOutsideRanges: options.preserveOutsideRanges });
     return;
@@ -1099,6 +1114,11 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
 
 function scheduleSemanticDiagnostics(delay = 500, options: { preserveOutsideRanges?: boolean } = {}) {
   if (!editorIsActive) return;
+  if (shouldSkipSqlSemanticDiagnostics()) {
+    clearScheduledSemanticDiagnostics();
+    setSemanticDiagnostics([]);
+    return;
+  }
   pendingSemanticDiagnosticPreserveOutsideRanges = !!options.preserveOutsideRanges;
   if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
   semanticDiagnosticTimer = setTimeout(() => {
@@ -2516,14 +2536,25 @@ watch(
   { deep: true },
 );
 
+watch(
+  () => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled,
+  (enabled) => {
+    if (props.databaseType === "redis") return;
+    if (!shouldSkipSqlSemanticDiagnostics() && enabled) {
+      scheduleSemanticDiagnostics(0);
+      return;
+    }
+    clearScheduledSemanticDiagnostics();
+    setSemanticDiagnostics([]);
+  },
+);
+
 function pauseQueryEditorBackgroundWork() {
   flushEditorViewport();
   flushEditorSelection();
   clearTableNavigationHover();
   editorIsActive = false;
-  semanticDiagnosticRunId++;
-  if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
-  semanticDiagnosticTimer = null;
+  clearScheduledSemanticDiagnostics();
   completionEpoch++;
   unregisterTableReferenceDropListener();
 }

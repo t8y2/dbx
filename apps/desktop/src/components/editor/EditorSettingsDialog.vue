@@ -190,6 +190,7 @@ const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
+const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -468,6 +469,7 @@ watch(
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
+      editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
       editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
       editAppLayout.value = settingsStore.editorSettings.appLayout;
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
@@ -532,6 +534,7 @@ function hasChanges(): boolean {
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
+    editSqlSemanticDiagnosticsEnabled.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled ||
     editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -582,6 +585,7 @@ async function persistSettings() {
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
+    sqlSemanticDiagnosticsEnabled: editSqlSemanticDiagnosticsEnabled.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     appLayout: editAppLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
@@ -643,6 +647,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+    editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
@@ -702,6 +707,7 @@ function resetAllDefaults() {
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+  editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
@@ -2005,14 +2011,26 @@ watch(
                 </div>
               </div>
 
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.confirmDangerousSqlExecutionDescription") }}
-                  </p>
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sqlSemanticDiagnosticsEnabledDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-sql-semantic-diagnostics" v-model="editSqlSemanticDiagnosticsEnabled" class="mt-0.5" />
                 </div>
-                <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmDangerousSqlExecutionDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+                </div>
               </div>
 
               <Separator />

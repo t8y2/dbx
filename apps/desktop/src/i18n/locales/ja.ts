@@ -2643,6 +2643,8 @@ export default withEnglishFallback({
     showExecutionTargetPickerDescription: "有効にすると、選択なしで実行するときに現在の文とすべてのSQLを一時的に選べます。",
     wordWrap: "折り返し",
     wordWrapDescription: "長いSQL行をエディタ幅内で折り返します",
+    sqlSemanticDiagnosticsEnabled: "SQLセマンティック診断",
+    sqlSemanticDiagnosticsEnabledDescription: "有効時、エディタは不明なテーブルや列などの意味的な問題を表示します。大きなSQLの解析とメタデータ確認の負荷を減らすには無効にします。",
     confirmDangerousSqlExecution: "危険なSQLの前に確認",
     confirmDangerousSqlExecutionDescription: "無効時、ALTER、DROP、DELETE、TRUNCATEなどの危険なSQLが警告ダイアログなしで実行されます。",
     autoAliasTables: "テーブル別名を自動追加",

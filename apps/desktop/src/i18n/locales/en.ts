@@ -2660,6 +2660,8 @@ export default {
     showExecutionTargetPickerDescription: "When enabled, running without a selection lets you choose between the current statement and all SQL.",
     wordWrap: "Word wrap",
     wordWrapDescription: "Wrap long SQL lines within the editor width",
+    sqlSemanticDiagnosticsEnabled: "SQL semantic diagnostics",
+    sqlSemanticDiagnosticsEnabledDescription: "When enabled, the editor reports semantic issues such as unknown tables and columns. Disable it to reduce parsing and metadata checks for large SQL.",
     confirmDangerousSqlExecution: "Confirm before dangerous SQL",
     confirmDangerousSqlExecutionDescription: "When disabled, ALTER, DROP, DELETE, TRUNCATE, and other dangerous SQL run without the warning dialog.",
     autoAliasTables: "Automatically add table aliases",

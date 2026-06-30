@@ -10,6 +10,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ autoAliasTables: false }).autoAliasTables).toBe(false);
   });
 
+  it("enables SQL semantic diagnostics by default", () => {
+    expect(normalizeEditorSettings({}).sqlSemanticDiagnosticsEnabled).toBe(true);
+  });
+
+  it("preserves disabled SQL semantic diagnostics", () => {
+    expect(normalizeEditorSettings({ sqlSemanticDiagnosticsEnabled: false }).sqlSemanticDiagnosticsEnabled).toBe(false);
+  });
+
   it("defaults update downloads to the official source", () => {
     expect(normalizeEditorSettings({}).updateDownloadSource).toBe("official");
   });

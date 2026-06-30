@@ -83,6 +83,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "informix",
   "bigquery",
   "sundb",
+  "oscar",
   "databend",
 ]);
 

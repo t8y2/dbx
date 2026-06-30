@@ -18,6 +18,10 @@ describe("connectionAttemptTimeout", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "prestosql", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
   });
 
+  it("uses the startup floor for generic JDBC plugin connections", () => {
+    expect(connectionAttemptTimeoutMs({ db_type: "jdbc", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+  });
+
   it("uses the startup floor for ZooKeeper agent connections", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "zookeeper", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
   });

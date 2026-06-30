@@ -1518,6 +1518,36 @@
       }
     },
     {
+      "dbType": "oscar",
+      "label": "神通 OSCAR",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "oscar",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 2003,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "tdengine",
       "label": "TDengine",
       "runtimeMode": "agent",

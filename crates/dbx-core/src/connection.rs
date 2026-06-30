@@ -125,6 +125,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Bigquery
             | DatabaseType::Kylin
             | DatabaseType::Sundb
+            | DatabaseType::Oscar
             | DatabaseType::Tdengine
             | DatabaseType::Xugu
             | DatabaseType::Iotdb

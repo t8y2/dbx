@@ -312,6 +312,7 @@ pub enum DatabaseType {
     Bigquery,
     Kylin,
     Sundb,
+    Oscar,
     Tdengine,
     Xugu,
     Iotdb,
@@ -642,6 +643,7 @@ impl ConnectionConfig {
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Yashandb => Some("yasdb"),
+            DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
             DatabaseType::H2 => Some("test"),
             DatabaseType::Informix => Some("sysmaster"),
@@ -796,6 +798,7 @@ impl ConnectionConfig {
             DatabaseType::Bigquery => format!("bigquery://{host}/{db_part}"),
             DatabaseType::Kylin => format!("kylin://{host}:{port}{db_part}"),
             DatabaseType::Sundb => format!("sundb://{host}:{port}{db_part}"),
+            DatabaseType::Oscar => format!("oscar://{host}:{port}{db_part}"),
             DatabaseType::Tdengine => format!("tdengine://{host}:{port}{db_part}"),
             DatabaseType::Xugu => format!("xugu://{host}:{port}{db_part}"),
             DatabaseType::Iotdb => {
@@ -997,6 +1000,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Sundb => {
                 format!("sundb://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Oscar => {
+                format!("oscar://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Tdengine => {
                 format!("tdengine://{}:{}@{host}:{port}{db_part}", username, password)

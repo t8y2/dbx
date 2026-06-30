@@ -518,6 +518,7 @@ export const useConnectionStore = defineStore("connection", () => {
       bigquery: "BigQuery",
       kylin: "Kylin",
       sundb: "SunDB",
+      oscar: "神通 OSCAR",
       influxdb: "InfluxDB",
     };
 

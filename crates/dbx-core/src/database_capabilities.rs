@@ -24,6 +24,7 @@ pub fn is_single_connection_pool(db_type: &DatabaseType) -> bool {
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
             | DatabaseType::Yashandb
+            | DatabaseType::Oscar
             | DatabaseType::Firebird
             | DatabaseType::Iris
             | DatabaseType::OceanbaseOracle

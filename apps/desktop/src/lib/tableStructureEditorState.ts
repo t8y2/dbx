@@ -276,6 +276,7 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
+  oscar: "oracle",
   gbase: "mysql",
   gaussdb: "postgres",
   kwdb: "postgres",

@@ -51,6 +51,7 @@ export type DatabaseType =
   | "bigquery"
   | "kylin"
   | "sundb"
+  | "oscar"
   | "tdengine"
   | "xugu"
   | "iotdb"

@@ -90,7 +90,9 @@ const assetIcons: Record<string, string> = {
   zookeeper: "zookeeper",
 };
 
-const letterIcons: Record<string, { letter: string; color: string }> = {};
+const letterIcons: Record<string, { letter: string; color: string }> = {
+  oscar: { letter: "O", color: "#2563eb" },
+};
 
 const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);

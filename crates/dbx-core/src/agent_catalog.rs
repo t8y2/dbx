@@ -222,6 +222,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Oscar,
+        key: "oscar",
+        label: "神通 OSCAR",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Yashandb,
         key: "yashandb",
         label: "崖山 YashanDB",

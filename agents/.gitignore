@@ -1,4 +1,4 @@
-*/libs/*.jar
+**/libs/*.jar
 gradle.properties
 build/
 */bin/

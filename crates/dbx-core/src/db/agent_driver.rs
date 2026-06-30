@@ -41,11 +41,11 @@ impl AgentLaunchSpec {
         Self { program: program.into(), args: Vec::new(), working_dir: None }
     }
 
-    pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
+    pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>, max_heap: Option<&str>) -> Self {
         let jar_path = jar_path.as_ref();
         Self {
             program: java_path.into(),
-            args: agent_java_args(&jar_path.to_string_lossy()),
+            args: agent_java_args(&jar_path.to_string_lossy(), max_heap),
             working_dir: jar_path.parent().map(Path::to_path_buf),
         }
     }
@@ -1094,7 +1094,7 @@ pub fn mongo_document_id_params(database: &str, collection: &str, id: &str) -> V
     serde_json::json!({ "database": database, "collection": collection, "id": id })
 }
 
-fn agent_java_args(jar_path: &str) -> Vec<String> {
+fn agent_java_args(jar_path: &str, max_heap: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-Dfile.encoding=UTF-8",
         "-Dsun.stdout.encoding=UTF-8",
@@ -1115,6 +1115,14 @@ fn agent_java_args(jar_path: &str) -> Vec<String> {
     }
 
     args.push("--add-opens=java.sql/java.sql=ALL-UNNAMED".to_string());
+
+    // Cap the JVM heap so a large result set or export inside the agent cannot balloon the
+    // child process to several GB. Invalid/empty values fall back to the conservative default.
+    let heap = max_heap
+        .map(str::trim)
+        .filter(|value| crate::agent_manager::validate_max_heap(value))
+        .unwrap_or(crate::agent_manager::DEFAULT_AGENT_MAX_HEAP);
+    args.push(format!("-Xmx{heap}"));
 
     args.extend(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-jar", jar_path].into_iter().map(str::to_string));
 
@@ -1281,7 +1289,7 @@ mod tests {
 
     #[test]
     fn agent_java_args_include_oracle_network_compatibility_flags() {
-        let args = agent_java_args("/tmp/dbx-agent-oracle.jar");
+        let args = agent_java_args("/tmp/dbx-agent-oracle.jar", None);
 
         assert!(args.iter().any(|arg| arg == "-Doracle.net.disableOob=true"));
         assert!(args.iter().any(|arg| arg == "-Doracle.jdbc.javaNetNio=false"));
@@ -1289,14 +1297,14 @@ mod tests {
 
     #[test]
     fn agent_java_args_open_java_sql_for_legacy_timestamp_serializers() {
-        let args = agent_java_args("/tmp/dbx-agent-dameng.jar");
+        let args = agent_java_args("/tmp/dbx-agent-dameng.jar", None);
 
         assert!(args.iter().any(|arg| arg == "--add-opens=java.sql/java.sql=ALL-UNNAMED"));
     }
 
     #[test]
     fn agent_java_args_disable_ambient_proxy_settings() {
-        let args = agent_java_args("/tmp/dbx-agent-opengauss.jar");
+        let args = agent_java_args("/tmp/dbx-agent-opengauss.jar", None);
 
         assert!(args.iter().any(|arg| arg == "-Djava.net.useSystemProxies=false"));
         assert!(args.iter().any(|arg| arg == "-Dhttp.proxyHost="));
@@ -1306,23 +1314,50 @@ mod tests {
 
     #[test]
     fn agent_java_args_prefer_ipv4_for_kingbase() {
-        let args = agent_java_args("/tmp/dbx/drivers/kingbase/agent.jar");
+        let args = agent_java_args("/tmp/dbx/drivers/kingbase/agent.jar", None);
 
         assert!(args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
     }
 
     #[test]
     fn agent_java_args_prefer_ipv4_for_informix() {
-        let args = agent_java_args("/tmp/dbx/drivers/informix/agent.jar");
+        let args = agent_java_args("/tmp/dbx/drivers/informix/agent.jar", None);
 
         assert!(args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
     }
 
     #[test]
     fn agent_java_args_do_not_prefer_ipv4_for_other_agents() {
-        let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
+        let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar", None);
 
         assert!(!args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
+    }
+
+    #[test]
+    fn agent_java_args_applies_default_max_heap_when_unset() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar", None);
+
+        assert!(args.iter().any(|arg| arg == "-Xmx512m"), "default -Xmx512m must be applied, got {args:?}");
+        // -Xmx must precede -jar so the JVM honors it.
+        let xmx = args.iter().position(|arg| arg == "-Xmx512m");
+        let jar = args.iter().position(|arg| arg == "-jar");
+        assert!(matches!((xmx, jar), (Some(xmx), Some(jar)) if xmx < jar));
+    }
+
+    #[test]
+    fn agent_java_args_respects_custom_max_heap() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar", Some("1g"));
+
+        assert!(args.iter().any(|arg| arg == "-Xmx1g"));
+        assert!(!args.iter().any(|arg| arg == "-Xmx512m"));
+    }
+
+    #[test]
+    fn agent_java_args_falls_back_to_default_for_invalid_heap() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar", Some("abc"));
+
+        assert!(args.iter().any(|arg| arg == "-Xmx512m"), "invalid heap must fall back to default");
+        assert!(!args.iter().any(|arg| arg == "-Xmxabc"));
     }
 
     #[test]
@@ -1365,6 +1400,7 @@ mod tests {
         assert!(message.contains("HiveAgent.connect"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn startup_error_waits_briefly_for_exit_status_and_stderr_tail() {
         let mut child = Command::new("sh")

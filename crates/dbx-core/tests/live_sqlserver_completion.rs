@@ -97,7 +97,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
 

@@ -162,8 +162,9 @@ const queuedDriverInstalls = ref<string[]>([]);
 const reinstallingJre = ref<string | null>(null);
 const refreshing = ref(false);
 const progress = ref<DriverInstallProgress | null>(null);
-const javaRuntimeConfig = ref<JavaRuntimeConfig>({ mode: "managed", custom_java_path: null });
+const javaRuntimeConfig = ref<JavaRuntimeConfig>({ mode: "managed", custom_java_path: null, max_heap: null });
 const customJavaPath = ref("");
+const maxHeapValue = ref("");
 const savingJavaRuntime = ref(false);
 const driverStoreUsage = ref<DriverStoreUsage | null>(null);
 const runtimeSummary = ref<DriverRuntimeSummary | null>(null);
@@ -321,6 +322,7 @@ async function loadJavaRuntimeConfig() {
   const config = await api.getAgentJavaRuntimeConfig();
   javaRuntimeConfig.value = config;
   customJavaPath.value = config.custom_java_path ?? "";
+  maxHeapValue.value = config.max_heap ?? "";
 }
 
 function setJavaRuntimeMode(value: any) {
@@ -335,9 +337,11 @@ async function saveJavaRuntimeConfig() {
     const config = await api.setAgentJavaRuntimeConfig({
       mode: javaRuntimeConfig.value.mode,
       custom_java_path: javaRuntimeConfig.value.mode === "custom" ? customJavaPath.value.trim() || null : null,
+      max_heap: maxHeapValue.value.trim() || null,
     });
     javaRuntimeConfig.value = config;
     customJavaPath.value = config.custom_java_path ?? "";
+    maxHeapValue.value = config.max_heap ?? "";
     toast(t("driverStore.javaRuntimeSaved"));
   } catch (e: any) {
     toast(t("driverStore.javaRuntimeSaveFailed", { error: e }));
@@ -1060,6 +1064,17 @@ watch(driverStoreTab, (tab) => {
                   {{ t("driverStore.choose") }}
                 </Button>
                 <Button class="h-8 shrink-0 rounded-[6px] text-xs" :disabled="savingJavaRuntime || (javaRuntimeConfig.mode === 'custom' && !customJavaPath.trim())" @click="saveJavaRuntimeConfig">
+                  {{ savingJavaRuntime ? t("driverStore.saving") : t("settings.save") }}
+                </Button>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <Label class="shrink-0">{{ t("driverStore.javaMaxHeap") }}</Label>
+                <Input v-model="maxHeapValue" class="h-8 min-w-[120px] text-xs" :placeholder="t('driverStore.javaMaxHeapPlaceholder')" @keydown.enter.prevent="saveJavaRuntimeConfig" />
+                <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {{ t("driverStore.javaMaxHeapHint") }}
+                </span>
+                <Button class="h-8 shrink-0 rounded-[6px] text-xs" :disabled="savingJavaRuntime" @click="saveJavaRuntimeConfig">
                   {{ savingJavaRuntime ? t("driverStore.saving") : t("settings.save") }}
                 </Button>
               </div>

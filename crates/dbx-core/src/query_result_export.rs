@@ -25,6 +25,9 @@ use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 pub const XLSX_MAX_DATA_ROWS: usize = 1_048_575;
+/// Backstop row cap applied to every export format, even when the caller didn't set a row_limit,
+/// so a huge result cannot stream to disk indefinitely. Users can always set a smaller row_limit.
+pub const MAX_EXPORT_ROWS: usize = 1_000_000;
 const XLSX_ROW_LIMIT_ERROR: &str = "XLSX 最多支持 1,048,575 行数据，请改用 CSV 导出完整结果。";
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str = "当前查询暂不支持流式导出，请简化查询或使用受支持的驱动。";
 const AGENT_SESSION_MISSING_ERROR: &str = "查询结果流式导出需要驱动返回结果集会话，但当前驱动未返回 session_id。";
@@ -85,7 +88,8 @@ fn effective_row_limit(format: &str, request: &QueryResultExportRequest) -> Opti
     if format == "xlsx" {
         Some(request.row_limit.map_or(XLSX_MAX_DATA_ROWS, |limit| limit.min(XLSX_MAX_DATA_ROWS)))
     } else {
-        request.row_limit
+        // Backstop: cap exports even when the caller didn't set a row limit.
+        Some(request.row_limit.map_or(MAX_EXPORT_ROWS, |limit| limit.min(MAX_EXPORT_ROWS)))
     }
 }
 
@@ -714,8 +718,9 @@ mod tests {
     }
 
     #[test]
-    fn csv_unlimited_export_has_no_effective_row_limit() {
-        assert_eq!(effective_row_limit("csv", &request("csv", None, None)), None);
+    fn csv_export_without_row_limit_uses_backend_backstop() {
+        // CSV now has a backend backstop row cap so a huge result cannot stream indefinitely.
+        assert_eq!(effective_row_limit("csv", &request("csv", None, None)), Some(MAX_EXPORT_ROWS));
     }
 
     #[test]

@@ -28,6 +28,12 @@ use crate::sql::{split_sql_batches, split_sql_statements};
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
+/// Hard byte cap applied to every interactive query result as a final safety net, on top of the
+/// row limit. Catches large BLOB/TEXT rows that `MAX_ROWS` (row count only) would miss. 64 MiB.
+pub const MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
+/// Upper bound for an explicit query timeout. `Some(0)` (disable) is rejected and `None` uses
+/// the default, so a query can never hang forever under worst-case loads.
+const MAX_QUERY_TIMEOUT_SECS: u64 = 3600;
 #[cfg(feature = "duckdb-bundled")]
 const DUCKDB_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -626,6 +632,63 @@ pub fn truncate_result_with_max_rows(mut result: db::QueryResult, max_rows: Opti
     result
 }
 
+/// Fast per-cell byte estimate for the result-set byte cap. Reads lengths without allocating for
+/// common scalars; objects/arrays (rare in cells) fall back to their JSON length, capped.
+fn estimate_value_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(_) => 5,
+        serde_json::Value::Number(_) => 8,
+        serde_json::Value::String(s) => s.len().saturating_add(2),
+        other => other.to_string().len().min(2048),
+    }
+}
+
+/// Estimate the serialized size of a result's rows, with an early stop once the estimate is far
+/// past any realistic cap so it never becomes a bottleneck on huge results.
+pub fn estimate_result_bytes(result: &db::QueryResult) -> usize {
+    let mut bytes = 0usize;
+    for row in &result.rows {
+        for value in row {
+            bytes = bytes.saturating_add(estimate_value_bytes(value));
+        }
+        if bytes > MAX_RESULT_BYTES.saturating_mul(4) {
+            return bytes;
+        }
+    }
+    bytes
+}
+
+/// Final safety net applied to every query result regardless of driver. Enforces both a row
+/// limit and a byte limit; rows beyond either are dropped and `truncated` is flagged so the UI
+/// can warn. Catches large BLOB/TEXT rows that a pure row-count limit misses.
+pub fn enforce_result_limits(mut result: db::QueryResult, row_limit: usize, byte_limit: usize) -> db::QueryResult {
+    if result.rows.len() > row_limit {
+        result.rows.truncate(row_limit);
+        result.truncated = true;
+    }
+    if byte_limit > 0 {
+        let mut bytes = 0usize;
+        let mut kept = 0usize;
+        for row in &result.rows {
+            let mut row_bytes = 0usize;
+            for value in row {
+                row_bytes = row_bytes.saturating_add(estimate_value_bytes(value));
+            }
+            if bytes.saturating_add(row_bytes) > byte_limit {
+                break;
+            }
+            bytes = bytes.saturating_add(row_bytes);
+            kept += 1;
+        }
+        if kept < result.rows.len() {
+            result.rows.truncate(kept);
+            result.truncated = true;
+        }
+    }
+    result
+}
+
 fn normalize_query_result_for_js(mut result: db::QueryResult) -> db::QueryResult {
     result.rows = result.rows.into_iter().map(|row| row.into_iter().map(db::json_value_for_js).collect()).collect();
     result
@@ -872,8 +935,10 @@ where
 
 fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
     match timeout_secs {
-        Some(0) => None,
-        Some(n) => Some(Duration::from_secs(n)),
+        // `Some(0)` previously disabled the timeout entirely (unbounded wait). Treat it as the
+        // default so every query always has an upper bound.
+        Some(0) => Some(QUERY_TIMEOUT),
+        Some(n) => Some(Duration::from_secs(n.min(MAX_QUERY_TIMEOUT_SECS))),
         None => Some(QUERY_TIMEOUT),
     }
 }
@@ -906,6 +971,7 @@ pub async fn do_execute(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, String> {
+    let max_rows_opt = options.max_rows;
     if let Some(execution_id) = options.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.to_string());
     }
@@ -1250,7 +1316,9 @@ pub async fn do_execute(
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
     };
-    result.map(normalize_query_result_for_js)
+    result
+        .map(|res| enforce_result_limits(res, query_result_row_limit(max_rows_opt), MAX_RESULT_BYTES))
+        .map(normalize_query_result_for_js)
 }
 
 fn external_driver_query_params(
@@ -2360,6 +2428,53 @@ mod tests {
     use super::*;
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
 
+    fn sample_result(rows: usize, cols: usize) -> db::QueryResult {
+        db::QueryResult {
+            columns: (0..cols).map(|i| format!("c{i}")).collect(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows: (0..rows).map(|r| (0..cols).map(|c| serde_json::json!((r + c) * 10)).collect()).collect(),
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        }
+    }
+
+    #[test]
+    fn enforce_result_limits_truncates_by_row_count() {
+        let result = sample_result(10, 3);
+        let enforced = enforce_result_limits(result, 5, 0);
+        assert_eq!(enforced.rows.len(), 5);
+        assert!(enforced.truncated);
+    }
+
+    #[test]
+    fn enforce_result_limits_keeps_all_when_under_limits() {
+        let result = sample_result(3, 2);
+        let enforced = enforce_result_limits(result, 100, MAX_RESULT_BYTES);
+        assert_eq!(enforced.rows.len(), 3);
+        assert!(!enforced.truncated);
+    }
+
+    #[test]
+    fn enforce_result_limits_truncates_by_bytes_for_large_blob_rows() {
+        // Each row holds a single ~1 MiB string; a 3 MiB byte cap must drop most rows.
+        let big = serde_json::Value::String("x".repeat(1024 * 1024));
+        let mut result = sample_result(0, 1);
+        result.rows = vec![vec![big.clone()]; 10];
+        let enforced = enforce_result_limits(result, 100, 3 * 1024 * 1024);
+        assert!(enforced.rows.len() < 10, "byte cap should drop some rows");
+        assert!(enforced.truncated);
+    }
+
+    #[test]
+    fn estimate_result_bytes_is_zero_for_empty_and_positive_otherwise() {
+        assert_eq!(estimate_result_bytes(&sample_result(0, 3)), 0);
+        assert!(estimate_result_bytes(&sample_result(10, 3)) > 0);
+    }
+
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
             id: "conn-1".to_string(),
@@ -2521,15 +2636,17 @@ mod tests {
         assert_eq!(budget.checkout_timeout, Duration::from_secs(12));
         assert_eq!(budget.connect_timeout, Duration::from_secs(12));
         assert_eq!(budget.recycle_timeout, Duration::from_secs(12));
-        assert_eq!(budget.query_timeout, None);
+        assert_eq!(budget.query_timeout, Some(QUERY_TIMEOUT));
         assert_eq!(budget.cancel_timeout, Duration::from_secs(5));
         assert_eq!(budget.cleanup_timeout, Duration::from_secs(3));
     }
 
     #[test]
-    fn db_operation_budget_query_timeout_zero_means_no_limit() {
+    fn db_operation_budget_query_timeout_zero_falls_back_to_default() {
         let budget = DbOperationBudget::from_config(10, Some(0));
-        assert_eq!(budget.query_timeout, None);
+        // `Some(0)` used to disable the timeout (no limit); it now falls back to the default so
+        // every query always has an upper bound under worst-case loads.
+        assert_eq!(budget.query_timeout, Some(QUERY_TIMEOUT));
         // Infrastructure timeouts still have hard limits
         assert_eq!(budget.checkout_timeout, Duration::from_secs(10));
         assert_eq!(budget.cancel_timeout, Duration::from_secs(5));
@@ -2543,7 +2660,7 @@ mod tests {
 
         let budget = DbOperationBudget::from_connection_config(&config);
 
-        assert_eq!(budget.query_timeout, None);
+        assert_eq!(budget.query_timeout, Some(QUERY_TIMEOUT));
         assert_eq!(budget.checkout_timeout, Duration::from_secs(7));
         assert_eq!(budget.recycle_timeout, Duration::from_secs(7));
         assert_eq!(budget.cleanup_timeout, Duration::from_secs(3));

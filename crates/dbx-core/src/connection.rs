@@ -2929,6 +2929,7 @@ mod tests {
                 java_runtime: JavaRuntimeConfig {
                     mode: JavaRuntimeMode::Custom,
                     custom_java_path: Some(java.to_string_lossy().to_string()),
+                    ..Default::default()
                 },
                 ..AgentState::default()
             })

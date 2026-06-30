@@ -10,6 +10,24 @@ use crate::models::connection::DatabaseType;
 pub const DEFAULT_JRE_KEY: &str = "21";
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
+/// Default JVM max heap for Java agents. Agents previously launched with no `-Xmx`, so the JVM
+/// used its default (up to ~1/4 of physical RAM) and a single agent could reach several GB.
+/// Paired with the existing `UseSerialGC` to cap memory under worst-case result/export loads.
+/// Users can raise this in the driver store settings.
+pub const DEFAULT_AGENT_MAX_HEAP: &str = "512m";
+
+/// Validate a JVM heap size string such as `512m`, `1g`, `2048k`. Must be a positive integer
+/// followed by a `k`/`m`/`g` unit (case-insensitive). Malformed values are rejected so launch
+/// sites fall back to [`DEFAULT_AGENT_MAX_HEAP`].
+pub fn validate_max_heap(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some((unit, digits)) = trimmed.as_bytes().split_last() else {
+        return false;
+    };
+    matches!(*unit, b'k' | b'K' | b'm' | b'M' | b'g' | b'G')
+        && !digits.is_empty()
+        && digits.iter().all(|c| c.is_ascii_digit())
+}
 
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
@@ -139,6 +157,7 @@ mod tests {
             java_runtime: JavaRuntimeConfig {
                 mode: JavaRuntimeMode::Custom,
                 custom_java_path: Some(custom_java.to_string_lossy().to_string()),
+                ..Default::default()
             },
             ..AgentState::default()
         };
@@ -153,6 +172,7 @@ mod tests {
             java_runtime: JavaRuntimeConfig {
                 mode: JavaRuntimeMode::Custom,
                 custom_java_path: Some(manager.base_dir().join("missing-java").to_string_lossy().to_string()),
+                ..Default::default()
             },
             ..AgentState::default()
         };
@@ -254,11 +274,36 @@ mod tests {
             .expect("manifest launch should resolve");
 
         assert_eq!(launch.program, driver_dir.join("bin").join("dameng-agent"));
-        assert_eq!(
-            launch.args,
-            vec!["--config".to_string(), driver_dir.join("config.json").to_string_lossy().to_string()]
-        );
+        assert_eq!(launch.args, vec!["--config".to_string(), format!("{}/config.json", driver_dir.to_string_lossy())]);
         assert_eq!(launch.working_dir.as_deref(), Some(driver_dir.as_path()));
+    }
+
+    #[test]
+    fn validate_max_heap_accepts_positive_integer_with_unit() {
+        assert!(validate_max_heap("512m"));
+        assert!(validate_max_heap("1g"));
+        assert!(validate_max_heap("2048k"));
+        assert!(validate_max_heap("2G"));
+        assert!(validate_max_heap(" 768m "));
+    }
+
+    #[test]
+    fn validate_max_heap_rejects_malformed_values() {
+        assert!(!validate_max_heap(""));
+        assert!(!validate_max_heap("512"));
+        assert!(!validate_max_heap("abc"));
+        assert!(!validate_max_heap("1.5g"));
+        assert!(!validate_max_heap("g"));
+        assert!(!validate_max_heap("-1g"));
+    }
+
+    #[test]
+    fn java_runtime_config_deserializes_without_max_heap_field() {
+        // Older state.json written before max_heap was introduced must still load.
+        let json = r#"{"mode":"managed","custom_java_path":null}"#;
+        let config: JavaRuntimeConfig = serde_json::from_str(json).expect("legacy config should deserialize");
+        assert_eq!(config.mode, JavaRuntimeMode::Managed);
+        assert_eq!(config.max_heap, None);
     }
 }
 
@@ -336,6 +381,10 @@ pub struct JavaRuntimeConfig {
     pub mode: JavaRuntimeMode,
     #[serde(default)]
     pub custom_java_path: Option<String>,
+    /// JVM max heap passed to every Java agent as `-Xmx<value>` (e.g. `512m`, `1g`).
+    /// `None`, empty, or invalid values fall back to [`DEFAULT_AGENT_MAX_HEAP`].
+    #[serde(default)]
+    pub max_heap: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,7 +619,7 @@ impl AgentManager {
         let jar_path = self.driver_jar_path(driver_key);
         if jar_path.exists() {
             let java = self.resolve_java_runtime(state, jre_key)?;
-            return Ok(AgentLaunchSpec::java_jar(java, jar_path));
+            return Ok(AgentLaunchSpec::java_jar(java, jar_path, state.java_runtime.max_heap.as_deref()));
         }
 
         Err(format!("{driver_key} driver is not installed. Please install it from the Driver Manager."))

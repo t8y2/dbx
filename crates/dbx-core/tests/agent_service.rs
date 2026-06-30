@@ -149,7 +149,11 @@ fn agent_list_does_not_mark_jre_update_for_system_java_runtime() {
     std::fs::write(&jar_path, b"jar").unwrap();
     manager
         .save_state(&dbx_core::agent_manager::AgentState {
-            java_runtime: JavaRuntimeConfig { mode: JavaRuntimeMode::System, custom_java_path: None },
+            java_runtime: JavaRuntimeConfig {
+                mode: JavaRuntimeMode::System,
+                custom_java_path: None,
+                ..Default::default()
+            },
             installed_drivers: [(
                 "dameng".to_string(),
                 InstalledDriver {

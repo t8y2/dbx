@@ -556,7 +556,7 @@ test("cancelled query result CSV export clears the cancel handler without using 
   assert.equal(exportCancelHandler.value, null);
 });
 
-test("table data export leaves row limit unset by default", async () => {
+test("table data export applies default row limit", async () => {
   const restoreStorage = installMemoryStorage();
   try {
     const { composable } = buildTableDataExportHarness();
@@ -564,7 +564,8 @@ test("table data export leaves row limit unset by default", async () => {
     await composable.exportCsv();
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
-    assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, null);
+    // exportRowLimitEnabled now defaults to true with a 100000 row backstop.
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, 100000);
   } finally {
     restoreStorage();
   }

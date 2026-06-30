@@ -18,6 +18,13 @@ use crate::transfer::{generate_comment_ddl, generate_create_table_ddl};
 const DATA_SYNC_INSERT_BATCH_SIZE: usize = 500;
 const DATA_SYNC_CONDITION_BATCH_SIZE: usize = 200;
 
+/// Hard cap on rows per side for data compare. Tables larger than this are rejected up front
+/// (after the count query) to avoid loading both sides into memory — the worst OOM risk here.
+pub const COMPARE_ROW_THRESHOLD: u64 = 200_000;
+/// Fetch safety cap: stop and mark the compare truncated after this many rows on one side, in
+/// case the count estimate is inaccurate or unavailable.
+pub const COMPARE_MAX_ROWS: usize = 500_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompareDataRowsOptions {
@@ -237,8 +244,15 @@ pub async fn prepare_data_compare_from_tables(
     )?;
     let source_row_count = first_count(&source_count_result.rows)?;
     let target_row_count = first_count(&target_count_result.rows)?;
+    let max_compare_rows = COMPARE_MAX_ROWS.max(fetch_batch_size);
+    let largest_side = source_row_count.max(target_row_count);
+    if largest_side > COMPARE_ROW_THRESHOLD {
+        return Err(format!(
+            "表行数过多（{largest_side} 行），超过数据对比上限 {COMPARE_ROW_THRESHOLD} 行。请加 WHERE 条件缩小范围或分批对比，以免内存溢出。"
+        ));
+    }
 
-    let (source_rows, target_rows) = tokio::try_join!(
+    let ((source_rows, source_truncated), (target_rows, target_truncated)) = tokio::try_join!(
         fetch_compare_rows(
             state,
             &options.source_connection_id,
@@ -249,6 +263,7 @@ pub async fn prepare_data_compare_from_tables(
             &options.key_columns,
             source_database_type,
             fetch_batch_size,
+            max_compare_rows,
         ),
         fetch_compare_rows(
             state,
@@ -260,6 +275,7 @@ pub async fn prepare_data_compare_from_tables(
             &options.key_columns,
             target_database_type,
             fetch_batch_size,
+            max_compare_rows,
         )
     )?;
     let target_columns = get_columns_core(
@@ -289,8 +305,8 @@ pub async fn prepare_data_compare_from_tables(
         pre_sync_statements: Vec::new(),
         source_row_count,
         target_row_count,
-        source_truncated: false,
-        target_truncated: false,
+        source_truncated,
+        target_truncated,
     })
 }
 
@@ -324,7 +340,13 @@ pub async fn prepare_data_compare_missing_target(
     )
     .await?;
     let source_row_count = first_count(&source_count_result.rows)?;
-    let source_rows = fetch_compare_rows(
+    let max_compare_rows = COMPARE_MAX_ROWS.max(fetch_batch_size);
+    if source_row_count > COMPARE_ROW_THRESHOLD {
+        return Err(format!(
+            "表行数过多（{source_row_count} 行），超过数据对比上限 {COMPARE_ROW_THRESHOLD} 行。请加 WHERE 条件缩小范围或分批对比，以免内存溢出。"
+        ));
+    }
+    let (source_rows, source_truncated) = fetch_compare_rows(
         state,
         &options.source_connection_id,
         &options.source_database,
@@ -334,6 +356,7 @@ pub async fn prepare_data_compare_missing_target(
         &options.key_columns,
         source_database_type,
         fetch_batch_size,
+        max_compare_rows,
     )
     .await?;
     let result = missing_target_diff(&column_names, &options.key_columns, source_rows);
@@ -381,7 +404,7 @@ pub async fn prepare_data_compare_missing_target(
         pre_sync_statements,
         source_row_count,
         target_row_count: 0,
-        source_truncated: false,
+        source_truncated,
         target_truncated: false,
     })
 }
@@ -960,20 +983,21 @@ async fn fetch_compare_rows(
     key_columns: &[String],
     database_type: DatabaseType,
     fetch_batch_size: usize,
-) -> Result<Vec<Vec<Value>>, String> {
+    max_rows: usize,
+) -> Result<(Vec<Vec<Value>>, bool), String> {
     let mut rows = Vec::new();
     let mut offset = 0usize;
+    let mut truncated = false;
 
     loop {
-        let sql = build_data_compare_select_sql(
-            database_type,
-            schema,
-            table_name,
-            columns,
-            key_columns,
-            fetch_batch_size,
-            offset,
-        );
+        let remaining = max_rows.saturating_sub(rows.len());
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        let page_size = fetch_batch_size.min(remaining);
+        let sql =
+            build_data_compare_select_sql(database_type, schema, table_name, columns, key_columns, page_size, offset);
         let result = execute_sql_statement_with_options(
             state,
             connection_id,
@@ -981,7 +1005,7 @@ async fn fetch_compare_rows(
             &sql,
             Some(schema),
             None,
-            QueryExecutionOptions { max_rows: Some(fetch_batch_size), ..Default::default() },
+            QueryExecutionOptions { max_rows: Some(page_size), ..Default::default() },
         )
         .await?;
         let fetched = result.rows.len();
@@ -989,13 +1013,17 @@ async fn fetch_compare_rows(
             break;
         }
         rows.extend(result.rows);
-        if fetched < fetch_batch_size {
+        if rows.len() >= max_rows {
+            truncated = true;
+            break;
+        }
+        if fetched < page_size {
             break;
         }
         offset += fetched;
     }
 
-    Ok(rows)
+    Ok((rows, truncated))
 }
 
 fn where_by_key(

@@ -995,6 +995,8 @@ fn oracle_object_statistics_owner_segments_sql(schema: &str, segment_view: &str)
 }
 
 fn oracle_object_statistics_user_segments_sql(schema: &str) -> String {
+    // USER_SEGMENTS exposes objects owned by the login/current user, while DBX
+    // may switch CURRENT_SCHEMA before metadata queries for cross-schema browsing.
     format!(
         "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
          FROM ALL_TABLES t \
@@ -1017,7 +1019,7 @@ fn oracle_object_statistics_user_segments_sql(schema: &str) -> String {
            ) \
            GROUP BY table_name \
          ) s ON s.TABLE_NAME = t.TABLE_NAME \
-         WHERE t.OWNER = {} AND t.OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND t.NESTED = 'NO' \
+         WHERE t.OWNER = {} AND t.OWNER = USER AND t.NESTED = 'NO' \
          ORDER BY t.TABLE_NAME",
         oracle_owner_filter(schema),
         oracle_owner_filter(schema),
@@ -2202,7 +2204,9 @@ mod tests {
 
         let user_sql = oracle_object_statistics_user_segments_sql("app's");
         assert!(user_sql.contains("USER_SEGMENTS"));
-        assert!(user_sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"));
+        assert!(user_sql.contains("OWNER = 'APP''S'"));
+        assert!(user_sql.contains("t.OWNER = USER"));
+        assert!(!user_sql.contains("CURRENT_SCHEMA"));
 
         let rows_only_sql = oracle_object_statistics_rows_only_sql("app's");
         assert!(rows_only_sql.contains("ALL_TABLES"));

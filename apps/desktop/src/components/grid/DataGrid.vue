@@ -7987,7 +7987,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                     :options="DateTimePatterns"
                                     :placeholder="t('grid.formatterDatetimePatternPlaceholder')"
                                     :search-placeholder="t('grid.formatterDatetimePatternPlaceholder')"
-                                    :empty-text="t('grid..formatterDatetimePatternEmpty')"
+                                    :empty-text="t('grid.formatterDatetimePatternEmpty')"
                                     :loading-text="t('common.loading')"
                                     :allow-custom="true"
                                     :trigger-class="['border border-input h-8 w-72 pl-2.5 text-xs']"

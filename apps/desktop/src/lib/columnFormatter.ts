@@ -1,5 +1,5 @@
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
-import dayjs from "dayjs";
+import dayjs, { Dayjs } from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
 
@@ -7,7 +7,8 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 export type DateTimeFormatterUnit = "seconds" | "milliseconds" | "auto";
-export const DateTimePatterns = ["HH:mm:ss", "HH:mm:ss.SSS", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ssZ[Z]", "YYYY-MM-DDTHH:mm:ss.SSSZ[Z]", "YYYY-MM-DDTHH:mm:ssZ[Z]", "YYYY-MM-DDTHH:mm:ss.SSSZ[Z]"];
+const DEFAULT_DATETIME_PATTERN = "YYYY-MM-DD HH:mm:ss";
+export const DateTimePatterns = ["HH:mm:ss", "HH:mm:ss.SSS", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ssZ[Z]", "YYYY-MM-DDTHH:mm:ss.SSSZ[Z]", "YYYY/MM/DDTHH:mm:ssZ[Z]", "YYYY/MM/DDTHH:mm:ss.SSSZ[Z]"];
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -102,18 +103,68 @@ function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit, pattern: 
   if (value === null) return displayCellValue(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "object") return JSON.stringify(value);
-  try {
-    if (typeof value === "string" && !/^\d+$/.test(value)) {
-      return dayjs(value).format(pattern ?? "YYYY-MM-DD HH:mm:ss");
+  const parsed: Dayjs | undefined = resolveDateTimeValue(value, unit);
+  return parsed ? parsed.format(pattern || DEFAULT_DATETIME_PATTERN) : displayCellValue(value);
+}
+
+function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUnit) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
     }
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
-      return displayCellValue(value);
+    const timestamp = parseTimestampMilliseconds(trimmed, unit);
+    if (timestamp !== undefined) {
+      const parsedTimestamp = dayjs(timestamp);
+      return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
     }
-    const timestamp = unit === "seconds" || (unit === "auto" && Math.abs(numeric) < 100_000_000_000) ? numeric * 1000 : numeric;
-    return dayjs(timestamp).format(pattern ?? "YYYY-MM-DD HH:mm:ss");
-  } catch {
-    return displayCellValue(value);
+    const parsedDate = dayjs(trimmed);
+    return parsedDate.isValid() ? parsedDate : undefined;
+  }
+
+  const timestamp = parseTimestampMilliseconds(value, unit);
+  if (timestamp === undefined) return undefined;
+
+  const parsedTimestamp = dayjs(timestamp);
+  return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
+}
+
+function parseTimestampMilliseconds(value: string | number, unit: DateTimeFormatterUnit): number | undefined {
+  const numeric = typeof value === "string" ? Number(value) : value;
+  if (!Number.isInteger(numeric)) {
+    return undefined;
+  }
+  if (unit === "seconds" || unit === "milliseconds") {
+    return convertToMilliseconds(numeric, unit);
+  }
+  return isAutoTimestampValue(value, numeric) ? convertToMilliseconds(numeric, unit) : undefined;
+}
+
+function convertToMilliseconds(value: number, unit: DateTimeFormatterUnit): number {
+  return unit === "seconds" || (unit === "auto" && Math.abs(value) < 100_000_000_000) ? value * 1000 : value;
+}
+
+function isAutoTimestampValue(originalValue: string | number, numericValue: number): boolean {
+  if (!Number.isInteger(numericValue)) {
+    return false;
+  }
+  const digits = getTimestampDigits(originalValue);
+  if (digits !== 10 && digits !== 13) {
+    return false;
+  }
+  const yearFromTimestamp = dayjs(digits === 10 ? numericValue * 1000 : numericValue).year();
+  return yearFromTimestamp >= 1970 && yearFromTimestamp <= 2100;
+}
+
+function getTimestampDigits(value: string | number): number | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^-?\d+$/.test(trimmed)) return undefined;
+    return trimmed.startsWith("-") ? trimmed.length - 1 : trimmed.length;
+  } else if (!Number.isInteger(value)) {
+    return undefined;
+  } else {
+    return Math.abs(value).toString().length;
   }
 }
 

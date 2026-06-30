@@ -12,6 +12,7 @@ import ContentArea from "@/components/layout/ContentArea.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
+import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -115,6 +116,7 @@ const setupRequired = ref(false);
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
+const connectionDialogInitialTab = ref<ConfigTab | undefined>(undefined);
 const showSettingsDialog = ref(false);
 const settingsInitialTab = ref("editor");
 const settingsInitialSection = ref<string | undefined>(undefined);
@@ -798,7 +800,17 @@ async function openPendingConnectionLinks() {
 
 function setConnectionDialogOpen(value: boolean) {
   showConnectionDialog.value = value;
-  if (!value) connectionDialogPrefill.value = null;
+  if (!value) {
+    connectionDialogPrefill.value = null;
+    connectionDialogInitialTab.value = undefined;
+  }
+}
+
+function openConnectionSettings(connectionId: string, initialTab: ConfigTab = "connection") {
+  if (!connectionStore.getConfig(connectionId)) return;
+  connectionDialogInitialTab.value = initialTab;
+  connectionStore.startEditing(connectionId);
+  showConnectionDialog.value = true;
 }
 
 async function newQuery() {
@@ -1638,6 +1650,7 @@ onUnmounted(() => {
                     "
                     @structure-editor-close="activeTab && queryStore.closeTab(activeTab.id)"
                     @open-settings="openSettings"
+                    @open-connection-settings="openConnectionSettings"
                   />
                 </KeepAlive>
               </div>
@@ -1683,6 +1696,7 @@ onUnmounted(() => {
         <AppDialogs
           :show-connection-dialog="showConnectionDialog"
           :connection-prefill="connectionDialogPrefill"
+          :connection-initial-tab="connectionDialogInitialTab"
           :show-settings-dialog="showSettingsDialog"
           :settings-initial-tab="settingsInitialTab"
           :settings-initial-section="settingsInitialSection"

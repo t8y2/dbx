@@ -137,6 +137,7 @@ const emit = defineEmits<{
   structureEditorSaved: [commentChanged: boolean];
   structureEditorClose: [];
   openSettings: [initialTab?: string, initialSection?: string];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
 }>();
 
 const { t } = useI18n();
@@ -178,6 +179,11 @@ const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridR
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const dataGridViewOptionsActive = computed(() => dataGridRef.value?.nullColumnsHidden || dataGridRef.value?.multiRowTranspose || dataGridRenderMode.value === "dom" || tableFontSize.value !== TABLE_FONT_SIZE_DEFAULT);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
+
+function isQueryTimeoutError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("query timed out") || lower.includes("查询超时");
+}
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
@@ -977,6 +983,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
+                  <Button v-if="activeTab.connectionId && isQueryTimeoutError(String(errorMessage))" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('openConnectionSettings', activeTab.connectionId, 'advanced')">
+                    <Wrench class="h-3.5 w-3.5" />
+                    {{ t("editor.changeQueryTimeout") }}
+                  </Button>
                   <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('fixWithAi', String(errorMessage))">
                     <Bot class="h-3.5 w-3.5" />
                     {{ t("ai.fixWithAi") }}

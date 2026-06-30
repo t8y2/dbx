@@ -48,7 +48,7 @@ type DbOption = { value: string; label: string };
 type DbCategory = { key: string; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 type DbPickerView = "icon" | "list";
-type ConfigTab = "connection" | "advanced" | "tls" | "transport";
+export type ConfigTab = "connection" | "advanced" | "tls" | "transport";
 type MqTokenSigningMode = "none" | "hs256" | "rs256";
 type NacosAuthKind = NacosAuthConfig["kind"];
 type DremioConnectionMode = "arrow-flight-sql" | "legacy";
@@ -97,6 +97,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
+  initialTab?: ConfigTab;
 }>();
 
 const emit = defineEmits<{
@@ -124,6 +125,10 @@ const visibleSchemaNames = ref<string[]>([]);
 const visibleSchemaInitialSelection = ref<string[]>([]);
 const visibleSchemaError = ref("");
 let testRunId = 0;
+
+function initialConfigTab(): ConfigTab {
+  return props.initialTab ?? "connection";
+}
 
 const defaultForm = (): ConnectionForm => ({
   name: "",
@@ -1051,7 +1056,7 @@ watch(
       jdbcManualClasspathOpen.value = config.db_type === "prestosql" || (config.jdbc_driver_paths || []).length > 0;
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
-      configTab.value = "connection";
+      configTab.value = initialConfigTab();
     } else {
       editingId.value = null;
       form.value = defaultForm();

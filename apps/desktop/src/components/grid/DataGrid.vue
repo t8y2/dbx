@@ -158,7 +158,8 @@ import { formatShortcut } from "@/lib/shortcutRegistry";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
-const FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-shown";
+const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
+const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 10;
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -448,8 +449,6 @@ const rowDetailDialogOpen = ref(false);
 const rowDetailDialogRowId = ref<number | null>(null);
 const columnDetailDialogOpen = ref(false);
 const columnDetailDialogColumnIndex = ref<number | null>(null);
-const cellDetailJsonView = ref(false);
-const sideDetailJsonView = ref(false);
 const rowDetailSearch = ref("");
 const columnDetailSearch = ref("");
 const isResizingDetail = ref(false);
@@ -3810,6 +3809,10 @@ const dialogCellDetail = computed(() => {
   return target ? cellDetailFor(target.rowIndex, target.col) : null;
 });
 
+const cellDetailJsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJsonFormatted);
+const sideDetailJsonView = computed(() => cellDetailJsonFormatted.value && !!activeCellDetail.value?.formattedJson);
+const cellDetailJsonView = computed(() => cellDetailJsonFormatted.value && !!dialogCellDetail.value?.formattedJson);
+
 const rowDetail = computed(() => {
   if (rowDetailDialogRowId.value === null) return null;
   const item = getRowItem(rowDetailDialogRowId.value);
@@ -3854,8 +3857,7 @@ const filteredRowDetailFields = computed(() => (rowDetail.value ? filterDataGrid
 const filteredColumnDetailFields = computed(() => (columnDetail.value ? filterDataGridDetailFields(columnDetail.value.fields, columnDetailSearch.value) : []));
 
 watch(cellDetailDialogOpen, (open) => {
-  if (open) cellDetailJsonView.value = false;
-  else cellDetailDialogTarget.value = null;
+  if (!open) cellDetailDialogTarget.value = null;
 });
 
 watch(rowDetailDialogOpen, (open) => {
@@ -4014,7 +4016,6 @@ async function prefetchDetailSqlCondition() {
 
 watch(activeCellDetail, (detail) => {
   void prefetchDetailSqlCondition();
-  sideDetailJsonView.value = false;
   if (activeCellDetailTab.value !== "valueEditor") return;
   if (!detail?.isEditable) {
     resetDetailEdit();
@@ -4174,9 +4175,14 @@ function cellDetailEditText(detail: DataGridCellDetail): string {
 
 function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false) {
   if (!force && (!sideDetailJsonView.value || !detail.formattedJson)) return;
-  if (safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY) === "1") return;
+  const count = Number(safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY)) || 0;
+  if (count >= FORMATTED_JSON_EDIT_WARNING_MAX_COUNT) return;
   toast(t("grid.formattedJsonEditWarning"), 10000);
-  safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY, "1");
+  safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY, String(count + 1));
+}
+
+function toggleCellDetailJsonFormatted() {
+  settingsStore.updateEditorSettings({ cellDetailJsonFormatted: !cellDetailJsonFormatted.value });
 }
 
 function startDetailEdit() {
@@ -6038,7 +6044,6 @@ async function openDialogCellInSidePanel() {
   showCellDetails(detail.rowNumber - 1, detail.colIndex);
   cellDetailDialogOpen.value = false;
   await nextTick();
-  sideDetailJsonView.value = cellDetailJsonView.value && !!detail.formattedJson;
   if (detail.isEditable) startDetailEdit();
 }
 
@@ -8917,7 +8922,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <div class="flex min-h-5 items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
-                        <Button v-if="activeCellDetail.formattedJson" :variant="sideDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="sideDetailJsonView = !sideDetailJsonView">
+                        <Button v-if="activeCellDetail.formattedJson" :variant="sideDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="toggleCellDetailJsonFormatted">
                           <Code2 class="h-3 w-3" />
                           {{ t("grid.formattedJson") }}
                         </Button>
@@ -8959,7 +8964,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </a>
                     </div>
                     <template v-if="isEditingDetail">
-                      <div class="min-h-32 shrink-0" :class="cellDetailPanelIsBottom ? 'h-32' : ''" :style="sideDetailEditorStyle">
+                      <div :class="cellDetailPanelIsBottom ? 'min-h-0 flex-1' : 'min-h-32 shrink-0'" :style="sideDetailEditorStyle">
                         <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelDetailEdit" @commit="commitDetailEdit" />
                         <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
                       </div>
@@ -9224,7 +9229,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <div class="flex items-center justify-between gap-2">
               <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
               <div class="flex items-center gap-1">
-                <Button v-if="dialogCellDetail.formattedJson" :variant="cellDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="cellDetailJsonView = !cellDetailJsonView">
+                <Button v-if="dialogCellDetail.formattedJson" :variant="cellDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="toggleCellDetailJsonFormatted">
                   <Code2 class="h-3 w-3" />
                   {{ t("grid.formattedJson") }}
                 </Button>

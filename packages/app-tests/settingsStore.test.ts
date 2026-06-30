@@ -228,15 +228,19 @@ test("normalizes grid drawer widths", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth, 320);
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth, 380);
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout, "bottom");
+  assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailJsonFormatted, false);
   assert.equal(normalizeEditorSettings({}).tableInfoDrawerWidth, 320);
   assert.equal(normalizeEditorSettings({}).cellDetailDrawerWidth, 380);
   assert.equal(normalizeEditorSettings({}).cellDetailPanelLayout, "bottom");
+  assert.equal(normalizeEditorSettings({}).cellDetailJsonFormatted, false);
   assert.equal(normalizeEditorSettings({ tableInfoDrawerWidth: 200 } as any).tableInfoDrawerWidth, 240);
   assert.equal(normalizeEditorSettings({ cellDetailDrawerWidth: 200 } as any).cellDetailDrawerWidth, 260);
   assert.equal(normalizeEditorSettings({ tableInfoDrawerWidth: 1000 } as any).tableInfoDrawerWidth, 900);
   assert.equal(normalizeEditorSettings({ cellDetailDrawerWidth: 456.7 } as any).cellDetailDrawerWidth, 457);
   assert.equal(normalizeEditorSettings({ cellDetailPanelLayout: "right" } as any).cellDetailPanelLayout, "right");
   assert.equal(normalizeEditorSettings({ cellDetailPanelLayout: "invalid" } as any).cellDetailPanelLayout, "bottom");
+  assert.equal(normalizeEditorSettings({ cellDetailJsonFormatted: true } as any).cellDetailJsonFormatted, true);
+  assert.equal(normalizeEditorSettings({ cellDetailJsonFormatted: "true" } as any).cellDetailJsonFormatted, false);
 });
 
 test("keeps saved active tab sidebar selection", () => {

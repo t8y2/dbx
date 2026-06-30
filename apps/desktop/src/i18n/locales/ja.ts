@@ -786,6 +786,7 @@ export default withEnglishFallback({
     copyColumnTsv: "列をコピー (TSV)",
     editValue: "値を編集",
     formatJson: "JSONをフォーマット",
+    formattedJsonEditWarning: "フォーマット済みJSONを編集中です。保存するとJSONとして書き込まれるため、元の書式が変わる場合があります。",
     setNull: "NULLに設定",
     restoreOriginalValue: "元の値に戻す",
     copyColumnName: "列名をコピー",

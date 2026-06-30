@@ -801,7 +801,7 @@ export default withEnglishFallback({
     copyColumnTsv: "复制列 (TSV)",
     editValue: "编辑值",
     formatJson: "格式化 JSON",
-    formattedJsonEditWarning: "正在编辑格式化后的 JSON。保存后会写回格式化文本，原始空白和排版可能变化",
+    formattedJsonEditWarning: "正在编辑格式化后的 JSON。保存后会以JSON格式写入，原始排版可能变化。",
     setNull: "设为 NULL",
     restoreOriginalValue: "恢复原值",
     copyColumnName: "复制列名",

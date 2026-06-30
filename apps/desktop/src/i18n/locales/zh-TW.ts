@@ -789,7 +789,7 @@ export default withEnglishFallback({
     copyColumnTsv: "複製欄 (TSV)",
     editValue: "編輯值",
     formatJson: "格式化 JSON",
-    formattedJsonEditWarning: "正在編輯格式化後的 JSON。儲存後會寫回格式化文字，原始空白和排版可能改變",
+    formattedJsonEditWarning: "正在編輯格式化後的 JSON。儲存後會以 JSON 格式寫入，原始排版可能改變。",
     setNull: "設為 NULL",
     restoreOriginalValue: "復原資料",
     copyColumnName: "複製欄位名稱",

@@ -229,7 +229,13 @@ function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined)
 
 function canExecuteWithoutSelectedDatabase(connection: ConnectionConfig, sql: string): boolean {
   if (connection.db_type !== "mysql") return false;
-  return CONNECTION_LEVEL_CREATE_DATABASE_RE.test(stripSqlComments(sql));
+  const statements = stripSqlComments(sql)
+    .split(";")
+    .map((stmt) => stmt.trim())
+    .filter(Boolean);
+  // Only connection-level database creation may bypass the selected-database guard.
+  if (statements.length !== 1) return false;
+  return CONNECTION_LEVEL_CREATE_DATABASE_RE.test(statements[0]);
 }
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {

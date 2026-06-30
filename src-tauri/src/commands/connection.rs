@@ -636,6 +636,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 &config.username,
                 &config.password,
                 config.database.as_deref(),
+                config.url_params.as_deref(),
                 connect_timeout,
             )
             .await
@@ -923,6 +924,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 &db_config.username,
                 &db_config.password,
                 db_config.database.as_deref(),
+                db_config.url_params.as_deref(),
                 connect_timeout,
             )
             .await?;

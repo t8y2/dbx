@@ -110,6 +110,7 @@ const store = useConnectionStore();
 const isTesting = ref(false);
 const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
+const sqlServerLegacyUnencryptedRetryAvailable = ref(false);
 const editingId = ref<string | null>(null);
 const showVisibleDatabasesDialog = ref(false);
 const isLoadingVisibleDatabases = ref(false);
@@ -760,6 +761,28 @@ function errorMessage(error: unknown): string {
 function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
   if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
   return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
+}
+
+function isSqlServerLegacyUnencryptedMode(params: string | undefined): boolean {
+  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
+  if (!normalized) return false;
+  const parsed = new URLSearchParams(normalized);
+  for (const [key, value] of parsed.entries()) {
+    if (key.trim().toLowerCase() === "sqlserverencryption") {
+      return ["disabled", "disable", "false", "0", "off"].includes(value.trim().toLowerCase());
+    }
+  }
+  return false;
+}
+
+function setSqlServerLegacyUnencryptedMode(params: string | undefined): string {
+  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
+  return setUrlParam(normalized, "sqlserverEncryption", "disabled");
+}
+
+function isSqlServerTlsHandshakeFailure(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes("sql server") && text.includes("tls") && (text.includes("handshake") || text.includes("eof") || text.includes("performing i/o"));
 }
 
 async function testConnectionWithTimeout(config: ConnectionConfig, runId: number): Promise<string> {
@@ -1487,6 +1510,7 @@ const testResultMessage = computed(() => {
   if (!testResult.value) return "";
   return testResult.value.ok ? t("connection.testSuccess") : translateBackendError(t, testResult.value.message);
 });
+const sqlServerLegacyUnencryptedModeEnabled = computed(() => form.value.db_type === "sqlserver" && isSqlServerLegacyUnencryptedMode(form.value.url_params));
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "sm:max-w-[760px]";
@@ -1549,6 +1573,7 @@ async function testConnection() {
   const runId = ++testRunId;
   isTesting.value = true;
   testResult.value = null;
+  sqlServerLegacyUnencryptedRetryAvailable.value = false;
   const config = connectionConfigForSubmit(editingId.value || uuid());
   try {
     const msg = await testConnectionWithTimeout(config, runId);
@@ -1562,7 +1587,32 @@ async function testConnection() {
     const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
     const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
     if (runId !== testRunId) return;
+    sqlServerLegacyUnencryptedRetryAvailable.value = !fallbackMessage && config.db_type === "sqlserver" && !isSqlServerLegacyUnencryptedMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
+  } finally {
+    if (runId === testRunId) {
+      isTesting.value = false;
+    }
+  }
+}
+
+async function retrySqlServerLegacyUnencryptedConnection() {
+  if (!ensureConnectionHostResolvedFromUrl()) return;
+
+  form.value.url_params = setSqlServerLegacyUnencryptedMode(form.value.url_params);
+  const runId = ++testRunId;
+  isTesting.value = true;
+  sqlServerLegacyUnencryptedRetryAvailable.value = false;
+  testResult.value = null;
+  const config = connectionConfigForSubmit(editingId.value || uuid());
+
+  try {
+    const msg = await testConnectionWithTimeout(config, runId);
+    if (runId !== testRunId) return;
+    testResult.value = { ok: true, message: `${msg} ${t("connection.sqlServerLegacyUnencryptedModeEnabled")}` };
+  } catch (e: any) {
+    if (runId !== testRunId) return;
+    testResult.value = { ok: false, message: connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e))) };
   } finally {
     if (runId === testRunId) {
       isTesting.value = false;
@@ -2138,6 +2188,7 @@ function resetTestState() {
   testRunId += 1;
   isTesting.value = false;
   testResult.value = null;
+  sqlServerLegacyUnencryptedRetryAvailable.value = false;
 }
 
 function resetVisibleDatabaseDraftState() {
@@ -3711,6 +3762,13 @@ function openExternalUrl(url: string) {
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
 
+                  <div v-if="sqlServerLegacyUnencryptedModeEnabled" class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+                      {{ t("connection.sqlServerLegacyUnencryptedModeHint") }}
+                    </p>
+                  </div>
+
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
@@ -4329,6 +4387,10 @@ function openExternalUrl(url: string) {
               </span>
               <Button variant="ghost" size="icon-xs" class="h-5 w-5 shrink-0" :title="t('connection.copyTestResult')" :aria-label="t('connection.copyTestResult')" @click="copyTestResult">
                 <Copy class="h-3 w-3" />
+              </Button>
+              <Button v-if="sqlServerLegacyUnencryptedRetryAvailable" variant="outline" size="sm" class="h-7 shrink-0 px-2 text-xs" :disabled="isTesting || isSaving" @click="retrySqlServerLegacyUnencryptedConnection">
+                <ShieldCheck class="mr-1 h-3 w-3" />
+                {{ t("connection.sqlServerLegacyUnencryptedRetry") }}
               </Button>
             </template>
           </div>

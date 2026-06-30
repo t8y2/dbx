@@ -881,6 +881,7 @@ impl AppState {
                     &db_config.username,
                     &db_config.password,
                     db_config.database.as_deref(),
+                    db_config.url_params.as_deref(),
                     connect_timeout,
                 )
                 .await?;

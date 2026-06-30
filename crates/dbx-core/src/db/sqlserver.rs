@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub type SqlServerClient = Client<Compat<TcpStream>>;
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
+const SQLSERVER_LEGACY_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::Off;
 
 #[derive(Debug, PartialEq, Eq)]
 struct SqlServerEndpoint<'a> {
@@ -44,12 +45,51 @@ pub async fn connect(
     user: &str,
     pass: &str,
     database: Option<&str>,
+    url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    match try_connect(host, port, user, pass, database, true, timeout).await {
-        Ok(client) => Ok(client),
-        Err(_) => try_connect(host, port, user, pass, database, false, timeout).await,
+    if sqlserver_legacy_encryption_disabled(url_params) {
+        return try_connect(host, port, user, pass, database, SQLSERVER_LEGACY_ENCRYPTION_LEVEL, timeout).await;
     }
+
+    match try_connect(host, port, user, pass, database, tiberius::EncryptionLevel::Required, timeout).await {
+        Ok(client) => Ok(client),
+        Err(encrypted_error) => {
+            try_connect(host, port, user, pass, database, tiberius::EncryptionLevel::NotSupported, timeout)
+                .await
+                .map_err(|plain_error| {
+                    if is_sqlserver_tls_handshake_error(&encrypted_error) {
+                        format!(
+                            "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS configuration. \
+                         If you are connecting to SQL Server 2008/2008 R2 or another legacy instance, \
+                         try SQL Server legacy unencrypted mode. It behaves like encrypt=false and only helps \
+                         when the server allows unencrypted transport or login-only encryption. It will still fail \
+                         if the server requires TLS 1.0 encryption. Only use this mode on trusted networks, VPNs, \
+                         or SSH tunnels.\n\n\
+                         Automatic unencrypted fallback also failed: {plain_error}"
+                        )
+                    } else {
+                        plain_error
+                    }
+                })
+        }
+    }
+}
+
+fn sqlserver_legacy_encryption_disabled(url_params: Option<&str>) -> bool {
+    let Some(params) = url_params.map(str::trim).filter(|params| !params.is_empty()) else {
+        return false;
+    };
+
+    params.trim_start_matches('?').split(['&', ';']).filter_map(|pair| pair.split_once('=')).any(|(key, value)| {
+        key.trim().eq_ignore_ascii_case("sqlserverEncryption")
+            && matches!(value.trim().to_ascii_lowercase().as_str(), "disabled" | "disable" | "false" | "0" | "off")
+    })
+}
+
+fn is_sqlserver_tls_handshake_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("tls") && (error.contains("handshake") || error.contains("eof") || error.contains("performing i/o"))
 }
 
 async fn try_connect(
@@ -58,7 +98,7 @@ async fn try_connect(
     user: &str,
     pass: &str,
     database: Option<&str>,
-    use_encryption: bool,
+    encryption: tiberius::EncryptionLevel,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     let mut config = Config::new();
@@ -74,9 +114,7 @@ async fn try_connect(
         config.database(db);
     }
     config.trust_cert();
-    if !use_encryption {
-        config.encryption(tiberius::EncryptionLevel::NotSupported);
-    }
+    config.encryption(encryption);
 
     let tcp = if endpoint.instance_name.is_some() {
         tokio::time::timeout(timeout, TcpStream::connect_named(&config))
@@ -1798,6 +1836,29 @@ mod tests {
         let try_connect = source.split("async fn try_connect").nth(1).unwrap();
         let try_connect = try_connect.split("fn row_to_json").next().unwrap();
         assert!(try_connect.contains("connect_named(&config)"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_encryption_flag_is_opt_in() {
+        assert!(!super::sqlserver_legacy_encryption_disabled(None));
+        assert!(!super::sqlserver_legacy_encryption_disabled(Some("encrypt=false")));
+        assert!(super::sqlserver_legacy_encryption_disabled(Some("sqlserverEncryption=disabled")));
+        assert!(super::sqlserver_legacy_encryption_disabled(Some("applicationName=dbx;sqlserverEncryption=off")));
+        assert!(super::sqlserver_legacy_encryption_disabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
+    }
+
+    #[test]
+    fn sqlserver_legacy_encryption_mode_matches_jdbc_encrypt_false_semantics() {
+        assert_eq!(super::SQLSERVER_LEGACY_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::Off);
+    }
+
+    #[test]
+    fn sqlserver_tls_handshake_error_detection_matches_legacy_hint_cases() {
+        assert!(super::is_sqlserver_tls_handshake_error(
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+        ));
+        assert!(super::is_sqlserver_tls_handshake_error("TLS handshake failed: unexpected EOF"));
+        assert!(!super::is_sqlserver_tls_handshake_error("SQL Server connection failed: Login failed for user"));
     }
 
     #[test]

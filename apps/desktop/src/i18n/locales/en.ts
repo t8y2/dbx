@@ -283,6 +283,10 @@ export default {
     test: "Test",
     testing: "Testing...",
     copyTestResult: "Copy test result",
+    sqlServerLegacyUnencryptedRetry: "Try legacy unencrypted mode",
+    sqlServerLegacyUnencryptedModeEnabled: "SQL Server legacy unencrypted mode is enabled.",
+    sqlServerLegacyUnencryptedModeHint:
+      "This SQL Server connection uses a legacy unencrypted mode similar to encrypt=false. It only helps when the server allows unencrypted transport or login-only encryption. It will still fail if the server requires TLS 1.0 encryption. Use it only on trusted networks, VPNs, or SSH tunnels.",
     saveAndConnect: "Save & Connect",
     save: "Save",
     editTitle: "Edit Connection",

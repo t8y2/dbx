@@ -62,6 +62,12 @@ export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnectio
   return schema || database;
 }
 
+export function metadataSchemaForConnection(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
+  const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "sqlserver") return schema || "dbo";
+  return connectionObjectTreeQuerySchema(connection, database, schema);
+}
+
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;

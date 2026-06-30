@@ -1366,19 +1366,36 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
     let s = schema.replace('\'', "''");
     let t = table.replace('\'', "''");
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
-         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
-         c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, c.DATETIME_PRECISION, \
-         ident.extra AS COLUMN_EXTRA, \
+        "SELECT c.name AS COLUMN_NAME, \
+         ty.name AS DATA_TYPE, \
+         CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END AS IS_NULLABLE, \
+         dc.definition AS COLUMN_DEFAULT, \
+         CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
+         CONVERT(INT, c.precision) AS NUMERIC_PRECISION, \
+         CONVERT(INT, c.scale) AS NUMERIC_SCALE, \
+         CASE \
+           WHEN ty.name IN ('nchar','nvarchar') AND c.max_length > 0 THEN CONVERT(INT, c.max_length / 2) \
+           WHEN c.max_length = -1 THEN -1 \
+           ELSE CONVERT(INT, c.max_length) \
+         END AS CHARACTER_MAXIMUM_LENGTH, \
+         CONVERT(INT, c.scale) AS DATETIME_PRECISION, \
+         CASE WHEN ic.column_id IS NOT NULL THEN 'identity(' + CONVERT(VARCHAR(38), ic.seed_value) + ',' + CONVERT(VARCHAR(38), ic.increment_value) + ')' ELSE NULL END AS COLUMN_EXTRA, \
          ep.value AS COLUMN_COMMENT \
-         FROM INFORMATION_SCHEMA.COLUMNS c \
-         LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
-           ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA AND c.TABLE_NAME = kcu.TABLE_NAME AND c.COLUMN_NAME = kcu.COLUMN_NAME \
-           AND kcu.CONSTRAINT_NAME IN (SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE CONSTRAINT_TYPE = 'PRIMARY KEY' AND TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}') \
-         OUTER APPLY (SELECT 'identity(' + CONVERT(VARCHAR(38), ic.seed_value) + ',' + CONVERT(VARCHAR(38), ic.increment_value) + ')' AS extra FROM sys.identity_columns ic WHERE ic.object_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) AND ic.name = c.COLUMN_NAME) ident \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) AND ep.minor_id = COLUMNPROPERTY(OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')), c.COLUMN_NAME, 'ColumnId') AND ep.name = N'MS_Description') ep \
-         WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}' \
-         ORDER BY c.ORDINAL_POSITION"
+         FROM sys.objects o \
+         JOIN sys.schemas s ON s.schema_id = o.schema_id \
+         JOIN sys.columns c ON c.object_id = o.object_id \
+         JOIN sys.types ty ON ty.user_type_id = c.user_type_id \
+         LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id \
+         LEFT JOIN sys.identity_columns ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id \
+         LEFT JOIN ( \
+           SELECT ic.object_id, ic.column_id \
+           FROM sys.indexes i \
+           JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+           WHERE i.is_primary_key = 1 \
+         ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
+         WHERE s.name = '{s}' AND o.name = '{t}' AND o.type IN ('U','V') \
+         ORDER BY c.column_id"
     )
 }
 
@@ -1876,6 +1893,18 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_columns_sql_reads_column_comment_by_column_id() {
+        let sql = sqlserver_columns_sql("dbo", "orders");
+
+        assert!(sql.contains("FROM sys.objects o"));
+        assert!(sql.contains("JOIN sys.columns c ON c.object_id = o.object_id"));
+        assert!(sql.contains("sys.extended_properties ep"));
+        assert!(sql.contains("ep.major_id = c.object_id"));
+        assert!(sql.contains("ep.minor_id = c.column_id"));
+        assert!(sql.contains("MS_Description"));
+    }
+
+    #[test]
     fn sqlserver_table_comment_sql_queries_extended_properties() {
         let sql = sqlserver_table_comment_sql("dbo", "users");
 
@@ -1891,8 +1920,8 @@ mod tests {
         let columns_sql = sqlserver_columns_sql("d'bo", "t'able");
         let indexes_sql = sqlserver_indexes_sql("d'bo", "t'able");
 
-        assert!(columns_sql.contains("TABLE_SCHEMA = 'd''bo'"));
-        assert!(columns_sql.contains("TABLE_NAME = 't''able'"));
+        assert!(columns_sql.contains("s.name = 'd''bo'"));
+        assert!(columns_sql.contains("o.name = 't''able'"));
         assert!(columns_sql.contains("sys.identity_columns"));
         assert!(indexes_sql.contains("OBJECT_ID('d''bo.t''able')"));
     }

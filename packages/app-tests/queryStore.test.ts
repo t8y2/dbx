@@ -47,6 +47,15 @@ function oracleConn(id: string): ConnectionConfig {
   };
 }
 
+function sqlServerConn(id: string): ConnectionConfig {
+  return {
+    ...conn(id),
+    db_type: "sqlserver",
+    port: 1433,
+    username: "sa",
+  };
+}
+
 function withConnectionHealthMock(handler: typeof fetch): typeof fetch {
   return async (input, init) => {
     if (String(input) === "/api/connection/check-health") {
@@ -820,6 +829,106 @@ test("normalizes unquoted Oracle query identifiers before loading editable metad
     assert.equal(tab?.tableMeta?.tableName, "USERS");
     assert.deepEqual(tab?.querySourceColumns, ["ID", "NAME"]);
     assert.equal(tab?.queryEditabilityReason, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("uses dbo as SQL Server metadata schema when query omits schema", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(sqlServerConn("sqlserver-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["ID", "NAME"],
+            rows: [[1, "Ada"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.sql, "select id, name from users");
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: undefined,
+            schemaQuoted: false,
+            tableName: "users",
+            tableNameQuoted: false,
+            tableAlias: undefined,
+            selectStar: false,
+            columns: [
+              { sourceName: "id", sourceNameQuoted: false, resultName: "ID", expression: "id" },
+              { sourceName: "name", sourceNameQuoted: false, resultName: "NAME", expression: "name" },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      columnRequests.push({ schema: params.get("schema"), table: params.get("table") });
+      return new Response(
+        JSON.stringify([
+          {
+            name: "ID",
+            data_type: "int",
+            is_nullable: false,
+            column_default: null,
+            is_primary_key: true,
+            extra: null,
+            comment: "编号",
+          },
+          {
+            name: "NAME",
+            data_type: "nvarchar(100)",
+            is_nullable: true,
+            column_default: null,
+            is_primary_key: false,
+            extra: null,
+            comment: "姓名",
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("sqlserver-1", "app", "Query 1", "query");
+    await store.executeTabSql(tabId, "select id, name from users");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "users");
+    assert.deepEqual(columnRequests, [{ schema: "dbo", table: "users" }]);
+    assert.equal(tab?.tableMeta?.schema, "dbo");
+    assert.equal(tab?.tableMeta?.columns[0]?.comment, "编号");
+    assert.equal(tab?.tableMeta?.columns[1]?.comment, "姓名");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -2500,14 +2609,14 @@ test("query results keep readable table source labels with active database conte
                 { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
                 { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
               ]
-          : currentSql === "select * from public.users"
-            ? [{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]
-            : currentSql === "select u.id from users u join orders o on o.user_id = u.id"
+            : currentSql === "select * from public.users"
               ? [{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]
-              : [
-                  { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 },
-                  { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
-                ];
+              : currentSql === "select u.id from users u join orders o on o.user_id = u.id"
+                ? [{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]
+                : [
+                    { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 },
+                    { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+                  ];
       return new Response(JSON.stringify(results), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/query/analyze-editability") {
@@ -2522,15 +2631,21 @@ test("query results keep readable table source labels with active database conte
   try {
     await store.executeTabSql(tabId, "select * from users; select * from orders");
     let tab = store.tabs.find((item) => item.id === tabId);
-    assert.deepEqual(tab?.results?.map((result) => result.sourceLabel), ["db.users", "db.orders"]);
-    assert.deepEqual(tab?.results?.map((result) => result.sourceStatement), ["select * from users", "select * from orders"]);
-
-    await store.executeTabSql(
-      defaultDatabaseTabId,
-      "SELECT *\nFROM apis AS ap\nLIMIT 10;\n\nSELECT *\nFROM menus AS mn\nLIMIT 10;",
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceLabel),
+      ["db.users", "db.orders"],
     );
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      ["select * from users", "select * from orders"],
+    );
+
+    await store.executeTabSql(defaultDatabaseTabId, "SELECT *\nFROM apis AS ap\nLIMIT 10;\n\nSELECT *\nFROM menus AS mn\nLIMIT 10;");
     tab = store.tabs.find((item) => item.id === defaultDatabaseTabId);
-    assert.deepEqual(tab?.results?.map((result) => result.sourceLabel), ["aaa.apis", "aaa.menus"]);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceLabel),
+      ["aaa.apis", "aaa.menus"],
+    );
 
     await store.executeTabSql(tabId, "select * from public.users");
     tab = store.tabs.find((item) => item.id === tabId);

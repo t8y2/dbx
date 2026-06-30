@@ -9,7 +9,7 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import * as api from "@/lib/api";
 import type { QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
-import { connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
 import { uuid } from "@/lib/utils";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 
@@ -55,7 +55,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await connectionStore.ensureConnected(tab.connectionId);
     console.info("[DBX][reloadData:metadata:ensure-connected:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
     const config = connectionStore.getConfig(tab.connectionId);
-    const querySchema = connectionObjectTreeQuerySchema(config, tab.database, tableMeta.schema);
+    const querySchema = metadataSchemaForConnection(config, tab.database, tableMeta.schema);
     console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: tableMeta.tableName });
     const columns = await api.getColumns(tab.connectionId, tab.database, querySchema, tableMeta.tableName);
     const indexes = await api.listIndexes(tab.connectionId, tab.database, querySchema, tableMeta.tableName).catch(() => []);

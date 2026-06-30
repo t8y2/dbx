@@ -1,5 +1,5 @@
 import * as api from "@/lib/api";
-import { connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -52,7 +52,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     await connectionStore.ensureConnected(target.connectionId);
     if (!config) throw new Error("Connection config not found");
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-    const querySchema = connectionObjectTreeQuerySchema(config, target.database, target.schema);
+    const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
     if (config.db_type === "neo4j") {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
       const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns);
@@ -157,7 +157,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     for (const tab of matchingDataTabs) {
       try {
         const connection = connectionStore.getConfig(tab.connectionId);
-        const metadataSchema = connectionObjectTreeQuerySchema(connection, tab.database, tab.tableMeta?.schema);
+        const metadataSchema = metadataSchemaForConnection(connection, tab.database, tab.tableMeta?.schema);
         const columns = await api.getColumns(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName);
         const indexes = await api.listIndexes(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName).catch(() => []);
         queryStore.setTableMeta(tab.id, {

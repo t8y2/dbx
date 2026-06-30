@@ -34,7 +34,7 @@ import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/t
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
-import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
@@ -1285,7 +1285,8 @@ export const useQueryStore = defineStore("query", () => {
       if (dbType === "postgres" || dbType === "kwdb") schema = "public";
       else schema = "";
     }
-    const metadataSchema = normalizeOracleLikeMetadataIdentifier(dbType, schema || undefined, analysis.schema ? analysis.schemaQuoted : false) || "";
+    const resolvedSchema = metadataSchemaForConnection(conn, tab.database, schema || undefined);
+    const metadataSchema = normalizeOracleLikeMetadataIdentifier(dbType, resolvedSchema || undefined, analysis.schema ? analysis.schemaQuoted : false) || "";
     const metadataTableName = normalizeOracleLikeMetadataIdentifier(dbType, analysis.tableName, analysis.tableNameQuoted)!;
     const metadataAnalysis = normalizeOracleLikeQueryAnalysis(dbType, analysis, metadataSchema || undefined, metadataTableName);
 

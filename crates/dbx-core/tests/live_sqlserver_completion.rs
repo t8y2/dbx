@@ -2,6 +2,9 @@ use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::storage::Storage;
+use dbx_core::table_structure_sql::{
+    build_table_structure_change_sql, ColumnInfo, EditableStructureColumn, TableStructureSqlOptions,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -83,6 +86,110 @@ async fn live_sqlserver_execute_query_creates_schema() {
     assert_eq!(verify_result.rows.len(), 1);
     assert!(verify_result.rows[0][0].as_i64().is_some(), "schema_id row={:?}", verify_result.rows[0]);
     assert!(schemas.expect("list schemas").contains(&schema));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_table_structure_default_changes_drop_existing_constraints() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("dbx_default_{suffix}");
+    let table = "products";
+    let create_schema = format!("CREATE SCHEMA [{schema}];");
+    let create_table = format!(
+        "\
+        CREATE TABLE [{schema}].[{table}] (\
+            [sku] NVARCHAR(64) NULL CONSTRAINT [DF_{schema}_{table}_sku_old] DEFAULT N'old sku',\
+            [active] BIT NOT NULL CONSTRAINT [DF_{schema}_{table}_active_old] DEFAULT 0\
+        );"
+    );
+    dbx_core::db::sqlserver::execute_query(&mut client, &create_schema).await.expect("create live test schema");
+    dbx_core::db::sqlserver::execute_query(&mut client, &create_table).await.expect("create table with defaults");
+
+    let mut sku = structure_column("sku", "nvarchar(64)", true, "new sku", Some("'old sku'"));
+    let mut active = structure_column("active", "bit", false, "1", Some("0"));
+    sku.original_position = Some(0);
+    active.original_position = Some(1);
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some(schema.clone()),
+        table_name: table.to_string(),
+        columns: vec![sku, active],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 4);
+
+    let execution_result = async {
+        for statement in &result.statements {
+            dbx_core::db::sqlserver::execute_query(&mut client, statement).await?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    let verify_sql = format!(
+        "\
+        SELECT c.name, dc.definition \
+        FROM sys.default_constraints AS dc \
+        JOIN sys.columns AS c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id \
+        WHERE dc.parent_object_id = OBJECT_ID(N'[{schema}].[{table}]') \
+        ORDER BY c.name;"
+    );
+    let verify_result = dbx_core::db::sqlserver::execute_query(&mut client, &verify_sql).await;
+    let cleanup = format!("DROP TABLE IF EXISTS [{schema}].[{table}]; DROP SCHEMA IF EXISTS [{schema}];");
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+
+    execution_result.expect("execute generated default constraint SQL");
+    let verify_result = verify_result.expect("verify changed defaults");
+    assert_eq!(verify_result.rows.len(), 2, "rows={:?}", verify_result.rows);
+    assert_eq!(verify_result.rows[0][0], serde_json::json!("active"));
+    assert_eq!(verify_result.rows[0][1], serde_json::json!("((1))"));
+    assert_eq!(verify_result.rows[1][0], serde_json::json!("sku"));
+    assert_eq!(verify_result.rows[1][1], serde_json::json!("('new sku')"));
+}
+
+fn structure_column(
+    name: &str,
+    data_type: &str,
+    is_nullable: bool,
+    default_value: &str,
+    original_default: Option<&str>,
+) -> EditableStructureColumn {
+    EditableStructureColumn {
+        id: name.to_string(),
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        is_nullable,
+        default_value: default_value.to_string(),
+        comment: String::new(),
+        is_primary_key: false,
+        extra: None,
+        original: Some(ColumnInfo {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            is_nullable,
+            column_default: original_default.map(str::to_string),
+            is_primary_key: false,
+            extra: None,
+            comment: None,
+        }),
+        original_position: None,
+        marked_for_drop: false,
+    }
 }
 
 #[tokio::test]

@@ -532,9 +532,58 @@ function stripPostgresStringDefaultCast(defaultValue: string, dataType: string):
   return match?.[1] ?? defaultValue;
 }
 
+function isWrappedByOuterParens(value: string): boolean {
+  if (value.length < 2 || value[0] !== "(" || value[value.length - 1] !== ")") return false;
+
+  let depth = 0;
+  let inString = false;
+  let inBracketIdentifier = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (char === "'" && value[index + 1] === "'") {
+        index += 1;
+      } else if (char === "'") {
+        inString = false;
+      }
+      continue;
+    }
+    if (inBracketIdentifier) {
+      if (char === "]") inBracketIdentifier = false;
+      continue;
+    }
+    if (char === "'") {
+      inString = true;
+      continue;
+    }
+    if (char === "[") {
+      inBracketIdentifier = true;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth < 0) return false;
+      if (depth === 0 && index < value.length - 1) return false;
+    }
+  }
+  return depth === 0;
+}
+
+function stripSqlServerDefaultOuterParens(defaultValue: string): string {
+  let value = defaultValue.trim();
+  while (isWrappedByOuterParens(value)) {
+    value = value.slice(1, -1).trim();
+  }
+  return value;
+}
+
 function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
   const defaultValue = column.column_default ?? "";
-  return databaseType === "postgres" ? stripPostgresStringDefaultCast(defaultValue, column.data_type) : defaultValue;
+  if (databaseType === "postgres") return stripPostgresStringDefaultCast(defaultValue, column.data_type);
+  if (databaseType === "sqlserver") return stripSqlServerDefaultOuterParens(defaultValue);
+  return defaultValue;
 }
 
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {

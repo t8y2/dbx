@@ -440,6 +440,60 @@ fn gbase8a_uses_limited_mysql_ddl() {
 }
 
 #[test]
+fn gbase8a_allows_mysql_style_column_reorder() {
+    let mut id = column("id");
+    id.original_position = Some(0);
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut name = column("name");
+    name.original_position = Some(1);
+    name.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut email = column("email");
+    email.original_position = Some(2);
+    email.original = Some(ColumnInfo {
+        name: "email".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Gbase),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![id, email, name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;"]);
+}
+
+#[test]
 fn manticoresearch_does_not_drop_id_column() {
     let mut id = column("id");
     id.data_type = "bigint".to_string();
@@ -1125,6 +1179,33 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [email] nvarchar(255) NOT NULL;"]);
+}
+
+#[test]
+fn sqlserver_add_column_with_identity() {
+    let mut id = column("id");
+    id.data_type = "int".to_string();
+    id.is_nullable = false;
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(10), increment: Some(2) }),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [id] int NOT NULL IDENTITY(10, 2);"]);
 }
 
 #[test]

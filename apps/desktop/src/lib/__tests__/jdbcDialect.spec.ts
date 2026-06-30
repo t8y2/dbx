@@ -37,4 +37,13 @@ describe("jdbc dialect inference", () => {
       }),
     ).toBe("iris");
   });
+
+  it("uses JDBC driver profiles when inferring dialect", () => {
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        driver_profile: "sqlserver",
+      }),
+    ).toBe("sqlserver");
+  });
 });

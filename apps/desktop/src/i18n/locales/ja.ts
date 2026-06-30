@@ -386,6 +386,7 @@ export default withEnglishFallback({
     pressToExecute: "{mod}+Enter で実行",
     pressToSaveSql: "{mod}+S でSQLを保存",
     queryTimeoutError: "クエリがタイムアウトしました（{seconds}秒）。データベース接続が正常か確認してください。",
+    changeQueryTimeout: "クエリタイムアウトを変更",
     connectionMayBeLost: "接続が失われた可能性があります。データを更新して再試行してください。",
     showResultsPane: "結果を表示",
     hideResultsPane: "結果を非表示",

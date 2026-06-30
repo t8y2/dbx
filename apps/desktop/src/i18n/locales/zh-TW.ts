@@ -387,6 +387,7 @@ export default withEnglishFallback({
     pressToExecute: "按 {mod}+Enter 執行查詢",
     pressToSaveSql: "按 {mod}+S 儲存 SQL",
     queryTimeoutError: "查詢逾時 ({seconds}s)，請檢查資料庫連線是否正常",
+    changeQueryTimeout: "修改查詢逾時時間",
     connectionMayBeLost: "連線可能已斷開，請重新整理資料重試",
     showResultsPane: "顯示結果",
     hideResultsPane: "收起結果",

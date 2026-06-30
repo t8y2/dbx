@@ -399,6 +399,7 @@ export default withEnglishFallback({
     pressToExecute: "Pressione {mod}+Enter para executar",
     pressToSaveSql: "Pressione {mod}+S para salvar o SQL",
     queryTimeoutError: "A consulta expirou ({seconds}s). Verifique se a conexão com o banco de dados está saudável.",
+    changeQueryTimeout: "Alterar tempo limite da consulta",
     connectionMayBeLost: "A conexão pode ter sido perdida. Atualize os dados e tente novamente.",
     showResultsPane: "Mostrar resultados",
     hideResultsPane: "Ocultar resultados",

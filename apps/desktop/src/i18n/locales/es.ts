@@ -387,6 +387,7 @@ export default withEnglishFallback({
     pressToExecute: "Presiona {mod}+Enter para ejecutar",
     pressToSaveSql: "Presiona {mod}+S para guardar el SQL",
     queryTimeoutError: "La consulta agotó el tiempo ({seconds}s). Comprueba la conexión a la base de datos.",
+    changeQueryTimeout: "Cambiar tiempo de espera de consulta",
     connectionMayBeLost: "Es posible que la conexión se haya perdido. Actualiza los datos e inténtalo de nuevo.",
     showResultsPane: "Mostrar resultados",
     hideResultsPane: "Ocultar resultados",

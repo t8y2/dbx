@@ -1311,15 +1311,17 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <!-- Objects mode: virtualized database object browser -->
     <template v-else-if="activeTab.mode === 'objects' && activeConnection">
-      <ObjectBrowser
-        ref="objectBrowserRef"
-        :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
-        :connection="activeConnection"
-        :database="activeTab.database"
-        :schema="activeTab.objectBrowser?.schema"
-        @open-table="emit('openObjectTable', $event)"
-        @schema-change="emit('objectSchemaChange', $event)"
-      />
+      <div class="flex-1 min-h-0">
+        <ObjectBrowser
+          ref="objectBrowserRef"
+          :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
+          :connection="activeConnection"
+          :database="activeTab.database"
+          :schema="activeTab.objectBrowser?.schema"
+          @open-table="emit('openObjectTable', $event)"
+          @schema-change="emit('objectSchemaChange', $event)"
+        />
+      </div>
     </template>
 
     <!-- Structure mode: table structure editor -->

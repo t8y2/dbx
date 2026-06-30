@@ -757,7 +757,10 @@ test("suggests common SQL Server SET options", () => {
       databaseType: "sqlserver",
     });
 
-    assert.ok(items.some((item) => item.type === "keyword" && item.label === expected), `${expected} should appear for ${sql}`);
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === expected),
+      `${expected} should appear for ${sql}`,
+    );
   }
 });
 
@@ -903,6 +906,61 @@ test("suggests SQL snippets for common abbreviations", () => {
   assert.equal(snippet.apply, "SELECT *\nFROM ${table}\nLIMIT 100;");
 });
 
+test("prioritizes FROM after SELECT star when typing the keyword", () => {
+  const sql = "SELECT * f";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "FROM");
+});
+
+test("prioritizes referenced columns in WHERE conditions", () => {
+  const sql = "SELECT * FROM public.users WHERE i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "id");
+});
+
+test("prioritizes LIMIT after SELECT WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 l";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "LIMIT");
+});
+
+test("prioritizes AND after a completed WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 a";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "AND");
+});
+
+test("prioritizes OR after a completed WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 o";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "OR");
+});
+
 test("applies keyword case to built-in SQL snippets", () => {
   const items = buildSqlCompletionItems("sel", 3, {
     tables,
@@ -963,12 +1021,7 @@ test("prioritizes referenced table columns in WHERE field input", () => {
           { name: "UserName", table: "A1User", schema: "dbo", dataType: "varchar" },
         ],
       ],
-      [
-        "dbo.OtherUserTable",
-        [
-          { name: "UserCheck", table: "OtherUserTable", schema: "dbo", dataType: "varchar" },
-        ],
-      ],
+      ["dbo.OtherUserTable", [{ name: "UserCheck", table: "OtherUserTable", schema: "dbo", dataType: "varchar" }]],
     ]),
     databaseType: "sqlserver",
   });
@@ -1003,7 +1056,10 @@ test("keeps snippets below matching WHERE field columns", () => {
       ["image_mime", "column"],
     ],
   );
-  assert.equal(items.some((item) => item.type === "snippet" && item.label === "insert into"), false);
+  assert.equal(
+    items.some((item) => item.type === "snippet" && item.label === "insert into"),
+    false,
+  );
 });
 
 test("suggests user functions and triggers with fuzzy matching", () => {

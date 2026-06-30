@@ -1603,7 +1603,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const suggestRoutines = inCallRoutineContext || oracleTableFunctionContext || inPotentialPackageMemberContext || (!preferColumnsOverGlobalRoutines && !exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && prefix.length >= 2);
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
-  const preferredKeywords = preferredKeywordsForCompletion(updateInfo, deleteInfo);
+  const preferredKeywords = preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo);
   const contextKind = detectCompletionContextKind({
     qualifier,
     exclusiveTableSuggestions,
@@ -1980,12 +1980,90 @@ function detectOracleTableFunctionContext(beforeCursor: string): boolean {
   return /\b(?:from|join)\s+table\s*\(\s*(?:(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w$]*)\.){0,2}[A-Za-z_][\w$]*$/i.test(cleaned);
 }
 
-function preferredKeywordsForCompletion(updateInfo: ReturnType<typeof detectUpdateCompletionContext>, deleteInfo: ReturnType<typeof detectDeleteCompletionContext>): string[] {
+function preferredKeywordsForCompletion(beforeCursor: string, beforeToken: string, selectListColumnContext: boolean, exclusiveTableSuggestions: boolean, updateInfo: ReturnType<typeof detectUpdateCompletionContext>, deleteInfo: ReturnType<typeof detectDeleteCompletionContext>): string[] {
   const keywords: string[] = [];
+  if (selectListColumnContext && hasSelectListExpression(beforeCursor)) keywords.push("FROM");
+  if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken)) keywords.push("LIMIT");
+  if (isAfterConditionExpression(beforeToken)) keywords.push("AND", "OR");
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
   if (deleteInfo?.afterTarget) keywords.push("WHERE");
   return keywords;
+}
+
+function hasSelectListExpression(beforeCursor: string): boolean {
+  const cleaned = stripSqlLiterals(beforeCursor).trimEnd();
+  const selectIndex = lastTopLevelKeywordIndex(cleaned, "select");
+  if (selectIndex < 0) return false;
+  const afterSelect = cleaned.slice(selectIndex + "select".length).trim();
+  return !!afterSelect && !/^distinct\s*$/i.test(afterSelect);
+}
+
+function isAfterSelectBodyExpression(beforeToken: string): boolean {
+  const cleaned = stripSqlLiterals(beforeToken).trimEnd();
+  if (!/^\s*(?:with\b[\s\S]*\bselect\b|select\b)/i.test(cleaned)) return false;
+  if (!/\bfrom\b/i.test(cleaned)) return false;
+  if (/\b(?:limit|offset|union|intersect|except)\b/i.test(cleaned)) return false;
+  const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
+  if (lastKeyword && SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
+  return true;
+}
+
+const SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS = new Set(["where", "and", "or", "not", "having", "group", "order", "by", "on", "is", "in", "like", "between"]);
+const CONDITION_INCOMPLETE_TAIL_KEYWORDS = new Set(["where", "and", "or", "not", "having", "on", "is", "in", "like", "between", "exists"]);
+
+function isAfterConditionExpression(beforeToken: string): boolean {
+  const cleaned = stripSqlLiterals(beforeToken).trimEnd();
+  if (!hasActiveConditionClause(cleaned)) return false;
+  const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
+  if (lastKeyword && CONDITION_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
+  return isExpressionTailComplete(cleaned);
+}
+
+function hasActiveConditionClause(sql: string): boolean {
+  const lower = sql.toLowerCase();
+  const whereIndex = lastTopLevelKeywordIndex(lower, "where");
+  const havingIndex = lastTopLevelKeywordIndex(lower, "having");
+  const onIndex = lastTopLevelKeywordIndex(lower, "on");
+  const conditionIndex = Math.max(whereIndex, havingIndex, onIndex);
+  if (conditionIndex < 0) return false;
+  const afterCondition = lower.slice(conditionIndex);
+  return !/\b(?:group\s+by|order\s+by|limit|offset|union|intersect|except)\b/.test(afterCondition);
+}
+
+function isExpressionTailComplete(sql: string): boolean {
+  const trimmed = sql.trimEnd();
+  if (!trimmed) return false;
+  const lastChar = trimmed[trimmed.length - 1] ?? "";
+  if (/[,.(+\-*/%<>=!&|]$/.test(lastChar)) return false;
+  return /(?:\)|\]|\b(?:true|false|null)\b|`[^`]+`|"[^"]*"|''|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][\w$]*\b)$/i.test(trimmed);
+}
+
+function stripSqlLiterals(sql: string): string {
+  return sql.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+}
+
+function lastTopLevelKeywordIndex(sql: string, keyword: string): number {
+  const lower = sql.toLowerCase();
+  const target = keyword.toLowerCase();
+  let depth = 0;
+  let lastIndex = -1;
+  for (let index = 0; index < lower.length; index++) {
+    const ch = lower[index] ?? "";
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && lower.startsWith(target, index) && !isIdentifierPart(lower[index - 1]) && !isIdentifierPart(lower[index + target.length])) {
+      lastIndex = index;
+      index += target.length - 1;
+    }
+  }
+  return lastIndex;
 }
 
 function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {

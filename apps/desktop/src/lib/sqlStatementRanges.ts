@@ -388,6 +388,8 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
 
   const boundaries: Array<{ hitFrom: number; from: number; keyword: string }> = [];
   let currentKeyword = softStatementKeywordAt(sql, statement.from, databaseType);
+  let currentExplainTargetKeyword = explainLikeTargetKeywordAt(sql, statement.from);
+  let currentBodyKeyword = currentExplainTargetKeyword ?? currentKeyword;
   let consumedWithMainStatement = false;
   let consumedExplainStatement = false;
 
@@ -401,25 +403,28 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
-    if (currentKeyword === "EXPLAIN" && !consumedExplainStatement && EXPLAIN_STATEMENT_KEYWORDS.has(lineStart.keyword)) {
+    if (!consumedExplainStatement && EXPLAIN_STATEMENT_KEYWORDS.has(lineStart.keyword) && (currentKeyword === "EXPLAIN" || currentExplainTargetKeyword !== null)) {
       consumedExplainStatement = true;
+      currentBodyKeyword = lineStart.keyword;
       continue;
     }
 
-    if (currentKeyword === "CREATE" && CREATE_BODY_KEYWORDS.has(lineStart.keyword)) {
+    if (currentBodyKeyword === "CREATE" && CREATE_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
 
-    if (currentKeyword === "INSERT" && INSERT_BODY_KEYWORDS.has(lineStart.keyword)) {
+    if (currentBodyKeyword === "INSERT" && INSERT_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
 
-    if (currentKeyword === "UPDATE" && lineStart.keyword === "SET") {
+    if (currentBodyKeyword === "UPDATE" && lineStart.keyword === "SET") {
       continue;
     }
 
     boundaries.push(lineStart);
     currentKeyword = lineStart.keyword;
+    currentExplainTargetKeyword = explainLikeTargetKeywordAt(sql, lineStart.from);
+    currentBodyKeyword = currentExplainTargetKeyword ?? currentKeyword;
     consumedWithMainStatement = false;
     consumedExplainStatement = false;
   }
@@ -616,6 +621,22 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
 
 function softStatementStartKeywords(databaseType?: DatabaseType): Set<string> {
   return new Set([...COMMON_SOFT_STATEMENT_START_KEYWORDS, ...(databaseType ? (DATABASE_SOFT_STATEMENT_KEYWORDS[databaseType] ?? []) : [])]);
+}
+
+function isExplainLikeKeyword(keyword: string | null): boolean {
+  return keyword === "EXPLAIN" || keyword === "DESCRIBE" || keyword === "DESC";
+}
+
+function explainLikeTargetKeywordAt(sql: string, pos: number): string | null {
+  const prefixMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(pos));
+  const prefix = prefixMatch?.[0]?.toUpperCase();
+  if (!isExplainLikeKeyword(prefix ?? null)) return null;
+
+  let i = pos + (prefixMatch?.[0].length ?? 0);
+  while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
+  const targetMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
+  const targetKeyword = targetMatch?.[0]?.toUpperCase();
+  return targetKeyword && EXPLAIN_STATEMENT_KEYWORDS.has(targetKeyword) ? targetKeyword : null;
 }
 
 function startsLineComment(sql: string, pos: number): boolean {

@@ -183,6 +183,26 @@ describe("statementRangeAtCursor", () => {
     expect(range?.sql.trim()).toBe("EXPLAIN\nSELECT * FROM users");
   });
 
+  it("keeps MySQL DESC UPDATE joins as one statement", () => {
+    const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "desc"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "set"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL EXPLAIN UPDATE assignments as one statement", () => {
+    const sql = "EXPLAIN UPDATE test_orders a\nJOIN test_users b ON a.id=b.id\nSET a.name = '张三'\nWHERE b.id > 10;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SET"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("does not merge a plain MySQL DESC table statement with the next query", () => {
+    const sql = "DESC users\nSELECT * FROM users;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "DESC"), "mysql")?.sql.trim()).toBe("DESC users");
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "mysql")?.sql.trim()).toBe("SELECT * FROM users");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["DESC users", "SELECT * FROM users"]);
+  });
+
   it("does not include comments between soft statement blocks", () => {
     const sql = "SELECT 1\n-- explain the next query\n/* still next query notes */\nSELECT 2;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "1"));
@@ -354,6 +374,11 @@ describe("hasMultipleExecutionTargets", () => {
   it("counts MySQL delimiter scripts by executable statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(true);
+  });
+
+  it("does not show multiple targets for MySQL DESC UPDATE joins", () => {
+    const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
+    expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
   });
 });
 

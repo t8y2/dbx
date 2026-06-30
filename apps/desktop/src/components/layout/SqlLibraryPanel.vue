@@ -1186,7 +1186,7 @@ function showDropInside(targetId: string) {
                   v-for="file in visibleFiles"
                   :key="file.id"
                   class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
-                  :class="[isDraggingItem(file.id) ? 'opacity-50' : isFileSelected(file.id) ? 'bg-primary/10' : 'hover:bg-accent']"
+                  :class="[isDraggingItem(file.id) ? 'opacity-50' : isFileSelected(file.id) ? 'bg-primary/10' : isFileActive(file.id) ? 'bg-accent' : 'hover:bg-accent']"
                   @mousedown="handleDragMouseDown($event, file.id, 'file')"
                   @mousemove="updateDropTarget($event, file.id, 'file')"
                   @mouseleave="clearDropTarget(file.id)"

@@ -335,15 +335,20 @@ function handleTab(view: EditorViewType): boolean {
   return true;
 }
 
-function requestExecute(options: { forceCurrent?: boolean } = {}) {
+interface RequestExecuteOptions {
+  forceCurrent?: boolean;
+  ignoreSelection?: boolean;
+}
+
+function requestExecute(options: RequestExecuteOptions = {}) {
   const currentView = view.value;
   if (!currentView) return false;
   return requestExecuteFromView(currentView, currentView.state.selection.main.head, options);
 }
 
-function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, options: { forceCurrent?: boolean } = {}) {
+function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, options: RequestExecuteOptions = {}) {
   const selection = currentView.state.selection.main;
-  if (!selection.empty) {
+  if (!options.ignoreSelection && !selection.empty) {
     // Has manual selection → execute directly, skip picker.
     emit("execute", sqlExecutionSnapshotFromView(currentView));
     return true;
@@ -524,7 +529,7 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   if (!statementRange) return false;
   event.preventDefault();
   event.stopPropagation();
-  emit("execute", statementRange.sql);
+  requestExecuteFromView(currentView, line.from, { ignoreSelection: true });
   currentView.focus();
   return true;
 }

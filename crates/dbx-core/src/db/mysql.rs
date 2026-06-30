@@ -2594,7 +2594,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
     let sql = format!(
         "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
          MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary, \
-         INDEX_TYPE \
+         INDEX_TYPE, MAX(NULLIF(INDEX_COMMENT, '')) AS INDEX_COMMENT \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          GROUP BY INDEX_NAME, INDEX_TYPE \
@@ -2618,7 +2618,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 filter: None,
                 index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
                 included_columns: None,
-                comment: None,
+                comment: get_opt_str(row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
             }
         })
         .collect())

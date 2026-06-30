@@ -447,17 +447,25 @@ export interface SqlTableReference {
   schema?: string | null;
   alias?: string | null;
   span: SqlTextSpan;
+  scope_id?: number;
 }
 
 export interface SqlColumnReference {
   name: string;
   qualifier?: string | null;
   span: SqlTextSpan;
+  scope_id?: number;
+}
+
+export interface SqlReferenceScope {
+  id: number;
+  parent_id?: number | null;
 }
 
 export interface SqlReferenceAnalysis {
   tables: SqlTableReference[];
   columns: SqlColumnReference[];
+  scopes?: SqlReferenceScope[];
 }
 
 export type TreeNodeType =

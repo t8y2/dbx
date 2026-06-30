@@ -27,6 +27,7 @@ static POSTGRES_DEFAULT_PRIVILEGES_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct SqlReferenceAnalysis {
     pub tables: Vec<SqlTableReference>,
     pub columns: Vec<SqlColumnReference>,
+    pub scopes: Vec<SqlReferenceScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,7 @@ pub struct SqlTableReference {
     pub schema: Option<String>,
     pub alias: Option<String>,
     pub span: SqlTextSpan,
+    pub scope_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,13 @@ pub struct SqlColumnReference {
     pub name: String,
     pub qualifier: Option<String>,
     pub span: SqlTextSpan,
+    pub scope_id: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlReferenceScope {
+    pub id: usize,
+    pub parent_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,15 +76,18 @@ impl From<Span> for SqlTextSpan {
 struct Analyzer {
     tables: Vec<SqlTableReference>,
     columns: Vec<SqlColumnReference>,
+    scopes: Vec<SqlReferenceScope>,
+    scope_stack: Vec<usize>,
+    next_scope_id: usize,
 }
 
 pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
     let normalized_dialect = normalize_dialect(dialect);
     if normalized_dialect == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
-        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![] });
+        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
     }
     if normalized_dialect == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
-        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![] });
+        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
     }
     let parser_sql = if normalized_dialect == "clickhouse" {
         normalize_clickhouse_join_order_for_parser(sql)
@@ -99,7 +111,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         analyzer.visit_statement(&statement);
     }
 
-    Ok(SqlReferenceAnalysis { tables: analyzer.tables, columns: analyzer.columns })
+    Ok(SqlReferenceAnalysis { tables: analyzer.tables, columns: analyzer.columns, scopes: analyzer.scopes })
 }
 
 fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
@@ -147,14 +159,31 @@ fn normalize_dialect(dialect: Option<&str>) -> String {
 impl Analyzer {
     fn visit_statement(&mut self, statement: &Statement) {
         if let Statement::Query(query) = statement {
-            self.visit_query(query);
+            self.visit_query_in_new_scope(query, None);
         }
+    }
+
+    fn visit_query_in_new_scope(&mut self, query: &Query, parent_id: Option<usize>) {
+        let scope_id = self.next_scope_id;
+        self.next_scope_id += 1;
+        self.scopes.push(SqlReferenceScope { id: scope_id, parent_id });
+        self.scope_stack.push(scope_id);
+        self.visit_query(query);
+        self.scope_stack.pop();
+    }
+
+    fn visit_child_query(&mut self, query: &Query) {
+        self.visit_query_in_new_scope(query, self.current_scope_id());
+    }
+
+    fn current_scope_id(&self) -> Option<usize> {
+        self.scope_stack.last().copied()
     }
 
     fn visit_query(&mut self, query: &Query) {
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
-                self.visit_query(&cte.query);
+                self.visit_child_query(&cte.query);
             }
         }
         self.visit_set_expr(&query.body);
@@ -170,13 +199,22 @@ impl Analyzer {
     fn visit_set_expr(&mut self, set_expr: &SetExpr) {
         match set_expr {
             SetExpr::Select(select) => self.visit_select(select),
-            SetExpr::Query(query) => self.visit_query(query),
+            SetExpr::Query(query) => self.visit_child_query(query),
             SetExpr::SetOperation { left, right, .. } => {
-                self.visit_set_expr(left);
-                self.visit_set_expr(right);
+                self.visit_set_expr_in_child_scope(left);
+                self.visit_set_expr_in_child_scope(right);
             }
             _ => {}
         }
+    }
+
+    fn visit_set_expr_in_child_scope(&mut self, set_expr: &SetExpr) {
+        let scope_id = self.next_scope_id;
+        self.next_scope_id += 1;
+        self.scopes.push(SqlReferenceScope { id: scope_id, parent_id: self.current_scope_id() });
+        self.scope_stack.push(scope_id);
+        self.visit_set_expr(set_expr);
+        self.scope_stack.pop();
     }
 
     fn visit_select(&mut self, select: &Select) {
@@ -272,12 +310,16 @@ impl Analyzer {
         match factor {
             TableFactor::Table { name, alias, args, .. } => {
                 if args.is_none() {
-                    if let Some(table) = table_reference_from_name(name, alias.as_ref().map(|a| a.name.value.clone())) {
+                    if let Some(table) = table_reference_from_name(
+                        name,
+                        alias.as_ref().map(|a| a.name.value.clone()),
+                        self.current_scope_id(),
+                    ) {
                         self.tables.push(table);
                     }
                 }
             }
-            TableFactor::Derived { subquery, .. } => self.visit_query(subquery),
+            TableFactor::Derived { subquery, .. } => self.visit_child_query(subquery),
             TableFactor::NestedJoin { table_with_joins, .. } => self.visit_table_with_joins(table_with_joins),
             TableFactor::TableFunction { expr, .. } => self.visit_expr(expr),
             TableFactor::Function { args, .. } => {
@@ -383,14 +425,14 @@ impl Analyzer {
                     self.visit_expr(else_result);
                 }
             }
-            Expr::Subquery(query) | Expr::Exists { subquery: query, .. } => self.visit_query(query),
+            Expr::Subquery(query) | Expr::Exists { subquery: query, .. } => self.visit_child_query(query),
             _ => {}
         }
     }
 
     fn visit_function_args(&mut self, args: &FunctionArguments) {
         match args {
-            FunctionArguments::Subquery(query) => self.visit_query(query),
+            FunctionArguments::Subquery(query) => self.visit_child_query(query),
             FunctionArguments::List(list) => {
                 for arg in &list.args {
                     self.visit_function_arg(arg);
@@ -418,16 +460,27 @@ impl Analyzer {
     }
 
     fn push_column(&mut self, qualifier: Option<String>, ident: &Ident) {
-        self.columns.push(SqlColumnReference { name: ident.value.clone(), qualifier, span: ident.span.into() });
+        if let Some(scope_id) = self.current_scope_id() {
+            self.columns.push(SqlColumnReference {
+                name: ident.value.clone(),
+                qualifier,
+                span: ident.span.into(),
+                scope_id,
+            });
+        }
     }
 }
 
-fn table_reference_from_name(name: &ObjectName, alias: Option<String>) -> Option<SqlTableReference> {
+fn table_reference_from_name(
+    name: &ObjectName,
+    alias: Option<String>,
+    scope_id: Option<usize>,
+) -> Option<SqlTableReference> {
     let parts: Vec<&Ident> = name.0.iter().filter_map(ObjectNamePart::as_ident).collect();
     let table = parts.last()?;
     let schema = if parts.len() >= 2 { parts.get(parts.len() - 2).map(|ident| ident.value.clone()) } else { None };
 
-    Some(SqlTableReference { name: table.value.clone(), schema, alias, span: table.span.into() })
+    Some(SqlTableReference { name: table.value.clone(), schema, alias, span: table.span.into(), scope_id: scope_id? })
 }
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {

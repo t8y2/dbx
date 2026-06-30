@@ -141,6 +141,33 @@ func TestNormalizeDDLObjectType(t *testing.T) {
 	}
 }
 
+func TestIsQuerySQLSkipsLeadingComments(t *testing.T) {
+	tests := []string{
+		"-- 测试\nSELECT * FROM (SELECT * FROM \"DBX_TEST\".\"ORDERS_10K\") WHERE ROWNUM <= 100",
+		"/* explain */\nSELECT * FROM dual",
+		"-- comment\r\nWITH rows AS (SELECT 1 FROM dual) SELECT * FROM rows",
+	}
+	for _, sqlText := range tests {
+		if !isQuerySQL(sqlText) {
+			t.Fatalf("expected SQL to be treated as query: %s", sqlText)
+		}
+	}
+}
+
+func TestIsQuerySQLRequiresKeywordBoundary(t *testing.T) {
+	tests := []string{
+		"-- comment only",
+		"selectivity FROM stats",
+		"withdraw FROM account",
+		"/* unterminated comment",
+	}
+	for _, sqlText := range tests {
+		if isQuerySQL(sqlText) {
+			t.Fatalf("expected SQL not to be treated as query: %s", sqlText)
+		}
+	}
+}
+
 func protocolContract(t *testing.T) struct {
 	ProtocolVersion int      `json:"protocolVersion"`
 	AllCapabilities []string `json:"allCapabilities"`

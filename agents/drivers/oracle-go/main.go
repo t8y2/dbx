@@ -1539,8 +1539,42 @@ func trimStatementSQL(sqlText string) string {
 }
 
 func isQuerySQL(sqlText string) bool {
-	lower := strings.ToLower(strings.TrimSpace(sqlText))
-	return strings.HasPrefix(lower, "select") || strings.HasPrefix(lower, "with")
+	executable := trimLeadingSQLComments(sqlText)
+	return startsWithSQLKeyword(executable, "select") || startsWithSQLKeyword(executable, "with")
+}
+
+func trimLeadingSQLComments(sqlText string) string {
+	remaining := strings.TrimSpace(sqlText)
+	for {
+		switch {
+		case strings.HasPrefix(remaining, "--"):
+			lineEnd := strings.IndexAny(remaining, "\r\n")
+			if lineEnd < 0 {
+				return ""
+			}
+			remaining = strings.TrimSpace(remaining[lineEnd+1:])
+		case strings.HasPrefix(remaining, "/*"):
+			commentEnd := strings.Index(remaining[2:], "*/")
+			if commentEnd < 0 {
+				return ""
+			}
+			remaining = strings.TrimSpace(remaining[commentEnd+4:])
+		default:
+			return remaining
+		}
+	}
+}
+
+func startsWithSQLKeyword(sqlText, keyword string) bool {
+	sqlText = strings.TrimSpace(sqlText)
+	if len(sqlText) < len(keyword) || !strings.EqualFold(sqlText[:len(keyword)], keyword) {
+		return false
+	}
+	if len(sqlText) == len(keyword) {
+		return true
+	}
+	next := sqlText[len(keyword)]
+	return !((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') || next == '_' || next == '$')
 }
 
 func quoteIdentifier(value string) string {

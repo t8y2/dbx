@@ -49,7 +49,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { TABLE_FONT_SIZE_DEFAULT, TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
@@ -177,7 +177,6 @@ const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
-const dataGridViewOptionsActive = computed(() => dataGridRef.value?.nullColumnsHidden || dataGridRef.value?.multiRowTranspose || dataGridRenderMode.value === "dom" || tableFontSize.value !== TABLE_FONT_SIZE_DEFAULT);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 
 function isQueryTimeoutError(message: string): boolean {
@@ -785,16 +784,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                      :class="{
-                        'bg-accent text-foreground': dataGridViewOptionsActive,
-                      }"
-                      :title="t('grid.viewOptions')"
-                      :aria-label="t('grid.viewOptions')"
-                    >
+                    <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
                     </Button>
                   </PopoverTrigger>
@@ -1108,16 +1098,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           </DropdownMenu>
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                :class="{
-                  'bg-accent text-foreground': dataGridViewOptionsActive,
-                }"
-                :title="t('grid.viewOptions')"
-                :aria-label="t('grid.viewOptions')"
-              >
+              <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                 <Wrench class="h-4 w-4" />
               </Button>
             </PopoverTrigger>

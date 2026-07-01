@@ -1151,7 +1151,7 @@ watch(driverStoreTab, (tab) => {
                   >
                     <FileUp class="h-3.5 w-3.5" />
                   </Button>
-                  <template v-else>
+                  <template v-if="driver.installed">
                     <Check v-if="!(driver.update_available && isDriverProgressActive(driver.db_type))" class="h-4 w-4 text-green-600" />
                     <Button
                       v-if="driver.update_available && isDriverQueued(driver.db_type)"

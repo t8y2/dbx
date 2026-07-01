@@ -4036,6 +4036,13 @@ const detailTemporalEditorKind = computed(() => {
   const detail = activeCellDetail.value;
   return detail ? temporalEditorKindForColumn(detail.colIndex) : undefined;
 });
+const sideDetailPrioritizesValue = computed(() => !cellDetailPanelIsBottom.value && !isEditingDetail.value && !!activeCellDetail.value?.formattedJson);
+const sideDetailValueFillsHeight = computed(() => cellDetailPanelIsBottom.value || isEditingDetail.value || (!cellDetailPanelIsBottom.value && !activeCellDetail.value?.imagePreviewUrl));
+const sideJsonPreviewText = computed(() => {
+  const detail = activeCellDetail.value;
+  if (!detail?.formattedJson) return "";
+  return sideDetailJsonView.value ? detail.formattedJson : detail.rawValuePreview;
+});
 
 // CodeMirror-based cell detail editors
 const detailsEditorContainer = ref<HTMLElement>();
@@ -4056,7 +4063,7 @@ const SIDE_DETAIL_EDITOR_MAX_HEIGHT = 360;
 const SIDE_DETAIL_EDITOR_LINE_HEIGHT = 20;
 const SIDE_DETAIL_EDITOR_SOFT_WRAP_CHARS = 48;
 const sideDetailEditorStyle = computed(() => {
-  if (cellDetailPanelIsBottom.value) return undefined;
+  if (cellDetailPanelIsBottom.value || isEditingDetail.value) return undefined;
   const lines = detailEditValue.value.split(/\r\n|\r|\n/).reduce((total, line) => total + Math.max(1, Math.ceil(line.length / SIDE_DETAIL_EDITOR_SOFT_WRAP_CHARS)), 0);
   const height = Math.min(SIDE_DETAIL_EDITOR_MAX_HEIGHT, Math.max(SIDE_DETAIL_EDITOR_MIN_HEIGHT, lines * SIDE_DETAIL_EDITOR_LINE_HEIGHT + 28));
   return { height: `${height}px` };
@@ -4115,7 +4122,7 @@ watch(sideJsonPreviewContainer, async (el) => {
       fontSize: editorFontSize,
       fontFamily: editorFontFamily,
     });
-    await sideJsonPreviewEditor.create(el, activeCellDetail.value?.formattedJson ?? "", "json");
+    await sideJsonPreviewEditor.create(el, sideJsonPreviewText.value, "json");
   } else if (!el && sideJsonPreviewEditor) {
     sideJsonPreviewEditor.destroy();
     sideJsonPreviewEditor = null;
@@ -4139,12 +4146,9 @@ watch(dialogJsonPreviewContainer, async (el) => {
   }
 });
 
-watch(
-  () => activeCellDetail.value?.formattedJson ?? "",
-  (value) => {
-    sideJsonPreviewEditor?.setValue(value, "json");
-  },
-);
+watch(sideJsonPreviewText, (value) => {
+  sideJsonPreviewEditor?.setValue(value, "json");
+});
 
 watch(
   () => dialogCellDetail.value?.formattedJson ?? "",
@@ -8853,7 +8857,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
-                <div data-native-clipboard class="flex-1 min-h-0 overflow-auto p-3 text-xs" :class="cellDetailPanelIsBottom || isEditingDetail ? 'flex flex-col gap-3' : 'space-y-3'">
+                <div data-native-clipboard class="flex-1 min-h-0 overflow-auto px-3 pt-3 text-xs" :class="[sideDetailValueFillsHeight ? 'flex flex-col gap-3' : 'space-y-3', isEditingDetail && !cellDetailPanelIsBottom ? 'pb-1' : 'pb-3']">
                   <div v-if="cellDetailPanelIsBottom" class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2">
                     <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
@@ -8886,7 +8890,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </div>
                   </div>
-                  <template v-else>
+                  <template v-else-if="!isEditingDetail && !sideDetailPrioritizesValue">
                     <div class="space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
                       <div class="font-medium break-all">{{ activeCellDetail.column }}</div>
@@ -8918,7 +8922,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </div>
                   </template>
-                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': cellDetailPanelIsBottom || isEditingDetail }, cellDetailPanelIsBottom && !(activeCellDetail.imagePreviewUrl && !isEditingDetail) ? 'flex-1' : '', activeCellDetail.imagePreviewUrl && !isEditingDetail ? 'shrink-0' : '']">
+                  <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': sideDetailValueFillsHeight }, sideDetailValueFillsHeight && !(activeCellDetail.imagePreviewUrl && !isEditingDetail) ? 'flex-1' : '', activeCellDetail.imagePreviewUrl && !isEditingDetail ? 'shrink-0' : '']">
                     <div class="flex min-h-5 items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
@@ -8964,11 +8968,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </a>
                     </div>
                     <template v-if="isEditingDetail">
-                      <div :class="cellDetailPanelIsBottom ? 'min-h-0 flex-1' : 'min-h-32 shrink-0'" :style="sideDetailEditorStyle">
+                      <div class="min-h-0 flex-1" :style="sideDetailEditorStyle">
                         <TemporalCellEditor v-if="detailTemporalEditorKind" v-model="detailEditValue" :kind="detailTemporalEditorKind" variant="inline" :commit-on-close="false" @cancel="cancelDetailEdit" @commit="commitDetailEdit" />
                         <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
                       </div>
-                      <div v-if="!cellDetailPanelIsBottom" class="flex shrink-0 gap-1 mt-1">
+                      <div v-if="!cellDetailPanelIsBottom" class="flex shrink-0 gap-1 py-0.5">
                         <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
                           {{ t("dangerDialog.confirm") }}
                         </Button>
@@ -8978,17 +8982,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </template>
                     <div
-                      v-else-if="sideDetailJsonView && activeCellDetail.formattedJson"
+                      v-else-if="activeCellDetail.formattedJson"
                       ref="sideJsonPreviewContainer"
                       data-cell-detail-editor-root
                       class="overflow-hidden rounded border bg-muted/20 p-2"
-                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, sideDetailValueFillsHeight ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
                       @dblclick.capture="startDetailEdit"
                     />
                     <pre
                       v-else
                       class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
-                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom && activeCellDetail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', cellDetailPanelIsBottom && !activeCellDetail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom && activeCellDetail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', sideDetailValueFillsHeight && !activeCellDetail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
                       @dblclick="startDetailEdit"
                       >{{ activeCellDetail.rawValuePreview }}</pre
                     >

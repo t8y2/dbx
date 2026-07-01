@@ -1,5 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { filterDatabaseNamesForConnection, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
+import { filterDatabaseNamesForVisiblePicker, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
@@ -22,7 +22,7 @@ export function initialVisibleDatabaseSelection(databaseNames: string[], visible
   if (Array.isArray(visibleDatabases)) {
     return normalizeVisibleDatabaseSelection(visibleDatabases, databaseNames);
   }
-  return filterDatabaseNamesForConnection(databaseNames, connection);
+  return filterDatabaseNamesForVisiblePicker(databaseNames, connection);
 }
 
 export function visibleDatabaseSelectionIsStale(previous: VisibleDatabaseConnectionFields, current: VisibleDatabaseConnectionFields): boolean {

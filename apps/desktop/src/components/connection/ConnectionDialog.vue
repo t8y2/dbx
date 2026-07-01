@@ -38,7 +38,7 @@ import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
 import { isSchemaAware } from "@/lib/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/oceanbaseConnectionMode";
@@ -1582,7 +1582,7 @@ const listedVisibleDatabaseNames = computed(() => {
   if (visibleFilterUsesSchemas.value) return visibleDatabaseNames.value;
   const connection = connectionConfigSnapshotForVisibleDatabases();
   if (visibleDatabaseShowSystem.value) return visibleDatabaseNames.value;
-  return filterDatabaseNamesForConnection(visibleDatabaseNames.value, connection);
+  return filterDatabaseNamesForVisiblePicker(visibleDatabaseNames.value, connection);
 });
 const filteredVisibleDatabaseNames = computed(() => {
   const query = visibleDatabaseSearchText.value.trim().toLowerCase();

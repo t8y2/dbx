@@ -1209,6 +1209,36 @@ fn sqlserver_add_column_with_identity() {
 }
 
 #[test]
+fn sqlserver_rejects_identity_on_incompatible_type() {
+    let mut column = column("test");
+    column.data_type = "varchar(255)".to_string();
+    column.is_nullable = false;
+    column.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("core".to_string()),
+        table_name: "products".to_string(),
+        columns: vec![column],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(
+        result.warnings,
+        vec!["SQL Server identity column \"test\" must use tinyint, smallint, int, bigint, or decimal/numeric with scale 0."]
+    );
+}
+
+#[test]
 fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
     let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "accounts", "id");
     user_fk.ref_schema = "dbo".to_string();

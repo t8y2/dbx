@@ -725,6 +725,20 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+export function isSqlServerIdentityCompatibleDataType(rawDataType: string): boolean {
+  const { baseType, params } = splitDataType(rawDataType);
+  const normalized = baseType.trim().replace(/\s+/g, " ").toLowerCase();
+  if (["tinyint", "smallint", "int", "integer", "bigint"].includes(normalized)) return true;
+  if (normalized !== "decimal" && normalized !== "numeric") return false;
+  const normalizedParams = params.replace(/\s+/g, "");
+  if (!normalizedParams) return true;
+  const parts = normalizedParams.split(",");
+  if (parts.length === 1) return /^\d+$/.test(parts[0] ?? "");
+  if (parts.length !== 2) return false;
+  const [precision, scale] = parts;
+  return /^\d+$/.test(precision ?? "") && scale === "0";
+}
+
 export function combineDataType(baseType: string, params: string): string {
   const type = baseType.trim();
   const p = params.trim();

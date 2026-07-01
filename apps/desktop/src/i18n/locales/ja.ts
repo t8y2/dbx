@@ -1606,6 +1606,7 @@ export default withEnglishFallback({
     identityGeneration: "生成",
     identitySeed: "開始値",
     identityIncrement: "増分",
+    sqlServerIdentityTypeHint: "SQL Server の ID 列は tinyint、smallint、int、bigint、scale 0 の decimal/numeric のみ対応します",
   },
   diagram: {
     title: "リレーション図",

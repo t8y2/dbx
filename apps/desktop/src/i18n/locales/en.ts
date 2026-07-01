@@ -1591,6 +1591,7 @@ export default {
     identityGeneration: "Generation",
     identitySeed: "Seed",
     identityIncrement: "Increment",
+    sqlServerIdentityTypeHint: "SQL Server identity only supports tinyint, smallint, int, bigint, and decimal/numeric with scale 0",
   },
   diagram: {
     title: "Relationship Diagram",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combineDataTypeForDatabase, createColumnDrafts, dataTypeLengthInputValue, isDataTypeLengthDisabled, splitDataType } from "../tableStructureEditorState";
+import { combineDataTypeForDatabase, createColumnDrafts, dataTypeLengthInputValue, isDataTypeLengthDisabled, isSqlServerIdentityCompatibleDataType, splitDataType } from "../tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
   it("keeps mysql unsigned attributes in the editable base type", () => {
@@ -69,5 +69,14 @@ describe("tableStructureEditorState", () => {
 
     expect(drafts.map((draft) => draft.defaultValue)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
     expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
+  });
+
+  it("limits SQL Server identity columns to supported data types", () => {
+    expect(isSqlServerIdentityCompatibleDataType("int")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("bigint")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("numeric(18, 0)")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("decimal(10)")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("varchar(255)")).toBe(false);
+    expect(isSqlServerIdentityCompatibleDataType("numeric(18, 2)")).toBe(false);
   });
 });

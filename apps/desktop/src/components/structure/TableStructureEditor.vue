@@ -42,6 +42,7 @@ import {
   getDataTypeOptions,
   getDefaultLengthForType,
   isDataTypeLengthDisabled,
+  isSqlServerIdentityCompatibleDataType,
   isProtectedManticoreIdColumn,
   parseExtraToColumnExtra,
   splitDataType,
@@ -1017,7 +1018,19 @@ function isSqlServerIdentityChecked(column: EditableStructureColumn): boolean {
 }
 
 function canEditSqlServerIdentity(column: EditableStructureColumn): boolean {
-  return !column.original && !column.markedForDrop;
+  return !column.original && !column.markedForDrop && isSqlServerIdentityCompatibleDataType(column.dataType);
+}
+
+function clearSqlServerIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = false;
+  column.extra.identity = undefined;
+}
+
+function syncSqlServerIdentityForDataType(column: EditableStructureColumn) {
+  if (databaseType.value !== "sqlserver") return;
+  if (!isSqlServerIdentityChecked(column)) return;
+  if (isSqlServerIdentityCompatibleDataType(column.dataType)) return;
+  clearSqlServerIdentity(column);
 }
 
 function ensureSqlServerIdentity(column: EditableStructureColumn) {
@@ -1034,8 +1047,7 @@ function setSqlServerIdentity(column: EditableStructureColumn, checked: boolean)
     ensureSqlServerIdentity(column);
     column.isNullable = false;
   } else {
-    column.extra.autoIncrement = false;
-    column.extra.identity = undefined;
+    clearSqlServerIdentity(column);
   }
 }
 
@@ -1057,6 +1069,16 @@ function updateSqlServerIdentityIncrement(column: EditableStructureColumn, value
   if (!canEditSqlServerIdentity(column)) return;
   ensureSqlServerIdentity(column);
   column.extra.identity!.increment = parseOptionalNumberInput(value);
+}
+
+function updateColumnDataType(column: EditableStructureColumn, baseType: string) {
+  column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
+  syncSqlServerIdentityForDataType(column);
+}
+
+function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
+  column.dataType = combineDataTypeForDatabase(databaseType.value, splitDataType(column.dataType).baseType, String(value));
+  syncSqlServerIdentityForDataType(column);
 }
 
 function moveColumnTo(index: number, insertionIndex: number) {
@@ -1797,17 +1819,12 @@ watch(activeTab, (tab) => {
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
                       :trigger-class="[structureMonoControlClass, 'w-full']"
-                      @update:model-value="(v: string) => (column.dataType = combineDataTypeForDatabase(databaseType, v, getDefaultLengthForType(databaseType, v)))"
+                      @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
                     <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
-                    <Input
-                      :model-value="dataTypeLengthInputValue(databaseType, column.dataType)"
-                      :class="structureMonoControlClass"
-                      :disabled="isColumnLengthDisabled(column)"
-                      @update:model-value="column.dataType = combineDataTypeForDatabase(databaseType, splitDataType(column.dataType).baseType, String($event))"
-                    />
+                    <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
@@ -1967,7 +1984,7 @@ watch(activeTab, (tab) => {
                       </template>
                       <!-- SQL Server: IDENTITY -->
                       <template v-else-if="structureDialect === 'sqlserver'">
-                        <label :class="structurePropertyLabelClass" :title="t('structureEditor.identity')">
+                        <label :class="structurePropertyLabelClass" :title="canEditSqlServerIdentity(column) || isSqlServerIdentityChecked(column) ? t('structureEditor.identity') : t('structureEditor.sqlServerIdentityTypeHint')">
                           <input :checked="isSqlServerIdentityChecked(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="!canEditSqlServerIdentity(column)" @change="setSqlServerIdentity(column, ($event.target as HTMLInputElement).checked)" />
                           <span class="min-w-0 truncate">{{ t("structureEditor.autoIncrement") }}</span>
                         </label>

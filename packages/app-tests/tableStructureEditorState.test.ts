@@ -12,6 +12,7 @@ import {
   getColumnEditorControls,
   getDataTypeOptions,
   isProtectedManticoreIdColumn,
+  isSqlServerIdentityCompatibleDataType,
   normalizeDataTypeParams,
   parseExtraToColumnExtra,
   toColumnNames,
@@ -198,6 +199,18 @@ test("parses SQL Server identity extra string to ColumnExtra", () => {
     autoIncrement: true,
     identity: { seed: 100, increment: 5 },
   });
+});
+
+test("recognizes SQL Server identity-compatible data types", () => {
+  assert.equal(isSqlServerIdentityCompatibleDataType("tinyint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("smallint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("int"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("integer"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("bigint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("decimal(18,0)"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("numeric(10)"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("varchar(255)"), false);
+  assert.equal(isSqlServerIdentityCompatibleDataType("numeric(18,2)"), false);
 });
 
 test("parses Manticore Search text properties to ColumnExtra", () => {

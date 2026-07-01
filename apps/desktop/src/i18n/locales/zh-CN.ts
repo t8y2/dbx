@@ -1594,6 +1594,7 @@ export default withEnglishFallback({
     identityGeneration: "生成方式",
     identitySeed: "起始值",
     identityIncrement: "增量",
+    sqlServerIdentityTypeHint: "SQL Server 自增仅支持 tinyint、smallint、int、bigint、decimal/numeric(小数位为 0)",
   },
   diagram: {
     title: "关系图",

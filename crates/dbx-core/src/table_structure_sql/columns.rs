@@ -63,6 +63,16 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings.push(format!("Adding columns is not supported for {database_label} from this editor."));
                 continue;
             }
+            if dialect == StructureDialect::SqlServer
+                && has_sqlserver_identity(column)
+                && !is_sqlserver_identity_compatible_type(&column.data_type)
+            {
+                warnings.push(format!(
+                    "SQL Server identity column \"{}\" must use tinyint, smallint, int, bigint, or decimal/numeric with scale 0.",
+                    column.name
+                ));
+                continue;
+            }
             statements.extend(build_add_column_sql(
                 dialect,
                 options.database_type,
@@ -197,6 +207,38 @@ pub(super) fn build_primary_key_sql(
     }
 
     statements
+}
+
+fn has_sqlserver_identity(column: &EditableStructureColumn) -> bool {
+    column.extra.as_ref().is_some_and(|extra| extra.auto_increment.unwrap_or(false) || extra.identity.is_some())
+}
+
+fn is_sqlserver_identity_compatible_type(data_type: &str) -> bool {
+    let trimmed = data_type.trim();
+    let (base_type, params) = match trimmed.find('(') {
+        Some(open_index) => {
+            let close_index = trimmed.rfind(')').unwrap_or(trimmed.len());
+            (&trimmed[..open_index], trimmed.get(open_index + 1..close_index).unwrap_or(""))
+        }
+        None => (trimmed, ""),
+    };
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if matches!(normalized.as_str(), "tinyint" | "smallint" | "int" | "integer" | "bigint") {
+        return true;
+    }
+    if !matches!(normalized.as_str(), "decimal" | "numeric") {
+        return false;
+    }
+    let normalized_params = params.split_whitespace().collect::<String>();
+    if normalized_params.is_empty() {
+        return true;
+    }
+    let parts = normalized_params.split(',').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [precision] => precision.parse::<u32>().is_ok(),
+        [precision, scale] => precision.parse::<u32>().is_ok() && *scale == "0",
+        _ => false,
+    }
 }
 
 pub(super) fn build_add_column_sql(

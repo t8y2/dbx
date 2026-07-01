@@ -1584,6 +1584,7 @@ export default withEnglishFallback({
     identityGeneration: "Geração",
     identitySeed: "Valor inicial",
     identityIncrement: "Incremento",
+    sqlServerIdentityTypeHint: "A identidade do SQL Server só aceita tinyint, smallint, int, bigint e decimal/numeric com escala 0",
   },
   diagram: {
     title: "Diagrama de relacionamentos",

@@ -167,7 +167,7 @@ pub fn format_export_sql_literal(value: &Value) -> String {
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+    quote_export_sql_string(&text)
 }
 
 fn format_export_sql_literal_typed(
@@ -183,7 +183,140 @@ fn format_export_sql_literal_typed(
             return format_ch_array_sql_literal(arr);
         }
     }
+    if let Some(literal) = format_export_temporal_literal(value, database_type, column_type) {
+        return literal;
+    }
     format_export_sql_literal(value)
+}
+
+fn quote_export_sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn format_export_temporal_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Option<String> {
+    let text = value.as_str()?;
+    let column_type = column_type?;
+    if database_type == Some(DatabaseType::SqlServer) {
+        return crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(text, Some(column_type))
+            .map(|text| quote_export_sql_string(&text));
+    }
+    let kind = export_temporal_column_kind(database_type, column_type)?;
+    format_rfc3339_export_temporal_text(text, kind, database_type).map(|text| quote_export_sql_string(&text))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportTemporalKind {
+    Date,
+    Time,
+    DateTime,
+    DateTimeWithTimeZone,
+}
+
+fn export_temporal_column_kind(database_type: Option<DatabaseType>, column_type: &str) -> Option<ExportTemporalKind> {
+    let lower = column_type.trim().trim_matches('"').to_ascii_lowercase();
+    let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
+    match base {
+        "date" if matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) => {
+            Some(ExportTemporalKind::DateTime)
+        }
+        "date" => Some(ExportTemporalKind::Date),
+        "time" => Some(ExportTemporalKind::Time),
+        "datetime" | "datetime2" | "smalldatetime" | "datetime64" => Some(ExportTemporalKind::DateTime),
+        "datetimeoffset" | "timestamptz" => Some(ExportTemporalKind::DateTimeWithTimeZone),
+        _ if lower.starts_with("timestamp")
+            && (lower.contains("with time zone") || lower.contains("with local time zone")) =>
+        {
+            Some(ExportTemporalKind::DateTimeWithTimeZone)
+        }
+        _ if lower.starts_with("timestamp") => Some(ExportTemporalKind::DateTime),
+        _ => None,
+    }
+}
+
+fn format_rfc3339_export_temporal_text(
+    text: &str,
+    kind: ExportTemporalKind,
+    database_type: Option<DatabaseType>,
+) -> Option<String> {
+    let parts = parse_export_rfc3339_parts(text)?;
+    let fraction = normalize_export_fraction(parts.fraction.as_deref(), database_type);
+    match kind {
+        ExportTemporalKind::Date => Some(parts.date),
+        ExportTemporalKind::Time => Some(format!("{}{fraction}", parts.time)),
+        ExportTemporalKind::DateTime => Some(format!("{} {}{fraction}", parts.date, parts.time)),
+        ExportTemporalKind::DateTimeWithTimeZone => {
+            Some(format!("{} {}{fraction}{}", parts.date, parts.time, normalize_export_timezone(&parts.zone)))
+        }
+    }
+}
+
+struct ExportRfc3339Parts {
+    date: String,
+    time: String,
+    fraction: Option<String>,
+    zone: String,
+}
+
+fn parse_export_rfc3339_parts(text: &str) -> Option<ExportRfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let date = &text[0..10];
+    let time = &text[11..19];
+    let rest = &text[19..];
+    let (fraction, zone) = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 {
+            return None;
+        }
+        (Some(format!(".{}", &rest[..digit_count])), &rest[digit_count..])
+    } else {
+        (None, rest)
+    };
+    if zone.eq_ignore_ascii_case("z") || is_export_timezone_offset(zone) {
+        Some(ExportRfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: zone.to_string() })
+    } else {
+        None
+    }
+}
+
+fn normalize_export_fraction(fraction: Option<&str>, database_type: Option<DatabaseType>) -> String {
+    match fraction {
+        Some(fraction) if database_type == Some(DatabaseType::Mysql) && fraction.len() > 7 => fraction[..7].to_string(),
+        Some(fraction) => fraction.to_string(),
+        None => String::new(),
+    }
+}
+
+fn normalize_export_timezone(zone: &str) -> String {
+    if zone.eq_ignore_ascii_case("z") {
+        "+00:00".to_string()
+    } else {
+        zone.to_string()
+    }
+}
+
+fn is_export_timezone_offset(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 6
+        && matches!(bytes[0], b'+' | b'-')
+        && bytes[3] == b':'
+        && bytes[1].is_ascii_digit()
+        && bytes[2].is_ascii_digit()
+        && bytes[4].is_ascii_digit()
+        && bytes[5].is_ascii_digit()
 }
 
 fn is_mysql_bit_type(column_type: &str) -> bool {
@@ -1167,6 +1300,88 @@ mod tests {
         assert_eq!(
             statements,
             vec!["INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES (b'1', b'1010', '1010'), (b'0', 3, 'off');"]
+        );
+    }
+
+    #[test]
+    fn temporal_columns_export_without_rfc3339_separator_or_utc_suffix() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "created_at".to_string(), "created_on".to_string(), "raw_text".to_string()],
+            column_types: vec![
+                Some("int".to_string()),
+                Some("timestamp".to_string()),
+                Some("date".to_string()),
+                Some("varchar(64)".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![
+                json!(1),
+                json!("2026-06-12T10:11:12.123456789Z"),
+                json!("2026-06-12T10:11:12Z"),
+                json!("2026-06-12T10:11:12Z"),
+            ]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO `events` (`id`, `created_at`, `created_on`, `raw_text`) VALUES (1, '2026-06-12 10:11:12.123456', '2026-06-12', '2026-06-12T10:11:12Z');"
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_timestamptz_export_keeps_timezone_without_rfc3339_t_separator() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["recorded_at".to_string(), "local_at".to_string()],
+            column_types: vec![
+                Some("timestamp with time zone".to_string()),
+                Some("timestamp without time zone".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T18:11:12+08:00")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO \"public\".\"events\" (\"recorded_at\", \"local_at\") VALUES ('2026-06-12 10:11:12+00:00', '2026-06-12 18:11:12');"
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_rowversion_timestamp_type_is_not_treated_as_datetime() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["row_version".to_string(), "created_at".to_string()],
+            column_types: vec![Some("timestamp".to_string()), Some("datetime2(3)".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T10:11:12.1234567Z")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [dbo].[events] ([row_version], [created_at]) VALUES ('2026-06-12T10:11:12Z', '2026-06-12 10:11:12.123');"
+            ]
         );
     }
 

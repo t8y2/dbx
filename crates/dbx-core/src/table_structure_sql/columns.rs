@@ -20,6 +20,13 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
+    if dialect == StructureDialect::Oracle
+        && active_columns.is_empty()
+        && options.columns.iter().any(|column| column.marked_for_drop)
+    {
+        warnings.push("Oracle does not allow dropping all columns from a table. Keep at least one column or drop the table instead.".to_string());
+        return Vec::new();
+    }
     let has_original_column_positions = active_columns.iter().any(|column| column.original_position.is_some());
     let mut simulated_column_order =
         if has_original_column_positions { original_active_column_order(&active_columns) } else { Vec::new() };

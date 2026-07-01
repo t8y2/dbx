@@ -107,14 +107,14 @@ fn builds_mysql_column_and_index_changes() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
-            result.statements,
-            vec![
-                "ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120) NOT NULL DEFAULT 'guest' COMMENT 'Shown name';",
-                "ALTER TABLE `users` ADD COLUMN `email` varchar(255) NOT NULL;",
-                "DROP INDEX `idx_old` ON `users`;",
-                "CREATE UNIQUE INDEX `uniq_users_email` ON `users` (`email`);",
-            ]
-        );
+        result.statements,
+        vec![
+            "ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120) NOT NULL DEFAULT 'guest' COMMENT 'Shown name';",
+            "ALTER TABLE `users` ADD COLUMN `email` varchar(255) NOT NULL;",
+            "DROP INDEX `idx_old` ON `users`;",
+            "CREATE UNIQUE INDEX `uniq_users_email` ON `users` (`email`);",
+        ]
+    );
 }
 
 #[test]
@@ -490,7 +490,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;"]);
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) AFTER `email`;"]);
 }
 
 #[test]
@@ -935,10 +935,7 @@ fn builds_mysql_column_reorder_statements() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec![
-            "ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;",
-            "ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120);",
-        ]
+        vec!["ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120) AFTER `email`;"]
     );
 }
 
@@ -1044,7 +1041,75 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;"]);
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) AFTER `email`;"]);
+}
+
+#[test]
+fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
+    let mut col_0 = column("col_0");
+    col_0.data_type = "int(11)".to_string();
+    col_0.is_nullable = false;
+    col_0.original_position = Some(0);
+    col_0.original = Some(ColumnInfo {
+        name: "col_0".to_string(),
+        data_type: "int(11)".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut col_1 = column("col_1");
+    col_1.original_position = Some(1);
+    col_1.original = Some(ColumnInfo {
+        name: "col_1".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut col_2 = column("col_2");
+    col_2.original_position = Some(2);
+    col_2.original = Some(ColumnInfo {
+        name: "col_2".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut col_3 = column("col_3");
+    col_3.original_position = Some(3);
+    col_3.original = Some(ColumnInfo {
+        name: "col_3".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col_1, col_2, col_3, col_0],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `col_0` int(11) NOT NULL AFTER `col_3`;"]);
 }
 
 #[test]
@@ -1381,12 +1446,12 @@ fn builds_duckdb_create_table_statements() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
-            result.statements,
-            vec![
-                "CREATE TABLE \"events\" (\n  \"name\" VARCHAR NOT NULL,\n  \"created_at\" TIMESTAMP DEFAULT current_timestamp\n);",
-                "CREATE INDEX \"idx_events_name\" ON \"events\" (\"name\");",
-            ]
-        );
+        result.statements,
+        vec![
+            "CREATE TABLE \"events\" (\n  \"name\" VARCHAR NOT NULL,\n  \"created_at\" TIMESTAMP DEFAULT current_timestamp\n);",
+            "CREATE INDEX \"idx_events_name\" ON \"events\" (\"name\");",
+        ]
+    );
 }
 
 #[test]

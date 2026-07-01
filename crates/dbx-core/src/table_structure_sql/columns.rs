@@ -12,6 +12,7 @@ use super::util::{
     clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
     quote_ident, quote_string,
 };
+use std::collections::HashSet;
 
 pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
     let capabilities = capabilities_for(options.database_type);
@@ -22,6 +23,15 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
     let has_original_column_positions = active_columns.iter().any(|column| column.original_position.is_some());
     let mut simulated_column_order =
         if has_original_column_positions { original_active_column_order(&active_columns) } else { Vec::new() };
+    // Pre-compute the minimal set of existing columns that really need an explicit move.
+    // For MySQL/ClickHouse we keep the largest already-ordered subset in place and only
+    // emit FIRST/AFTER SQL for columns outside that subset.
+    let reordered_existing_column_ids =
+        if has_original_column_positions && matches!(dialect, StructureDialect::Mysql | StructureDialect::ClickHouse) {
+            planned_existing_column_move_ids(&active_columns)
+        } else {
+            HashSet::new()
+        };
     let mut statements = Vec::new();
 
     for column in &options.columns {
@@ -52,8 +62,11 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             String::new()
         };
         let desired_previous_column_id = active_previous_column_id(&active_columns, active_index);
+        // A position change only matters when this column is part of the planned move set
+        // and its predecessor still differs in the simulated order.
         let has_position_change = has_original_column_positions
             && matches!(dialect, StructureDialect::Mysql | StructureDialect::ClickHouse)
+            && reordered_existing_column_ids.contains(&column.id)
             && column.original.is_some()
             && column.original_position.is_some()
             && simulated_column_position_changed(&simulated_column_order, &column.id, desired_previous_column_id);
@@ -312,6 +325,79 @@ pub(super) fn original_active_column_order(columns: &[&EditableStructureColumn])
         .collect();
     original_columns.sort_by_key(|column| column.original_position.unwrap_or(0));
     original_columns.into_iter().map(|column| column.id.clone()).collect()
+}
+
+/// Returns the ids of existing columns that must be explicitly moved to reach the target order.
+///
+/// The function keeps the longest subsequence of existing columns whose relative order is already
+/// correct, and marks only the remaining columns for FIRST/AFTER reordering SQL.
+pub(super) fn planned_existing_column_move_ids(columns: &[&EditableStructureColumn]) -> HashSet<String> {
+    // Only existing columns with an original position participate in move planning.
+    // Newly added columns are positioned directly from the target order.
+    let reorderable_columns: Vec<_> = columns
+        .iter()
+        .filter_map(|column| {
+            column
+                .original
+                .as_ref()
+                .zip(column.original_position)
+                .map(|_| (column.id.as_str(), column.original_position.unwrap_or(0)))
+        })
+        .collect();
+    if reorderable_columns.len() < 2 {
+        return HashSet::new();
+    }
+
+    // Map the target order back to original positions, then keep the largest increasing subsequence.
+    let original_positions: Vec<_> = reorderable_columns.iter().map(|(_, position)| *position).collect();
+    // Columns inside the LIS can stay where they are; everything else needs an explicit move.
+    let kept_indices: HashSet<_> = longest_increasing_subsequence_indices(&original_positions).into_iter().collect();
+
+    reorderable_columns
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !kept_indices.contains(index))
+        .map(|(_, (column_id, _))| column_id.to_string())
+        .collect()
+}
+
+/// Returns the indices of one longest increasing subsequence within `values`.
+///
+/// In the reorder planner, an increasing subsequence represents existing columns whose relative
+/// order still matches the original table layout, so they can remain untouched.
+fn longest_increasing_subsequence_indices(values: &[usize]) -> Vec<usize> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
+    // O(n^2) is sufficient here because table editors deal with relatively small column counts
+    // and the simpler implementation is easier to maintain.
+    let mut lengths = vec![1; values.len()];
+    let mut previous = vec![None; values.len()];
+    let mut best_end_index = 0;
+
+    for current_index in 0..values.len() {
+        for previous_index in 0..current_index {
+            if values[previous_index] < values[current_index] && lengths[previous_index] + 1 > lengths[current_index] {
+                lengths[current_index] = lengths[previous_index] + 1;
+                previous[current_index] = Some(previous_index);
+            }
+        }
+
+        if lengths[current_index] > lengths[best_end_index] {
+            best_end_index = current_index;
+        }
+    }
+
+    // Reconstruct the subsequence by following the predecessor chain backwards.
+    let mut indices = Vec::new();
+    let mut cursor = Some(best_end_index);
+    while let Some(index) = cursor {
+        indices.push(index);
+        cursor = previous[index];
+    }
+    indices.reverse();
+    indices
 }
 
 pub(super) fn active_previous_column_id<'a>(columns: &[&'a EditableStructureColumn], index: usize) -> Option<&'a str> {

@@ -225,6 +225,8 @@ let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
+let editorScrollbarPointerCleanup: (() => void) | null = null;
+const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
 
 function editorThemeAppearance() {
@@ -487,6 +489,33 @@ function updateTableNavigationHover(currentView: EditorViewType, event: MouseEve
 
 function clearTableNavigationHoverOnModifierRelease(event: KeyboardEvent) {
   if (!event.metaKey && !event.ctrlKey) clearTableNavigationHover();
+}
+
+function isEditorScrollbarPointerEvent(currentView: EditorViewType, event: MouseEvent) {
+  if (event.button !== 0) return false;
+  const scrollDOM = currentView.scrollDOM;
+  const rect = scrollDOM.getBoundingClientRect();
+  const hasVerticalScrollbar = scrollDOM.scrollHeight > scrollDOM.clientHeight + 1;
+  const hasHorizontalScrollbar = scrollDOM.scrollWidth > scrollDOM.clientWidth + 1;
+  const verticalGutter = Math.max(scrollDOM.offsetWidth - scrollDOM.clientWidth, EDITOR_SCROLLBAR_POINTER_GUTTER_PX);
+  const horizontalGutter = Math.max(scrollDOM.offsetHeight - scrollDOM.clientHeight, EDITOR_SCROLLBAR_POINTER_GUTTER_PX);
+  const inVerticalScrollbar = hasVerticalScrollbar && event.clientX >= rect.right - verticalGutter && event.clientX <= rect.right;
+  const inHorizontalScrollbar = hasHorizontalScrollbar && event.clientY >= rect.bottom - horizontalGutter && event.clientY <= rect.bottom;
+  return inVerticalScrollbar || inHorizontalScrollbar;
+}
+
+function registerEditorScrollbarPointerGuard(currentView: EditorViewType) {
+  editorScrollbarPointerCleanup?.();
+  const onPointerDown = (event: MouseEvent) => {
+    if (!isEditorScrollbarPointerEvent(currentView, event)) return;
+    clearTableNavigationHover();
+    event.stopPropagation();
+  };
+  currentView.scrollDOM.addEventListener("mousedown", onPointerDown, true);
+  editorScrollbarPointerCleanup = () => {
+    currentView.scrollDOM.removeEventListener("mousedown", onPointerDown, true);
+    editorScrollbarPointerCleanup = null;
+  };
 }
 
 function executeFromContextMenu() {
@@ -2411,6 +2440,7 @@ onMounted(async () => {
   });
 
   view.value = new EditorView({ state, parent: editorRef.value });
+  registerEditorScrollbarPointerGuard(view.value);
   view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, { passive: true });
   restoreEditorViewport();
   syncContextMenuState(view.value);
@@ -2594,6 +2624,7 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(viewportRestoreFrame);
     viewportRestoreFrame = null;
   }
+  editorScrollbarPointerCleanup?.();
   view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);

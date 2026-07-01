@@ -21,9 +21,11 @@ const CONNECTION_ERROR_PATTERNS = [
   "agent stdout not available",
   "failed to write to agent stdin",
   "failed to flush agent stdin",
+  "input/output error",
   "关闭的连接",
   "连接已关闭",
   "i/o error",
+  "no route to host",
 ];
 
 export function staleConnectionMessage(error: unknown): string {
@@ -37,7 +39,7 @@ export function shouldMarkDisconnected(error: unknown): boolean {
 }
 
 function hasConnectionOsError(message: string): boolean {
-  const osErrorCodes = new Set(["10053", "10054", "10057", "10058", "10060", "10061"]);
+  const osErrorCodes = new Set(["65", "10053", "10054", "10057", "10058", "10060", "10061"]);
   const match = message.match(/os error\s+(\d+)/);
   return !!match && osErrorCodes.has(match[1]);
 }

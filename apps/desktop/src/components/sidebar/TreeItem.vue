@@ -80,6 +80,7 @@ import { copyNameForTreeNode, objectSourceKindForTreeNode, sidebarSelectionCopyA
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { joinExportedDdls } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
+import { canActivateExistingDataTableTab } from "@/lib/dataTabActivation";
 import { buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, duckDbAttachedDatabaseNameFromPath, supportsCreateDatabaseCharset, uniqueDuckDbAttachedDatabaseName } from "@/lib/createDatabaseSql";
 import {
   buildCreateSchemaSql,
@@ -951,12 +952,7 @@ async function openData() {
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
   const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
-  const activateExistingSameTableTab = () => {
-    const existing = queryStore.tabs.find(isSameDataTableTab);
-    if (!existing) return false;
-    queryStore.activeTabId = existing.id;
-    return true;
-  };
+  const existingSameTableTab = queryStore.tabs.find(isSameDataTableTab);
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
     tab.title = node.label;
     tab.schema = tableSchema;
@@ -979,12 +975,18 @@ async function openData() {
     tab.queryEditabilityReason = undefined;
   };
 
-  if (activateExistingSameTableTab()) {
+  if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab)) {
+    queryStore.activeTabId = existingSameTableTab.id;
     logPhase("existing-tab-activated", { table: node.label });
     return;
   }
 
   const tabId = (() => {
+    if (existingSameTableTab) {
+      queryStore.activeTabId = existingSameTableTab.id;
+      resetReusedDataTabState(existingSameTableTab);
+      return existingSameTableTab.id;
+    }
     if (settingsStore.editorSettings.reuseDataTab) {
       const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
       if (existing) {

@@ -399,6 +399,7 @@ export default withEnglishFallback({
     selectDatabase: "データベースを選択",
     searchDatabase: "データベースを検索...",
     selectSchema: "スキーマを選択",
+    searchSchema: "スキーマを検索...",
     setDefaultDatabase: "デフォルトに設定",
     defaultDatabase: "デフォルト",
     clearDatabase: "データベースをクリア",

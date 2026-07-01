@@ -401,6 +401,7 @@ export default withEnglishFallback({
     selectDatabaseRequired: "請先選擇資料庫",
     searchDatabase: "搜尋資料庫……",
     selectSchema: "選擇 Schema",
+    searchSchema: "搜尋 Schema...",
     setDefaultDatabase: "設為預設",
     defaultDatabase: "預設資料庫",
     clearDatabase: "清除資料庫",

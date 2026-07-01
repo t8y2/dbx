@@ -413,6 +413,7 @@ export default withEnglishFallback({
     selectDatabaseRequired: "Selecione um banco de dados primeiro",
     searchDatabase: "Pesquisar bancos de dados...",
     selectSchema: "Selecionar schema",
+    searchSchema: "Pesquisar schemas...",
     setDefaultDatabase: "Definir Padrão",
     defaultDatabase: "Padrão",
     clearDatabase: "Limpar banco de dados",

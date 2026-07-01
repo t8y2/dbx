@@ -41,7 +41,7 @@ import {
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
@@ -1540,14 +1540,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </button>
         </div>
       </div>
-      <Select v-if="needsSchema" :model-value="selectedSchema" :disabled="loadingSchemas" @update:model-value="onSchemaChange">
-        <SelectTrigger class="h-7 w-36 text-xs">
-          <SelectValue :placeholder="loadingSchemas ? t('objects.loadingSchemas') : t('objects.schema')" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="schema in schemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-        </SelectContent>
-      </Select>
+      <SearchableSelect
+        v-if="needsSchema"
+        :model-value="selectedSchema || ''"
+        :options="schemas"
+        :placeholder="t('objects.schema')"
+        :search-placeholder="t('editor.searchSchema')"
+        :empty-text="t('grid.noSearchResults')"
+        :loading-text="t('objects.loadingSchemas')"
+        :loading="loadingSchemas"
+        :disabled="loadingSchemas"
+        trigger-variant="outline"
+        trigger-class="h-7 w-36 max-w-36 px-2 text-xs font-normal"
+        content-class="w-56"
+        @update:model-value="onSchemaChange"
+      />
       <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="loadingObjects" @click="reload">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects }" />
       </Button>

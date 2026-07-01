@@ -405,6 +405,7 @@ export default withEnglishFallback({
     selectDatabaseRequired: "Seleziona prima un database",
     searchDatabase: "Cerca database...",
     selectSchema: "Seleziona schema",
+    searchSchema: "Cerca schemi...",
     setDefaultDatabase: "Imposta Predefinito",
     defaultDatabase: "Predefinito",
     clearDatabase: "Cancella database",

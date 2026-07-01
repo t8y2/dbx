@@ -1321,7 +1321,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <!-- Objects mode: virtualized database object browser -->
     <template v-else-if="activeTab.mode === 'objects' && activeConnection">
-      <div class="flex-1 min-h-0">
+      <div class="min-w-0 flex-1 min-h-0">
         <ObjectBrowser
           ref="objectBrowserRef"
           :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"

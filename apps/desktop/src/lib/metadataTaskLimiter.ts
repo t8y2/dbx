@@ -41,12 +41,6 @@ export class MetadataTaskLimiter {
     });
   }
 
-  snapshot(scope: string): MetadataTaskLimiterEvent {
-    const normalizedScope = scope || "global";
-    const state = this.stateForScope(normalizedScope);
-    return { scope: normalizedScope, kind: "snapshot", active: state.active, queued: state.queue.length };
-  }
-
   private stateForScope(scope: string): ScopeState {
     let state = this.scopes.get(scope);
     if (!state) {

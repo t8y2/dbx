@@ -27,7 +27,7 @@ import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/li
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import type { TableStructureEditorDraft } from "@/types/database";
+import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -80,6 +80,8 @@ const props = defineProps<{
   database: string;
   schema?: string;
   tableName: string;
+  initialTab?: TableInfoTab;
+  initialTabRequestId?: number;
   draft?: TableStructureEditorDraft;
 }>();
 
@@ -90,7 +92,7 @@ const emit = defineEmits<{
   openSettings: [initialTab?: string, initialSection?: string];
 }>();
 
-const activeTab = ref("columns");
+const activeTab = ref<TableInfoTab>("columns");
 const loading = ref(false);
 const saving = ref(false);
 const postSaveRefreshing = ref(false);
@@ -1559,10 +1561,12 @@ function unregisterStructureEditorShortcuts() {
 
 onMounted(() => {
   resetState();
+  applyInitialStructureTab();
   registerStructureEditorShortcuts();
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
+    applyInitialStructureTab();
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else {
@@ -1594,14 +1598,27 @@ function firstStructureMetadataTab(capabilities = tableMetadataCapabilities.valu
   return "columns";
 }
 
+function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities = tableMetadataCapabilities.value) {
+  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode.value);
+}
+
+function resolveStructureMetadataTab(tab: TableInfoTab | undefined, capabilities = tableMetadataCapabilities.value): TableInfoTab {
+  if (tab && isStructureMetadataTabSupported(tab, capabilities)) return tab;
+  return firstStructureMetadataTab(capabilities);
+}
+
+function applyInitialStructureTab() {
+  if (!props.initialTab) return;
+  activeTab.value = resolveStructureMetadataTab(props.initialTab);
+}
+
 watch(tableMetadataCapabilities, (capabilities) => {
-  const supported =
-    (activeTab.value === "columns" && capabilities.columns) ||
-    (activeTab.value === "indexes" && capabilities.indexes) ||
-    (activeTab.value === "foreignKeys" && capabilities.foreignKeys) ||
-    (activeTab.value === "triggers" && capabilities.triggers) ||
-    (activeTab.value === "ddl" && capabilities.ddl && !isCreateMode.value);
-  if (!supported) activeTab.value = firstStructureMetadataTab(capabilities);
+  if (!isStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = firstStructureMetadataTab(capabilities);
+});
+
+watch([() => props.initialTab, () => props.initialTabRequestId], () => {
+  if (!props.initialTab) return;
+  applyInitialStructureTab();
 });
 
 watch([() => props.connectionId, () => props.database, databaseType], () => {

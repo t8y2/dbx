@@ -2759,6 +2759,30 @@ test("new table structure tabs can open multiple drafts while existing tables st
   }
 });
 
+test("reopening table structure tabs records the requested initial tab", () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useQueryStore();
+
+    const structureId = store.openTableStructure("conn-1", "db", "public", "users", "indexes");
+    const firstTab = store.tabs.find((item) => item.id === structureId);
+
+    assert.equal(firstTab?.structureInitialTab, "indexes");
+    assert.equal(firstTab?.structureInitialTabRequestId, 1);
+
+    const reusedStructureId = store.openTableStructure("conn-1", "db", "public", "users", "foreignKeys");
+    const reusedTab = store.tabs.find((item) => item.id === reusedStructureId);
+
+    assert.equal(reusedStructureId, structureId);
+    assert.equal(reusedTab?.structureInitialTab, "foreignKeys");
+    assert.equal(reusedTab?.structureInitialTabRequestId, 2);
+    assert.equal(store.activeTabId, structureId);
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("table structure refresh versions are scoped by table target", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();

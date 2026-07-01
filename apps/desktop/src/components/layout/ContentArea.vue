@@ -1342,6 +1342,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
         :database="activeTab.database"
         :schema="activeTab.schema"
         :table-name="activeTab.structureTableName || ''"
+        :initial-tab="activeTab.structureInitialTab"
+        :initial-tab-request-id="activeTab.structureInitialTabRequestId"
         :draft="activeTab.structureDraft"
         @update:draft="(draft) => (activeTab.structureDraft = draft)"
         @saved="(commentChanged) => emit('structureEditorSaved', commentChanged)"

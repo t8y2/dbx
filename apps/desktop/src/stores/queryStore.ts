@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/utils";
 import { markRaw, ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { DatabaseType, QueryResult, QueryTab } from "@/types/database";
+import type { DatabaseType, QueryResult, QueryTab, TableInfoTab } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/queryExecutionState";
 import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
@@ -745,11 +745,18 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string) {
+  function applyTableStructureInitialTab(tab: QueryTab, initialTab?: TableInfoTab) {
+    if (!initialTab) return;
+    tab.structureInitialTab = initialTab;
+    tab.structureInitialTabRequestId = (tab.structureInitialTabRequestId ?? 0) + 1;
+  }
+
+  function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
       const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.structureTableName || "") === resolvedTableName);
       if (existing) {
+        applyTableStructureInitialTab(existing, initialTab);
         activeTabId.value = existing.id;
         return existing.id;
       }
@@ -769,6 +776,8 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "structure",
       structureTableName: resolvedTableName,
+      structureInitialTab: initialTab,
+      structureInitialTabRequestId: initialTab ? 1 : undefined,
     };
     tabs.value.push(tab);
     activeTabId.value = id;

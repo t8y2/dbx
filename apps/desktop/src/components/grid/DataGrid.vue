@@ -6895,7 +6895,7 @@ function copyDdl() {
 
 function openTableStructureEditor() {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return;
-  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName);
+  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, activeTableInfoTab.value);
 }
 
 function toggleDdlWrap() {
@@ -8656,18 +8656,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
-              <div v-if="activeTableInfoTab === 'ddl'" class="table-info-ddl-actions flex min-w-0 shrink-0 items-center gap-1">
-                <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-ddl-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-                  <PencilRuler class="w-3 h-3" />
-                  <span class="table-info-ddl-action-label">{{ t("contextMenu.editStructure") }}</span>
-                </Button>
-                <Button variant="ghost" size="sm" class="table-info-ddl-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
+              <div v-if="activeTableInfoTab === 'ddl'" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                   <Copy class="w-3 h-3" />
-                  <span class="table-info-ddl-action-label">{{ t("grid.copyDdl") }}</span>
+                  <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
+                </Button>
+                <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
+                  <WrapText class="w-3 h-3" />
                 </Button>
               </div>
-              <Button v-if="activeTableInfoTab === 'ddl'" variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': ddlWrap }" @click="toggleDdlWrap">
-                <WrapText class="w-3 h-3" />
+              <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
+                <PencilRuler class="w-3 h-3" />
+                <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">
                 <X class="w-3 h-3" />
@@ -9909,7 +9909,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   container-type: inline-size;
 }
 
-.table-info-ddl-action-button {
+.table-info-action-button {
   gap: 0.25rem;
   max-width: 8rem;
   overflow: hidden;
@@ -9918,7 +9918,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     padding-inline 180ms ease;
 }
 
-.table-info-ddl-action-label {
+.table-info-action-label {
   min-width: 0;
   max-width: 6rem;
   overflow: hidden;
@@ -9930,13 +9930,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 @container (max-width: 360px) {
-  .table-info-ddl-action-button {
+  .table-info-action-button {
     width: 1.5rem;
     max-width: 1.5rem;
     padding-inline: 0;
   }
 
-  .table-info-ddl-action-label {
+  .table-info-action-label {
     max-width: 0;
     opacity: 0;
   }

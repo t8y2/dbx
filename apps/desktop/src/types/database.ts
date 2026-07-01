@@ -643,6 +643,8 @@ export interface QueryTab {
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureInitialTab?: TableInfoTab;
+  structureInitialTabRequestId?: number;
   structureDraft?: TableStructureEditorDraft;
   objectBrowser?: {
     schema?: string;

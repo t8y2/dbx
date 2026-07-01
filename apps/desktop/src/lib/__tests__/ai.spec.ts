@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildSystemPrompt, type AiContext } from "@/lib/ai";
+
+// buildSystemPrompt switches copy by currentLocale(); pin it to English so the assertions below
+// (which check the English prompt text) are stable regardless of the host locale.
+vi.mock("@/i18n", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/i18n")>();
+  return { ...actual, currentLocale: () => "en" };
+});
 
 function context(overrides: Partial<AiContext> = {}): AiContext {
   return {

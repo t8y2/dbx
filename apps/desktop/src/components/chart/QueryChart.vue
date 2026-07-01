@@ -23,6 +23,7 @@ const props = defineProps<{
 const { t } = useI18n();
 const { isDark } = useTheme();
 
+const MAX_CHART_POINTS = 5000;
 type ChartType = "line" | "bar" | "pie";
 const chartType = ref<ChartType>("bar");
 const xColumnIndex = ref(0);
@@ -73,7 +74,14 @@ const chartOption = computed(() => {
   const xIdx = xColumnIndex.value;
   if (xIdx < 0 || yColumnIndexes.value.length === 0) return null;
 
-  const xData = props.result.rows.map((row) => String(row[xIdx] ?? ""));
+  const allRows = props.result.rows;
+  const rowCount = allRows.length;
+  // Downsample huge result sets so ECharts does not duplicate every row into series data.
+  const stride = rowCount > MAX_CHART_POINTS ? Math.ceil(rowCount / MAX_CHART_POINTS) : 1;
+  const picked: number[] = [];
+  for (let i = 0; i < rowCount; i += stride) picked.push(i);
+
+  const xData = picked.map((i) => String(allRows[i][xIdx] ?? ""));
 
   if (chartType.value === "pie") {
     const yIdx = yColumnIndexes.value[0];
@@ -85,9 +93,9 @@ const chartOption = computed(() => {
         {
           type: "pie",
           radius: ["30%", "60%"],
-          data: xData.map((name, i) => ({
-            name,
-            value: toChartNumber(props.result.rows[i][yIdx]) ?? 0,
+          data: picked.map((rowIdx, j) => ({
+            name: xData[j],
+            value: toChartNumber(allRows[rowIdx][yIdx]) ?? 0,
           })),
         },
       ],
@@ -115,7 +123,7 @@ const chartOption = computed(() => {
     series: yIndices.map((yIdx) => ({
       name: axisColumnLabel(props.result.columns, yIdx),
       type: chartType.value,
-      data: props.result.rows.map((row) => toChartNumber(row[yIdx]) ?? 0),
+      data: picked.map((rowIdx) => toChartNumber(allRows[rowIdx][yIdx]) ?? 0),
       smooth: chartType.value === "line",
     })),
   };

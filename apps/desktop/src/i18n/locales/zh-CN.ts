@@ -528,6 +528,7 @@ export default withEnglishFallback({
   executionSummary: {
     empty: "暂无执行摘要",
     executing: "正在执行...",
+    largeResultWarning: "结果集较大（{rows} 行，约 {megabytes} MB）。建议减小每页行数或导出，以免内存占用过高。",
     statement: "语句",
     type: "类型",
     rows: "返回行",
@@ -2948,6 +2949,9 @@ export default withEnglishFallback({
     uninstall: "卸载",
     jreRuntime: "JRE 运行时",
     jreRuntimeAutoDownloadHint: "首次安装驱动时自动下载",
+    javaMaxHeap: "最大堆内存",
+    javaMaxHeapPlaceholder: "512m / 768m / 1g / 2g",
+    javaMaxHeapHint: "限制 Java 驱动进程内存（如 512m、1g）；留空使用默认 512m",
     driversUpdatable: "{count} 个驱动可更新",
     upgradingProgress: "升级中 ({current}/{total})",
     upgradeAll: "全部升级",

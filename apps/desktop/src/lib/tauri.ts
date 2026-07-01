@@ -91,6 +91,8 @@ export type JavaRuntimeMode = "managed" | "system" | "custom";
 export interface JavaRuntimeConfig {
   mode: JavaRuntimeMode;
   custom_java_path: string | null;
+  /** JVM max heap passed to every Java agent as `-Xmx<value>` (e.g. "512m", "1g"). null/empty uses the backend default. */
+  max_heap: string | null;
 }
 
 export interface DriverStoreUsageItem {

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tauri::{Emitter, State};
 
-use dbx_core::agent_manager::{AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
+use dbx_core::agent_manager::{
+    validate_max_heap, AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY,
+};
 use dbx_core::agent_service::{
     build_agent_list, fetch_registry, import_agent_jar, import_agents_from_zip as import_agents_from_zip_core,
     install_agent_driver, invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
@@ -103,6 +105,20 @@ pub async fn set_agent_java_runtime_config(
     mut config: JavaRuntimeConfig,
 ) -> Result<JavaRuntimeConfig, String> {
     let am = &state.agent_manager;
+    // Validate + normalize the JVM max heap before persisting. Empty values clear the override
+    // (launch falls back to the default); invalid values are rejected with a clear message.
+    config.max_heap = match config.max_heap.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(heap) => {
+            if validate_max_heap(heap) {
+                Some(heap.to_string())
+            } else {
+                return Err(format!(
+                    "Invalid Java agent max heap '{heap}'. Use a positive integer with a k/m/g unit, e.g. 512m, 1g, 2048k."
+                ));
+            }
+        }
+    };
     if config.mode == JavaRuntimeMode::Custom || config.mode == JavaRuntimeMode::System {
         let candidate_state = dbx_core::agent_manager::AgentState { java_runtime: config.clone(), ..am.load_state() };
         let resolved = am.resolve_java_runtime(&candidate_state, DEFAULT_JRE_KEY)?;

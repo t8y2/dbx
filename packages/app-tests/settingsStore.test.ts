@@ -42,7 +42,7 @@ function withMockLocalStorage(initial: Record<string, string>, run: () => void) 
 test("normalizes saved query result page size", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.pageSize, 100);
   assert.equal(normalizeEditorSettings({ pageSize: 5000 }).pageSize, 5000);
-  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 100000);
+  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 50000);
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
@@ -79,14 +79,14 @@ test("keeps a manually saved 10000 export batch size after migration", () => {
 });
 
 test("defaults query-result export row limit settings", () => {
-  assert.equal(DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled, true);
   assert.equal(DEFAULT_EDITOR_SETTINGS.exportRowLimit, 100000);
   assert.equal(DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled, true);
-  assert.equal(normalizeEditorSettings({}).exportRowLimitEnabled, false);
+  assert.equal(normalizeEditorSettings({}).exportRowLimitEnabled, true);
   assert.equal(normalizeEditorSettings({}).exportRowLimit, 100000);
   assert.equal(normalizeEditorSettings({}).queryExportKeysetOptimizationEnabled, true);
   assert.equal(normalizeEditorSettings({ exportRowLimitEnabled: true }).exportRowLimitEnabled, true);
-  assert.equal(normalizeEditorSettings({ exportRowLimitEnabled: "nope" as any }).exportRowLimitEnabled, false);
+  assert.equal(normalizeEditorSettings({ exportRowLimitEnabled: "nope" as any }).exportRowLimitEnabled, true);
   assert.equal(normalizeEditorSettings({ exportRowLimit: 250000 }).exportRowLimit, 250000);
   assert.equal(normalizeEditorSettings({ exportRowLimit: 10 }).exportRowLimit, 100000);
   assert.equal(normalizeEditorSettings({ queryExportKeysetOptimizationEnabled: false }).queryExportKeysetOptimizationEnabled, false);

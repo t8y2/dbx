@@ -525,6 +525,7 @@ export default {
   executionSummary: {
     empty: "No execution summary",
     executing: "Executing...",
+    largeResultWarning: "Large result set ({rows} rows, ~{megabytes} MB). Consider decreasing rows per page or exporting to avoid high memory use.",
     statement: "Statement",
     type: "Type",
     rows: "Rows",
@@ -2941,6 +2942,9 @@ export default {
     uninstall: "Uninstall",
     jreRuntime: "JRE Runtime",
     jreRuntimeAutoDownloadHint: "Downloaded automatically when installing a driver for the first time",
+    javaMaxHeap: "Max heap",
+    javaMaxHeapPlaceholder: "512m / 768m / 1g / 2g",
+    javaMaxHeapHint: "Caps Java agent memory (e.g. 512m, 1g); empty uses the 512m default",
     driversUpdatable: "{count} driver(s) can be updated",
     upgradingProgress: "Upgrading ({current}/{total})",
     upgradeAll: "Upgrade all",

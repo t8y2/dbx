@@ -41,6 +41,8 @@ import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionCont
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
+import { estimateResultBytes, isLargeResult, MAX_RESULT_CACHE_BYTES } from "@/lib/resultMemoryBudget";
+import { useToast } from "@/composables/useToast";
 import { splitSqlStatementRanges } from "@/lib/sqlStatementRanges";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabResultCache";
@@ -187,6 +189,7 @@ function getI18nT() {
 
 export const useQueryStore = defineStore("query", () => {
   const t = getI18nT();
+  const { toast } = useToast();
   const restored = loadSavedTabs();
   const tabs = ref<QueryTab[]>(restored.tabs);
   const activeTabId = ref<string | null>(restored.activeTabId);
@@ -2004,6 +2007,7 @@ export const useQueryStore = defineStore("query", () => {
           backendMs: current.result?.execution_time_ms,
           elapsed: elapsed(),
         });
+        warnLargeResultIfNeeded(current.result);
         if (current.mode === "query" && current.result) analyzeQueryMetadataInBackground(id, queryBaseSql, current.result, traceId, elapsed);
       } else {
         console.warn("[DBX][executeTabSql:stale-result]", {
@@ -2241,10 +2245,27 @@ export const useQueryStore = defineStore("query", () => {
 
   async function trimResultCache() {
     const inactive = tabs.value.filter((t) => t.id !== activeTabId.value && (t.result || t.results)).sort((a, b) => (a.resultAccessedAt ?? 0) - (b.resultAccessedAt ?? 0));
-    if (inactive.length > MAX_CACHED_RESULTS) {
-      const toEvict = inactive.slice(0, inactive.length - MAX_CACHED_RESULTS);
-      await Promise.all(toEvict.map((t) => evictCachedResult(t)));
+    if (inactive.length === 0) return;
+    // Evict oldest inactive results while we exceed either the tab-count cap or the byte budget.
+    // The byte budget prevents a few huge results from holding hundreds of MB across inactive tabs.
+    let totalBytes = inactive.reduce((sum, tab) => sum + estimateResultBytes(tab.result ?? tab.results?.[0]), 0);
+    const toEvict: QueryTab[] = [];
+    for (const tab of inactive) {
+      const remainingCount = inactive.length - toEvict.length;
+      if (remainingCount <= MAX_CACHED_RESULTS && totalBytes <= MAX_RESULT_CACHE_BYTES) break;
+      toEvict.push(tab);
+      totalBytes -= estimateResultBytes(tab.result ?? tab.results?.[0]);
     }
+    if (toEvict.length > 0) {
+      await Promise.all(toEvict.map((tab) => evictCachedResult(tab)));
+    }
+  }
+
+  function warnLargeResultIfNeeded(result: QueryResult | undefined) {
+    if (!result || !isLargeResult(result)) return;
+    const rows = result.rows.length;
+    const megabytes = Math.max(1, Math.round(estimateResultBytes(result) / (1024 * 1024)));
+    toast(t("query.largeResultWarning", { rows, megabytes }));
   }
 
   function rememberActiveTab(id: string | null) {

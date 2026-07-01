@@ -954,6 +954,122 @@ fn oracle_table_comments_from_query_result(result: db::QueryResult) -> HashMap<S
         .collect()
 }
 
+fn oracle_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
+         c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
+         CASE WHEN cc.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
+         cm.COMMENTS \
+         FROM ALL_TAB_COLUMNS c \
+         LEFT JOIN ( \
+           SELECT cols.OWNER, cols.TABLE_NAME, cols.COLUMN_NAME \
+           FROM ALL_CONS_COLUMNS cols \
+           JOIN ALL_CONSTRAINTS con \
+             ON con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
+            AND con.OWNER = cols.OWNER \
+            AND con.CONSTRAINT_TYPE = 'P' \
+         ) cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME \
+         LEFT JOIN ALL_COL_COMMENTS cm \
+           ON cm.OWNER = c.OWNER AND cm.TABLE_NAME = c.TABLE_NAME AND cm.COLUMN_NAME = c.COLUMN_NAME \
+         WHERE c.OWNER = {} AND c.TABLE_NAME = {} \
+         ORDER BY c.COLUMN_ID",
+        oracle_owner_filter(schema),
+        sql_string(table),
+    )
+}
+
+fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
+    match data_type.to_ascii_uppercase().as_str() {
+        "NUMBER" => match (precision, scale) {
+            (Some(precision), Some(scale)) if scale > 0 => format!("NUMBER({precision},{scale})"),
+            (Some(precision), _) => format!("NUMBER({precision})"),
+            _ => "NUMBER".to_string(),
+        },
+        "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" | "RAW" => match length {
+            Some(length) => format!("{data_type}({length})"),
+            None => data_type.to_string(),
+        },
+        _ => data_type.to_string(),
+    }
+}
+
+fn oracle_columns_from_query_result(result: db::QueryResult) -> Vec<db::ColumnInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            let data_type = query_result_cell_string(&row, 1).unwrap_or_default();
+            let nullable = query_result_cell_string(&row, 2).unwrap_or_default();
+            let default_value = query_result_cell_string(&row, 3)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let length = query_result_cell_i64(&row, 4).and_then(|value| i32::try_from(value).ok());
+            let precision = query_result_cell_i64(&row, 5).and_then(|value| i32::try_from(value).ok());
+            let scale = query_result_cell_i64(&row, 6).and_then(|value| i32::try_from(value).ok());
+            let is_primary_key = query_result_cell_i64(&row, 8).unwrap_or(0) == 1;
+            let comment = query_result_cell_string(&row, 9).filter(|value| !value.trim().is_empty());
+            Some(db::ColumnInfo {
+                name,
+                data_type: oracle_column_type(&data_type, precision, scale, length),
+                is_nullable: nullable == "Y",
+                column_default: default_value,
+                is_primary_key,
+                extra: None,
+                comment,
+                numeric_precision: precision,
+                numeric_scale: scale,
+                character_maximum_length: length,
+            })
+        })
+        .collect()
+}
+
+async fn oracle_columns_via_sql(
+    database: &str,
+    schema: &str,
+    table: &str,
+    client: &mut db::agent_driver::AgentDriverClient,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let sql = oracle_columns_sql(schema, table);
+    let result = client
+        .execute_query_with_timeout::<db::QueryResult>(
+            agent_execute_query_params(
+                &sql,
+                if database.is_empty() { None } else { Some(database) },
+                if schema.is_empty() { None } else { Some(schema) },
+                QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
+            ),
+            timeout_duration,
+        )
+        .await?;
+    Ok(deduplicate_column_infos(oracle_columns_from_query_result(result)))
+}
+
+async fn external_driver_oracle_columns_via_sql(
+    session: Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let result: db::QueryResult = session
+        .invoke_with_timeout(
+            "executeQuery",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "sql": oracle_columns_sql(schema, table),
+                "maxRows": 10_000
+            }),
+            agent_metadata_timeout(Some(config)),
+        )
+        .await?;
+    Ok(deduplicate_column_infos(oracle_columns_from_query_result(result)))
+}
+
 fn oracle_object_statistics_sql(schema: &str) -> String {
     oracle_object_statistics_owner_segments_sql(schema, "ALL_SEGMENTS")
 }
@@ -1298,9 +1414,17 @@ async fn list_tables_once(
             let session = session.clone();
             drop(connections);
             if uses_presto_like_information_schema_tables(&config.db_type) {
-                return external_driver_presto_like_tables(session, config.as_ref(), database, schema)
-                    .await
-                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                return external_driver_presto_like_tables(
+                    session,
+                    config.as_ref(),
+                    database,
+                    schema,
+                    filter,
+                    limit,
+                    offset,
+                )
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
             }
             return session
                 .invoke_with_timeout::<Vec<db::TableInfo>>(
@@ -1561,7 +1685,11 @@ async fn external_driver_presto_like_tables(
     config: &ConnectionConfig,
     database: &str,
     schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    let query_limit = limit.map(|limit| limit.saturating_add(offset.unwrap_or(0)).max(1)).unwrap_or(100000);
     let result: db::QueryResult = session
         .invoke_with_timeout(
             "executeQuery",
@@ -1569,8 +1697,8 @@ async fn external_driver_presto_like_tables(
                 "connection": config,
                 "database": database,
                 "schema": schema,
-                "sql": presto_like_information_schema_tables_sql(database, schema),
-                "maxRows": 100000,
+                "sql": presto_like_information_schema_tables_sql(database, schema, filter, Some(query_limit)),
+                "maxRows": query_limit,
                 "fetchSize": 1000,
                 "timeoutSecs": 60
             }),
@@ -1586,7 +1714,7 @@ async fn external_driver_presto_like_objects(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    let tables = external_driver_presto_like_tables(session, config, database, schema).await?;
+    let tables = external_driver_presto_like_tables(session, config, database, schema, None, None, None).await?;
     Ok(tables
         .into_iter()
         .map(|table| db::ObjectInfo {
@@ -1603,18 +1731,72 @@ async fn external_driver_presto_like_objects(
         .collect())
 }
 
-fn presto_like_information_schema_tables_sql(database: &str, schema: &str) -> String {
+async fn external_driver_presto_like_columns(
+    session: Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let result: db::QueryResult = session
+        .invoke(
+            "executeQuery",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "sql": presto_like_information_schema_columns_sql(database, schema, table),
+                "maxRows": 10000,
+                "fetchSize": 1000,
+                "timeoutSecs": 60
+            }),
+        )
+        .await?;
+    Ok(presto_like_columns_from_query_result(&result))
+}
+
+fn presto_like_information_schema_tables_sql(
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+) -> String {
     let source = if database.trim().is_empty() {
         "information_schema.tables".to_string()
     } else {
         format!("{}.information_schema.tables", quote_presto_like_identifier(database))
     };
-    format!(
+    let mut sql = format!(
         "SELECT table_name, CASE table_type WHEN 'BASE TABLE' THEN 'TABLE' ELSE table_type END AS table_type \
          FROM {source} \
-         WHERE table_schema = {} AND table_type IN ('BASE TABLE', 'VIEW') \
-         ORDER BY table_type, table_name",
+         WHERE table_schema = {} AND table_type IN ('BASE TABLE', 'VIEW')",
         sql_string_literal(schema)
+    );
+    if let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) {
+        sql.push_str(" AND lower(table_name) LIKE ");
+        sql.push_str(&sql_string_literal(&format!("{}%", escape_presto_like_pattern(&filter.to_lowercase()))));
+        sql.push_str(" ESCAPE '\\'");
+    }
+    sql.push_str(" ORDER BY table_type, table_name");
+    if let Some(limit) = limit {
+        sql.push_str(&format!(" LIMIT {}", limit.max(1)));
+    }
+    sql
+}
+
+fn presto_like_information_schema_columns_sql(database: &str, schema: &str, table: &str) -> String {
+    let source = if database.trim().is_empty() {
+        "information_schema.columns".to_string()
+    } else {
+        format!("{}.information_schema.columns", quote_presto_like_identifier(database))
+    };
+    format!(
+        "SELECT column_name, data_type, is_nullable, column_default, comment \
+         FROM {source} \
+         WHERE table_schema = {} AND table_name = {} \
+         ORDER BY ordinal_position",
+        sql_string_literal(schema),
+        sql_string_literal(table)
     )
 }
 
@@ -1640,12 +1822,64 @@ fn presto_like_tables_from_query_result(result: &db::QueryResult) -> Vec<db::Tab
         .collect()
 }
 
+fn presto_like_columns_from_query_result(result: &db::QueryResult) -> Vec<db::ColumnInfo> {
+    result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(row, 0)?;
+            if name.trim().is_empty() {
+                return None;
+            }
+            let data_type = query_result_cell_string(row, 1).unwrap_or_default();
+            Some(db::ColumnInfo {
+                name,
+                // Presto/Trino do not expose precision/length columns in information_schema.columns.
+                data_type: data_type.clone(),
+                is_nullable: query_result_cell_string(row, 2)
+                    .map(|value| value.eq_ignore_ascii_case("YES"))
+                    .unwrap_or(true),
+                column_default: query_result_cell_string(row, 3),
+                is_primary_key: false,
+                extra: None,
+                comment: query_result_cell_string(row, 4),
+                numeric_precision: presto_like_numeric_precision(&data_type),
+                numeric_scale: presto_like_numeric_scale(&data_type),
+                character_maximum_length: presto_like_character_maximum_length(&data_type),
+            })
+        })
+        .collect()
+}
+
 fn query_result_cell_string(row: &[serde_json::Value], index: usize) -> Option<String> {
     let value = row.get(index)?;
     if value.is_null() {
         return None;
     }
     value.as_str().map(ToString::to_string).or_else(|| Some(value.to_string()))
+}
+
+fn presto_like_numeric_precision(data_type: &str) -> Option<i32> {
+    presto_like_type_argument(data_type, &["decimal", "numeric"], 0)
+}
+
+fn presto_like_numeric_scale(data_type: &str) -> Option<i32> {
+    presto_like_type_argument(data_type, &["decimal", "numeric"], 1)
+}
+
+fn presto_like_character_maximum_length(data_type: &str) -> Option<i32> {
+    presto_like_type_argument(data_type, &["char", "varchar"], 0)
+}
+
+fn presto_like_type_argument(data_type: &str, type_names: &[&str], index: usize) -> Option<i32> {
+    let value = data_type.trim();
+    let open = value.find('(')?;
+    let close = value[open + 1..].find(')')? + open + 1;
+    let name = value[..open].trim().to_ascii_lowercase();
+    if !type_names.iter().any(|type_name| *type_name == name) {
+        return None;
+    }
+    value[open + 1..close].split(',').nth(index)?.trim().parse::<i32>().ok()
 }
 
 fn normalize_information_schema_table_type(table_type: &str) -> String {
@@ -1669,6 +1903,10 @@ fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn escape_presto_like_pattern(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::db;
@@ -1676,11 +1914,12 @@ mod tests {
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
         filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
         is_retryable_metadata_error, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
-        oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_information_schema_tables_sql,
-        presto_like_tables_from_query_result, visible_schema_filter,
+        oracle_columns_from_query_result, oracle_columns_sql, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
+        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, visible_schema_filter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -1921,7 +2160,7 @@ mod tests {
 
     #[test]
     fn presto_like_information_schema_sql_uses_catalog_and_schema_without_system_jdbc() {
-        let sql = presto_like_information_schema_tables_sql("hive", "sales_analytics");
+        let sql = presto_like_information_schema_tables_sql("hive", "sales_analytics", None, None);
 
         assert_eq!(
             sql,
@@ -1932,10 +2171,38 @@ mod tests {
 
     #[test]
     fn presto_like_information_schema_sql_escapes_identifiers_and_literals() {
-        let sql = presto_like_information_schema_tables_sql("hi\"ve", "sales'analytics");
+        let sql = presto_like_information_schema_tables_sql("hi\"ve", "sales'analytics", None, None);
 
         assert!(sql.contains("\"hi\"\"ve\".information_schema.tables"));
         assert!(sql.contains("table_schema = 'sales''analytics'"));
+    }
+
+    #[test]
+    fn presto_like_information_schema_sql_pushes_table_filter_and_limit() {
+        let sql = presto_like_information_schema_tables_sql("hive", "sales_analytics", Some("Daily_%\\"), Some(20));
+
+        assert!(sql.contains("AND lower(table_name) LIKE 'daily\\_\\%\\\\%' ESCAPE '\\'"));
+        assert!(sql.ends_with("ORDER BY table_type, table_name LIMIT 20"));
+    }
+
+    #[test]
+    fn presto_like_information_schema_columns_sql_uses_catalog_information_schema() {
+        let sql = presto_like_information_schema_columns_sql("hive", "sales_analytics", "daily_revenue");
+
+        assert_eq!(
+            sql,
+            "SELECT column_name, data_type, is_nullable, column_default, comment FROM \"hive\".information_schema.columns WHERE table_schema = 'sales_analytics' AND table_name = 'daily_revenue' ORDER BY ordinal_position"
+        );
+        assert!(!sql.contains("system.jdbc.columns"));
+    }
+
+    #[test]
+    fn presto_like_information_schema_columns_sql_escapes_identifiers_and_literals() {
+        let sql = presto_like_information_schema_columns_sql("hi\"ve", "sales'analytics", "daily'revenue");
+
+        assert!(sql.contains("\"hi\"\"ve\".information_schema.columns"));
+        assert!(sql.contains("table_schema = 'sales''analytics'"));
+        assert!(sql.contains("table_name = 'daily''revenue'"));
     }
 
     #[test]
@@ -1962,6 +2229,58 @@ mod tests {
         assert_eq!(tables[1].name, "revenue_view");
         assert_eq!(tables[1].table_type, "VIEW");
         assert_eq!(normalize_information_schema_table_type("MATERIALIZED VIEW"), "MATERIALIZED_VIEW");
+    }
+
+    #[test]
+    fn presto_like_columns_from_query_result_maps_column_metadata() {
+        let result = super::db::QueryResult {
+            columns: vec![
+                "column_name".to_string(),
+                "data_type".to_string(),
+                "is_nullable".to_string(),
+                "column_default".to_string(),
+                "comment".to_string(),
+            ],
+            column_types: vec![],
+            column_sortables: vec![],
+            rows: vec![
+                vec![
+                    serde_json::json!("amount"),
+                    serde_json::json!("decimal(12,2)"),
+                    serde_json::json!("NO"),
+                    serde_json::Value::Null,
+                    serde_json::json!("daily amount"),
+                ],
+                vec![
+                    serde_json::json!("code"),
+                    serde_json::json!("varchar(64)"),
+                    serde_json::json!("YES"),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                ],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+
+        let columns = presto_like_columns_from_query_result(&result);
+
+        assert_eq!(columns[0].name, "amount");
+        assert_eq!(columns[0].data_type, "decimal(12,2)");
+        assert!(!columns[0].is_nullable);
+        assert_eq!(columns[0].comment.as_deref(), Some("daily amount"));
+        assert_eq!(columns[0].numeric_precision, Some(12));
+        assert_eq!(columns[0].numeric_scale, Some(2));
+        assert_eq!(columns[0].character_maximum_length, None);
+        assert!(!columns[0].is_primary_key);
+        assert_eq!(columns[1].name, "code");
+        assert!(columns[1].is_nullable);
+        assert_eq!(columns[1].numeric_precision, None);
+        assert_eq!(columns[1].numeric_scale, None);
+        assert_eq!(columns[1].character_maximum_length, Some(64));
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -2184,6 +2503,79 @@ mod tests {
         let comments = oracle_table_comments_from_query_result(result);
         assert_eq!(comments.get("ORDERS").map(String::as_str), Some("Orders table"));
         assert!(!comments.contains_key("PRODUCTS"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_uses_exact_table_name_for_quoted_lowercase_tables() {
+        let sql = oracle_columns_sql("DBX_TEST", "test");
+
+        assert!(sql.contains("ALL_TAB_COLUMNS"));
+        assert!(sql.contains("ALL_COL_COMMENTS"));
+        assert!(sql.contains("c.OWNER = 'DBX_TEST'"));
+        assert!(sql.contains("c.TABLE_NAME = 'test'"));
+    }
+
+    #[test]
+    fn oracle_columns_from_query_result_maps_types_comments_and_primary_key() {
+        let result = db::QueryResult {
+            columns: vec![
+                "COLUMN_NAME".to_string(),
+                "DATA_TYPE".to_string(),
+                "NULLABLE".to_string(),
+                "DATA_DEFAULT".to_string(),
+                "DATA_LENGTH".to_string(),
+                "DATA_PRECISION".to_string(),
+                "DATA_SCALE".to_string(),
+                "COLUMN_ID".to_string(),
+                "IS_PK".to_string(),
+                "COMMENTS".to_string(),
+            ],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows: vec![
+                vec![
+                    serde_json::json!("id"),
+                    serde_json::json!("VARCHAR2"),
+                    serde_json::json!("N"),
+                    serde_json::Value::Null,
+                    serde_json::json!("255"),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::json!("1"),
+                    serde_json::json!("1"),
+                    serde_json::json!("identifier"),
+                ],
+                vec![
+                    serde_json::json!("data"),
+                    serde_json::json!("TIMESTAMP"),
+                    serde_json::json!("Y"),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::json!("2"),
+                    serde_json::json!("0"),
+                    serde_json::Value::Null,
+                ],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+
+        let columns = oracle_columns_from_query_result(result);
+
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].data_type, "VARCHAR2(255)");
+        assert!(!columns[0].is_nullable);
+        assert!(columns[0].is_primary_key);
+        assert_eq!(columns[0].comment.as_deref(), Some("identifier"));
+        assert_eq!(columns[1].name, "data");
+        assert_eq!(columns[1].data_type, "TIMESTAMP");
+        assert!(columns[1].is_nullable);
     }
 
     #[test]
@@ -2977,6 +3369,9 @@ pub async fn get_columns_core(
                 let config = config.clone();
                 let session = session.clone();
                 drop(connections);
+                if uses_presto_like_information_schema_tables(&config.db_type) {
+                    return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table).await;
+                }
                 let columns = session
                     .invoke_with_timeout::<Vec<db::ColumnInfo>>(
                         "getColumns",
@@ -2989,6 +3384,30 @@ pub async fn get_columns_core(
                         agent_metadata_timeout(Some(config.as_ref())),
                     )
                     .await?;
+                if columns.is_empty() && config.db_type == DatabaseType::Oracle {
+                    match external_driver_oracle_columns_via_sql(
+                        session.clone(),
+                        config.as_ref(),
+                        database,
+                        schema,
+                        table,
+                    )
+                    .await
+                    {
+                        Ok(fallback_columns) if !fallback_columns.is_empty() => return Ok(fallback_columns),
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][external-driver:get_columns:oracle-fallback-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    }
+                }
                 return Ok(deduplicate_column_infos(columns));
             }
             #[cfg(feature = "duckdb-bundled")]
@@ -3045,6 +3464,30 @@ pub async fn get_columns_core(
                     Ok(columns) if !columns.is_empty() => return Ok(deduplicate_column_infos(columns)),
                     Ok(columns) => {
                         if let Some(config) = fallback_config.as_ref() {
+                            if config.db_type == DatabaseType::Oracle {
+                                match oracle_columns_via_sql(
+                                    database,
+                                    schema,
+                                    table,
+                                    &mut client,
+                                    agent_metadata_timeout(Some(config)),
+                                )
+                                .await
+                                {
+                                    Ok(fallback_columns) if !fallback_columns.is_empty() => return Ok(fallback_columns),
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        log::warn!(
+                                            "[schema][agent:get_columns:oracle-fallback-failed] connection_id={} database={} schema={} table={} error={}",
+                                            connection_id,
+                                            database,
+                                            schema,
+                                            table,
+                                            error
+                                        );
+                                    }
+                                }
+                            }
                             match native_postgres_metadata_pool(state, connection_id, database, config).await {
                                 Ok(Some(pool)) => {
                                     return db::postgres::get_columns(&pool, schema, table)

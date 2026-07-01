@@ -45,12 +45,17 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import org.bson.Document;
+import org.bson.json.JsonMode;
+import org.bson.json.JsonWriterSettings;
 import org.bson.types.ObjectId;
 
 public final class MongoAgent {
     private static final Gson GSON = new Gson();
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
     private static final long JS_MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
+    private static final JsonWriterSettings EXTENDED_JSON_SETTINGS = JsonWriterSettings.builder()
+        .outputMode(JsonMode.RELAXED)
+        .build();
     private static MongoClient client;
 
     private MongoAgent() {
@@ -383,6 +388,44 @@ public final class MongoAgent {
         return result;
     }
 
+    /**
+     * MongoDB Extended JSON read path for transfer; output follows the driver's
+     * relaxed Extended JSON representation rather than the UI display format.
+     */
+    private static Object findDocumentsExtendedJson(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        long skip = params.has("skip") ? params.get("skip").getAsLong() : 0;
+        int limit = params.has("limit") ? params.get("limit").getAsInt() : 50;
+        Document filterDoc = documentOrNull(params, "filter");
+        Document projectionDoc = documentOrNull(params, "projection");
+        Document sortDoc = documentOrNull(params, "sort");
+
+        var col = c.getDatabase(database).getCollection(collection);
+        if (filterDoc == null) {
+            filterDoc = new Document();
+        }
+        long total = col.countDocuments(filterDoc);
+
+        var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
+        if (projectionDoc != null) {
+            iterable = iterable.projection(projectionDoc);
+        }
+        if (sortDoc != null) {
+            iterable = iterable.sort(sortDoc);
+        }
+
+        List<JsonObject> documents = new ArrayList<>();
+        for (Document document : iterable) {
+            documents.add(bsonToExtendedJson(document));
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("documents", documents);
+        result.put("total", total);
+        return result;
+    }
+
     private static Object serverVersion(JsonObject params) {
         MongoClient c = requireClient();
         String database = defaultString(stringOrNull(params, "database"), "admin");
@@ -501,6 +544,10 @@ public final class MongoAgent {
         return result;
     }
 
+    static JsonObject bsonToExtendedJson(Document doc) {
+        return JsonParser.parseString(doc.toJson(EXTENDED_JSON_SETTINGS)).getAsJsonObject();
+    }
+
     static Object convertValue(Object value) {
         if (value == null) {
             return null;
@@ -609,6 +656,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_LIST_COLLECTIONS -> listCollections(params);
             case AgentProtocol.METHOD_LIST_INDEXES -> listIndexes(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS -> findDocuments(params);
+            case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON -> findDocumentsExtendedJson(params);
             case AgentProtocol.MONGO_METHOD_SERVER_VERSION -> serverVersion(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);

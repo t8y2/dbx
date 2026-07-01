@@ -45,6 +45,7 @@ import {
   isSqlServerIdentityCompatibleDataType,
   isProtectedManticoreIdColumn,
   parseExtraToColumnExtra,
+  rehydrateColumnDraftsFromMetadata,
   splitDataType,
   toColumnNames,
   applyManticoreDdlColumnExtras,
@@ -618,6 +619,7 @@ let skipNextRefreshVersion = false;
 let restoringDraft = false;
 let syncingDraft = false;
 let draftHydrated = false;
+let hydratingRestoredDraft = false;
 
 function cloneDraftValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -647,6 +649,7 @@ function syncDraftToParent() {
 
 function restoreDraft(draft: TableStructureEditorDraft) {
   restoringDraft = true;
+  draftHydrated = false;
   activeTab.value = draft.activeTab || "columns";
   newTableName.value = draft.newTableName || "";
   tableComment.value = draft.tableComment || "";
@@ -656,7 +659,45 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
   triggers.value = cloneDraftValue(draft.triggers || []);
   restoringDraft = false;
-  draftHydrated = true;
+  draftHydrated = !needsColumnDraftMetadataHydration();
+}
+
+function needsColumnDraftMetadataHydration() {
+  return !isCreateMode.value && columns.value.some((column) => !column.original && !column.id.startsWith("new:") && !!column.name.trim());
+}
+
+async function hydrateRestoredDraftFromDatabase() {
+  if (!needsColumnDraftMetadataHydration() || hydratingRestoredDraft) return;
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = metadataSchema.value;
+  const tableName = props.tableName;
+  if (!connectionId || !database || !tableName) return;
+
+  hydratingRestoredDraft = true;
+  let shouldRefreshPreview = false;
+  try {
+    await store.ensureConnected(connectionId);
+    let nextColumns = await api.getColumns(connectionId, database, schema, tableName);
+    if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
+      try {
+        const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
+        ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
+        ddlFetched.value = true;
+        nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
+      } catch {
+        /* ignore — Manticore column properties can still come from SHOW COLUMNS when available */
+      }
+    }
+    columns.value = rehydrateColumnDraftsFromMetadata(columns.value, nextColumns, databaseType.value);
+    markDraftHydratedAndSync();
+    shouldRefreshPreview = true;
+  } catch (e: any) {
+    console.warn("[DBX][structure-editor:draft-hydration-failed]", e);
+  } finally {
+    hydratingRestoredDraft = false;
+    if (shouldRefreshPreview) scheduleSqlPreviewRefresh();
+  }
 }
 
 function markDraftHydratedAndSync() {
@@ -736,6 +777,18 @@ async function loadDynamicDataTypeOptions() {
 }
 
 function scheduleSqlPreviewRefresh() {
+  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) {
+    if (sqlPreviewDebounceTimer) {
+      clearTimeout(sqlPreviewDebounceTimer);
+      sqlPreviewDebounceTimer = undefined;
+    }
+    sqlPreviewRequestId++;
+    deferredSqlPreviewRefresh = false;
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqlPreviewLoading.value = true;
+    return;
+  }
   if (!hasPendingStructureChanges()) {
     clearSqlPreviewState();
     return;
@@ -1589,6 +1642,7 @@ onMounted(() => {
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
     applyInitialStructureTab();
+    void hydrateRestoredDraftFromDatabase();
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else {
@@ -1601,6 +1655,7 @@ onActivated(() => {
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
+    void hydrateRestoredDraftFromDatabase();
   }
 });
 onDeactivated(unregisterStructureEditorShortcuts);

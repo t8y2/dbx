@@ -3,6 +3,7 @@ import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from 
 import { isNoSnapshotErrorResult } from "@/lib/queryResultError";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
+import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -21,7 +22,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
-  const pageLimit = settingsStore.editorSettings.pageSize;
+  const pageLimit = tableOpenPageLimit();
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
@@ -74,7 +75,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         columns,
         primaryKeys,
       });
-      await queryStore.executeTabSql(tabId, sql);
+      await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
       return;
     }
     const sql = await buildTableSelectSql({
@@ -92,7 +93,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       columns: [],
       primaryKeys: [],
     });
-    await queryStore.executeTabSql(tabId, sql);
+    await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
     // executeTabSql surfaces query failures as an "Error" result instead of throwing.
     // A snapshot-less lake table fails the data preview above but its metadata still
     // reads fine — retry with LIMIT 0 so the user sees the table structure (columns +
@@ -109,7 +110,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         limit: 0,
       });
       queryStore.updateSql(tabId, emptySql);
-      await queryStore.executeTabSql(tabId, emptySql);
+      await queryStore.executeTabSql(tabId, emptySql, { pagination: { limit: pageLimit, offset: 0 } });
     }
     try {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
@@ -135,7 +136,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
           limit: pageLimit,
         });
         queryStore.updateSql(tabId, newSql);
-        await queryStore.executeTabSql(tabId, newSql);
+        await queryStore.executeTabSql(tabId, newSql, { pagination: { limit: pageLimit, offset: 0 } });
       }
     } catch (reason) {
       console.error("[DBX] ERROR fetching table metadata:", reason);

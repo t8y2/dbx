@@ -180,6 +180,17 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ schema: "dbo", name: "Users", alias: "u" }), expect.objectContaining({ name: "Orders", alias: "o" })]));
   });
 
+  it("treats schema-qualified table prefixes in FROM as table completion input", () => {
+    const sql = "SELECT * FROM dws_game_sdk_base.di";
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    expect(context.qualifier).toBe("dws_game_sdk_base");
+    expect(context.prefix).toBe("di");
+    expect(context.suggestTables).toBe(true);
+    expect(context.exclusiveTableSuggestions).toBe(true);
+    expect(context.suggestColumns).toBe(true);
+  });
+
   it("exposes CTEs as table-like referenced tables", () => {
     const sql = "WITH recent_orders(id, total) AS (SELECT id, total FROM orders) SELECT * FROM recent_orders ro WHERE ro.";
     const context = getSqlCompletionContext(sql, sql.length);

@@ -141,6 +141,32 @@ test("parseMongoWriteCommand accepts supported write commands", () => {
     keys: '{"email":1}',
     options: '{"unique":true,"name":"projects_email_unique"}',
   });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.dropIndex("projects_email_unique")'), {
+    kind: "dropIndex",
+    collection: "projects",
+    index: '"projects_email_unique"',
+  });
+  assert.deepEqual(parseMongoWriteCommand("db.projects.dropIndexes()"), {
+    kind: "dropIndexes",
+    collection: "projects",
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.dropIndexes({"email":1})'), {
+    kind: "dropIndexes",
+    collection: "projects",
+    indexes: '{"email":1}',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.dropIndexes(["a_1","b_1"])'), {
+    kind: "dropIndexes",
+    collection: "projects",
+    indexes: '["a_1","b_1"]',
+  });
+});
+
+test("parseMongoWriteCommand rejects invalid dropIndex and dropIndexes commands", () => {
+  assert.equal(parseMongoWriteCommand("db.projects.dropIndex()"), null);
+  assert.equal(parseMongoWriteCommand('db.projects.dropIndex("*")'), null);
+  assert.equal(parseMongoWriteCommand('db.projects.dropIndex(["a_1"])'), null);
+  assert.equal(parseMongoWriteCommand('db.projects.dropIndexes([{"email":1}])'), null);
 });
 
 test("mongodb executeQuery blocks writes when writes are explicitly disabled", async () => {
@@ -191,6 +217,60 @@ test("mongodb executeQuery treats createIndex as a write when writes are explici
   );
   if (oldAllowWrites === undefined) delete process.env.DBX_MCP_ALLOW_WRITES;
   else process.env.DBX_MCP_ALLOW_WRITES = oldAllowWrites;
+});
+
+test("mongodb executeQuery treats dropIndex as a write when writes are explicitly disabled", async () => {
+  const oldAllowWrites = process.env.DBX_MCP_ALLOW_WRITES;
+  process.env.DBX_MCP_ALLOW_WRITES = "0";
+  await assert.rejects(
+    executeQuery(
+      {
+        id: "mongo",
+        name: "mongo",
+        db_type: "mongodb",
+        host: "127.0.0.1",
+        port: 27017,
+        username: "",
+        password: "",
+        database: "app",
+        ssh_enabled: false,
+        ssl: false,
+      },
+      'db.projects.dropIndex("projects_email_unique")',
+    ),
+    /read-only/i,
+  );
+  if (oldAllowWrites === undefined) delete process.env.DBX_MCP_ALLOW_WRITES;
+  else process.env.DBX_MCP_ALLOW_WRITES = oldAllowWrites;
+});
+
+test("mongodb executeQuery blocks dangerous dropIndexes shapes until dangerous SQL is enabled", async () => {
+  const oldAllowWrites = process.env.DBX_MCP_ALLOW_WRITES;
+  const oldAllowDangerous = process.env.DBX_MCP_ALLOW_DANGEROUS_SQL;
+  process.env.DBX_MCP_ALLOW_WRITES = "1";
+  delete process.env.DBX_MCP_ALLOW_DANGEROUS_SQL;
+
+  const config = {
+    id: "mongo",
+    name: "mongo",
+    db_type: "mongodb",
+    host: "127.0.0.1",
+    port: 27017,
+    username: "",
+    password: "",
+    database: "app",
+    ssh_enabled: false,
+    ssl: false,
+  } as const;
+
+  await assert.rejects(executeQuery(config, "db.projects.dropIndexes()"), /DBX_MCP_ALLOW_DANGEROUS_SQL=1/);
+  await assert.rejects(executeQuery(config, 'db.projects.dropIndexes("*")'), /DBX_MCP_ALLOW_DANGEROUS_SQL=1/);
+  await assert.rejects(executeQuery(config, 'db.projects.dropIndexes(["a_1","b_1"])'), /DBX_MCP_ALLOW_DANGEROUS_SQL=1/);
+
+  if (oldAllowWrites === undefined) delete process.env.DBX_MCP_ALLOW_WRITES;
+  else process.env.DBX_MCP_ALLOW_WRITES = oldAllowWrites;
+  if (oldAllowDangerous === undefined) delete process.env.DBX_MCP_ALLOW_DANGEROUS_SQL;
+  else process.env.DBX_MCP_ALLOW_DANGEROUS_SQL = oldAllowDangerous;
 });
 
 test("mongoDocumentsToQueryResult turns documents into rows", () => {

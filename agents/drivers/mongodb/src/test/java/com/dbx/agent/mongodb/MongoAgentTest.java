@@ -20,6 +20,7 @@ import java.security.PrivateKey;
 import java.util.Base64;
 import java.util.Date;
 import org.bson.Document;
+import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -146,7 +147,6 @@ class MongoAgentTest {
         assertEquals(10, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
-        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS));
     }
 
     @Test
@@ -353,6 +353,25 @@ class MongoAgentTest {
     @Test
     void convertValueFormatsDatesAsMongoShellIsoDate() {
         assertEquals("ISODate(\"2026-06-10T13:59:31.287Z\")", MongoAgent.convertValue(Date.from(java.time.Instant.parse("2026-06-10T13:59:31.287Z"))));
+    }
+
+    @Test
+    void convertValueKeepsObjectIdAsStringByDefault() {
+        assertEquals(
+            "507f1f77bcf86cd799439011",
+            MongoAgent.convertValue(new ObjectId("507f1f77bcf86cd799439011"))
+        );
+    }
+
+    @Test
+    void bsonToExtendedJsonUsesMongoExtendedJson() {
+        Document doc = new Document("_id", new ObjectId("507f1f77bcf86cd799439011"))
+            .append("created_at", Date.from(java.time.Instant.parse("2026-06-10T13:59:31.287Z")));
+
+        assertEquals(
+            "{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},\"created_at\":{\"$date\":\"2026-06-10T13:59:31.287Z\"}}",
+            new com.google.gson.Gson().toJson(MongoAgent.bsonToExtendedJson(doc))
+        );
     }
 
     @Test

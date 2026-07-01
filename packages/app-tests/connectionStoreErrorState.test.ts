@@ -161,6 +161,7 @@ test("known backend connection errors mark the connection disconnected", async (
     "ORA-02396: exceeded maximum idle time, please connect again",
     "Agent stdin not available",
     "Failed to write to agent stdin",
+    "MySQL connection failed: Input/output error: No route to host (os error 65)",
   ];
 
   try {

@@ -2035,7 +2035,29 @@ fn sql_rows_to_mongo_documents(columns: &[String], rows: &[Vec<serde_json::Value
         .collect()
 }
 
-async fn find_mongo_documents_for_transfer(
+async fn find_mongo_documents_extended_json(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    offset: u64,
+    batch_size: usize,
+) -> Result<MongoDocumentResult, String> {
+    crate::mongo_ops::mongo_find_documents_extended_json_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        offset,
+        batch_size as i64,
+        None,
+        None,
+        Some(r#"{"_id":1}"#),
+    )
+    .await
+}
+
+async fn find_mongo_documents_for_rows(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -2080,6 +2102,34 @@ async fn insert_mongo_documents_for_transfer(
                 inserted += 1;
             }
             Ok(inserted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn insert_mongo_documents_extended_json_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    documents: &[serde_json::Value],
+) -> Result<u64, String> {
+    if documents.is_empty() {
+        return Ok(0);
+    }
+    let docs_json = serde_json::to_string(documents).map_err(|e| format!("Failed to encode MongoDB documents: {e}"))?;
+    match crate::mongo_ops::mongo_insert_documents_extended_json_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        &docs_json,
+    )
+    .await
+    {
+        Ok(count) => Ok(count),
+        Err(error) if error.to_ascii_lowercase().contains("legacy agent") => {
+            insert_mongo_documents_for_transfer(state, connection_id, database, collection, documents).await
         }
         Err(error) => Err(error),
     }
@@ -3178,15 +3228,27 @@ where
         }
 
         let documents = if is_mongodb_transfer_type(source_db_type) {
-            let result = find_mongo_documents_for_transfer(
-                state,
-                &request.source_connection_id,
-                &request.source_database,
-                table,
-                offset,
-                batch_size,
-            )
-            .await?;
+            let result = if is_mongodb_transfer_type(target_db_type) {
+                find_mongo_documents_extended_json(
+                    state,
+                    &request.source_connection_id,
+                    &request.source_database,
+                    table,
+                    offset,
+                    batch_size,
+                )
+                .await?
+            } else {
+                find_mongo_documents_for_rows(
+                    state,
+                    &request.source_connection_id,
+                    &request.source_database,
+                    table,
+                    offset,
+                    batch_size,
+                )
+                .await?
+            };
             total_rows = Some(result.total);
             result.documents
         } else {
@@ -3224,14 +3286,25 @@ where
         }
 
         if is_mongodb_transfer_type(target_db_type) {
-            insert_mongo_documents_for_transfer(
-                state,
-                &request.target_connection_id,
-                &request.target_database,
-                &target_table,
-                &documents,
-            )
-            .await
+            if is_mongodb_transfer_type(source_db_type) {
+                insert_mongo_documents_extended_json_for_transfer(
+                    state,
+                    &request.target_connection_id,
+                    &request.target_database,
+                    &target_table,
+                    &documents,
+                )
+                .await
+            } else {
+                insert_mongo_documents_for_transfer(
+                    state,
+                    &request.target_connection_id,
+                    &request.target_database,
+                    &target_table,
+                    &documents,
+                )
+                .await
+            }
             .map_err(|e| format!("Insert failed for MongoDB collection '{target_table}' at offset {offset}: {e}"))?;
         } else {
             if !sql_target_prepared {

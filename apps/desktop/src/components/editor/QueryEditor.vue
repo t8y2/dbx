@@ -156,6 +156,8 @@ const completionTranslations = computed(() => ({
   functionDescriptions: Object.fromEntries(SQL_FUNCTION_NAMES.map((name) => [name, t(`editor.completion.functionDescriptions.${name}`)])) as Record<string, string>,
 }));
 const MAX_COMPLETION_TABLES = 200;
+const PRESTO_ON_DEMAND_TABLE_COMPLETION_MIN_PREFIX = 2;
+const PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT = 20;
 const MAX_JOIN_FK_PREFETCH_TABLES = 24;
 const MAX_SEMANTIC_DIAGNOSTIC_COLUMN_TABLES = 4;
 const liveFontSize = ref(settingsStore.editorSettings.fontSize);
@@ -225,6 +227,8 @@ let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
+let editorScrollbarPointerCleanup: (() => void) | null = null;
+const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
 
 function editorThemeAppearance() {
@@ -489,6 +493,33 @@ function clearTableNavigationHoverOnModifierRelease(event: KeyboardEvent) {
   if (!event.metaKey && !event.ctrlKey) clearTableNavigationHover();
 }
 
+function isEditorScrollbarPointerEvent(currentView: EditorViewType, event: MouseEvent) {
+  if (event.button !== 0) return false;
+  const scrollDOM = currentView.scrollDOM;
+  const rect = scrollDOM.getBoundingClientRect();
+  const hasVerticalScrollbar = scrollDOM.scrollHeight > scrollDOM.clientHeight + 1;
+  const hasHorizontalScrollbar = scrollDOM.scrollWidth > scrollDOM.clientWidth + 1;
+  const verticalGutter = Math.max(scrollDOM.offsetWidth - scrollDOM.clientWidth, EDITOR_SCROLLBAR_POINTER_GUTTER_PX);
+  const horizontalGutter = Math.max(scrollDOM.offsetHeight - scrollDOM.clientHeight, EDITOR_SCROLLBAR_POINTER_GUTTER_PX);
+  const inVerticalScrollbar = hasVerticalScrollbar && event.clientX >= rect.right - verticalGutter && event.clientX <= rect.right;
+  const inHorizontalScrollbar = hasHorizontalScrollbar && event.clientY >= rect.bottom - horizontalGutter && event.clientY <= rect.bottom;
+  return inVerticalScrollbar || inHorizontalScrollbar;
+}
+
+function registerEditorScrollbarPointerGuard(currentView: EditorViewType) {
+  editorScrollbarPointerCleanup?.();
+  const onPointerDown = (event: MouseEvent) => {
+    if (!isEditorScrollbarPointerEvent(currentView, event)) return;
+    clearTableNavigationHover();
+    event.stopPropagation();
+  };
+  currentView.scrollDOM.addEventListener("mousedown", onPointerDown, true);
+  editorScrollbarPointerCleanup = () => {
+    currentView.scrollDOM.removeEventListener("mousedown", onPointerDown, true);
+    editorScrollbarPointerCleanup = null;
+  };
+}
+
 function executeFromContextMenu() {
   if (!canExecuteContextSql.value) return;
   requestExecute();
@@ -686,6 +717,12 @@ function usesLocalOnlyCompletionMetadata(): boolean {
 
 function usesOnDemandOnlyCompletionColumns(): boolean {
   return usesOnDemandOnlyEditorColumnMetadata(props.databaseType);
+}
+
+function allowsOnDemandQualifiedTableCompletion(prefix: string): boolean {
+  if (!usesLocalOnlyCompletionMetadata()) return false;
+  if (props.databaseType !== "prestosql" && props.databaseType !== "trino") return false;
+  return prefix.trim().length >= PRESTO_ON_DEMAND_TABLE_COMPLETION_MIN_PREFIX;
 }
 
 function completionMetadataTarget(table: { name: string; schema?: string | null }): { database: string; schema?: string } | null {
@@ -1787,9 +1824,12 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   // If qualifier didn't match any table names, try it as a schema name
   let qualifierIsSchema = false;
   if (completionContext.qualifier && !qualifierDatabase && !isReferencedTableQualifier(completionContext) && tables.length === 0 && (completionContext.suggestTables || completionContext.exclusiveColumnSuggestions)) {
-    const schemaTables = localOnlyMetadata
-      ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier)
-      : await listCompletionTablesWithLatencyBudget(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier);
+    let schemaTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier);
+    if (!localOnlyMetadata) {
+      schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier);
+    } else if (schemaTables.length === 0 && allowsOnDemandQualifiedTableCompletion(completionContext.prefix)) {
+      schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, props.database!, completionContext.prefix, PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT, completionContext.qualifier);
+    }
     if (schemaTables.length > 0) {
       tables = schemaTables;
       qualifierIsSchema = true;
@@ -1841,7 +1881,8 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     }
   }
 
-  const shouldFetchColumnsForCompletion = !onDemandOnlyColumns || completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions || !!completionContext.insertTable;
+  const isTableNameCompletionContext = completionContext.suggestTables || completionContext.exclusiveTableSuggestions;
+  const shouldFetchColumnsForCompletion = !onDemandOnlyColumns || ((completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions) && !isTableNameCompletionContext) || !!completionContext.insertTable;
   if (shouldFetchColumnsForCompletion) {
     await Promise.all(
       refs.map(async (refTable) => {
@@ -2413,6 +2454,7 @@ onMounted(async () => {
   });
 
   view.value = new EditorView({ state, parent: editorRef.value });
+  registerEditorScrollbarPointerGuard(view.value);
   view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, { passive: true });
   restoreEditorViewport();
   syncContextMenuState(view.value);
@@ -2596,6 +2638,7 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(viewportRestoreFrame);
     viewportRestoreFrame = null;
   }
+  editorScrollbarPointerCleanup?.();
   view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);

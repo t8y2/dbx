@@ -663,9 +663,18 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
           row_count: 1,
         };
       }
+      if (write.kind === "dropIndex" || write.kind === "dropIndexes") {
+        return {
+          columns: ["name"],
+          rows: (result.droppedNames ?? []).map((name) => ({ name })),
+          row_count: result.affectedRows,
+        };
+      }
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
-    throw new Error("Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})");
+    throw new Error(
+      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
+    );
   }
   if (isDirectQueryType(config.db_type)) {
     return query(config, sql, undefined, options);
@@ -883,7 +892,7 @@ async function mongoServerVersion(config: ConnectionConfig): Promise<string> {
 async function executeMongoWrite(
   config: ConnectionConfig,
   command: MongoWriteCommand,
-): Promise<{ affectedRows: number; indexName?: string }> {
+): Promise<{ affectedRows: number; indexName?: string; droppedNames?: string[] }> {
   if (command.kind === "insert") {
     const result = await bridgeDataRequest<{ affected_rows: number }>("/data/mongo/insert-documents", {
       connection_name: config.name,
@@ -913,6 +922,16 @@ async function executeMongoWrite(
       options_json: command.options,
     });
     return { affectedRows: 1, indexName: result.name };
+  }
+  if (command.kind === "dropIndex" || command.kind === "dropIndexes") {
+    const result = await bridgeDataRequest<{ dropped_names: string[]; affected_rows: number }>("/data/mongo/drop-indexes", {
+      connection_name: config.name,
+      database: config.database || "",
+      collection: command.collection,
+      indexes_json: command.kind === "dropIndex" ? command.index : command.indexes,
+      single: command.kind === "dropIndex",
+    });
+    return { affectedRows: result.affected_rows, droppedNames: result.dropped_names };
   }
   const result = await bridgeDataRequest<{ affected_rows: number }>("/data/mongo/delete-documents", {
     connection_name: config.name,
@@ -1008,7 +1027,9 @@ export type MongoWriteCommand =
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
-  | { kind: "createIndex"; collection: string; keys: string; options?: string };
+  | { kind: "createIndex"; collection: string; keys: string; options?: string }
+  | { kind: "dropIndex"; collection: string; index: string }
+  | { kind: "dropIndexes"; collection: string; indexes?: string };
 
 export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
@@ -1150,6 +1171,22 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return { kind: "createIndex", collection: createIndex.collection, keys, ...(options ? { options } : {}) };
   }
 
+  const dropIndex = parseCollectionMethodTarget(source, "dropIndex");
+  if (dropIndex) {
+    const args = parseMethodArgs(source, dropIndex.methodCallIndex);
+    if (!args) return null;
+    const index = parseMongoDropIndexArgument(args);
+    return index ? { kind: "dropIndex", collection: dropIndex.collection, index } : null;
+  }
+
+  const dropIndexes = parseCollectionMethodTarget(source, "dropIndexes");
+  if (dropIndexes) {
+    const args = parseMethodArgs(source, dropIndexes.methodCallIndex);
+    if (!args) return null;
+    const indexes = parseMongoDropIndexesArgument(args);
+    return indexes !== null ? { kind: "dropIndexes", collection: dropIndexes.collection, ...(indexes ? { indexes } : {}) } : null;
+  }
+
   return null;
 }
 
@@ -1164,6 +1201,12 @@ export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: { 
     return {
       allowed: false,
       reason: "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
+    };
+  }
+  if (!options.allowDangerous && mongoDropIndexesRequiresDangerous(command)) {
+    return {
+      allowed: false,
+      reason: "MongoDB dropIndexes() without a specific single index requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
     };
   }
   return { allowed: true };
@@ -1238,6 +1281,26 @@ function normalizeJsonArgument(arg: string): string | null {
   } catch {
     return null;
   }
+}
+
+function parseMongoDropIndexArgument(args: string[]): string | null {
+  if (args.length !== 1 || !args[0]?.trim()) return null;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return parsed === "*" ? null : normalized;
+  return isNonEmptyRecord(parsed) ? normalized : null;
+}
+
+function parseMongoDropIndexesArgument(args: string[]): string | undefined | null {
+  if (args.length !== 1) return null;
+  if (!args[0]?.trim()) return undefined;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return normalized;
+  if (isNonEmptyRecord(parsed)) return normalized;
+  return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string") ? normalized : null;
 }
 
 function convertSingleQuotedStrings(source: string): string {
@@ -1332,6 +1395,18 @@ function shouldQuoteObjectKey(source: string, index: number): boolean {
   return source[after] === ":";
 }
 
+function parseNormalizedJson(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
 function isEmptyJsonObject(json: string): boolean {
   try {
     const parsed = JSON.parse(json);
@@ -1339,6 +1414,14 @@ function isEmptyJsonObject(json: string): boolean {
   } catch {
     return false;
   }
+}
+
+function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean {
+  if (command.kind !== "dropIndexes") return false;
+  if (!command.indexes) return true;
+  const parsed = parseNormalizedJson(command.indexes);
+  if (parsed === "*") return true;
+  return Array.isArray(parsed) && parsed.length > 1;
 }
 
 function splitTopLevel(source: string): string[] {

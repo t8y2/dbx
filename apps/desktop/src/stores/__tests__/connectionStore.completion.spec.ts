@@ -92,6 +92,35 @@ describe("connectionStore completion assistant", () => {
     expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table" }]);
   });
 
+  it("keeps schema-qualified local table completion scoped to the selected schema", async () => {
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const listTables = vi.fn(async (_connectionId: string, _database: string, schema: string, filter: string) => {
+      if (schema === "dim_game_base" && filter === "dim") {
+        return [{ name: "dim_game", table_type: "BASE TABLE", comment: null }];
+      }
+      return [];
+    });
+
+    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listSchemas: vi.fn().mockResolvedValue(["dim_game_base", "dws_game_sdk_base"]),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const dimTables = await store.listCompletionTables("pg-1", "app", "dim", 20, "dim_game_base");
+    const dwsTables = store.lookupLocalCompletionTables("pg-1", "app", "d", 20, "dws_game_sdk_base");
+
+    expect(dimTables).toEqual([{ name: "dim_game", schema: "dim_game_base", type: "table" }]);
+    expect(dwsTables).toEqual([]);
+  });
+
   it("limits concurrent completion column metadata requests per connection database", async () => {
     const gates = [deferred<any[]>(), deferred<any[]>(), deferred<any[]>(), deferred<any[]>()];
     let activeColumns = 0;

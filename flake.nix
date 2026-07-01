@@ -178,7 +178,7 @@
             fetcherVersion = 3;
             # Replace with the correct hash after the first failed build:
             #   nix build .#dbx-desktop 2>&1 | grep 'got:'
-            hash = "sha256-08cWt9V2co0/Qij1rX380Z+7tp16HdL6aF8YaGcJvyU=";
+            hash = "sha256-dzGQuZAv+z7+fha7J180bqfFtJhH0DFDZ/nXy8U4ChM=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #
@@ -203,6 +203,7 @@
               # Hooks that wire up the vendored deps automatically:
               pkgs.rustPlatform.cargoSetupHook # sets CARGO_HOME to cargoDeps
               pkgs.pnpmConfigHook             # sets up pnpm offline store
+              pkgs.desktop-file-utils         # for `desktop-file-validate`
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
               with pkgs;
@@ -210,6 +211,33 @@
                 wrapGAppsHook3 # wraps binary with GTK3/WebKit env
               ]
             );
+
+          # ── Desktop entry (freedesktop .desktop file) ────────────────────── #
+          # Built with `makeDesktopItem` so it is validated against the spec
+          # at build time. Icon name "dbx" resolves via the hicolor theme
+          # (the installPhase copies PNGs into share/icons/hicolor/<size>/apps).
+          desktopItem = pkgs.makeDesktopItem {
+            name = "dbx";
+            type = "Application";
+            exec = "dbx %u";
+            icon = "dbx";
+            desktopName = "DBX";
+            genericName = "Database Management Tool";
+            comment = "Open-source database management tool for 60+ databases";
+            categories = [ "Development" "Database" ];
+            keywords = [
+              "database"
+              "sql"
+              "client"
+              "mysql"
+              "postgresql"
+              "mongodb"
+              "redis"
+            ];
+            startupWMClass = "DBX";
+            terminal = false;
+            mimeTypes = [ "application/sql" "x-scheme-handler/dbx" ];
+          };
 
           # ── Linked libraries (present at both build and runtime) ─────────── #
           buildInputs =
@@ -283,11 +311,32 @@
             # tauri build --no-bundle puts the binary at target/release/dbx
             cp target/release/dbx $out/bin/dbx
 
-            # Copy desktop integration files if present
+            # Copy desktop integration files if present.
+            # Install every PNG size Tauri ships so the hicolor theme lookup
+            # (e.g. panels @ 48px, launchers @ 128px) always succeeds.
             if [ -d src-tauri/icons ]; then
-              mkdir -p $out/share/icons/hicolor/128x128/apps
-              cp src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/dbx.png || true
+              for size in 32 128; do
+                if [ -f "src-tauri/icons/''${size}x''${size}.png" ]; then
+                  mkdir -p "$out/share/icons/hicolor/''${size}x''${size}/apps"
+                  cp "src-tauri/icons/''${size}x''${size}.png" \
+                    "$out/share/icons/hicolor/''${size}x''${size}/apps/dbx.png"
+                fi
+              done
+              # @2x retina variant for 128px
+              if [ -f "src-tauri/icons/128x128@2x.png" ]; then
+                mkdir -p "$out/share/icons/hicolor/256x256/apps"
+                cp "src-tauri/icons/128x128@2x.png" \
+                  "$out/share/icons/hicolor/256x256/apps/dbx.png"
+              fi
             fi
+
+            # Register the freedesktop .desktop file so app launchers (GNOME
+            # Shell, KDE Plasma, etc.) can discover the application.
+            mkdir -p $out/share/applications
+            cp ${finalAttrs.desktopItem}/share/applications/dbx.desktop \
+              $out/share/applications/dbx.desktop
+            ${pkgs.desktop-file-utils}/bin/desktop-file-validate \
+              $out/share/applications/dbx.desktop
 
             runHook postInstall
           '';
@@ -304,6 +353,11 @@
             maintainers = [ ];
             platforms = platforms.linux; # macOS/Windows need platform-specific adjustments
             mainProgram = "dbx";
+          } // {
+            # Non-lib meta: absolute path to the installed .desktop file so
+            # `nix profile install`/home-manager can register it with the
+            # user's desktop environment.
+            desktopFile = "${placeholder "out"}/share/applications/dbx.desktop";
           };
         });
       }

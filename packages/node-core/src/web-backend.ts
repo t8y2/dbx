@@ -214,9 +214,14 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       if (write.kind === "createIndex") {
         return { columns: ["name"], rows: [{ name: result.indexName ?? "" }], row_count: 1 };
       }
+      if (write.kind === "dropIndex" || write.kind === "dropIndexes") {
+        return { columns: ["name"], rows: (result.droppedNames ?? []).map((name) => ({ name })), row_count: result.affectedRows };
+      }
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
-    throw new Error("Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})");
+    throw new Error(
+      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
+    );
   }
   const res = await apiFetch("/api/query/execute", {
     method: "POST",
@@ -258,7 +263,7 @@ export async function executeRedisCommand(config: ConnectionConfig, db: number, 
 async function executeMongoWrite(
   config: ConnectionConfig,
   command: MongoWriteCommand,
-): Promise<{ affectedRows: number; indexName?: string }> {
+): Promise<{ affectedRows: number; indexName?: string; droppedNames?: string[] }> {
   if (command.kind === "insert") {
     const res = await apiFetch("/api/mongo/insert-documents", {
       method: "POST",
@@ -300,6 +305,20 @@ async function executeMongoWrite(
     });
     const result = (await res.json()) as { name: string };
     return { affectedRows: 1, indexName: result.name };
+  }
+  if (command.kind === "dropIndex" || command.kind === "dropIndexes") {
+    const res = await apiFetch("/api/mongo/drop-indexes", {
+      method: "POST",
+      body: JSON.stringify({
+        connectionId: config.id,
+        database: config.database || "",
+        collection: command.collection,
+        indexesJson: command.kind === "dropIndex" ? command.index : command.indexes,
+        single: command.kind === "dropIndex",
+      }),
+    });
+    const result = (await res.json()) as { dropped_names: string[]; affected_rows: number };
+    return { affectedRows: result.affected_rows, droppedNames: result.dropped_names };
   }
   const res = await apiFetch("/api/mongo/delete-documents", {
     method: "POST",

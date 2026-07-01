@@ -35,7 +35,9 @@ export type MongoWriteCommand =
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
-  | { kind: "createIndex"; collection: string; keys: string; options?: string };
+  | { kind: "createIndex"; collection: string; keys: string; options?: string }
+  | { kind: "dropIndex"; collection: string; index: string }
+  | { kind: "dropIndexes"; collection: string; indexes?: string };
 
 export interface MongoAggregateSafetyOptions {
   allowWrites?: boolean;
@@ -220,7 +222,45 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return { kind: "createIndex", collection: createIndex.collection, keys, ...(options ? { options } : {}) };
   }
 
+  const dropIndex = parseCollectionMethodTarget(source, "dropIndex");
+  if (dropIndex) {
+    const args = parseMethodArgs(source, dropIndex.methodCallIndex);
+    if (!args) return null;
+    const index = parseMongoDropIndexArgument(args);
+    return index ? { kind: "dropIndex", collection: dropIndex.collection, index } : null;
+  }
+
+  const dropIndexes = parseCollectionMethodTarget(source, "dropIndexes");
+  if (dropIndexes) {
+    const args = parseMethodArgs(source, dropIndexes.methodCallIndex);
+    if (!args) return null;
+    const indexes = parseMongoDropIndexesArgument(args);
+    return indexes !== null ? { kind: "dropIndexes", collection: dropIndexes.collection, ...(indexes ? { indexes } : {}) } : null;
+  }
+
   return null;
+}
+
+export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: MongoAggregateSafetyOptions): { allowed: boolean; reason?: string } {
+  if (!options.allowWrites) {
+    return {
+      allowed: false,
+      reason: "MCP MongoDB execution is read-only by default. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.",
+    };
+  }
+  if (!options.allowDangerous && (command.kind === "update" || command.kind === "delete") && isEmptyJsonObject(command.filter)) {
+    return {
+      allowed: false,
+      reason: "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
+    };
+  }
+  if (!options.allowDangerous && mongoDropIndexesRequiresDangerous(command)) {
+    return {
+      allowed: false,
+      reason: "MongoDB dropIndexes() without a specific single index requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
+    };
+  }
+  return { allowed: true };
 }
 
 export function mongoAggregateWriteStage(pipelineJson: string): "$out" | "$merge" | null {
@@ -306,6 +346,15 @@ export function mongoCreateIndexToQueryResult(name: string, executionTimeMs: num
     columns: ["name"],
     rows: [[name]],
     affected_rows: 1,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
+export function mongoDroppedIndexesToQueryResult(names: string[], executionTimeMs: number): QueryResult {
+  return {
+    columns: ["name"],
+    rows: names.map((name) => [name]),
+    affected_rows: names.length,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
   };
 }
@@ -444,6 +493,26 @@ function convertSingleQuotedStrings(source: string): string {
   return quote === "'" ? source : result + source.slice(copiedUntil);
 }
 
+function parseMongoDropIndexArgument(args: string[]): string | null {
+  if (args.length !== 1 || !args[0]?.trim()) return null;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return parsed === "*" ? null : normalized;
+  return isNonEmptyRecord(parsed) ? normalized : null;
+}
+
+function parseMongoDropIndexesArgument(args: string[]): string | undefined | null {
+  if (args.length !== 1) return null;
+  if (!args[0]?.trim()) return undefined;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return normalized;
+  if (isNonEmptyRecord(parsed)) return normalized;
+  return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string") ? normalized : null;
+}
+
 export function quoteUnquotedObjectKeys(source: string): string {
   let result = "";
   let quote: string | null = null;
@@ -575,6 +644,31 @@ function findMatchingParen(source: string, openIndex: number): number {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseNormalizedJson(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function isEmptyJsonObject(json: string): boolean {
+  const parsed = parseNormalizedJson(json);
+  return isRecord(parsed) && Object.keys(parsed).length === 0;
+}
+
+function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean {
+  if (command.kind !== "dropIndexes") return false;
+  if (!command.indexes) return true;
+  const parsed = parseNormalizedJson(command.indexes);
+  if (parsed === "*") return true;
+  return Array.isArray(parsed) && parsed.length > 1;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

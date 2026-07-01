@@ -1772,6 +1772,10 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
   return post("/api/mongo/create-index", { connectionId, database, collection, keysJson, optionsJson });
 }
 
+export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<{ dropped_names: string[]; affected_rows: number }> {
+  return post("/api/mongo/drop-indexes", { connectionId, database, collection, indexesJson, single });
+}
+
 export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
   return documentInsertDocument(connectionId, database, collection, docJson);
 }

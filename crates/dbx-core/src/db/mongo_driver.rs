@@ -9,12 +9,18 @@ use super::with_connection_timeout;
 use crate::types::IndexInfo;
 use futures::TryStreamExt;
 use percent_encoding::percent_decode_str;
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
     pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MongoDropIndexesResult {
+    pub dropped_names: Vec<String>,
+    pub affected_rows: u64,
 }
 
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
@@ -245,8 +251,63 @@ pub async fn find_documents(
     let mut documents = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        let json = bson_to_json(&Bson::Document(doc));
-        documents.push(json);
+        documents.push(bson_to_json(&Bson::Document(doc)));
+    }
+
+    Ok(MongoDocumentResult { documents, total })
+}
+
+/// Find MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_documents_extended_json(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    let col = client.database(database).collection::<Document>(collection);
+
+    let filter_doc: Document = match filter {
+        Some(f) if !f.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            json_filter_to_document(&json)?
+        }
+        _ => doc! {},
+    };
+
+    let total = if filter_doc.is_empty() {
+        col.estimated_document_count().await.map_err(|e| e.to_string())?
+    } else {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    };
+
+    let mut find = col.find(filter_doc).skip(skip).limit(limit);
+    if let Some(p) = projection {
+        if !p.trim().is_empty() {
+            let json: serde_json::Value =
+                serde_json::from_str(p).map_err(|e| format!("Invalid projection JSON: {e}"))?;
+            let projection_doc = json_object_to_document(&json).map_err(|e| format!("Invalid projection: {e}"))?;
+            find = find.projection(projection_doc);
+        }
+    }
+    if let Some(s) = sort {
+        if !s.trim().is_empty() {
+            let json: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("Invalid sort JSON: {e}"))?;
+            let sort_doc = json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))?;
+            find = find.sort(sort_doc);
+        }
+    }
+
+    let mut cursor = find.await.map_err(|e| e.to_string())?;
+
+    let mut documents = Vec::new();
+    while cursor.advance().await.map_err(|e| e.to_string())? {
+        let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
+        documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
     Ok(MongoDocumentResult { documents, total })
@@ -312,6 +373,102 @@ pub async fn create_index(
     Ok(result.index_name)
 }
 
+pub async fn drop_indexes(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    indexes_json: Option<&str>,
+    single: bool,
+) -> Result<MongoDropIndexesResult, String> {
+    let database = database.trim();
+    let collection = collection.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    if collection.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+
+    let index = parse_drop_indexes_value(indexes_json, single)?;
+    let before = list_indexes(client, database, collection).await?;
+    client
+        .database(database)
+        .run_command(doc! { "dropIndexes": collection, "index": index })
+        .await
+        .map_err(|e| e.to_string())?;
+    let after = list_indexes(client, database, collection).await?;
+    let dropped_names = diff_dropped_index_names(&before, &after);
+    Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names })
+}
+
+fn diff_dropped_index_names(before: &[IndexInfo], after: &[IndexInfo]) -> Vec<String> {
+    let remaining = after.iter().map(|index| index.name.as_str()).collect::<HashSet<_>>();
+    before.iter().filter(|index| !remaining.contains(index.name.as_str())).map(|index| index.name.clone()).collect()
+}
+
+fn parse_drop_indexes_value(indexes_json: Option<&str>, single: bool) -> Result<Bson, String> {
+    match indexes_json.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(json) => parse_drop_indexes_json(json, single),
+        None if single => Err("dropIndex requires a string index name or JSON document".to_string()),
+        None => Ok(Bson::String("*".to_string())),
+    }
+}
+
+fn parse_drop_indexes_json(json: &str, single: bool) -> Result<Bson, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Invalid index JSON: {e}"))?;
+    if single {
+        validate_single_drop_index_value(&value)?;
+    } else {
+        validate_multi_drop_indexes_value(&value)?;
+    }
+    Ok(json_value_to_bson(&value))
+}
+
+fn validate_single_drop_index_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(name) => {
+            if name.trim().is_empty() {
+                Err("Index name is required".to_string())
+            } else if name == "*" {
+                Err(r#"dropIndex does not accept "*"; use dropIndexes() or dropIndexes("*") instead"#.to_string())
+            } else {
+                Ok(())
+            }
+        }
+        serde_json::Value::Object(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
+        serde_json::Value::Object(_) => Ok(()),
+        serde_json::Value::Array(_) => {
+            Err("dropIndex only accepts a string index name or JSON document; arrays are not supported".to_string())
+        }
+        _ => Err("dropIndex only accepts a string index name or JSON document".to_string()),
+    }
+}
+
+fn validate_multi_drop_indexes_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(name) => {
+            if name.trim().is_empty() {
+                Err("Index name is required".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        serde_json::Value::Object(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
+        serde_json::Value::Object(_) => Ok(()),
+        serde_json::Value::Array(items) if items.is_empty() => {
+            Err("dropIndexes only accepts non-empty string arrays".to_string())
+        }
+        serde_json::Value::Array(items) => {
+            if items.iter().all(|item| matches!(item, serde_json::Value::String(name) if !name.trim().is_empty())) {
+                Ok(())
+            } else {
+                Err("dropIndexes only accepts arrays of string index names".to_string())
+            }
+        }
+        _ => Err("dropIndexes only accepts a string index name, JSON document, or string array".to_string()),
+    }
+}
+
 pub async fn insert_document(
     client: &Client,
     database: &str,
@@ -338,6 +495,28 @@ pub async fn insert_documents(
             .map(|value| json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}")))
             .collect::<Result<Vec<Document>, String>>()?,
         value => vec![json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}"))?],
+    };
+    if docs.is_empty() {
+        return Ok(0);
+    }
+    let col = client.database(database).collection::<Document>(collection);
+    let result = col.insert_many(docs).await.map_err(|e| e.to_string())?;
+    Ok(result.inserted_ids.len() as u64)
+}
+
+pub async fn insert_documents_extended_json(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    docs_json: &str,
+) -> Result<u64, String> {
+    let json: serde_json::Value = serde_json::from_str(docs_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let docs = match json {
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|value| json_object_to_document_extended_json(&value).map_err(|e| format!("Invalid document: {e}")))
+            .collect::<Result<Vec<Document>, String>>()?,
+        value => vec![json_object_to_document_extended_json(&value).map_err(|e| format!("Invalid document: {e}"))?],
     };
     if docs.is_empty() {
         return Ok(0);
@@ -474,6 +653,13 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
 /// handling MongoDB extended JSON conventions such as `{"$oid":"..."}`.
 pub fn json_object_to_document(value: &serde_json::Value) -> Result<Document, String> {
     match json_value_to_bson(value) {
+        Bson::Document(doc) => Ok(doc),
+        other => Err(format!("Expected a JSON object, got {other:?}")),
+    }
+}
+
+fn json_object_to_document_extended_json(value: &serde_json::Value) -> Result<Document, String> {
+    match Bson::try_from(value.clone()).map_err(|e| e.to_string())? {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
     }
@@ -842,6 +1028,35 @@ mod tests {
     }
 
     #[test]
+    fn bson_to_json_displays_object_id_as_string() {
+        let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let value = bson_to_json(&Bson::ObjectId(oid));
+
+        assert_eq!(value, serde_json::json!("507f1f77bcf86cd799439011"));
+    }
+
+    #[test]
+    fn bson_to_extended_json_preserves_nested_object_ids() {
+        let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let nested_oid = ObjectId::parse_str("507f191e810c19729de860ea").unwrap();
+        let value = Bson::Document(doc! {
+            "_id": Bson::ObjectId(oid),
+            "owner": { "id": Bson::ObjectId(nested_oid) },
+            "tags": [Bson::ObjectId(nested_oid)],
+        })
+        .into_relaxed_extjson();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "_id": { "$oid": "507f1f77bcf86cd799439011" },
+                "owner": { "id": { "$oid": "507f191e810c19729de860ea" } },
+                "tags": [{ "$oid": "507f191e810c19729de860ea" }],
+            })
+        );
+    }
+
+    #[test]
     fn index_info_from_model_maps_mongodb_index_metadata() {
         let model = IndexModel::builder()
             .keys(doc! { "tenant_id": 1, "created_at": -1 })
@@ -879,6 +1094,95 @@ mod tests {
     }
 
     #[test]
+    fn parse_drop_indexes_value_validates_drop_index_arguments() {
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#""users_email_unique""#), true),
+            Ok(Bson::String(name)) if name == "users_email_unique"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#"{"email":1}"#), true),
+            Ok(Bson::Document(doc)) if doc.get_i64("email").ok() == Some(1)
+        ));
+
+        let wildcard = parse_drop_indexes_value(Some(r#""*""#), true).unwrap_err();
+        assert!(wildcard.contains("dropIndex does not accept"));
+
+        let array = parse_drop_indexes_value(Some(r#"["a_1"]"#), true).unwrap_err();
+        assert!(array.contains("arrays are not supported"));
+
+        let empty = parse_drop_indexes_value(None, true).unwrap_err();
+        assert!(empty.contains("dropIndex requires"));
+    }
+
+    #[test]
+    fn parse_drop_indexes_value_validates_drop_indexes_arguments() {
+        assert!(matches!(
+            parse_drop_indexes_value(None, false),
+            Ok(Bson::String(name)) if name == "*"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#""*""#), false),
+            Ok(Bson::String(name)) if name == "*"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#""users_email_unique""#), false),
+            Ok(Bson::String(name)) if name == "users_email_unique"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#"{"email":1}"#), false),
+            Ok(Bson::Document(doc)) if doc.get_i64("email").ok() == Some(1)
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#"["a_1","b_1"]"#), false),
+            Ok(Bson::Array(values))
+                if values
+                    == vec![Bson::String("a_1".to_string()), Bson::String("b_1".to_string())]
+        ));
+
+        let invalid_array = parse_drop_indexes_value(Some(r#"[{"a":1}]"#), false).unwrap_err();
+        assert!(invalid_array.contains("arrays of string index names"));
+    }
+
+    #[test]
+    fn diff_dropped_index_names_reports_removed_indexes() {
+        let before = vec![
+            IndexInfo {
+                name: "_id_".to_string(),
+                columns: vec!["_id".to_string()],
+                is_unique: true,
+                is_primary: true,
+                filter: None,
+                index_type: Some("_id: 1".to_string()),
+                included_columns: None,
+                comment: None,
+            },
+            IndexInfo {
+                name: "users_email_unique".to_string(),
+                columns: vec!["email".to_string()],
+                is_unique: true,
+                is_primary: false,
+                filter: None,
+                index_type: Some("email: 1".to_string()),
+                included_columns: None,
+                comment: None,
+            },
+            IndexInfo {
+                name: "users_status_idx".to_string(),
+                columns: vec!["status".to_string()],
+                is_unique: false,
+                is_primary: false,
+                filter: None,
+                index_type: Some("status: 1".to_string()),
+                included_columns: None,
+                comment: None,
+            },
+        ];
+        let after = vec![before[0].clone(), before[2].clone()];
+
+        assert_eq!(diff_dropped_index_names(&before, &after), vec!["users_email_unique".to_string()]);
+    }
+
+    #[test]
     fn json_object_to_document_parses_extended_json_date() {
         let value = serde_json::json!({
             "created_at": { "$date": "2026-06-10T13:59:31.287Z" },
@@ -891,6 +1195,30 @@ mod tests {
             doc.get("updated_at"),
             Some(Bson::DateTime(value)) if value.timestamp_millis() == 1_781_099_971_287
         ));
+    }
+
+    #[test]
+    fn json_object_to_document_parses_extended_json_object_id() {
+        let value = serde_json::json!({
+            "_id": { "$oid": "507f1f77bcf86cd799439011" },
+        });
+        let doc = json_object_to_document(&value).unwrap();
+
+        assert!(matches!(doc.get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011"));
+    }
+
+    #[test]
+    fn json_object_to_document_extended_json_parses_official_wrappers() {
+        let value = serde_json::json!({
+            "_id": { "$oid": "507f1f77bcf86cd799439011" },
+            "created_at": { "$date": "2026-06-10T13:59:31.287Z" },
+            "count": { "$numberLong": "42" },
+        });
+        let doc = json_object_to_document_extended_json(&value).unwrap();
+
+        assert!(matches!(doc.get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011"));
+        assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(_))));
+        assert!(matches!(doc.get("count"), Some(Bson::Int64(42))));
     }
 
     #[test]

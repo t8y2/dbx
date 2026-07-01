@@ -40,6 +40,8 @@ const COLLECTION_METHODS = [
   { label: "deleteMany", detail: "Delete all matching documents", apply: "deleteMany({})" },
   { label: "getIndexes", detail: "List collection indexes", apply: "getIndexes()" },
   { label: "createIndex", detail: "Create an index", apply: "createIndex({ ${field}: 1 })" },
+  { label: "dropIndex", detail: "Drop one index", apply: 'dropIndex("${indexName}")' },
+  { label: "dropIndexes", detail: "Drop collection indexes", apply: "dropIndexes()" },
 ] as const;
 
 const CURSOR_METHODS = [
@@ -66,7 +68,7 @@ const FIELD_SNIPPETS = [
 const QUERY_OPERATORS = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists", "$regex", "$and", "$or", "$nor", "$not", "$elemMatch"];
 const UPDATE_OPERATORS = ["$set", "$unset", "$inc", "$push", "$pull", "$addToSet", "$rename", "$currentDate", "$setOnInsert"];
 const PIPELINE_STAGES = ["$match", "$project", "$group", "$sort", "$limit", "$skip", "$unwind", "$lookup", "$addFields", "$count", "$facet"];
-const QUERY_METHODS = ["find", "findOne", "countDocuments", "updateOne", "updateMany", "deleteOne", "deleteMany", "sort"];
+const QUERY_METHODS = ["find", "findOne", "countDocuments", "updateOne", "updateMany", "deleteOne", "deleteMany", "dropIndex", "dropIndexes", "sort"];
 
 export function getMongoCompletionContext(text: string, cursor: number): MongoCompletionContext {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));

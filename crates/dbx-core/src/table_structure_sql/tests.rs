@@ -247,6 +247,52 @@ fn builds_informix_column_and_index_changes() {
 }
 
 #[test]
+fn oracle_does_not_generate_drop_sql_for_all_columns() {
+    let mut id = column("id");
+    id.marked_for_drop = true;
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "varchar2(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+    let mut name = column("name");
+    name.marked_for_drop = true;
+    name.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar2(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_TEST".to_string()),
+        table_name: "test".to_string(),
+        columns: vec![id, name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Oracle does not allow dropping all columns from a table. Keep at least one column or drop the table instead."
+        ]
+    );
+}
+
+#[test]
 fn iris_drop_index_includes_table_name() {
     let mut old_index = index("index_id", &["ID"]);
     old_index.marked_for_drop = true;

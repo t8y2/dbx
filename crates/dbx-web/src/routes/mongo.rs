@@ -109,6 +109,16 @@ pub struct MongoCreateIndexRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoDropIndexesRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub indexes_json: Option<String>,
+    pub single: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoInsertRequest {
     pub connection_id: String,
     pub database: String,
@@ -291,6 +301,24 @@ pub async fn create_index(
     .await
     .map_err(AppError)?;
     Ok(Json(serde_json::json!({ "name": name })))
+}
+
+pub async fn drop_indexes(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoDropIndexesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Drop indexes").await?;
+    let result = dbx_core::mongo_ops::mongo_drop_indexes_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        req.indexes_json.as_deref(),
+        req.single,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 
 pub async fn insert_document(

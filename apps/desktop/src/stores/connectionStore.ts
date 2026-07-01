@@ -2975,7 +2975,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function lookupLocalCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string): SqlCompletionTable[] {
     const allScopes = [...completionTableIndex.entries()].filter(([key]) => key.startsWith(`${connectionId}:${database}:`)).map(([, entry]) => entry);
     const preferred = schema ? completionTableIndex.get(completionScopeKey(connectionId, database, schema)) : undefined;
-    const scopes = preferred ? [preferred, ...allScopes.filter((entry) => entry !== preferred)] : allScopes;
+    const scopes = schema ? (preferred ? [preferred] : []) : allScopes;
     const treeTables = completionTablesFromTree(treeNodes.value, connectionId, database, schema);
     const ranked = scopes
       .flatMap((entry) => entry?.tables ?? [])
@@ -2989,7 +2989,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function lookupLocalCompletionObjects(connectionId: string, database: string, filter = "", limit?: number, schema?: string): SqlCompletionObject[] {
     const allScopes = [...completionObjectIndex.entries()].filter(([key]) => key.startsWith(`${connectionId}:${database}:`)).map(([, entry]) => entry);
     const preferred = schema ? completionObjectIndex.get(completionScopeKey(connectionId, database, schema)) : undefined;
-    const scopes = preferred ? [preferred, ...allScopes.filter((entry) => entry !== preferred)] : allScopes;
+    const scopes = schema ? (preferred ? [preferred] : []) : allScopes;
     const ranked = scopes
       .flatMap((entry) => entry?.objects ?? [])
       .map((object) => ({ object, score: objectMatchScore(object, filter, schema) }))

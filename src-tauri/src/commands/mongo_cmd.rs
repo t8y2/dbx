@@ -161,6 +161,27 @@ pub async fn mongo_create_index(
 }
 
 #[tauri::command]
+pub async fn mongo_drop_indexes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    indexes_json: Option<String>,
+    single: bool,
+) -> Result<dbx_core::db::mongo_driver::MongoDropIndexesResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Drop indexes").await?;
+    dbx_core::mongo_ops::mongo_drop_indexes_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        indexes_json.as_deref(),
+        single,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_insert_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

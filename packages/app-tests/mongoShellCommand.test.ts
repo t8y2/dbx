@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
   evaluateMongoAggregateSafety,
+  evaluateMongoWriteSafety,
   mongoAggregateWriteStage,
   mongoCountToQueryResult,
   mongoDocumentsToQueryResult,
@@ -112,6 +113,55 @@ test("parseMongoWriteCommand parses createIndex with optional options", () => {
     keys: '{"email": 1}',
     options: '{"unique": true, "name": "users_email_unique"}',
   });
+});
+
+test("parseMongoWriteCommand parses dropIndex and dropIndexes variants", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.users.dropIndex("users_email_unique")'), {
+    kind: "dropIndex",
+    collection: "users",
+    index: '"users_email_unique"',
+  });
+  assert.deepEqual(parseMongoWriteCommand("db.users.dropIndex({email: 1})"), {
+    kind: "dropIndex",
+    collection: "users",
+    index: '{"email": 1}',
+  });
+  assert.deepEqual(parseMongoWriteCommand("db.users.dropIndexes()"), {
+    kind: "dropIndexes",
+    collection: "users",
+  });
+  assert.deepEqual(parseMongoWriteCommand("db.users.dropIndexes({email: 1})"), {
+    kind: "dropIndexes",
+    collection: "users",
+    indexes: '{"email": 1}',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.users.dropIndexes("*")'), {
+    kind: "dropIndexes",
+    collection: "users",
+    indexes: '"*"',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.users.dropIndexes(["a_1", "b_1"])'), {
+    kind: "dropIndexes",
+    collection: "users",
+    indexes: '["a_1", "b_1"]',
+  });
+});
+
+test("parseMongoWriteCommand rejects invalid dropIndex/dropIndexes variants", () => {
+  assert.equal(parseMongoWriteCommand("db.users.dropIndex()"), null);
+  assert.equal(parseMongoWriteCommand('db.users.dropIndex("*")'), null);
+  assert.equal(parseMongoWriteCommand('db.users.dropIndex(["a_1"])'), null);
+  assert.equal(parseMongoWriteCommand('db.users.dropIndexes([{"a":1}])'), null);
+});
+
+test("evaluateMongoWriteSafety blocks dangerous dropIndexes shapes unless enabled", () => {
+  const dropAll = parseMongoWriteCommand("db.users.dropIndexes()");
+  assert.ok(dropAll);
+  assert.match(evaluateMongoWriteSafety(dropAll, { allowWrites: true }).reason || "", /DBX_MCP_ALLOW_DANGEROUS_SQL=1/);
+
+  const dropOne = parseMongoWriteCommand('db.users.dropIndexes("users_email_unique")');
+  assert.ok(dropOne);
+  assert.equal(evaluateMongoWriteSafety(dropOne, { allowWrites: true }).allowed, true);
 });
 
 test("parseMongoCountDocumentsCommand parses db collection countDocuments", () => {

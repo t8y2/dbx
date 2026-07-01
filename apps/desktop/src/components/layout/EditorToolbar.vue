@@ -3,7 +3,6 @@ import { computed, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield, Upload } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
@@ -312,27 +311,30 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
         </Button>
       </div>
       <div v-if="showSchemaSelector" class="flex items-center gap-1">
-        <Layers class="h-3.5 w-3.5 shrink-0" />
-        <Select
+        <SearchableSelect
           :model-value="activeSchemaValue"
-          @update:model-value="(v: any) => emit('changeSchema', v || undefined)"
+          :options="activeSchemaOptions.length ? activeSchemaOptions : activeSchemaValue ? [activeSchemaValue] : []"
+          :placeholder="t('editor.selectSchema')"
+          :search-placeholder="t('editor.searchSchema')"
+          :empty-text="t('grid.noSearchResults')"
+          :loading-text="t('common.loading')"
+          :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          trigger-class="gap-1.5"
+          @update:model-value="(schema) => emit('changeSchema', schema || undefined)"
           @update:open="
             (open: boolean) => {
               if (open && activeConnection) loadSchemaOptions(activeConnection.id, schemaDatabaseKey).catch(() => {});
             }
           "
         >
-          <SelectTrigger class="h-6 w-auto max-w-56 border-0 bg-transparent px-1 text-xs shadow-none focus:ring-0">
-            <SelectValue :placeholder="activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey) ? t('common.loading') : t('editor.selectSchema')">
-              {{ activeSchemaValue || t("editor.selectSchema") }}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent position="popper">
-            <SelectItem v-for="schema in activeSchemaOptions" :key="schema" :value="schema">
-              {{ schema }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
+          <template #trigger-label="{ label, loading }">
+            <Layers class="h-3.5 w-3.5 shrink-0" />
+            <span class="truncate">{{ loading ? t("common.loading") : label }}</span>
+          </template>
+          <template #option-label="{ label }">
+            <TruncatedTextTooltip :text="label" class="min-w-0 flex-1" side="left" :side-offset="8" />
+          </template>
+        </SearchableSelect>
       </div>
     </div>
     <div v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="ml-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">

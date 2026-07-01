@@ -8137,7 +8137,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             collapseConditionInputAfterBlur('where');
                           "
                         />
-                        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex min-w-0 items-center gap-1" :style="conditionTopbarOverlayStyle('where')">
+                        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex h-6 min-w-0 items-center gap-1" :style="conditionTopbarOverlayStyle('where')">
                           <button
                             type="button"
                             class="data-grid-topbar-condition-icon-control pointer-events-auto relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
@@ -8272,7 +8272,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             collapseConditionInputAfterBlur('orderBy');
                           "
                         />
-                        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex min-w-0 items-center gap-1" :style="conditionTopbarOverlayStyle('orderBy')">
+                        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex h-6 min-w-0 items-center gap-1" :style="conditionTopbarOverlayStyle('orderBy')">
                           <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--order" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">ORDER BY</span>
                           <div class="min-w-0 flex-1" />
                           <button class="data-grid-topbar-condition-icon-control pointer-events-auto text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openOrderByHistoryMenu">

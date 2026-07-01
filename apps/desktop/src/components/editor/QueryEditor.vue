@@ -157,6 +157,7 @@ const completionTranslations = computed(() => ({
 }));
 const MAX_COMPLETION_TABLES = 200;
 const MAX_JOIN_FK_PREFETCH_TABLES = 24;
+const MAX_COMPLETION_METADATA_PREFETCH_CONCURRENCY = 2;
 const MAX_SEMANTIC_DIAGNOSTIC_COLUMN_TABLES = 4;
 const liveFontSize = ref(settingsStore.editorSettings.fontSize);
 const gestureStartFontSize = ref(settingsStore.editorSettings.fontSize);
@@ -764,7 +765,9 @@ async function ensureForeignKeysForTables(tables: Array<{ name: string; schema?:
     seen.add(key);
     return true;
   });
-  await Promise.all(uniqueTables.map((table) => ensureForeignKeysForTable(table)));
+  for (let index = 0; index < uniqueTables.length; index += MAX_COMPLETION_METADATA_PREFETCH_CONCURRENCY) {
+    await Promise.all(uniqueTables.slice(index, index + MAX_COMPLETION_METADATA_PREFETCH_CONCURRENCY).map((table) => ensureForeignKeysForTable(table)));
+  }
 }
 
 function createHoverDom(title: string, detail: string, rows: string[] = []) {

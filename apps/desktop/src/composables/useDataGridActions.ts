@@ -50,21 +50,35 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     if (tab.mode !== "data" || !tab.connectionId || !tab.database) return;
     const tableMeta = tableMetaForDataTab(tab);
     if (!tableMeta?.tableName) return;
-
-    console.info("[DBX][reloadData:metadata:ensure-connected:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
-    await connectionStore.ensureConnected(tab.connectionId);
-    console.info("[DBX][reloadData:metadata:ensure-connected:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
-    const config = connectionStore.getConfig(tab.connectionId);
-    const querySchema = metadataSchemaForConnection(config, tab.database, tableMeta.schema);
-    console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: tableMeta.tableName });
-    const columns = await api.getColumns(tab.connectionId, tab.database, querySchema, tableMeta.tableName);
-    const indexes = await api.listIndexes(tab.connectionId, tab.database, querySchema, tableMeta.tableName).catch(() => []);
-    console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
-    const primaryKeys = editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(config), columns, indexes, tableMeta.tableType);
-    queryStore.setTableMeta(tab.id, {
+    const target = {
+      tabId: tab.id,
+      connectionId: tab.connectionId,
+      database: tab.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
+    };
+
+    console.info("[DBX][reloadData:metadata:ensure-connected:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
+    await connectionStore.ensureConnected(target.connectionId);
+    console.info("[DBX][reloadData:metadata:ensure-connected:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed() });
+    const config = connectionStore.getConfig(target.connectionId);
+    const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
+    console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: target.tableName });
+    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
+    const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName).catch(() => []);
+    console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
+    const current = queryStore.tabs.find((item) => item.id === target.tabId);
+    const currentMeta = current ? tableMetaForDataTab(current) : undefined;
+    if (!current || current.mode !== "data" || current.connectionId !== target.connectionId || current.database !== target.database || currentMeta?.tableName !== target.tableName || (currentMeta.schema ?? "") !== (target.schema ?? "")) {
+      console.info("[DBX][reloadData:metadata:stale-tab]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
+      return;
+    }
+    const primaryKeys = editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(config), columns, indexes, target.tableType);
+    queryStore.setTableMeta(target.tabId, {
+      schema: target.schema,
+      tableName: target.tableName,
+      tableType: target.tableType,
       columns,
       primaryKeys,
     });
@@ -98,16 +112,17 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       queryStore.setExecuting(tab.id, true);
       const tableMeta = tableMetaForDataTab(tab);
       const metadataAgeMs = tab.tableMetaUpdatedAt ? Date.now() - tab.tableMetaUpdatedAt : Number.POSITIVE_INFINITY;
-      const shouldRefreshMetadata = !tableMeta?.columns.length || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
+      const shouldRefreshMetadata = !tab.tableMeta || !tableMeta?.columns.length || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
       if (shouldRefreshMetadata) {
-        try {
-          console.info("[DBX][reloadData:metadata:start]", { traceId, elapsed: elapsed(), reason: tableMeta?.columns.length ? "stale" : "missing", metadataAgeMs });
-          await refreshDataTabTableMeta(tab, { traceId, elapsed });
-          console.info("[DBX][reloadData:metadata:done]", { traceId, elapsed: elapsed() });
-        } catch (e: any) {
-          console.warn("[DBX][reloadData:metadata:error]", { traceId, elapsed: elapsed(), error: e });
-          toast(e?.message || String(e), 5000);
-        }
+        console.info("[DBX][reloadData:metadata:background:start]", { traceId, elapsed: elapsed(), reason: tableMeta?.columns.length ? "stale" : "missing", metadataAgeMs });
+        void refreshDataTabTableMeta(tab, { traceId, elapsed })
+          .then(() => {
+            console.info("[DBX][reloadData:metadata:background:done]", { traceId, elapsed: elapsed() });
+          })
+          .catch((e: any) => {
+            console.warn("[DBX][reloadData:metadata:background:error]", { traceId, elapsed: elapsed(), error: e });
+            toast(e?.message || String(e), 5000);
+          });
       } else {
         console.info("[DBX][reloadData:metadata:skip]", { traceId, elapsed: elapsed(), columnCount: tableMeta.columns.length, metadataAgeMs });
       }

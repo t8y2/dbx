@@ -25,6 +25,14 @@ function postgresConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("connectionStore completion assistant", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -82,5 +90,44 @@ describe("connectionStore completion assistant", () => {
     expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
     expect(listTables).toHaveBeenCalledWith("pg-1", "app", "public", "acc", 20);
     expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table" }]);
+  });
+
+  it("limits concurrent completion column metadata requests per connection database", async () => {
+    const gates = [deferred<any[]>(), deferred<any[]>(), deferred<any[]>(), deferred<any[]>()];
+    let activeColumns = 0;
+    let maxActiveColumns = 0;
+    const getColumns = vi.fn((_connectionId: string, _database: string, _schema: string, table: string) => {
+      const index = Number(table.replace("table_", ""));
+      activeColumns++;
+      maxActiveColumns = Math.max(maxActiveColumns, activeColumns);
+      return gates[index].promise.finally(() => {
+        activeColumns--;
+      });
+    });
+
+    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch: vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false }),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const requests = [0, 1, 2, 3].map((index) => store.listCompletionColumns("pg-1", "app", `table_${index}`, "public"));
+
+    await vi.waitFor(() => expect(getColumns).toHaveBeenCalledTimes(2));
+    expect(maxActiveColumns).toBe(2);
+    gates[0].resolve([{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
+    await vi.waitFor(() => expect(getColumns).toHaveBeenCalledTimes(3));
+    gates[1].resolve([{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
+    gates[2].resolve([{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
+    gates[3].resolve([{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
+
+    await Promise.all(requests);
+    expect(maxActiveColumns).toBe(2);
   });
 });

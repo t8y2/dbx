@@ -1,6 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletion";
 import { getSqlCompletionContext } from "@/lib/sqlCompletion";
-import { executableStatementRanges, type SqlTextRange } from "@/lib/sqlStatementRanges";
+import { executableStatementRanges, isOraclePlSqlStatement, type SqlTextRange } from "@/lib/sqlStatementRanges";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
@@ -29,6 +29,7 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   const selected: SqlTextRange[] = [];
   const seen = new Set<string>();
   for (const statement of statements) {
+    if (isOraclePlSqlStatement(statement.sql, databaseType)) continue;
     if (!visibleRanges.some((visibleRange) => rangesIntersect(statement, visibleRange))) continue;
     const key = `${statement.from}:${statement.to}`;
     if (seen.has(key)) continue;

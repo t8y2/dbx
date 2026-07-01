@@ -344,6 +344,26 @@ test("selects complete SQL statements intersecting the visible viewport for diag
   assert.equal(ranges[0]?.to, sql.indexOf(";\nSELECT * FROM third"));
 });
 
+test("skips Oracle PL/SQL blocks when selecting semantic diagnostic ranges", () => {
+  const sql = `DECLARE
+  v_order_count NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_order_count
+  FROM "DBX_TEST"."ORDERS_10K";
+
+  IF v_order_count = 0 THEN
+    COMMIT;
+  END IF;
+END;
+/
+SELECT * FROM "DBX_TEST"."ORDERS_10K";`;
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "oracle");
+
+  assert.equal(ranges.length, 1);
+  assert.equal(ranges[0]?.sql, 'SELECT * FROM "DBX_TEST"."ORDERS_10K"');
+});
+
 test("keeps a long statement complete when only its middle is visible", () => {
   const sql = "SELECT id,\n  name,\n  missing_field\nFROM users\nWHERE id > 1;";
   const visibleFrom = sql.indexOf("missing_field");

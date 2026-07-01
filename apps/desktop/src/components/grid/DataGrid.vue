@@ -483,18 +483,40 @@ const suggestionLeft = ref(0);
 const whereSuggestions = ref<ConditionSuggestion[]>([]);
 const whereSuggestionIndex = ref(-1);
 const whereHistoryMenuOpen = ref(false);
-const whereFilterInputRef = ref<HTMLInputElement>();
+const whereFilterInputRef = ref<HTMLTextAreaElement>();
+const whereFilterOverlayRef = ref<HTMLTextAreaElement>();
+const whereConditionPaneRef = ref<HTMLDivElement>();
+const whereConditionControlRef = ref<HTMLDivElement>();
 const whereMeasureRef = ref<HTMLSpanElement>();
 const whereSuggestionLeft = ref(0);
 const whereSuggestionPosition = ref({ left: 0, top: 0 });
+const whereConditionRendered = ref(false);
+const whereConditionExpanded = ref(false);
+const whereConditionHeight = ref(28);
+const whereConditionRect = ref({ left: 0, top: 0, width: 0, height: 28 });
+const whereConditionScrollTop = ref(0);
+const whereConditionImmediateHeight = ref(false);
+let whereConditionCollapseTimer: ReturnType<typeof setTimeout> | undefined;
+let suppressNextWhereWatchResize = false;
 
 const orderBySuggestions = ref<ConditionSuggestion[]>([]);
 const orderBySuggestionIndex = ref(-1);
 const orderByHistoryMenuOpen = ref(false);
-const orderByInputRef = ref<HTMLInputElement>();
+const orderByInputRef = ref<HTMLTextAreaElement>();
+const orderByOverlayRef = ref<HTMLTextAreaElement>();
+const orderByConditionPaneRef = ref<HTMLDivElement>();
+const orderByConditionControlRef = ref<HTMLDivElement>();
 const orderByMeasureRef = ref<HTMLSpanElement>();
 const orderBySuggestionLeft = ref(0);
 const orderBySuggestionPosition = ref({ left: 0, top: 0 });
+const orderByConditionRendered = ref(false);
+const orderByConditionExpanded = ref(false);
+const orderByConditionHeight = ref(28);
+const orderByConditionRect = ref({ left: 0, top: 0, width: 0, height: 28 });
+const orderByConditionScrollTop = ref(0);
+const orderByConditionImmediateHeight = ref(false);
+let orderByConditionCollapseTimer: ReturnType<typeof setTimeout> | undefined;
+let suppressNextOrderByWatchResize = false;
 
 const orderByInput = ref(props.initialOrderByInput ?? "");
 const hasOrderByInput = computed(() => orderByInput.value.trim().length > 0);
@@ -533,6 +555,437 @@ const orderBySuggestionStyle = computed(() => ({
 }));
 const showOrderBySuggestionDropdown = computed(() => orderBySuggestions.value.length > 0 || orderByHistoryMenuOpen.value);
 const orderByHistoryEmptyText = computed(() => (orderByInput.value.trim() ? t("grid.conditionHistoryNoMatches") : t("grid.conditionHistoryEmpty")));
+
+type ConditionInputKind = "where" | "orderBy";
+const CONDITION_EXPANDED_MAX_HEIGHT = 260;
+let openingConditionHistoryKind: ConditionInputKind | null = null;
+
+function conditionInputRef(kind: ConditionInputKind) {
+  return kind === "where" ? whereFilterInputRef.value : orderByInputRef.value;
+}
+
+function conditionOverlayRef(kind: ConditionInputKind) {
+  return kind === "where" ? whereFilterOverlayRef.value : orderByOverlayRef.value;
+}
+
+function conditionPaneRef(kind: ConditionInputKind) {
+  return kind === "where" ? whereConditionPaneRef.value : orderByConditionPaneRef.value;
+}
+
+function conditionControlRef(kind: ConditionInputKind) {
+  return kind === "where" ? whereConditionControlRef.value : orderByConditionControlRef.value;
+}
+
+function conditionEditorRef(kind: ConditionInputKind) {
+  return conditionOverlayRef(kind) ?? conditionInputRef(kind);
+}
+
+function conditionInputTextWidth(input: HTMLTextAreaElement): number {
+  const probe = document.createElement("span");
+  const style = window.getComputedStyle(input);
+  probe.textContent = input.value || input.placeholder || "";
+  probe.style.cssText = `
+    position: fixed;
+    left: -9999px;
+    top: -9999px;
+    visibility: hidden;
+    white-space: pre;
+    font: ${style.font};
+    font-size: ${style.fontSize};
+    font-family: ${style.fontFamily};
+    font-weight: ${style.fontWeight};
+    letter-spacing: ${style.letterSpacing};
+  `;
+  document.body.appendChild(probe);
+  const width = probe.getBoundingClientRect().width;
+  probe.remove();
+  return width;
+}
+
+function conditionInputShouldExpand(input: HTMLTextAreaElement): boolean {
+  return input.value.length > 0 && conditionInputTextWidth(input) > input.clientWidth + 1;
+}
+
+function conditionInputContentHeight(input: HTMLTextAreaElement): number {
+  const probe = document.createElement("div");
+  const style = window.getComputedStyle(input);
+  probe.textContent = input.value || input.placeholder || "";
+  probe.style.cssText = `
+    position: fixed;
+    left: -9999px;
+    top: -9999px;
+    visibility: hidden;
+    box-sizing: border-box;
+    width: ${input.clientWidth}px;
+    min-height: 0;
+    padding: ${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};
+    border: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: ${style.font};
+    font-size: ${style.fontSize};
+    font-family: ${style.fontFamily};
+    font-weight: ${style.fontWeight};
+    line-height: ${style.lineHeight};
+    letter-spacing: ${style.letterSpacing};
+    text-indent: ${style.textIndent};
+  `;
+  document.body.appendChild(probe);
+  const height = probe.scrollHeight;
+  probe.remove();
+  return height;
+}
+
+function conditionExpandedHeight(input: HTMLTextAreaElement): number {
+  const style = window.getComputedStyle(input);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 24;
+  const inputRect = input.getBoundingClientRect();
+  const pane = input.parentElement;
+  const paneRect = pane?.getBoundingClientRect();
+  const verticalInset = paneRect ? Math.max(0, inputRect.top - paneRect.top) + Math.max(0, paneRect.bottom - inputRect.bottom) : 0;
+  const minimumHeight = Math.max(56, lineHeight * 2.5);
+  const availableHeight = Math.max(minimumHeight, window.innerHeight - input.getBoundingClientRect().top - 12);
+  const contentHeight = conditionInputContentHeight(input);
+  return Math.min(Math.max(minimumHeight, contentHeight + verticalInset), Math.min(CONDITION_EXPANDED_MAX_HEIGHT, availableHeight));
+}
+
+function conditionCaretTop(input: HTMLTextAreaElement, caretIndex: number): number {
+  const probe = document.createElement("div");
+  const style = window.getComputedStyle(input);
+  const textBeforeCaret = input.value.slice(0, caretIndex);
+  probe.textContent = textBeforeCaret || " ";
+  probe.style.cssText = `
+    position: fixed;
+    left: -9999px;
+    top: -9999px;
+    visibility: hidden;
+    box-sizing: border-box;
+    width: ${input.clientWidth}px;
+    min-height: 0;
+    padding: ${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};
+    border: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: ${style.font};
+    font-size: ${style.fontSize};
+    font-family: ${style.fontFamily};
+    font-weight: ${style.fontWeight};
+    line-height: ${style.lineHeight};
+    letter-spacing: ${style.letterSpacing};
+    text-indent: ${style.textIndent};
+  `;
+  document.body.appendChild(probe);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 24;
+  const top = Math.max(0, probe.scrollHeight - lineHeight);
+  probe.remove();
+  return top;
+}
+
+function setConditionScrollTop(kind: ConditionInputKind, scrollTop: number) {
+  if (kind === "where") {
+    whereConditionScrollTop.value = scrollTop;
+  } else {
+    orderByConditionScrollTop.value = scrollTop;
+  }
+}
+
+function scrollConditionCaretIntoView(kind: ConditionInputKind, input: HTMLTextAreaElement, caretIndex: number) {
+  const caretTop = conditionCaretTop(input, caretIndex);
+  const lineHeight = Number.parseFloat(window.getComputedStyle(input).lineHeight) || 24;
+  const topPadding = lineHeight * 0.5;
+  const maxScrollTop = Math.max(0, input.scrollHeight - input.clientHeight);
+  input.scrollTop = Math.min(Math.max(0, caretTop - topPadding), maxScrollTop);
+  setConditionScrollTop(kind, input.scrollTop);
+}
+
+function conditionCollapsedHeight(kind: ConditionInputKind) {
+  const pane = conditionPaneRef(kind) ?? conditionControlRef(kind);
+  return pane ? pane.getBoundingClientRect().height : 28;
+}
+
+function clearConditionCollapseTimer(kind: ConditionInputKind) {
+  if (kind === "where") {
+    if (whereConditionCollapseTimer) clearTimeout(whereConditionCollapseTimer);
+    whereConditionCollapseTimer = undefined;
+  } else {
+    if (orderByConditionCollapseTimer) clearTimeout(orderByConditionCollapseTimer);
+    orderByConditionCollapseTimer = undefined;
+  }
+}
+
+function conditionPaneRendered(kind: ConditionInputKind) {
+  return kind === "where" ? whereConditionRendered.value : orderByConditionRendered.value;
+}
+
+function setConditionRendered(kind: ConditionInputKind, rendered: boolean) {
+  if (kind === "where") {
+    whereConditionRendered.value = rendered;
+  } else {
+    orderByConditionRendered.value = rendered;
+  }
+}
+
+function conditionPaneExpanded(kind: ConditionInputKind) {
+  return kind === "where" ? whereConditionExpanded.value : orderByConditionExpanded.value;
+}
+
+function setConditionExpandedState(kind: ConditionInputKind, expanded: boolean) {
+  if (kind === "where") {
+    whereConditionExpanded.value = expanded;
+  } else {
+    orderByConditionExpanded.value = expanded;
+  }
+}
+
+function queueConditionPaneRemoval(kind: ConditionInputKind) {
+  clearConditionCollapseTimer(kind);
+  const timer = setTimeout(() => {
+    if (!conditionPaneExpanded(kind)) setConditionRendered(kind, false);
+  }, 160);
+  if (kind === "where") {
+    whereConditionCollapseTimer = timer;
+  } else {
+    orderByConditionCollapseTimer = timer;
+  }
+}
+
+function setConditionExpanded(kind: ConditionInputKind, expanded: boolean) {
+  if (expanded) {
+    const wasRendered = conditionPaneRendered(kind);
+    clearConditionCollapseTimer(kind);
+    setConditionRendered(kind, true);
+    if (wasRendered) {
+      setConditionExpandedState(kind, true);
+    } else {
+      setConditionExpandedState(kind, false);
+      requestAnimationFrame(() => requestAnimationFrame(() => setConditionExpandedState(kind, true)));
+    }
+    return;
+  }
+  setConditionExpandedState(kind, false);
+  queueConditionPaneRemoval(kind);
+}
+
+function setConditionHeight(kind: ConditionInputKind, height: number) {
+  if (kind === "where") {
+    whereConditionHeight.value = height;
+  } else {
+    orderByConditionHeight.value = height;
+  }
+}
+
+function setConditionRect(kind: ConditionInputKind, rect: DOMRect) {
+  const nextRect = {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+  if (kind === "where") {
+    whereConditionRect.value = nextRect;
+  } else {
+    orderByConditionRect.value = nextRect;
+  }
+}
+
+function conditionInputInsets(kind: ConditionInputKind) {
+  const pane = conditionPaneRef(kind);
+  const input = conditionInputRef(kind);
+  const control = conditionControlRef(kind);
+  if (!pane || !input) {
+    return { controlsTop: 3, inputTop: 3, prefix: 0, suffix: 0 };
+  }
+  const paneRect = pane.getBoundingClientRect();
+  const inputRect = input.getBoundingClientRect();
+  const controlRect = control?.getBoundingClientRect();
+  const paneStyle = window.getComputedStyle(pane);
+  const paddingLeft = Number.parseFloat(paneStyle.paddingLeft) || 0;
+  const paddingRight = Number.parseFloat(paneStyle.paddingRight) || 0;
+  return {
+    controlsTop: Math.max(0, (controlRect?.top ?? inputRect.top) - paneRect.top),
+    inputTop: Math.max(0, inputRect.top - paneRect.top),
+    prefix: Math.max(0, inputRect.left - paneRect.left - paddingLeft),
+    suffix: Math.max(28, paneRect.right - inputRect.right - paddingRight),
+  };
+}
+
+function conditionPaneStyle(kind: ConditionInputKind): CSSProperties {
+  const rendered = conditionPaneRendered(kind);
+  const expanded = conditionPaneExpanded(kind);
+  const height = kind === "where" ? whereConditionHeight.value : orderByConditionHeight.value;
+  const immediateHeight = kind === "where" ? whereConditionImmediateHeight.value : orderByConditionImmediateHeight.value;
+  if (!rendered) return {};
+  const rect = kind === "where" ? whereConditionRect.value : orderByConditionRect.value;
+  const collapsedHeight = rect.height || 28;
+  const insets = conditionInputInsets(kind);
+  return {
+    "--data-grid-condition-controls-top": `${insets.controlsTop}px`,
+    "--data-grid-condition-input-top": `${insets.inputTop}px`,
+    "--data-grid-condition-prefix-indent": `${insets.prefix}px`,
+    "--data-grid-condition-suffix-width": `${insets.suffix}px`,
+    height: `${expanded ? height : collapsedHeight}px`,
+    left: `${rect.left}px`,
+    pointerEvents: expanded ? "auto" : "none",
+    top: `${rect.top}px`,
+    transition: immediateHeight ? "box-shadow 150ms ease" : undefined,
+    width: `${rect.width}px`,
+  };
+}
+
+function conditionTopbarOverlayStyle(kind: ConditionInputKind): CSSProperties {
+  const scrollTop = kind === "where" ? whereConditionScrollTop.value : orderByConditionScrollTop.value;
+  return {
+    transform: `translateY(${-scrollTop}px)`,
+  };
+}
+
+function focusConditionOverlay(kind: ConditionInputKind, source: HTMLTextAreaElement) {
+  window.setTimeout(() => {
+    const overlay = conditionOverlayRef(kind);
+    if (!overlay) return;
+    const start = source.selectionStart ?? source.value.length;
+    const end = source.selectionEnd ?? start;
+    overlay.focus();
+    overlay.setSelectionRange(start, end);
+    scrollConditionCaretIntoView(kind, overlay, start);
+    requestAnimationFrame(() => scrollConditionCaretIntoView(kind, overlay, start));
+    updateConditionSuggestionPosition(kind);
+  }, 0);
+}
+
+function focusConditionInput(kind: ConditionInputKind, source: HTMLTextAreaElement) {
+  const input = conditionInputRef(kind);
+  if (!input) return;
+  const start = source.selectionStart ?? source.value.length;
+  const end = source.selectionEnd ?? start;
+  nextTick(() => {
+    input.focus();
+    input.setSelectionRange(start, end);
+    updateConditionSuggestionPosition(kind);
+  });
+}
+
+function onConditionOverlayScroll(kind: ConditionInputKind, event: Event) {
+  const input = event.target instanceof HTMLTextAreaElement ? event.target : null;
+  if (!input) return;
+  setConditionScrollTop(kind, input.scrollTop);
+}
+
+function resetConditionOverlayScrollIfContentFits(kind: ConditionInputKind) {
+  requestAnimationFrame(() => {
+    const overlay = conditionOverlayRef(kind);
+    const pane = overlay?.parentElement;
+    if (!overlay || !pane || overlay.scrollHeight > overlay.clientHeight + 1 || pane.getBoundingClientRect().height >= CONDITION_EXPANDED_MAX_HEIGHT - 1) return;
+    overlay.scrollTop = 0;
+    setConditionScrollTop(kind, 0);
+  });
+}
+
+function onConditionOverlayClick(kind: ConditionInputKind) {
+  if (kind === "where") {
+    if (whereHistoryMenuOpen.value) {
+      dismissWhereSuggestions();
+      return;
+    }
+    updateWhereSuggestionPosition();
+  } else {
+    if (orderByHistoryMenuOpen.value) {
+      dismissOrderBySuggestions();
+      return;
+    }
+    updateOrderBySuggestionPosition();
+  }
+}
+
+function resizeConditionInput(kind: ConditionInputKind, options: { focusOverlay?: boolean; expandFromFocus?: boolean; immediateHeight?: boolean } = {}) {
+  nextTick(() => {
+    const input = conditionInputRef(kind);
+    if (!input) return;
+    const editor = conditionEditorRef(kind) ?? input;
+    const focused = document.activeElement === input || document.activeElement === conditionOverlayRef(kind);
+    const expanded = focused && conditionInputShouldExpand(input) && (options.expandFromFocus || document.activeElement === conditionOverlayRef(kind));
+    const shouldRestoreInputFocus = !expanded && document.activeElement === conditionOverlayRef(kind);
+    if (shouldRestoreInputFocus && editor instanceof HTMLTextAreaElement) focusConditionInput(kind, editor);
+    if (expanded) setConditionRect(kind, (conditionPaneRef(kind) ?? conditionControlRef(kind) ?? input).getBoundingClientRect());
+    setConditionExpanded(kind, expanded);
+    requestAnimationFrame(() => {
+      if (!expanded) {
+        if (kind === "where") whereConditionImmediateHeight.value = false;
+        else orderByConditionImmediateHeight.value = false;
+        setConditionHeight(kind, conditionCollapsedHeight(kind));
+        return;
+      }
+      if (options.immediateHeight) {
+        if (kind === "where") whereConditionImmediateHeight.value = true;
+        else orderByConditionImmediateHeight.value = true;
+      }
+      setConditionHeight(kind, conditionExpandedHeight(editor));
+      if (options.immediateHeight) {
+        requestAnimationFrame(() => {
+          if (kind === "where") whereConditionImmediateHeight.value = false;
+          else orderByConditionImmediateHeight.value = false;
+        });
+      }
+      updateConditionSuggestionPosition(kind);
+      if (options.focusOverlay && document.activeElement === input) focusConditionOverlay(kind, input);
+      else resetConditionOverlayScrollIfContentFits(kind);
+    });
+  });
+}
+
+function onConditionInputClick(kind: ConditionInputKind) {
+  updateConditionSuggestionPosition(kind);
+  resizeConditionInput(kind, { expandFromFocus: true, focusOverlay: true });
+}
+
+function collapseConditionInput(kind: ConditionInputKind) {
+  setConditionExpanded(kind, false);
+  setConditionHeight(kind, conditionCollapsedHeight(kind));
+  setConditionScrollTop(kind, 0);
+}
+
+function collapseConditionInputAfterBlur(kind: ConditionInputKind) {
+  window.setTimeout(() => {
+    const input = conditionInputRef(kind);
+    const overlay = conditionOverlayRef(kind);
+    if (document.activeElement === input || document.activeElement === overlay) return;
+    collapseConditionInput(kind);
+  }, 0);
+}
+
+function resizeFocusedConditionInputs() {
+  resizeConditionInput("where");
+  resizeConditionInput("orderBy");
+}
+
+function normalizeConditionInputValue(value: string) {
+  return value.replace(/\s*\r?\n\s*/g, " ");
+}
+
+function updateConditionSuggestionPosition(kind: ConditionInputKind) {
+  if (kind === "where") {
+    updateWhereSuggestionPosition();
+  } else {
+    updateOrderBySuggestionPosition();
+  }
+}
+
+function setConditionHistorySuggestionPosition(kind: ConditionInputKind, target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    updateConditionSuggestionPosition(kind);
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  const position = {
+    left: Math.max(0, Math.min(rect.left, window.innerWidth - 180)),
+    top: rect.bottom + 2,
+  };
+  if (kind === "where") {
+    whereSuggestionPosition.value = position;
+  } else {
+    orderBySuggestionPosition.value = position;
+  }
+}
 
 type LocalFilterMode = "local" | "server";
 type LocalFilterOption = {
@@ -1285,6 +1738,12 @@ function ensureStructuredFilterRule() {
   }
 }
 
+function openStructuredFilterFromExpandedWhere() {
+  collapseConditionInput("where");
+  ensureStructuredFilterRule();
+  filterBuilderOpen.value = true;
+}
+
 function addStructuredFilterRule() {
   ensureStructuredFilterRule();
   structuredFilterRules.value = [...structuredFilterRules.value, defaultStructuredFilterRule()];
@@ -1522,7 +1981,7 @@ function onSearchKeydown(e: KeyboardEvent) {
 // --- WHERE filter input suggestions ---
 function updateWhereSuggestionPosition() {
   nextTick(() => {
-    const input = whereFilterInputRef.value;
+    const input = conditionEditorRef("where");
     const measure = whereMeasureRef.value;
     if (!input || !measure) return;
     const cursorPos = input.selectionStart ?? 0;
@@ -1545,7 +2004,7 @@ function acceptWhereSuggestion() {
     whereSuggestions.value = [];
     whereSuggestionIndex.value = -1;
     whereHistoryMenuOpen.value = false;
-    whereFilterInputRef.value?.focus();
+    conditionEditorRef("where")?.focus();
     return;
   }
   const lastWordMatch = whereFilterInput.value.match(/([^\s,()><=!&|]+)$/);
@@ -1557,7 +2016,7 @@ function acceptWhereSuggestion() {
   whereSuggestions.value = [];
   whereSuggestionIndex.value = -1;
   whereHistoryMenuOpen.value = false;
-  whereFilterInputRef.value?.focus();
+  conditionEditorRef("where")?.focus();
 }
 
 function dismissWhereSuggestions() {
@@ -1579,13 +2038,21 @@ function showWhereHistorySuggestions() {
   const history = loadDataGridConditionHistory("where", conditionHistoryScope.value, whereFilterInput.value);
   whereSuggestions.value = history.map((value) => ({ value, kind: "history" }));
   whereSuggestionIndex.value = -1;
+  if (openingConditionHistoryKind === "where") return;
   updateWhereSuggestionPosition();
 }
 
-function openWhereHistoryMenu() {
+function openWhereHistoryMenu(event?: MouseEvent) {
+  openingConditionHistoryKind = "where";
+  conditionEditorRef("where")?.focus();
   whereHistoryMenuOpen.value = true;
-  showWhereHistorySuggestions();
-  whereFilterInputRef.value?.focus();
+  const history = loadDataGridConditionHistory("where", conditionHistoryScope.value, whereFilterInput.value);
+  whereSuggestions.value = history.map((value) => ({ value, kind: "history" }));
+  whereSuggestionIndex.value = -1;
+  setConditionHistorySuggestionPosition("where", event?.currentTarget ?? null);
+  requestAnimationFrame(() => {
+    if (openingConditionHistoryKind === "where") openingConditionHistoryKind = null;
+  });
 }
 
 function deleteWhereHistorySuggestion(value: string) {
@@ -1599,9 +2066,17 @@ function deleteWhereHistorySuggestion(value: string) {
 }
 
 function onWhereFilterInput(event: Event) {
-  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  const input = event.target instanceof HTMLTextAreaElement ? event.target : null;
   if (!input) return;
-  const nextValue = input.value;
+  suppressNextWhereWatchResize = true;
+  const nextValue = normalizeConditionInputValue(input.value);
+  if (nextValue !== input.value) {
+    whereFilterInput.value = nextValue;
+    previousWhereFilterInputValue = nextValue;
+    nextTick(() => input.setSelectionRange(nextValue.length, nextValue.length));
+    resizeConditionInput("where", { expandFromFocus: true, focusOverlay: true, immediateHeight: true });
+    return;
+  }
   if (
     insertedSqlSingleQuoteAtCaret({
       previousValue: previousWhereFilterInputValue,
@@ -1614,6 +2089,7 @@ function onWhereFilterInput(event: Event) {
     whereFilterInput.value = pairedValue;
     previousWhereFilterInputValue = pairedValue;
     nextTick(() => input.setSelectionRange(caret, caret));
+    resizeConditionInput("where", { expandFromFocus: true, focusOverlay: true, immediateHeight: true });
     return;
   }
   const nextCaret = caretPositionInsideInsertedSqlSingleQuotes({
@@ -1622,6 +2098,7 @@ function onWhereFilterInput(event: Event) {
     selectionStart: input.selectionStart,
   });
   previousWhereFilterInputValue = nextValue;
+  resizeConditionInput("where", { expandFromFocus: true, focusOverlay: true, immediateHeight: true });
   if (nextCaret == null) return;
   nextTick(() => input.setSelectionRange(nextCaret, nextCaret));
 }
@@ -1630,6 +2107,11 @@ watch(whereFilterInput, (val) => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
   previousWhereFilterInputValue = val;
+  if (suppressNextWhereWatchResize) {
+    suppressNextWhereWatchResize = false;
+  } else {
+    resizeConditionInput("where");
+  }
   whereSuggestions.value = [];
   whereHistoryMenuOpen.value = false;
   if (!props.tableMeta?.columns?.length) return;
@@ -1653,7 +2135,7 @@ watch(whereFilterInput, (val) => {
 
 function onWhereFilterKeydown(e: KeyboardEvent) {
   if (e.key in PAIRS && !e.ctrlKey && !e.metaKey) {
-    const input = e.target as HTMLInputElement;
+    const input = e.target as HTMLTextAreaElement;
     const start = input.selectionStart ?? 0;
     const end = input.selectionEnd ?? 0;
     const close = PAIRS[e.key];
@@ -1715,7 +2197,7 @@ function onWhereFilterKeydown(e: KeyboardEvent) {
 // --- ORDER BY input suggestions ---
 function updateOrderBySuggestionPosition() {
   nextTick(() => {
-    const input = orderByInputRef.value;
+    const input = conditionEditorRef("orderBy");
     const measure = orderByMeasureRef.value;
     if (!input || !measure) return;
     const cursorPos = input.selectionStart ?? 0;
@@ -1738,7 +2220,7 @@ function acceptOrderBySuggestion() {
     orderBySuggestions.value = [];
     orderBySuggestionIndex.value = -1;
     orderByHistoryMenuOpen.value = false;
-    orderByInputRef.value?.focus();
+    conditionEditorRef("orderBy")?.focus();
     return;
   }
   const lastWordMatch = orderByInput.value.match(/([^\s,()]+)$/);
@@ -1750,7 +2232,7 @@ function acceptOrderBySuggestion() {
   orderBySuggestions.value = [];
   orderBySuggestionIndex.value = -1;
   orderByHistoryMenuOpen.value = false;
-  orderByInputRef.value?.focus();
+  conditionEditorRef("orderBy")?.focus();
 }
 
 function dismissOrderBySuggestions() {
@@ -1772,13 +2254,21 @@ function showOrderByHistorySuggestions() {
   const history = loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByInput.value);
   orderBySuggestions.value = history.map((value) => ({ value, kind: "history" }));
   orderBySuggestionIndex.value = -1;
+  if (openingConditionHistoryKind === "orderBy") return;
   updateOrderBySuggestionPosition();
 }
 
-function openOrderByHistoryMenu() {
+function openOrderByHistoryMenu(event?: MouseEvent) {
+  openingConditionHistoryKind = "orderBy";
+  conditionEditorRef("orderBy")?.focus();
   orderByHistoryMenuOpen.value = true;
-  showOrderByHistorySuggestions();
-  orderByInputRef.value?.focus();
+  const history = loadDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByInput.value);
+  orderBySuggestions.value = history.map((value) => ({ value, kind: "history" }));
+  orderBySuggestionIndex.value = -1;
+  setConditionHistorySuggestionPosition("orderBy", event?.currentTarget ?? null);
+  requestAnimationFrame(() => {
+    if (openingConditionHistoryKind === "orderBy") openingConditionHistoryKind = null;
+  });
 }
 
 function deleteOrderByHistorySuggestion(value: string) {
@@ -1793,6 +2283,11 @@ function deleteOrderByHistorySuggestion(value: string) {
 
 watch(orderByInput, (val) => {
   emit("update:orderByInput", val);
+  if (suppressNextOrderByWatchResize) {
+    suppressNextOrderByWatchResize = false;
+  } else {
+    resizeConditionInput("orderBy");
+  }
   orderBySuggestions.value = [];
   orderByHistoryMenuOpen.value = false;
   if (!props.tableMeta?.columns?.length) return;
@@ -1813,6 +2308,18 @@ watch(orderByInput, (val) => {
     updateOrderBySuggestionPosition();
   }
 });
+
+function onOrderByInput(event: Event) {
+  const input = event.target instanceof HTMLTextAreaElement ? event.target : null;
+  if (!input) return;
+  suppressNextOrderByWatchResize = true;
+  const nextValue = normalizeConditionInputValue(input.value);
+  if (nextValue !== input.value) {
+    orderByInput.value = nextValue;
+    nextTick(() => input.setSelectionRange(nextValue.length, nextValue.length));
+  }
+  resizeConditionInput("orderBy", { expandFromFocus: true, focusOverlay: true, immediateHeight: true });
+}
 
 function onOrderByKeydown(e: KeyboardEvent) {
   if (orderBySuggestions.value.length > 0) {
@@ -5101,12 +5608,17 @@ onActivated(resumeCanvasGridWork);
 onMounted(() => {
   if (typeof window === "undefined") return;
   window.addEventListener("resize", scheduleCanvasPixelRatioRefresh);
+  window.addEventListener("resize", resizeFocusedConditionInputs);
   window.visualViewport?.addEventListener("resize", scheduleCanvasPixelRatioRefresh);
+  window.visualViewport?.addEventListener("resize", resizeFocusedConditionInputs);
   window.addEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
+  window.addEventListener("dbx:ui-scale-applied", resizeFocusedConditionInputs);
 });
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   pauseCanvasGridWork();
+  clearConditionCollapseTimer("where");
+  clearConditionCollapseTimer("orderBy");
   gridHorizontalScrollbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver?.disconnect();
   disconnectCellEditResizeObserver();
@@ -5118,8 +5630,11 @@ onUnmounted(() => {
   }
   if (typeof window === "undefined") return;
   window.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
+  window.removeEventListener("resize", resizeFocusedConditionInputs);
   window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
+  window.visualViewport?.removeEventListener("resize", resizeFocusedConditionInputs);
   window.removeEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
+  window.removeEventListener("dbx:ui-scale-applied", resizeFocusedConditionInputs);
 });
 
 function setRowStatusFilter(value: string) {
@@ -6930,6 +7445,7 @@ function onSearchSplitResizeMove(event: MouseEvent) {
     containerWidth,
     desiredWidth: searchSplitStartWidth + event.clientX - searchSplitStartX,
   });
+  resizeFocusedConditionInputs();
 }
 
 function onSearchSplitResizeEnd() {
@@ -6942,6 +7458,21 @@ function onSearchSplitResizeEnd() {
 function resetSearchSplitWidth() {
   const containerWidth = searchSplitContainerWidth();
   searchSplitWhereWidth.value = containerWidth > 0 ? clampSearchSplitWidth({ containerWidth }) : null;
+  resizeFocusedConditionInputs();
+}
+
+function onDataGridTopbarFixedActionWheel(event: WheelEvent) {
+  if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onConditionInputWheel(event: WheelEvent) {
+  const input = event.currentTarget instanceof HTMLTextAreaElement ? event.currentTarget : null;
+  if (!input || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+  input.scrollLeft += event.deltaX;
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function onDdlResizeStart(event: MouseEvent) {
@@ -7364,441 +7895,567 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
-        <div
-          ref="dataGridTopbarRef"
-          v-if="showDataGridTopbar"
-          class="data-grid-topbar-scroll shrink-0 overflow-x-auto border-b bg-muted/20"
-          @scroll="
-            updateWhereSuggestionPosition();
-            updateOrderBySuggestionPosition();
-          "
-        >
-          <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
-            <div v-if="useTransaction && editable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
-              <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
-                <SelectTrigger class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground [&_svg]:size-3">
-                  <SelectValue :placeholder="t('grid.filterRows')" />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  <SelectItem value="all">{{ t("grid.filterAllRows") }}</SelectItem>
-                  <SelectItem value="changed">{{ t("grid.filterChangedRows") }}</SelectItem>
-                  <SelectItem value="edited">{{ t("grid.statusEdited") }}</SelectItem>
-                  <SelectItem value="new">{{ t("grid.statusNew") }}</SelectItem>
-                  <SelectItem value="deleted">{{ t("grid.statusDeleted") }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <template v-if="hasLocalColumnFilters && !canShowWhereSearch && !hasSearchBarSlot">
-              <div class="flex items-center gap-1 px-2 py-0.5 min-w-0">
-                <button type="button" class="flex shrink-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15" :title="t('grid.clearLocalFilters')" @click="clearLocalFilter()">
-                  <Filter class="h-3 w-3" />
-                  {{ localFilterCount }}
-                  <X class="h-3 w-3" />
-                </button>
+        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell shrink-0 flex min-w-0 border-b bg-muted/20">
+          <div
+            class="data-grid-topbar-scroll min-w-0 flex-1 overflow-x-hidden"
+            @scroll="
+              updateWhereSuggestionPosition();
+              updateOrderBySuggestionPosition();
+            "
+          >
+            <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
+              <div v-if="useTransaction && editable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
+                <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
+                  <SelectTrigger class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground [&_svg]:size-3">
+                    <SelectValue :placeholder="t('grid.filterRows')" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem value="all">{{ t("grid.filterAllRows") }}</SelectItem>
+                    <SelectItem value="changed">{{ t("grid.filterChangedRows") }}</SelectItem>
+                    <SelectItem value="edited">{{ t("grid.statusEdited") }}</SelectItem>
+                    <SelectItem value="new">{{ t("grid.statusNew") }}</SelectItem>
+                    <SelectItem value="deleted">{{ t("grid.statusDeleted") }}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-            </template>
-            <template v-if="canShowWhereSearch">
-              <div ref="searchSplitContainerRef" class="flex flex-1 min-w-0">
-                <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': useTransaction && editable && hasDataGridSaveTarget }" :style="whereSearchPaneStyle">
-                  <Popover v-model:open="filterBuilderOpen">
-                    <PopoverTrigger as-child>
-                      <button
-                        type="button"
-                        class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
-                        :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
-                        :disabled="!canUseWhereSearch"
-                        @click="ensureStructuredFilterRule"
-                      >
-                        <Filter class="h-3 w-3" />
-                        <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">
-                          {{ filterButtonCount }}
-                        </span>
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent align="start" class="w-[380px] max-w-[calc(100vw-24px)] gap-3 p-3">
-                      <div class="flex items-center justify-between gap-3">
-                        <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
-                        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addStructuredFilterRule">
-                          <Plus class="mr-1 h-3.5 w-3.5" />
-                          {{ t("grid.filterBuilderAddRule") }}
-                        </Button>
-                      </div>
-
-                      <div v-if="hasLocalColumnFilters" class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2">
-                        <div class="flex items-center justify-between gap-3">
-                          <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
-                            <Filter class="h-3.5 w-3.5 shrink-0" />
-                            <span class="truncate">{{ t("grid.localFiltersActive", { count: localFilterCount }) }}</span>
-                          </div>
-                          <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" @click="clearLocalFilter()">
-                            <X class="mr-1 h-3.5 w-3.5" />
-                            {{ t("grid.clearLocalFiltersShort") }}
-                          </Button>
-                        </div>
-                        <div class="space-y-1">
-                          <div v-for="summary in localFilterSummaries" :key="summary.columnIndex" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-2 rounded border border-primary/10 bg-background/70 px-2 py-1 text-xs">
-                            <span class="truncate font-medium text-foreground" :title="summary.columnName">
-                              {{ summary.columnName }}
-                            </span>
-                            <span class="min-w-0 truncate font-mono text-muted-foreground">
-                              <template v-for="(value, valueIndex) in summary.values" :key="valueIndex">
-                                <span v-if="valueIndex > 0">, </span>
-                                <span>{{ value }}</span>
-                              </template>
-                              <span v-if="summary.hiddenValueCount">
-                                {{ t("grid.localFilterMoreValues", { count: summary.hiddenValueCount }) }}
-                              </span>
-                            </span>
-                            <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" @click="clearLocalFilter(summary.columnIndex)">
-                              <X class="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div v-if="structuredFilterRules.length" class="space-y-2">
-                        <template v-for="(rule, index) in structuredFilterRules" :key="rule.id">
-                          <div v-if="index > 0" class="flex justify-center">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              class="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
-                              @click="
-                                updateStructuredFilterRule(rule.id, {
-                                  conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND',
-                                })
-                              "
-                            >
-                              {{ rule.conjunction }}
-                            </Button>
-                          </div>
-                          <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-                            <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
-                              <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
-                                <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
-                              </SelectTrigger>
-                              <SelectContent position="popper">
-                                <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
-                                  {{ columnName }}
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-
-                            <Select :model-value="rule.mode" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { mode: value as FilterMode })">
-                              <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent position="popper">
-                                <SelectItem v-for="option in filterModeOptions" :key="option.value" :value="option.value">
-                                  {{ t(option.labelKey) }}
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-
-                            <Input
-                              v-if="filterModeNeedsValue(rule.mode)"
-                              :model-value="rule.rawValue"
-                              class="h-8 min-w-0 text-xs"
-                              :class="rule.disabled ? 'opacity-45' : ''"
-                              :disabled="rule.disabled"
-                              :placeholder="t('grid.filterBuilderValue')"
-                              @update:model-value="(value) => updateStructuredFilterRule(rule.id, { rawValue: String(value ?? '') })"
-                              @keydown.enter.prevent="applyStructuredFilters"
-                            />
-                            <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground" :class="rule.disabled ? 'opacity-45' : ''">
-                              <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
-                            </div>
-
-                            <div class="flex items-center gap-1">
-                              <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground" @click="updateStructuredFilterRule(rule.id, { disabled: !rule.disabled })">
-                                <EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" />
-                                <Eye v-else class="h-3.5 w-3.5" />
-                              </Button>
-                              <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="structuredFilterRules.length === 1" @click="removeStructuredFilterRule(rule.id)">
-                                <Trash2 class="h-3.5 w-3.5" />
-                              </Button>
-                            </div>
-                          </div>
-                        </template>
-                      </div>
-
-                      <div v-else class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
-                        {{ t("grid.filterBuilderEmpty") }}
-                      </div>
-
-                      <div class="flex items-center justify-between gap-2 pt-1">
-                        <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="clearAllFilters">
-                          {{ t("grid.clearFilter") }}
-                        </Button>
-                        <div class="flex items-center gap-2">
-                          <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="resetStructuredFilters">
-                            {{ t("grid.resetFilterBuilder") }}
-                          </Button>
-                          <Button size="sm" class="h-8 px-3 text-xs" @click="applyStructuredFilters">
-                            {{ t("grid.applyFilter") }}
-                          </Button>
-                        </div>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                  <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--where" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">WHERE</span>
-                  <input
-                    ref="whereFilterInputRef"
-                    v-model="whereFilterInput"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    spellcheck="false"
-                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where flex-1 h-6 min-w-0 bg-transparent outline-none"
-                    :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
-                    placeholder="WHERE"
-                    @input="onWhereFilterInput"
-                    @keydown="onWhereFilterKeydown"
-                    @focus="showWhereHistorySuggestions"
-                    @click="updateWhereSuggestionPosition"
-                    @blur="dismissWhereSuggestions"
-                  />
-                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openWhereHistoryMenu">
-                    <ChevronDown class="w-3 h-3" />
-                  </button>
-                  <span ref="whereMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
-                  <!-- WHERE suggestion dropdown -->
-                  <Teleport to="body">
-                    <div v-if="showWhereSuggestionDropdown" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
-                      <div
-                        v-for="(sug, idx) in whereSuggestions"
-                        :key="`${sug.kind}:${sug.value}`"
-                        class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
-                        :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
-                        @mousedown.prevent="
-                          whereSuggestionIndex = idx;
-                          acceptWhereSuggestion();
-                        "
-                        @mouseenter="whereSuggestionIndex = idx"
-                      >
-                        <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
-                        <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
-                        <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteWhereHistorySuggestion(sug.value)">
-                          <X class="h-3 w-3" />
-                        </button>
-                      </div>
-                      <div v-if="whereSuggestions.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
-                        {{ whereHistoryEmptyText }}
-                      </div>
-                    </div>
-                  </Teleport>
-                  <button
-                    v-if="hasWhereFilterInput"
-                    class="text-muted-foreground hover:text-foreground shrink-0"
-                    @click="
-                      whereFilterInput = '';
-                      applyWhereFilter();
-                    "
-                  >
-                    <X class="w-3 h-3" />
+              <template v-if="hasLocalColumnFilters && !canShowWhereSearch && !hasSearchBarSlot">
+                <div class="flex items-center gap-1 px-2 py-0.5 min-w-0">
+                  <button type="button" class="flex shrink-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15" :title="t('grid.clearLocalFilters')" @click="clearLocalFilter()">
+                    <Filter class="h-3 w-3" />
+                    {{ localFilterCount }}
+                    <X class="h-3 w-3" />
                   </button>
                 </div>
-                <button
-                  type="button"
-                  class="group relative flex w-2 shrink-0 cursor-col-resize items-center justify-center border-l border-r border-border/80 bg-muted/15 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                  aria-label="Resize WHERE and ORDER BY"
-                  @mousedown="onSearchSplitResizeStart"
-                  @dblclick.stop="resetSearchSplitWidth"
-                >
-                  <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
-                </button>
-                <div class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0 relative">
-                  <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--order" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">ORDER BY</span>
-                  <input
-                    ref="orderByInputRef"
-                    v-model="orderByInput"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    spellcheck="false"
-                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order flex-1 h-6 min-w-0 bg-transparent outline-none"
-                    :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
-                    placeholder="ORDER BY"
-                    @keydown="onOrderByKeydown"
-                    @focus="showOrderByHistorySuggestions"
-                    @click="updateOrderBySuggestionPosition"
-                    @blur="dismissOrderBySuggestions"
-                  />
-                  <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openOrderByHistoryMenu">
-                    <ChevronDown class="w-3 h-3" />
-                  </button>
-                  <span ref="orderByMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
-                  <!-- ORDER BY suggestion dropdown -->
-                  <Teleport to="body">
-                    <div v-if="showOrderBySuggestionDropdown" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
-                      <div
-                        v-for="(sug, idx) in orderBySuggestions"
-                        :key="`${sug.kind}:${sug.value}`"
-                        class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
-                        :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
-                        @mousedown.prevent="
-                          orderBySuggestionIndex = idx;
-                          acceptOrderBySuggestion();
-                        "
-                        @mouseenter="orderBySuggestionIndex = idx"
-                      >
-                        <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
-                        <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
-                        <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteOrderByHistorySuggestion(sug.value)">
-                          <X class="h-3 w-3" />
-                        </button>
-                      </div>
-                      <div v-if="orderBySuggestions.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
-                        {{ orderByHistoryEmptyText }}
-                      </div>
-                    </div>
-                  </Teleport>
-                  <button
-                    v-if="hasOrderByInput"
-                    class="text-muted-foreground hover:text-foreground shrink-0"
-                    @click="
-                      orderByInput = '';
-                      applyOrderBySearch();
-                    "
-                  >
-                    <X class="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            </template>
-
-            <slot name="search-bar" :local-filter-count="localFilterCount" :has-local-column-filters="hasLocalColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
-
-            <div class="flex shrink-0 items-center gap-1 px-1 ml-auto">
-              <Tooltip v-if="showQueryEditReadyBadge">
-                <TooltipTrigger as-child>
-                  <div class="flex h-5 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
-                    {{ t("grid.queryEditReady") }}
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("grid.queryEditReadyHint", { table: queryEditReadyTargetLabel }) }}
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip v-if="showKeylessEditWarning">
-                <TooltipTrigger as-child>
-                  <div class="flex h-5 items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
-                    <KeyRound class="h-3 w-3" />
-                    {{ t("grid.keylessEditWarning") }}
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("grid.keylessEditWarningHint") }}
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip v-if="props.context !== 'results'">
-                <TooltipTrigger as-child>
-                  <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', isSaving ? '' : '']" :disabled="isSaving" @click="onToolbarRefresh">
-                    <Loader2 v-if="loading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
-                    <RefreshCcw v-else class="data-grid-topbar-action-icon w-3 h-3" />
-                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.refresh") }}</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{{ t("grid.refresh") }} ({{ shortcutMod }}+R)</TooltipContent>
-              </Tooltip>
-              <Tooltip v-if="props.result.columns.length">
-                <TooltipTrigger as-child>
-                  <Popover v-model:open="goToColumnOpen">
-                    <PopoverTrigger as-child>
-                      <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
-                        <Columns3 class="data-grid-topbar-action-icon w-3 h-3" />
-                        <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.goToColumn") }}</span>
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent align="end" class="w-56 p-2" @keydown="onGoToColumnKeydown">
-                      <div class="relative mb-1">
-                        <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                        <input v-model="goToColumnSearch" :placeholder="t('grid.searchColumn')" class="h-8 w-full rounded-md border bg-transparent pl-7 pr-6 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25" />
-                        <button v-if="goToColumnSearch" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="goToColumnSearch = ''">
-                          <X class="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                      <div class="max-h-56 overflow-auto rounded border">
-                        <button v-for="column in filteredGoToColumns" :key="column.index" type="button" class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="scrollToColumn(column.index)">
-                          <span class="min-w-0 truncate">{{ column.name }}</span>
-                          <span class="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
-                        </button>
-                        <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">{{ t("grid.noColumnsFound") }}</div>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{{ t("grid.goToColumn") }}</TooltipContent>
-              </Tooltip>
-              <Tooltip v-if="editable && hasDataGridInsertTarget && canInsertRows">
-                <TooltipTrigger as-child>
-                  <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']" @click="addRow">
-                    <Plus class="data-grid-topbar-action-icon w-3 h-3" />
-                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.addRow") }}</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{{ t("grid.addRow") }} ({{ shortcutMod }}+N)</TooltipContent>
-              </Tooltip>
-              <template v-if="saveToolbarState.showActions">
-                <Tooltip v-if="pendingChangeCount > 0">
-                  <TooltipTrigger as-child>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
-                      :disabled="isPreviewLoading"
-                      @click="openSqlPreview"
-                    >
-                      <Loader2 v-if="isPreviewLoading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
-                      <Eye v-else class="data-grid-topbar-action-icon w-3 h-3" />
-                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("toolbar.previewSql") }}</span>
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-sm">
-                    {{ t("toolbar.previewSql") }}
-                  </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <Button
-                      variant="default"
-                      size="sm"
-                      :class="['data-grid-topbar-action-button data-grid-topbar-action-button--commit relative h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
-                      :disabled="saveToolbarState.actionsDisabled"
-                      @click="onToolbarCommit"
-                    >
-                      <Loader2 v-if="isSaving" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
-                      <Save v-else-if="compactDataGridToolbar || pendingChangeCount === 0" class="data-grid-topbar-action-icon w-3 h-3" />
-                      <span
-                        v-if="pendingChangeCount > 0"
-                        :class="
-                          compactDataGridToolbar
-                            ? 'absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950'
-                            : 'mr-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950'
-                        "
-                      >
-                        {{ pendingChangeCount }}
-                      </span>
-                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.labelKey, { count: pendingChangeCount }) }}</span>
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ saveShortcutLabel }}) </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
-                      :disabled="saveToolbarState.actionsDisabled"
-                      @click="useTransaction ? onToolbarRollback() : discardChanges()"
-                    >
-                      <RotateCcw class="data-grid-topbar-action-icon w-3 h-3" />
-                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.secondaryActionKey) }}</span>
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">{{ t(saveActionMode.secondaryActionKey) }}</TooltipContent>
-                </Tooltip>
               </template>
+              <template v-if="canShowWhereSearch">
+                <div ref="searchSplitContainerRef" class="flex flex-1 min-w-0">
+                  <div ref="whereConditionPaneRef" class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': useTransaction && editable && hasDataGridSaveTarget }" :style="whereSearchPaneStyle">
+                    <Popover v-model:open="filterBuilderOpen">
+                      <PopoverTrigger as-child>
+                        <button
+                          type="button"
+                          class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+                          :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+                          :disabled="!canUseWhereSearch"
+                          @click="ensureStructuredFilterRule"
+                        >
+                          <Filter class="h-3 w-3" />
+                          <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">
+                            {{ filterButtonCount }}
+                          </span>
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" class="w-[380px] max-w-[calc(100vw-24px)] gap-3 p-3">
+                        <div class="flex items-center justify-between gap-3">
+                          <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
+                          <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addStructuredFilterRule">
+                            <Plus class="mr-1 h-3.5 w-3.5" />
+                            {{ t("grid.filterBuilderAddRule") }}
+                          </Button>
+                        </div>
+
+                        <div v-if="hasLocalColumnFilters" class="space-y-2 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-2">
+                          <div class="flex items-center justify-between gap-3">
+                            <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
+                              <Filter class="h-3.5 w-3.5 shrink-0" />
+                              <span class="truncate">{{ t("grid.localFiltersActive", { count: localFilterCount }) }}</span>
+                            </div>
+                            <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" @click="clearLocalFilter()">
+                              <X class="mr-1 h-3.5 w-3.5" />
+                              {{ t("grid.clearLocalFiltersShort") }}
+                            </Button>
+                          </div>
+                          <div class="space-y-1">
+                            <div v-for="summary in localFilterSummaries" :key="summary.columnIndex" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-2 rounded border border-primary/10 bg-background/70 px-2 py-1 text-xs">
+                              <span class="truncate font-medium text-foreground" :title="summary.columnName">
+                                {{ summary.columnName }}
+                              </span>
+                              <span class="min-w-0 truncate font-mono text-muted-foreground">
+                                <template v-for="(value, valueIndex) in summary.values" :key="valueIndex">
+                                  <span v-if="valueIndex > 0">, </span>
+                                  <span>{{ value }}</span>
+                                </template>
+                                <span v-if="summary.hiddenValueCount">
+                                  {{ t("grid.localFilterMoreValues", { count: summary.hiddenValueCount }) }}
+                                </span>
+                              </span>
+                              <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" @click="clearLocalFilter(summary.columnIndex)">
+                                <X class="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div v-if="structuredFilterRules.length" class="space-y-2">
+                          <template v-for="(rule, index) in structuredFilterRules" :key="rule.id">
+                            <div v-if="index > 0" class="flex justify-center">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                class="h-6 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                                @click="
+                                  updateStructuredFilterRule(rule.id, {
+                                    conjunction: rule.conjunction === 'AND' ? 'OR' : 'AND',
+                                  })
+                                "
+                              >
+                                {{ rule.conjunction }}
+                              </Button>
+                            </div>
+                            <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
+                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                                <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+                                  <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
+                                </SelectTrigger>
+                                <SelectContent position="popper">
+                                  <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
+                                    {{ columnName }}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+
+                              <Select :model-value="rule.mode" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { mode: value as FilterMode })">
+                                <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent position="popper">
+                                  <SelectItem v-for="option in filterModeOptions" :key="option.value" :value="option.value">
+                                    {{ t(option.labelKey) }}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+
+                              <Input
+                                v-if="filterModeNeedsValue(rule.mode)"
+                                :model-value="rule.rawValue"
+                                class="h-8 min-w-0 text-xs"
+                                :class="rule.disabled ? 'opacity-45' : ''"
+                                :disabled="rule.disabled"
+                                :placeholder="t('grid.filterBuilderValue')"
+                                @update:model-value="(value) => updateStructuredFilterRule(rule.id, { rawValue: String(value ?? '') })"
+                                @keydown.enter.prevent="applyStructuredFilters"
+                              />
+                              <div v-else class="flex h-8 min-w-0 items-center overflow-hidden rounded-md border border-dashed px-2 text-xs text-muted-foreground" :class="rule.disabled ? 'opacity-45' : ''">
+                                <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
+                              </div>
+
+                              <div class="flex items-center gap-1">
+                                <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground" @click="updateStructuredFilterRule(rule.id, { disabled: !rule.disabled })">
+                                  <EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" />
+                                  <Eye v-else class="h-3.5 w-3.5" />
+                                </Button>
+                                <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :disabled="structuredFilterRules.length === 1" @click="removeStructuredFilterRule(rule.id)">
+                                  <Trash2 class="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
+
+                        <div v-else class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
+                          {{ t("grid.filterBuilderEmpty") }}
+                        </div>
+
+                        <div class="flex items-center justify-between gap-2 pt-1">
+                          <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="clearAllFilters">
+                            {{ t("grid.clearFilter") }}
+                          </Button>
+                          <div class="flex items-center gap-2">
+                            <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" @click="resetStructuredFilters">
+                              {{ t("grid.resetFilterBuilder") }}
+                            </Button>
+                            <Button size="sm" class="h-8 px-3 text-xs" @click="applyStructuredFilters">
+                              {{ t("grid.applyFilter") }}
+                            </Button>
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                    <div ref="whereConditionControlRef" class="flex min-w-0 flex-1 items-center gap-1">
+                      <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--where" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">WHERE</span>
+                      <div class="relative h-6 min-w-0 flex-1 overflow-hidden">
+                        <textarea
+                          ref="whereFilterInputRef"
+                          v-model="whereFilterInput"
+                          wrap="off"
+                          rows="1"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          spellcheck="false"
+                          class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where absolute inset-x-0 top-0 h-6 min-w-0 resize-none bg-transparent outline-none"
+                          :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
+                          style="height: 24px"
+                          placeholder="WHERE"
+                          @input="onWhereFilterInput"
+                          @keydown="onWhereFilterKeydown"
+                          @focus="
+                            showWhereHistorySuggestions();
+                            resizeConditionInput('where');
+                          "
+                          @click="onConditionInputClick('where')"
+                          @wheel="onConditionInputWheel"
+                          @blur="
+                            dismissWhereSuggestions();
+                            collapseConditionInputAfterBlur('where');
+                          "
+                        />
+                      </div>
+                      <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openWhereHistoryMenu">
+                        <ChevronDown class="w-3 h-3" />
+                      </button>
+                      <button
+                        v-if="hasWhereFilterInput"
+                        class="text-muted-foreground hover:text-foreground shrink-0"
+                        @click="
+                          whereFilterInput = '';
+                          applyWhereFilter();
+                        "
+                      >
+                        <X class="w-3 h-3" />
+                      </button>
+                    </div>
+                    <Teleport to="body">
+                      <div v-if="whereConditionRendered" class="data-grid-topbar-condition-pane--expanded flex min-w-0 items-start gap-1" :class="{ 'border-l': useTransaction && editable && hasDataGridSaveTarget }" :style="conditionPaneStyle('where')">
+                        <textarea
+                          ref="whereFilterOverlayRef"
+                          v-model="whereFilterInput"
+                          wrap="soft"
+                          rows="1"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          spellcheck="false"
+                          class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where data-grid-topbar-condition-input--expanded absolute resize-none outline-none"
+                          :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
+                          placeholder="WHERE"
+                          @input="onWhereFilterInput"
+                          @keydown="onWhereFilterKeydown"
+                          @focus="resizeConditionInput('where')"
+                          @click="onConditionOverlayClick('where')"
+                          @scroll="onConditionOverlayScroll('where', $event)"
+                          @blur="
+                            dismissWhereSuggestions();
+                            collapseConditionInputAfterBlur('where');
+                          "
+                        />
+                        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex min-w-0 items-center gap-1" :style="conditionTopbarOverlayStyle('where')">
+                          <button
+                            type="button"
+                            class="data-grid-topbar-condition-icon-control pointer-events-auto relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+                            :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+                            :disabled="!canUseWhereSearch"
+                            @mousedown.prevent
+                            @click="openStructuredFilterFromExpandedWhere"
+                          >
+                            <Filter class="h-3 w-3" />
+                            <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">
+                              {{ filterButtonCount }}
+                            </span>
+                          </button>
+                          <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--where" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">WHERE</span>
+                          <div class="min-w-0 flex-1" />
+                          <button class="data-grid-topbar-condition-icon-control pointer-events-auto text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openWhereHistoryMenu">
+                            <ChevronDown class="w-3 h-3" />
+                          </button>
+                          <button
+                            v-if="hasWhereFilterInput"
+                            class="data-grid-topbar-condition-icon-control pointer-events-auto text-muted-foreground hover:text-foreground shrink-0"
+                            @click="
+                              whereFilterInput = '';
+                              applyWhereFilter();
+                            "
+                          >
+                            <X class="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    </Teleport>
+                    <span ref="whereMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
+                    <!-- WHERE suggestion dropdown -->
+                    <Teleport to="body">
+                      <div v-if="showWhereSuggestionDropdown" class="fixed z-[90] min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
+                        <div
+                          v-for="(sug, idx) in whereSuggestions"
+                          :key="`${sug.kind}:${sug.value}`"
+                          class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
+                          :class="idx === whereSuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
+                          @mousedown.prevent="
+                            whereSuggestionIndex = idx;
+                            acceptWhereSuggestion();
+                          "
+                          @mouseenter="whereSuggestionIndex = idx"
+                        >
+                          <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
+                          <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
+                          <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteWhereHistorySuggestion(sug.value)">
+                            <X class="h-3 w-3" />
+                          </button>
+                        </div>
+                        <div v-if="whereSuggestions.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
+                          {{ whereHistoryEmptyText }}
+                        </div>
+                      </div>
+                    </Teleport>
+                  </div>
+                  <button
+                    type="button"
+                    class="group relative flex w-2 shrink-0 cursor-col-resize items-center justify-center border-l border-r border-border/80 bg-muted/15 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                    aria-label="Resize WHERE and ORDER BY"
+                    @mousedown="onSearchSplitResizeStart"
+                    @dblclick.stop="resetSearchSplitWidth"
+                  >
+                    <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
+                  </button>
+                  <div ref="orderByConditionPaneRef" class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0 relative">
+                    <div ref="orderByConditionControlRef" class="flex min-w-0 flex-1 items-center gap-1">
+                      <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--order" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">ORDER BY</span>
+                      <div class="relative h-6 min-w-0 flex-1 overflow-hidden">
+                        <textarea
+                          ref="orderByInputRef"
+                          v-model="orderByInput"
+                          wrap="off"
+                          rows="1"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          spellcheck="false"
+                          class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order absolute inset-x-0 top-0 h-6 min-w-0 resize-none bg-transparent outline-none"
+                          :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
+                          style="height: 24px"
+                          placeholder="ORDER BY"
+                          @input="onOrderByInput"
+                          @keydown="onOrderByKeydown"
+                          @focus="
+                            showOrderByHistorySuggestions();
+                            resizeConditionInput('orderBy');
+                          "
+                          @click="onConditionInputClick('orderBy')"
+                          @wheel="onConditionInputWheel"
+                          @blur="
+                            dismissOrderBySuggestions();
+                            collapseConditionInputAfterBlur('orderBy');
+                          "
+                        />
+                      </div>
+                      <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openOrderByHistoryMenu">
+                        <ChevronDown class="w-3 h-3" />
+                      </button>
+                      <button
+                        v-if="hasOrderByInput"
+                        class="text-muted-foreground hover:text-foreground shrink-0"
+                        @click="
+                          orderByInput = '';
+                          applyOrderBySearch();
+                        "
+                      >
+                        <X class="w-3 h-3" />
+                      </button>
+                    </div>
+                    <Teleport to="body">
+                      <div v-if="orderByConditionRendered" class="data-grid-topbar-condition-pane--expanded flex min-w-0 items-start gap-1 border-r" :style="conditionPaneStyle('orderBy')">
+                        <textarea
+                          ref="orderByOverlayRef"
+                          v-model="orderByInput"
+                          wrap="soft"
+                          rows="1"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          spellcheck="false"
+                          class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order data-grid-topbar-condition-input--expanded absolute resize-none outline-none"
+                          :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
+                          placeholder="ORDER BY"
+                          @input="onOrderByInput"
+                          @keydown="onOrderByKeydown"
+                          @focus="resizeConditionInput('orderBy')"
+                          @click="onConditionOverlayClick('orderBy')"
+                          @scroll="onConditionOverlayScroll('orderBy', $event)"
+                          @blur="
+                            dismissOrderBySuggestions();
+                            collapseConditionInputAfterBlur('orderBy');
+                          "
+                        />
+                        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex min-w-0 items-center gap-1" :style="conditionTopbarOverlayStyle('orderBy')">
+                          <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--order" :class="{ 'data-grid-topbar-condition-label--compact': compactDataGridToolbar }">ORDER BY</span>
+                          <div class="min-w-0 flex-1" />
+                          <button class="data-grid-topbar-condition-icon-control pointer-events-auto text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="openOrderByHistoryMenu">
+                            <ChevronDown class="w-3 h-3" />
+                          </button>
+                          <button
+                            v-if="hasOrderByInput"
+                            class="data-grid-topbar-condition-icon-control pointer-events-auto text-muted-foreground hover:text-foreground shrink-0"
+                            @click="
+                              orderByInput = '';
+                              applyOrderBySearch();
+                            "
+                          >
+                            <X class="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    </Teleport>
+                    <span ref="orderByMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
+                    <!-- ORDER BY suggestion dropdown -->
+                    <Teleport to="body">
+                      <div v-if="showOrderBySuggestionDropdown" class="fixed z-[90] min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
+                        <div
+                          v-for="(sug, idx) in orderBySuggestions"
+                          :key="`${sug.kind}:${sug.value}`"
+                          class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
+                          :class="idx === orderBySuggestionIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-gray-200 dark:hover:bg-gray-800'"
+                          @mousedown.prevent="
+                            orderBySuggestionIndex = idx;
+                            acceptOrderBySuggestion();
+                          "
+                          @mouseenter="orderBySuggestionIndex = idx"
+                        >
+                          <Search class="w-3 h-3 mr-2 text-muted-foreground shrink-0" />
+                          <span class="min-w-0 flex-1 truncate">{{ sug.value }}</span>
+                          <button v-if="sug.kind === 'history'" class="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" type="button" @mousedown.stop.prevent="deleteOrderByHistorySuggestion(sug.value)">
+                            <X class="h-3 w-3" />
+                          </button>
+                        </div>
+                        <div v-if="orderBySuggestions.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
+                          {{ orderByHistoryEmptyText }}
+                        </div>
+                      </div>
+                    </Teleport>
+                  </div>
+                </div>
+              </template>
+
+              <slot name="search-bar" :local-filter-count="localFilterCount" :has-local-column-filters="hasLocalColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
             </div>
+          </div>
+
+          <div class="flex shrink-0 items-center gap-1 px-1 ml-auto" @wheel="onDataGridTopbarFixedActionWheel">
+            <Tooltip v-if="showQueryEditReadyBadge">
+              <TooltipTrigger as-child>
+                <div class="flex h-5 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                  {{ t("grid.queryEditReady") }}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" class="max-w-sm">
+                {{ t("grid.queryEditReadyHint", { table: queryEditReadyTargetLabel }) }}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip v-if="showKeylessEditWarning">
+              <TooltipTrigger as-child>
+                <div class="flex h-5 items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                  <KeyRound class="h-3 w-3" />
+                  {{ t("grid.keylessEditWarning") }}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" class="max-w-sm">
+                {{ t("grid.keylessEditWarningHint") }}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip v-if="props.context !== 'results'">
+              <TooltipTrigger as-child>
+                <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', isSaving ? '' : '']" :disabled="isSaving" @click="onToolbarRefresh">
+                  <Loader2 v-if="loading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
+                  <RefreshCcw v-else class="data-grid-topbar-action-icon w-3 h-3" />
+                  <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.refresh") }}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{{ t("grid.refresh") }} ({{ shortcutMod }}+R)</TooltipContent>
+            </Tooltip>
+            <Tooltip v-if="props.result.columns.length">
+              <TooltipTrigger as-child>
+                <Popover v-model:open="goToColumnOpen">
+                  <PopoverTrigger as-child>
+                    <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
+                      <Columns3 class="data-grid-topbar-action-icon w-3 h-3" />
+                      <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.goToColumn") }}</span>
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" class="w-56 p-2" @keydown="onGoToColumnKeydown">
+                    <div class="relative mb-1">
+                      <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                      <input v-model="goToColumnSearch" :placeholder="t('grid.searchColumn')" class="h-8 w-full rounded-md border bg-transparent pl-7 pr-6 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25" />
+                      <button v-if="goToColumnSearch" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="goToColumnSearch = ''">
+                        <X class="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <div class="max-h-56 overflow-auto rounded border">
+                      <button v-for="column in filteredGoToColumns" :key="column.index" type="button" class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="scrollToColumn(column.index)">
+                        <span class="min-w-0 truncate">{{ column.name }}</span>
+                        <span class="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
+                      </button>
+                      <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">{{ t("grid.noColumnsFound") }}</div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{{ t("grid.goToColumn") }}</TooltipContent>
+            </Tooltip>
+            <Tooltip v-if="editable && hasDataGridInsertTarget && canInsertRows">
+              <TooltipTrigger as-child>
+                <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']" @click="addRow">
+                  <Plus class="data-grid-topbar-action-icon w-3 h-3" />
+                  <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.addRow") }}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{{ t("grid.addRow") }} ({{ shortcutMod }}+N)</TooltipContent>
+            </Tooltip>
+            <template v-if="saveToolbarState.showActions">
+              <Tooltip v-if="pendingChangeCount > 0">
+                <TooltipTrigger as-child>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                    :disabled="isPreviewLoading"
+                    @click="openSqlPreview"
+                  >
+                    <Loader2 v-if="isPreviewLoading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
+                    <Eye v-else class="data-grid-topbar-action-icon w-3 h-3" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("toolbar.previewSql") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-sm">
+                  {{ t("toolbar.previewSql") }}
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button
+                    variant="default"
+                    size="sm"
+                    :class="['data-grid-topbar-action-button data-grid-topbar-action-button--commit relative h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                    :disabled="saveToolbarState.actionsDisabled"
+                    @click="onToolbarCommit"
+                  >
+                    <Loader2 v-if="isSaving" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
+                    <Save v-else-if="compactDataGridToolbar || pendingChangeCount === 0" class="data-grid-topbar-action-icon w-3 h-3" />
+                    <span
+                      v-if="pendingChangeCount > 0"
+                      :class="
+                        compactDataGridToolbar
+                          ? 'absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950'
+                          : 'mr-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-semibold leading-none text-amber-950 shadow-[0_0_0_1px_rgba(120,53,15,0.16)] dark:bg-amber-400 dark:text-amber-950'
+                      "
+                    >
+                      {{ pendingChangeCount }}
+                    </span>
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.labelKey, { count: pendingChangeCount }) }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ saveShortcutLabel }}) </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']"
+                    :disabled="saveToolbarState.actionsDisabled"
+                    @click="useTransaction ? onToolbarRollback() : discardChanges()"
+                  >
+                    <RotateCcw class="data-grid-topbar-action-icon w-3 h-3" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.secondaryActionKey) }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{{ t(saveActionMode.secondaryActionKey) }}</TooltipContent>
+              </Tooltip>
+            </template>
           </div>
         </div>
         <!-- Truncation warning banner -->
@@ -9558,12 +10215,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .data-grid-topbar {
   --data-grid-topbar-transition-duration: 340ms;
   --data-grid-topbar-transition-easing: cubic-bezier(0.22, 1, 0.36, 1);
-  min-width: 760px;
+  width: 100%;
+  min-width: 0;
   transition: min-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing);
 }
 
 .data-grid-topbar--compact {
-  min-width: 620px;
+  min-width: 0;
 }
 
 .data-grid-topbar-condition-label {
@@ -9609,7 +10267,85 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .data-grid-topbar-condition-input,
 .data-grid-topbar-condition-measure {
   font-size: 0.8125rem;
-  line-height: 1.125rem;
+  line-height: 1.5rem;
+}
+
+.data-grid-topbar-condition-input {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  scrollbar-width: none;
+}
+
+.data-grid-topbar-condition-input::-webkit-scrollbar {
+  display: none;
+}
+
+.data-grid-topbar-condition-icon-control {
+  align-self: center;
+  margin-top: 0;
+}
+
+.data-grid-topbar-condition-floating-controls {
+  top: var(--data-grid-condition-controls-top);
+  will-change: transform;
+}
+
+.data-grid-topbar-condition-pane--expanded {
+  position: fixed;
+  z-index: 80;
+  right: auto;
+  bottom: auto;
+  box-sizing: border-box;
+  padding: 0.1875rem 0.5rem 0.1875rem 0.5rem;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--background) 96%, var(--muted) 4%);
+  box-shadow:
+    inset 0 -1px 0 var(--border),
+    0 8px 16px rgb(15 23 42 / 8%);
+  transition:
+    height 150ms ease,
+    box-shadow 150ms ease;
+  --data-grid-expanded-scrollbar-offset: 8px;
+  --data-grid-condition-controls-top: 0.125rem;
+  --data-grid-condition-input-top: 0.125rem;
+  --data-grid-condition-prefix-indent: 0px;
+  --data-grid-condition-suffix-width: 0px;
+}
+
+.data-grid-topbar-condition-input--expanded {
+  top: var(--data-grid-condition-input-top);
+  right: 0.5rem;
+  bottom: 0.125rem;
+  left: 0.5rem;
+  height: auto;
+  line-height: 1.5rem;
+  margin-left: 0;
+  width: calc(100% - 1rem + var(--data-grid-expanded-scrollbar-offset));
+  max-width: none;
+  margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0;
+  text-indent: var(--data-grid-condition-prefix-indent);
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  scrollbar-width: thin;
+}
+
+.data-grid-topbar-condition-input--expanded::-webkit-scrollbar {
+  display: initial;
+  width: 8px;
 }
 
 .data-grid-topbar-condition-input::placeholder {
@@ -9700,8 +10436,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-topbar-scroll {
-  scrollbar-width: thin;
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+
+.data-grid-topbar-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .data-grid-scroller {

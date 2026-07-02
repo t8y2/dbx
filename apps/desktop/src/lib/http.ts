@@ -981,6 +981,14 @@ export async function saveAiConfig(config: AiConfig): Promise<void> {
   return post("/api/ai/config", { config });
 }
 
+export async function saveAiProviderConfig(provider: string, config: AiConfig): Promise<void> {
+  return post("/api/ai/provider-config", { provider, config });
+}
+
+export async function loadAiProviderConfigs(): Promise<Record<string, AiConfig>> {
+  return get("/api/ai/provider-configs");
+}
+
 export async function loadAiConfig(): Promise<AiConfig | null> {
   return get("/api/ai/config");
 }

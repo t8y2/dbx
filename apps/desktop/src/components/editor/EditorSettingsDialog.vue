@@ -1739,20 +1739,15 @@ function syncAiEditState() {
 
 function aiSelectProvider(provider: AiProvider) {
   if (isWeb && provider === "codex-cli") return;
-  aiEditProvider.value = provider;
-  aiEditEndpoint.value = AI_PROVIDER_PRESETS[provider].endpoint;
-  aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;
-  aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
-  aiEditAuthMethod.value = AI_PROVIDER_PRESETS[provider].authMethod;
-  aiEditReasoningLevel.value = "default";
-  if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
-  aiEditCodexCliPath.value = "";
-  aiEditCodexCliEnvRows.value = [];
-  aiTestResult.value = "";
-  aiTestError.value = "";
-  aiTestLatency.value = null;
-  aiTestErrorCopied.value = false;
-  clearAiModelOptions();
+  if (provider === aiEditProvider.value) return;
+
+  // Save current form edits before switching to prevent data loss.
+  if (aiHasChanges()) {
+    settingsStore.updateAiConfig(currentAiEditConfig());
+  }
+
+  settingsStore.updateAiConfig({ provider });
+  syncAiEditState();
   if (provider === "codex-cli") void ensureCodexMcpStatus();
 }
 
@@ -2998,9 +2993,17 @@ onUnmounted(cleanupPreviewEditor);
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="provider in aiProviderOptions" :key="provider.provider" :value="provider.provider">
-                        <span class="flex items-center gap-2">
-                          <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
-                          <span>{{ provider.label }}</span>
+                        <span class="flex w-full items-center justify-between gap-4">
+                          <span class="flex items-center gap-2">
+                            <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
+                            <span>{{ provider.label }}</span>
+                          </span>
+                          <span class="flex shrink-0 items-center gap-1">
+                            <span v-if="aiEditProvider === provider.provider" class="rounded px-1 py-0.5 text-[10px] font-medium leading-none" :class="settingsStore.isAiProviderConfigured(provider.provider) ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">{{
+                              t("ai.providerStatusActive")
+                            }}</span>
+                            <span v-else-if="settingsStore.isAiProviderConfigured(provider.provider)" class="rounded bg-green-500/15 px-1 py-0.5 text-[10px] font-medium leading-none text-green-700 dark:text-green-400">{{ t("ai.providerStatusConfigured") }}</span>
+                          </span>
                         </span>
                       </SelectItem>
                     </SelectContent>

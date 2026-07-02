@@ -28,6 +28,26 @@ pub async fn load_ai_config(state: State<'_, Arc<AppState>>) -> Result<Option<Ai
 }
 
 #[tauri::command]
+pub async fn save_ai_provider_config(
+    state: State<'_, Arc<AppState>>,
+    provider: String,
+    config: AiConfig,
+) -> Result<(), String> {
+    let parsed_provider: AiProvider = serde_json::from_value(serde_json::Value::String(provider.clone()))
+        .map_err(|_| format!("Invalid AI provider: {provider}"))?;
+    let mut config = config;
+    config.provider = parsed_provider;
+    state.storage.save_ai_provider_config(&provider, &config).await
+}
+
+#[tauri::command]
+pub async fn load_ai_provider_configs(
+    state: State<'_, Arc<AppState>>,
+) -> Result<std::collections::HashMap<String, AiConfig>, String> {
+    state.storage.load_ai_provider_configs().await
+}
+
+#[tauri::command]
 pub async fn ai_complete(request: AiCompletionRequest) -> Result<String, String> {
     dbx_core::ai::complete(&request).await
 }

@@ -11,7 +11,8 @@ import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { useSettingsStore, AI_PROVIDER_PRESETS, type AiProvider } from "@/stores/settingsStore";
+import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIconType } from "@/lib/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -90,6 +91,16 @@ const draftBeforeHistory = ref("");
 const modelOptions = ref<AiModelInfo[]>([]);
 const modelLoading = ref(false);
 let modelRequestToken = 0;
+const providerSelectorOpen = ref(false);
+
+// Configured providers for quick switching
+const configuredProviders = computed(() => (Object.keys(AI_PROVIDER_PRESETS) as AiProvider[]).filter((p) => p !== settings.aiConfig.provider && settings.isAiProviderConfigured(p)));
+
+function handleProviderSwitch(provider: AiProvider) {
+  settings.updateAiConfig({ provider });
+  modelOptions.value = [];
+  providerSelectorOpen.value = false;
+}
 
 function normalizeModelOptions(models: AiModelInfo[]): AiModelInfo[] {
   const seen = new Set<string>();
@@ -1326,32 +1337,60 @@ async function openExternalUrl(url: string) {
               @update:model-value="(value) => selectAction(value as AiAction)"
             />
             <span class="min-w-0 flex-1" />
-            <SearchableSelect
-              v-if="settings.isConfigured()"
-              :model-value="settings.aiConfig.model"
-              :options="modelOptionIds"
-              :placeholder="t('ai.browseModels')"
-              :search-placeholder="t('ai.searchModels')"
-              :empty-text="t('ai.modelListHint')"
-              :loading-text="t('ai.loadingModels')"
-              :loading="modelLoading"
-              :display-name="displayModelName"
-              trigger-class="min-w-0 w-auto max-w-[220px] shrink justify-end rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-              content-class="w-72"
-              item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
-              @update:model-value="handleModelSelect"
-              @update:open="(open: boolean) => open && fetchModelOptions()"
-            >
-              <template #trigger-label="{ label, loading }">
-                <span class="min-w-0 truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
-              </template>
-              <template #option-label="{ option, label }">
-                <span class="flex min-w-0 flex-col leading-tight">
-                  <span class="truncate">{{ modelOptionPresentation(option, label).primary }}</span>
-                  <span v-if="modelOptionSecondary(option, label)" class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ modelOptionSecondary(option, label) }}</span>
-                </span>
-              </template>
-            </SearchableSelect>
+            <template v-if="settings.isConfigured()">
+              <!-- Combined provider + model selector -->
+              <Popover v-model:open="providerSelectorOpen">
+                <PopoverTrigger as-child>
+                  <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
+                    <AiProviderLogo :provider="settings.aiConfig.provider" :label="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.label ?? settings.aiConfig.provider" :icon-slug="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.iconSlug" class="h-3 w-3 shrink-0" />
+                    <span class="min-w-0 truncate">{{ modelLoading ? t("ai.loadingModels") : settings.aiConfig.model }}</span>
+                    <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-72 gap-0 p-1.5" @open-auto-focus.prevent>
+                  <!-- Configured providers section -->
+                  <template v-if="configuredProviders.length">
+                    <p class="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{{ t("ai.switchProvider") }}</p>
+                    <button v-for="p in configuredProviders" :key="p" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="handleProviderSwitch(p)">
+                      <AiProviderLogo :provider="p" :label="AI_PROVIDER_PRESETS[p]?.label ?? p" :icon-slug="AI_PROVIDER_PRESETS[p]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
+                      <span class="font-medium">{{ AI_PROVIDER_PRESETS[p]?.label ?? p }}</span>
+                      <span class="ml-auto min-w-0 truncate text-[11px] text-muted-foreground">{{ settings.aiProviderConfigs[p]?.model }}</span>
+                    </button>
+                    <div class="my-1 border-t" />
+                  </template>
+                  <!-- Model list for current provider -->
+                  <p class="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {{ AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.label ?? settings.aiConfig.provider }}
+                  </p>
+                  <SearchableSelect
+                    :model-value="settings.aiConfig.model"
+                    :options="modelOptionIds"
+                    :placeholder="t('ai.browseModels')"
+                    :search-placeholder="t('ai.searchModels')"
+                    :empty-text="t('ai.modelListHint')"
+                    :loading-text="t('ai.loadingModels')"
+                    :loading="modelLoading"
+                    :display-name="displayModelName"
+                    trigger-class="w-full max-w-full justify-start rounded-sm px-2 py-1.5 text-xs text-foreground hover:bg-accent"
+                    content-class="w-72"
+                    item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
+                    @update:model-value="handleModelSelect"
+                    @update:open="(open: boolean) => open && fetchModelOptions()"
+                  >
+                    <template #trigger-label="{ label, loading }">
+                      <AiProviderLogo :provider="settings.aiConfig.provider" :label="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.label ?? settings.aiConfig.provider" :icon-slug="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
+                      <span class="min-w-0 truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
+                    </template>
+                    <template #option-label="{ option, label }">
+                      <span class="flex min-w-0 flex-col leading-tight">
+                        <span class="truncate">{{ modelOptionPresentation(option, label).primary }}</span>
+                        <span v-if="modelOptionSecondary(option, label)" class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ modelOptionSecondary(option, label) }}</span>
+                      </span>
+                    </template>
+                  </SearchableSelect>
+                </PopoverContent>
+              </Popover>
+            </template>
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>

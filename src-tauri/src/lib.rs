@@ -636,6 +636,8 @@ pub fn run() {
             commands::ai::ai_list_models,
             commands::ai::save_ai_config,
             commands::ai::load_ai_config,
+            commands::ai::save_ai_provider_config,
+            commands::ai::load_ai_provider_configs,
             commands::ai::save_ai_conversation,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,

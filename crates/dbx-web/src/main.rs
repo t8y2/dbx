@@ -479,6 +479,8 @@ async fn main() {
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
         // AI
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
+        .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
+        .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
         .route("/ai/conversation", post(routes::ai::save_ai_conversation))
         .route("/ai/conversations", get(routes::ai::load_ai_conversations))
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))

@@ -339,6 +339,14 @@ export async function saveAiConfig(config: AiConfig): Promise<void> {
   return invoke("save_ai_config", { config });
 }
 
+export async function saveAiProviderConfig(provider: string, config: AiConfig): Promise<void> {
+  return invoke("save_ai_provider_config", { provider, config });
+}
+
+export async function loadAiProviderConfigs(): Promise<Record<string, AiConfig>> {
+  return invoke("load_ai_provider_configs");
+}
+
 export async function aiTestConnection(config: AiConfig): Promise<AiTestConnectionResult> {
   return invoke("ai_test_connection", { config });
 }

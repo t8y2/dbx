@@ -728,6 +728,7 @@ function saveEditorSettings(settings: EditorSettings) {
 export const useSettingsStore = defineStore("settings", () => {
   const aiConfig = ref<AiConfig>(normalizeAiConfig({ provider: "claude" }));
   const isAiConfigLoaded = ref(false);
+  const aiProviderConfigs = ref<Partial<Record<AiProvider, AiConfig>>>({});
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
   const isDesktopSettingsLoaded = ref(false);
 
@@ -760,30 +761,67 @@ export const useSettingsStore = defineStore("settings", () => {
   async function initAiConfig() {
     if (isAiConfigLoaded.value) return;
     const legacy = localStorage.getItem("dbx-ai-config");
-    const saved = await api.loadAiConfig().catch(() => null);
-    if (saved) {
-      aiConfig.value = normalizeAiConfig(saved);
+    const [savedActive, savedProviderConfigs] = await Promise.all([api.loadAiConfig().catch(() => null), api.loadAiProviderConfigs().catch(() => null) as Promise<Partial<Record<AiProvider, AiConfig>> | null>]);
+
+    if (savedActive) {
+      aiConfig.value = normalizeAiConfig(savedActive);
     } else if (legacy) {
       aiConfig.value = normalizeAiConfig(JSON.parse(legacy));
       await api.saveAiConfig(aiConfig.value).catch(() => {});
       localStorage.removeItem("dbx-ai-config");
     }
+
+    if (savedProviderConfigs) {
+      aiProviderConfigs.value = savedProviderConfigs;
+    }
+
+    // Ensure active config is reflected in provider map (overwrite if exists, to guarantee consistency)
+    const activeProvider = aiConfig.value.provider;
+    aiProviderConfigs.value[activeProvider] = { ...aiConfig.value };
+
     isAiConfigLoaded.value = true;
   }
 
   function updateAiConfig(config: Partial<AiConfig>) {
     const previousProvider = aiConfig.value.provider;
-    if (config.provider && config.provider !== previousProvider) {
-      Object.assign(aiConfig.value, defaultConfigs[config.provider]);
+    const targetProvider = config.provider;
+    const switchingProvider = !!targetProvider && targetProvider !== previousProvider;
+
+    if (switchingProvider) {
+      // Save current provider's config before switching
+      aiProviderConfigs.value[previousProvider] = { ...aiConfig.value };
+      api.saveAiProviderConfig(previousProvider, aiConfig.value).catch(() => {});
+
+      // Restore saved config for target provider, or use preset defaults
+      const savedConfig = aiProviderConfigs.value[targetProvider];
+      if (savedConfig) {
+        aiConfig.value = normalizeAiConfig({ ...savedConfig, provider: targetProvider });
+      } else {
+        aiConfig.value = normalizeAiConfig({ provider: targetProvider });
+      }
+      // Don't merge caller fields when switching — caller passes only { provider }
+    } else {
+      // Not switching provider — apply partial update
+      Object.assign(aiConfig.value, config);
     }
-    Object.assign(aiConfig.value, config);
+
+    aiProviderConfigs.value[aiConfig.value.provider] = { ...aiConfig.value };
     api.saveAiConfig(aiConfig.value).catch(() => {});
+    api.saveAiProviderConfig(aiConfig.value.provider, aiConfig.value).catch(() => {});
   }
 
   function isConfigured(): boolean {
     const preset = AI_PROVIDER_PRESETS[aiConfig.value.provider];
     if (aiConfig.value.provider === "codex-cli") return true;
     return !!aiConfig.value.endpoint && !!aiConfig.value.model && (!preset.requiresApiKey || !!aiConfig.value.apiKey);
+  }
+
+  function isAiProviderConfigured(provider: AiProvider): boolean {
+    const config = aiProviderConfigs.value[provider];
+    if (!config) return false;
+    if (provider === "codex-cli") return true;
+    const preset = AI_PROVIDER_PRESETS[provider];
+    return !!config.endpoint?.trim() && !!config.model?.trim() && (!preset.requiresApiKey || !!config.apiKey?.trim());
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
@@ -900,9 +938,11 @@ export const useSettingsStore = defineStore("settings", () => {
   return {
     aiConfig,
     isAiConfigLoaded,
+    aiProviderConfigs,
     initAiConfig,
     updateAiConfig,
     isConfigured,
+    isAiProviderConfigured,
     editorSettings,
     desktopSettings,
     updateEditorSettings,

@@ -1081,7 +1081,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger class="gap-2">
-                    <FileUp class="h-4 w-4" />
+                    <Download class="h-4 w-4" />
                     {{ t("tableToolbox.exportData") }}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuPortal>

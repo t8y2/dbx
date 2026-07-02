@@ -1110,6 +1110,12 @@ function onViewTableDdl(tableName: string) {
   showQueryEditorDdlDialog.value = true;
 }
 
+function onEditTableStructure(tableName: string) {
+  const target = tableTargetFromActiveTab(tableName);
+  if (!target) return;
+  queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName);
+}
+
 async function changeActiveConnection(connectionId: string) {
   const tab = activeTab.value;
   if (!tab) return;
@@ -1814,6 +1820,7 @@ onUnmounted(() => {
                     @execute-sql="onExecuteSql"
                     @click-table="onClickTable"
                     @view-table-data="onViewTableData"
+                    @edit-table-structure="onEditTableStructure"
                     @view-table-ddl="onViewTableDdl"
                     @open-object-table="
                       (target) =>

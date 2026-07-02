@@ -37,6 +37,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
   return api.buildExecutableObjectSourceSql(input);
 }
 
+export function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return api.buildEditableObjectSource(input);
+}
+
 export function objectSourceSaveExecutionMode(_databaseType: DatabaseType): ObjectSourceSaveExecutionMode {
   return "single";
 }

@@ -137,6 +137,9 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
             | DatabaseType::Questdb
     ) && input.object_type == ObjectSourceKind::View
     {
+        if source_starts_with_create_or_alter(source) {
+            return Ok(vec![ensure_semicolon(source)]);
+        }
         return Ok(vec![format!(
             "CREATE OR REPLACE VIEW {} AS\n{}",
             postgres_qualified_name(input.schema.as_deref(), &input.name),
@@ -283,6 +286,10 @@ fn ensure_semicolon(sql: &str) -> String {
     } else {
         format!("{trimmed};")
     }
+}
+
+fn source_starts_with_create_or_alter(source: &str) -> bool {
+    Regex::new(r"(?i)^\s*(?:CREATE|ALTER)\s+").unwrap().is_match(source)
 }
 
 fn postgres_qualified_name(schema: Option<&str>, name: &str) -> String {
@@ -545,6 +552,20 @@ mod tests {
             sql,
             "CREATE OR REPLACE VIEW \"public\".\"active users\" AS\nSELECT id, name FROM users WHERE active;"
         );
+    }
+
+    #[test]
+    fn postgres_view_create_source_opens_without_rewrapping_or_reformatting() {
+        let source = "CREATE OR REPLACE VIEW public.active_users AS SELECT id, name FROM users WHERE active = true";
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Postgres,
+            object_type: ObjectSourceKind::View,
+            schema: Some("public".to_string()),
+            name: "active_users".to_string(),
+            source: source.to_string(),
+        });
+
+        assert_eq!(sql, format!("{source};"));
     }
 
     #[test]

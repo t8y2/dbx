@@ -4,10 +4,10 @@ import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
-import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
@@ -274,26 +274,8 @@ function tabIconClass(tab: QueryTab) {
 const showRegularTabScrollbar = computed(() => hasTabOverflow.value);
 const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value);
 const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value);
-
-const openTabMenuItems = computed(() =>
-  queryStore.tabs.map((tab) => ({
-    value: tab.id,
-    label: tabDisplayTitle(tab, t),
-    title: tabDisplayTitle(tab, t),
-    icon: tabMenuIcon(tab),
-    iconClass: tabIconClass(tab),
-  })),
-);
-
-const fixedTabMenuItems = computed(() =>
-  fixedTabs.value.map((tab) => ({
-    value: tab.id,
-    label: tabDisplayTitle(tab, t),
-    title: tabDisplayTitle(tab, t),
-    icon: tabMenuIcon(tab),
-    iconClass: tabIconClass(tab),
-  })),
-);
+const regularTabOverflowOpen = ref(false);
+const fixedTabOverflowOpen = ref(false);
 
 function tabMenuIcon(tab: QueryTab) {
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis") return Table2;
@@ -373,6 +355,24 @@ function activateTab(tabId: string) {
   tabScrollBehavior.value = "auto";
   queryStore.activeTabId = tabId;
   emit("activate-tab");
+}
+
+function activateTabFromOverflow(tabId: string, kind: "regular" | "fixed") {
+  activateTab(tabId);
+  if (kind === "regular") regularTabOverflowOpen.value = false;
+  else fixedTabOverflowOpen.value = false;
+}
+
+function closeTabFromOverflow(tabId: string, event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  queryStore.closeTab(tabId);
+}
+
+function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regular" | "fixed") {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  activateTabFromOverflow(tabId, kind);
 }
 </script>
 
@@ -502,25 +502,44 @@ function activateTab(tabId: string) {
         </div>
       </div>
       <div v-if="showRegularTabOverflowControls" class="relative z-30 flex shrink-0 items-center">
-        <LightDropdown
-          :model-value="queryStore.activeTabId || ''"
-          :items="openTabMenuItems"
-          :aria-label="t('tabs.openTabs')"
-          :trigger-title="t('tabs.openTabs')"
-          :trigger-icon="ChevronDown"
-          :trigger-class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')"
-          trigger-icon-class="h-4 w-4"
-          item-icon-class="w-3.5 h-3.5 mr-2"
-          item-class="max-w-full"
-          content-class="w-auto min-w-48 max-w-72"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          :highlight-selected="false"
-          :match-trigger-width="false"
-          check-position="none"
-          align="end"
-          @update:model-value="activateTab"
-        />
+        <Popover v-model:open="regularTabOverflowOpen">
+          <PopoverTrigger as-child>
+            <button type="button" :class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
+              <ChevronDown class="h-4 w-4" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 max-h-[min(70vh,28rem)] gap-0 overflow-y-auto rounded-[6px] p-1" @click.stop @keydown.stop>
+            <CustomContextMenu v-for="tab in queryStore.tabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+              <div
+                class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
+                :title="tabDisplayTitle(tab, t)"
+                role="menuitem"
+                tabindex="0"
+                @click="activateTabFromOverflow(tab.id, 'regular')"
+                @contextmenu="onContextMenu"
+                @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
+              >
+                <component :is="tabMenuIcon(tab)" :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                <span class="min-w-0 flex-1 truncate">{{ tabDisplayTitle(tab, t) }}</span>
+                <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+                <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                <span class="w-5 shrink-0">
+                  <button
+                    type="button"
+                    class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
+                    :aria-label="t('contextMenu.closeTab')"
+                    :title="t('contextMenu.closeTab')"
+                    @click="closeTabFromOverflow(tab.id, $event)"
+                    @mousedown.stop
+                  >
+                    <X class="h-3 w-3" />
+                  </button>
+                </span>
+              </div>
+            </CustomContextMenu>
+          </PopoverContent>
+        </Popover>
       </div>
     </div>
 
@@ -604,25 +623,44 @@ function activateTab(tabId: string) {
         </div>
       </div>
       <div v-if="showFixedTabScrollbar" class="relative z-30 flex shrink-0 items-center">
-        <LightDropdown
-          :model-value="queryStore.activeTabId || ''"
-          :items="fixedTabMenuItems"
-          :aria-label="t('tabs.fixedTabs')"
-          :trigger-title="t('tabs.fixedTabs')"
-          :trigger-icon="ChevronDown"
-          :trigger-class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')"
-          trigger-icon-class="h-4 w-4"
-          item-icon-class="w-3.5 h-3.5 mr-2"
-          item-class="max-w-full"
-          content-class="w-auto min-w-48 max-w-72"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          :highlight-selected="false"
-          :match-trigger-width="false"
-          check-position="none"
-          align="end"
-          @update:model-value="activateTab"
-        />
+        <Popover v-model:open="fixedTabOverflowOpen">
+          <PopoverTrigger as-child>
+            <button type="button" :class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')" :aria-label="t('tabs.fixedTabs')" :title="t('tabs.fixedTabs')">
+              <ChevronDown class="h-4 w-4" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 max-h-[min(70vh,28rem)] gap-0 overflow-y-auto rounded-[6px] p-1" @click.stop @keydown.stop>
+            <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+              <div
+                class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
+                :title="tabDisplayTitle(tab, t)"
+                role="menuitem"
+                tabindex="0"
+                @click="activateTabFromOverflow(tab.id, 'fixed')"
+                @contextmenu="onContextMenu"
+                @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
+              >
+                <component :is="tabMenuIcon(tab)" :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                <span class="min-w-0 flex-1 truncate">{{ tabDisplayTitle(tab, t) }}</span>
+                <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+                <Pin class="h-3 w-3 shrink-0 fill-current text-primary" />
+                <span class="w-5 shrink-0">
+                  <button
+                    type="button"
+                    class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
+                    :aria-label="t('contextMenu.closeTab')"
+                    :title="t('contextMenu.closeTab')"
+                    @click="closeTabFromOverflow(tab.id, $event)"
+                    @mousedown.stop
+                  >
+                    <X class="h-3 w-3" />
+                  </button>
+                </span>
+              </div>
+            </CustomContextMenu>
+          </PopoverContent>
+        </Popover>
       </div>
     </div>
   </div>

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AlertTriangle, Check, ChevronDown, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -22,6 +22,7 @@ import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sqlHighlig
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/tableColumnTemplates";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
@@ -221,6 +222,12 @@ function isPlainModShortcut(event: KeyboardEvent, key: string): boolean {
 }
 
 const structureDensityValues: StructureEditorDensity[] = ["compact", "standard", "comfortable"];
+const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths";
+const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
+const STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY = "dbx-structure-editor-sql-preview-collapsed";
+const STRUCTURE_COLUMN_WIDTH_COUNT = 10;
+const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 8;
+const PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS = new Set([0, 1, 6]);
 const structureDensityMetrics: Record<
   StructureEditorDensity,
   {
@@ -242,7 +249,7 @@ const structureDensityMetrics: Record<
   }
 > = {
   compact: {
-    columns: [28, 120, 136, 82, 60, 52, 108, 124, 144, 108],
+    columns: [28, 168, 136, 82, 60, 52, 108, 220, 144, 108],
     indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
     minIndexColumnWidth: 48,
@@ -259,7 +266,7 @@ const structureDensityMetrics: Record<
     lineHeight: 1.35,
   },
   standard: {
-    columns: [32, 144, 160, 104, 72, 64, 128, 152, 160, 136],
+    columns: [32, 200, 160, 104, 72, 64, 128, 260, 160, 136],
     indexes: [148, 224, 72, 108, 148, 180, 148, 84],
     minColumnWidth: 28,
     minIndexColumnWidth: 60,
@@ -276,7 +283,7 @@ const structureDensityMetrics: Record<
     lineHeight: 1.4,
   },
   comfortable: {
-    columns: [36, 168, 188, 116, 84, 76, 152, 188, 188, 148],
+    columns: [36, 232, 188, 116, 84, 76, 152, 300, 188, 148],
     indexes: [176, 260, 84, 124, 176, 216, 176, 104],
     minColumnWidth: 32,
     minIndexColumnWidth: 64,
@@ -300,6 +307,79 @@ function isStructureEditorDensity(value: unknown): value is StructureEditorDensi
 
 function metricsForDensity(density: StructureEditorDensity) {
   return structureDensityMetrics[density];
+}
+
+function normalizeStructureColumnWidths(value: unknown, density: StructureEditorDensity): number[] | null {
+  if (!Array.isArray(value) || value.length !== STRUCTURE_COLUMN_WIDTH_COUNT) return null;
+  const minWidth = metricsForDensity(density).minColumnWidth;
+  const widths = value.map((item) => Number(item));
+  if (widths.some((item) => !Number.isFinite(item))) return null;
+  return widths.map((item) => Math.max(minWidth, item));
+}
+
+function normalizeStructureIndexColumnWidths(value: unknown, density: StructureEditorDensity): number[] | null {
+  if (!Array.isArray(value) || value.length !== STRUCTURE_INDEX_COLUMN_WIDTH_COUNT) return null;
+  const minWidth = metricsForDensity(density).minIndexColumnWidth;
+  const widths = value.map((item) => Number(item));
+  if (widths.some((item) => !Number.isFinite(item))) return null;
+  return widths.map((item) => Math.max(minWidth, item));
+}
+
+function loadStructureWidthsByDensity(storageKey: string, density: StructureEditorDensity): unknown {
+  const raw = safeLocalStorageGet(storageKey);
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<Record<StructureEditorDensity, unknown>>;
+    return parsed?.[density];
+  } catch {
+    return undefined;
+  }
+}
+
+function loadStructureColumnWidths(density: StructureEditorDensity): number[] {
+  const fallback = [...metricsForDensity(density).columns];
+  const stored = loadStructureWidthsByDensity(STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY, density);
+  return normalizeStructureColumnWidths(stored, density) ?? fallback;
+}
+
+function loadStructureIndexColumnWidths(density: StructureEditorDensity): number[] {
+  const fallback = [...metricsForDensity(density).indexes];
+  const stored = normalizeStructureIndexColumnWidths(loadStructureWidthsByDensity(STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY, density), density);
+  if (!stored) return fallback;
+  return fallback.map((width, index) => (PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS.has(index) ? stored[index] : width));
+}
+
+function saveStructureWidthsByDensity(storageKey: string, density: StructureEditorDensity, widths: readonly number[]) {
+  let payload: Partial<Record<StructureEditorDensity, number[]>> = {};
+  const raw = safeLocalStorageGet(storageKey);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") payload = parsed;
+    } catch {
+      payload = {};
+    }
+  }
+  payload[density] = [...widths];
+  safeLocalStorageSet(storageKey, JSON.stringify(payload));
+}
+
+function saveStructureColumnWidths(density: StructureEditorDensity, widths: readonly number[]) {
+  const normalized = normalizeStructureColumnWidths([...widths], density);
+  if (!normalized) return;
+  saveStructureWidthsByDensity(STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY, density, normalized);
+}
+
+function saveStructureIndexColumnWidths(density: StructureEditorDensity, widths: readonly number[]) {
+  const normalized = normalizeStructureIndexColumnWidths([...widths], density);
+  if (!normalized) return;
+  const fallback = metricsForDensity(density).indexes;
+  const stored = fallback.map((width, index) => (PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS.has(index) ? normalized[index] : width));
+  saveStructureWidthsByDensity(STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY, density, stored);
+}
+
+function loadSqlPreviewCollapsed(): boolean {
+  return safeLocalStorageGet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY) === "true";
 }
 
 const structureDensity = computed(() => settingsStore.editorSettings.structureEditorDensity);
@@ -341,9 +421,8 @@ const structureDensityMenuOpen = ref(false);
 const structureDensityMenuRef = ref<HTMLElement>();
 
 function applyStructureDensityWidths(density: StructureEditorDensity) {
-  const metric = metricsForDensity(density);
-  colWidths.value = [...metric.columns];
-  indexColWidths.value = [...metric.indexes];
+  colWidths.value = loadStructureColumnWidths(density);
+  indexColWidths.value = loadStructureIndexColumnWidths(density);
 }
 
 function setStructureDensity(value: unknown) {
@@ -408,11 +487,15 @@ function persistStructureDensity(density = localStructureDensity.value) {
   settingsStore.updateEditorSettings({ structureEditorDensity: density });
 }
 
-const initialDensityMetric = metricsForDensity(structureDensity.value);
-const colWidths = ref([...initialDensityMetric.columns]);
+const colWidths = ref(loadStructureColumnWidths(structureDensity.value));
 const colResizing = ref<{ col: number; startX: number; startW: number } | null>(null);
-const indexColWidths = ref([...initialDensityMetric.indexes]);
+const indexColWidths = ref(loadStructureIndexColumnWidths(structureDensity.value));
 const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
+const columnSearchInputRef = ref<InstanceType<typeof Input>>();
+const columnSearchText = ref("");
+const highlightedColumnId = ref<string | null>(null);
+const sqlPreviewCollapsed = ref(loadSqlPreviewCollapsed());
+let columnHighlightTimer: ReturnType<typeof window.setTimeout> | undefined;
 
 watch(
   structureDensity,
@@ -440,6 +523,7 @@ function onColResize(e: MouseEvent, col: number) {
   };
   const onUp = () => {
     colResizing.value = null;
+    saveStructureColumnWidths(localStructureDensity.value, colWidths.value);
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
   };
@@ -457,6 +541,9 @@ function onIndexColResize(e: MouseEvent, col: number) {
   };
   const onUp = () => {
     resizing.value = null;
+    if (PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS.has(col)) {
+      saveStructureIndexColumnWidths(localStructureDensity.value, indexColWidths.value);
+    }
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
   };
@@ -586,6 +673,22 @@ const colLabels = computed(() => {
   return labels;
 });
 const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
+const filteredColumnRowIds = computed(() => {
+  const query = columnSearchText.value.trim().toLowerCase();
+  if (!query) return new Set<string>();
+  return new Set(
+    columns.value
+      .filter((column) =>
+        [column.name, column.comment].some((value) =>
+          String(value ?? "")
+            .toLowerCase()
+            .includes(query),
+        ),
+      )
+      .map((column) => column.id),
+  );
+});
+const columnSearchMatchCount = computed(() => (columnSearchText.value.trim() ? filteredColumnRowIds.value.size : 0));
 const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
 const triggerTimingOptions = ["BEFORE", "AFTER"];
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
@@ -1264,13 +1367,78 @@ function onColumnDragEnd() {
 
 function columnRowClass(column: EditableStructureColumn, index: number) {
   const dragState = columnDragState.value;
+  const isSearchMatch = filteredColumnRowIds.value.has(column.id);
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
+    "structure-column-search-match": isSearchMatch,
+    "structure-column-search-current": highlightedColumnId.value === column.id,
     "opacity-55": dragState?.columnId === column.id,
     "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
     "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
     "[&>td]:border-b-2 [&>td]:border-b-primary": dragState?.insertionIndex === index + 1,
   };
+}
+
+function columnMatchesSearch(column: EditableStructureColumn): boolean {
+  const query = columnSearchText.value.trim().toLowerCase();
+  if (!query) return false;
+  return [column.name, column.comment].some((value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .includes(query),
+  );
+}
+
+function columnFieldMatchesSearch(value: string | null | undefined): boolean {
+  const query = columnSearchText.value.trim().toLowerCase();
+  return (
+    !!query &&
+    String(value ?? "")
+      .toLowerCase()
+      .includes(query)
+  );
+}
+
+function columnSearchFieldClass(column: EditableStructureColumn, value: string | null | undefined) {
+  const matches = columnFieldMatchesSearch(value);
+  return {
+    "!border-primary/60 !bg-primary/10": matches,
+    "!border-primary !ring-2 !ring-primary/30": matches && highlightedColumnId.value === column.id,
+  };
+}
+
+function focusColumnSearch() {
+  activeTab.value = "columns";
+  void nextTick(() => {
+    const input = columnSearchInputRef.value?.$el as HTMLInputElement | undefined;
+    input?.focus();
+    input?.select();
+  });
+}
+
+function scrollToColumnSearchMatch(direction: 1 | -1 = 1) {
+  const query = columnSearchText.value.trim();
+  if (!query) {
+    focusColumnSearch();
+    return;
+  }
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []);
+  const matches = columns.value.map((column, index) => ({ column, index })).filter(({ column }) => columnMatchesSearch(column));
+  if (!matches.length) return;
+  const currentIndex = highlightedColumnId.value ? matches.findIndex(({ column }) => column.id === highlightedColumnId.value) : -1;
+  const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
+  highlightedColumnId.value = nextMatch.column.id;
+  rows[nextMatch.index]?.scrollIntoView({ block: "center", inline: "nearest" });
+  if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
+  columnHighlightTimer = window.setTimeout(() => {
+    highlightedColumnId.value = null;
+  }, 1800);
+}
+
+function onColumnSearchKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  scrollToColumnSearchMatch(event.shiftKey ? -1 : 1);
 }
 
 function columnDragInsertionIndex(index: number, event: DragEvent): number {
@@ -1550,6 +1718,11 @@ async function copyPreviewSql() {
   }
 }
 
+function toggleSqlPreviewCollapsed() {
+  sqlPreviewCollapsed.value = !sqlPreviewCollapsed.value;
+  safeLocalStorageSet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY, String(sqlPreviewCollapsed.value));
+}
+
 async function applyChanges() {
   if (!canApply.value || !props.connectionId || !props.database) return;
   saving.value = true;
@@ -1607,6 +1780,12 @@ function addItemForActiveTab(): boolean {
 }
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
+  if (isPlainModShortcut(event, "f")) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (activeTab.value === "columns") focusColumnSearch();
+    return;
+  }
   if (isPlainModShortcut(event, "s")) {
     event.preventDefault();
     event.stopPropagation();
@@ -1663,6 +1842,7 @@ onBeforeUnmount(() => {
   stopColumnDragTracking();
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
+  if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
   persistStructureDensity();
 });
 
@@ -1712,6 +1892,7 @@ watch(
 );
 
 watch(activeTab, () => {
+  highlightedColumnId.value = null;
   syncDraftToParent();
 });
 
@@ -1820,6 +2001,25 @@ watch(activeTab, (tab) => {
                   </div>
                 </div>
               </div>
+              <div v-if="activeTab === 'columns'" class="relative flex w-40 shrink-0 items-center">
+                <Search :class="[structureIconClass, 'pointer-events-none absolute left-2 text-muted-foreground']" />
+                <Input
+                  ref="columnSearchInputRef"
+                  v-model="columnSearchText"
+                  :placeholder="t('structureEditor.searchColumns')"
+                  :class="[structureControlClass, 'pl-7 pr-14 text-[length:var(--structure-font-size)] placeholder:text-[length:var(--structure-font-size)]']"
+                  @keydown="onColumnSearchKeydown"
+                />
+                <button
+                  v-if="columnSearchText"
+                  type="button"
+                  class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded px-1 text-[length:var(--structure-font-size)] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  :title="t('structureEditor.nextColumnMatch')"
+                  @click="scrollToColumnSearchMatch(1)"
+                >
+                  {{ columnSearchMatchCount }}
+                </button>
+              </div>
               <Button v-if="activeTab === 'columns'" size="sm" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="addColumn">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addColumn") }}
@@ -1878,7 +2078,7 @@ watch(activeTab, (tab) => {
                     </div>
                   </td>
                   <td :class="structureCellClass">
-                    <Input v-model="column.name" :class="structureControlClass" :disabled="isColumnNameDisabled(column)" data-column-name-input />
+                    <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :disabled="isColumnNameDisabled(column)" data-column-name-input />
                   </td>
                   <td :class="structureCellClass">
                     <SearchableSelect
@@ -1936,7 +2136,7 @@ watch(activeTab, (tab) => {
                   </td>
                   <td v-if="columnEditorControls.comment" :class="structureCellClass">
                     <div class="flex min-w-0 items-center gap-1">
-                      <Input v-model="column.comment" :class="[structureControlClass, 'flex-1']" :disabled="isColumnCommentDisabled(column)" />
+                      <Input v-model="column.comment" :class="[structureControlClass, 'flex-1', columnSearchFieldClass(column, column.comment)]" :disabled="isColumnCommentDisabled(column)" />
                       <Popover>
                         <PopoverTrigger as-child>
                           <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'shrink-0']" :disabled="isColumnCommentDisabled(column)" :aria-label="t('structureEditor.editComment')" :title="t('structureEditor.editComment')">
@@ -2335,7 +2535,7 @@ watch(activeTab, (tab) => {
         </Tabs>
       </div>
 
-      <div class="flex h-[28%] min-h-40 min-w-0 max-h-64 shrink-0 flex-col overflow-hidden rounded-md border">
+      <div :class="['flex min-w-0 shrink-0 flex-col overflow-hidden rounded-md border', sqlPreviewCollapsed ? '' : 'h-[28%] min-h-40 max-h-64']">
         <div class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium">
           <div class="flex items-center gap-1.5">
             <span>{{ t("structureEditor.sqlPreview") }}</span>
@@ -2345,6 +2545,16 @@ watch(activeTab, (tab) => {
             </Badge>
           </div>
           <div class="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              :class="structureIconButtonClass"
+              :aria-label="sqlPreviewCollapsed ? t('structureEditor.expandSqlPreview') : t('structureEditor.collapseSqlPreview')"
+              :title="sqlPreviewCollapsed ? t('structureEditor.expandSqlPreview') : t('structureEditor.collapseSqlPreview')"
+              @click="toggleSqlPreviewCollapsed"
+            >
+              <ChevronUp v-if="sqlPreviewCollapsed" :class="structureIconClass" />
+              <ChevronDown v-else :class="structureIconClass" />
+            </Button>
             <Button variant="ghost" :class="structureToolbarButtonClass" :disabled="!previewSqlText.trim()" @click="copyPreviewSql">
               <Copy :class="[structureIconClass, 'mr-1']" />
               {{ t("structureEditor.copySql") }}
@@ -2355,7 +2565,7 @@ watch(activeTab, (tab) => {
             </Badge>
           </div>
         </div>
-        <div class="min-h-0 flex-1 overflow-auto p-2.5">
+        <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5">
           <div v-if="warnings.length" class="mb-2 space-y-1">
             <div v-for="warning in warnings" :key="warning" class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-yellow-700 dark:text-yellow-300">
               <AlertTriangle :class="[structureIconClass, 'mt-0.5 shrink-0']" />
@@ -2383,3 +2593,22 @@ watch(activeTab, (tab) => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.structure-column-search-match > td:first-child {
+  box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.55);
+}
+
+.structure-column-search-current > td {
+  box-shadow:
+    inset 0 1px 0 hsl(var(--primary) / 0.55),
+    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+}
+
+.structure-column-search-current > td:first-child {
+  box-shadow:
+    inset 3px 0 0 hsl(var(--primary)),
+    inset 0 1px 0 hsl(var(--primary) / 0.55),
+    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+}
+</style>

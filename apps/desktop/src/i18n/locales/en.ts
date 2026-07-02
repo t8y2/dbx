@@ -517,7 +517,7 @@ export default {
     autoKeepResultsDisabled: "Auto-keep results disabled",
     missingResultRun: "This result is no longer available",
     exportResultArchive: "Save Result Archive",
-    importResultArchive: "Import Results",
+    importResultArchive: "Import Result Archive",
     importedResultArchive: "Imported results",
     resultArchiveExported: "Results exported",
     resultArchiveImported: "Results imported",

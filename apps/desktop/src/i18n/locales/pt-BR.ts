@@ -526,7 +526,7 @@ export default withEnglishFallback({
     autoKeepResultsDisabled: "Manutenção automática de resultados desativada",
     missingResultRun: "Este resultado não está mais disponível",
     exportResultArchive: "Salvar Arquivo de Resultados",
-    importResultArchive: "Importar Resultados",
+    importResultArchive: "Importar Arquivo de Resultados",
     importedResultArchive: "Resultados importados",
     resultArchiveExported: "Resultados exportados",
     resultArchiveImported: "Resultados importados",

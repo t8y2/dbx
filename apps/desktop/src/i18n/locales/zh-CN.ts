@@ -520,7 +520,7 @@ export default withEnglishFallback({
     autoKeepResultsDisabled: "已关闭自动保留结果",
     missingResultRun: "此结果已不可用",
     exportResultArchive: "保存结果归档",
-    importResultArchive: "导入结果",
+    importResultArchive: "导入结果归档",
     importedResultArchive: "导入的结果",
     resultArchiveExported: "结果已导出",
     resultArchiveImported: "结果已导入",

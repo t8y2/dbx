@@ -511,7 +511,7 @@ export default withEnglishFallback({
     autoKeepResultsDisabled: "結果の自動保持をオフにしました",
     missingResultRun: "この結果は利用できなくなりました",
     exportResultArchive: "結果アーカイブを保存",
-    importResultArchive: "結果をインポート",
+    importResultArchive: "結果アーカイブをインポート",
     importedResultArchive: "結果をインポートしました",
     resultArchiveExported: "結果をエクスポートしました",
     resultArchiveImported: "結果をインポートしました",

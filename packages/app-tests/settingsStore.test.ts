@@ -107,6 +107,12 @@ test("defaults dangerous SQL confirmation to enabled", () => {
   assert.equal(normalizeEditorSettings({ confirmDangerousSqlExecution: false }).confirmDangerousSqlExecution, false);
 });
 
+test("defaults unsaved SQL close confirmation to enabled", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose, true);
+  assert.equal(normalizeEditorSettings({}).confirmUnsavedSqlClose, true);
+  assert.equal(normalizeEditorSettings({ confirmUnsavedSqlClose: false }).confirmUnsavedSqlClose, false);
+});
+
 test("defaults update notifications to enabled", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled, true);
   assert.equal(normalizeEditorSettings({}).updateNotificationsEnabled, true);

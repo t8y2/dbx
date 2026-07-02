@@ -1014,6 +1014,14 @@ export async function saveDesktopSettings(settings: DesktopSettings): Promise<vo
   safeLocalStorageSet(DESKTOP_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_DESKTOP_SETTINGS, ...settings }));
 }
 
+export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
+  return undefined;
+}
+
+export async function requestAppClose(): Promise<void> {
+  return undefined;
+}
+
 export interface DriverStoreMigrationResult {
   driver_store_dir: string | null;
   plugin_store_dir: string | null;

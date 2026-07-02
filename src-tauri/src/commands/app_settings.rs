@@ -4,10 +4,12 @@ use std::{
 };
 
 use dbx_core::storage::DesktopSettings;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
-use crate::{apply_debug_log_level, apply_desktop_settings};
+use crate::{
+    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, request_app_close, CloseBehaviorState,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DriverStoreMigrationResult {
@@ -36,6 +38,29 @@ pub async fn save_desktop_settings(
     if let Err(err) = apply_desktop_settings(&app, &settings) {
         eprintln!("Failed to apply desktop settings: {err}");
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn complete_app_close(app: AppHandle, window: Window, action: String) -> Result<(), String> {
+    match action.as_str() {
+        "quit" => {
+            if let Some(state) = app.try_state::<CloseBehaviorState>() {
+                state.allow_next_exit();
+            }
+            app.exit(0);
+        }
+        "hide" => {
+            hide_main_window_for_close(&app, &window);
+        }
+        _ => return Err(format!("unsupported close action: {action}")),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
+    request_app_close(&app, "settings");
     Ok(())
 }
 

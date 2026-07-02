@@ -1,6 +1,8 @@
 mod commands;
 mod data_dir;
 mod db;
+#[cfg(target_os = "macos")]
+mod macos_app_delegate;
 mod models;
 mod window_state_guard;
 
@@ -9,9 +11,11 @@ use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSett
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::RunEvent;
 use tauri::{
-    menu::MenuBuilder,
+    menu::{Menu, MenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Emitter, Manager};
@@ -19,31 +23,28 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
+const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
+const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 
 pub struct CloseBehaviorState {
-    quit_on_close: AtomicBool,
-    prompted: AtomicBool,
+    confirmed_exit: AtomicBool,
 }
 
 impl CloseBehaviorState {
-    fn new(settings: &DesktopSettings) -> Self {
-        Self {
-            quit_on_close: AtomicBool::new(settings.quit_on_close),
-            prompted: AtomicBool::new(settings.close_action_prompted),
-        }
+    fn new() -> Self {
+        Self { confirmed_exit: AtomicBool::new(false) }
     }
 
-    fn apply(&self, settings: &DesktopSettings) {
-        self.quit_on_close.store(settings.quit_on_close, Ordering::Relaxed);
-        self.prompted.store(settings.close_action_prompted, Ordering::Relaxed);
+    pub(crate) fn allow_next_exit(&self) {
+        self.confirmed_exit.store(true, Ordering::Relaxed);
     }
 
-    fn quit_on_close(&self) -> bool {
-        self.quit_on_close.load(Ordering::Relaxed)
+    pub(crate) fn is_exit_confirmed(&self) -> bool {
+        self.confirmed_exit.load(Ordering::Relaxed)
     }
 
-    fn prompted(&self) -> bool {
-        self.prompted.load(Ordering::Relaxed)
+    fn take_confirmed_exit(&self) -> bool {
+        self.confirmed_exit.swap(false, Ordering::Relaxed)
     }
 }
 #[cfg(target_os = "macos")]
@@ -66,11 +67,79 @@ fn should_show_main_window_after_setup() -> bool {
     true
 }
 
+fn should_confirm_app_exit_request(exit_code: Option<i32>, confirmed_exit: bool) -> bool {
+    exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
+}
+
 fn native_window_decorations_override(target_os: &str) -> Option<bool> {
     match target_os {
         "windows" | "linux" => Some(false),
         _ => None,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let pkg_info = app_handle.package_info();
+    let config = app_handle.config();
+    let app_name = pkg_info.name.clone();
+    let about_metadata = AboutMetadata {
+        name: Some(app_name.clone()),
+        version: Some(pkg_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+    let quit_item = MenuItem::with_id(app_handle, APP_MENU_QUIT_ID, format!("Quit {app_name}"), true, Some("Cmd+Q"))?;
+
+    Menu::with_items(
+        app_handle,
+        &[
+            &Submenu::with_items(
+                app_handle,
+                app_name,
+                true,
+                &[
+                    &PredefinedMenuItem::about(app_handle, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::separator(app_handle)?,
+                    &PredefinedMenuItem::services(app_handle, None)?,
+                    &PredefinedMenuItem::separator(app_handle)?,
+                    &PredefinedMenuItem::hide(app_handle, None)?,
+                    &PredefinedMenuItem::hide_others(app_handle, None)?,
+                    &PredefinedMenuItem::separator(app_handle)?,
+                    &quit_item,
+                ],
+            )?,
+            &Submenu::with_items(app_handle, "File", true, &[&PredefinedMenuItem::close_window(app_handle, None)?])?,
+            &Submenu::with_items(
+                app_handle,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app_handle, None)?,
+                    &PredefinedMenuItem::redo(app_handle, None)?,
+                    &PredefinedMenuItem::separator(app_handle)?,
+                    &PredefinedMenuItem::cut(app_handle, None)?,
+                    &PredefinedMenuItem::copy(app_handle, None)?,
+                    &PredefinedMenuItem::paste(app_handle, None)?,
+                    &PredefinedMenuItem::select_all(app_handle, None)?,
+                ],
+            )?,
+            &Submenu::with_items(app_handle, "View", true, &[&PredefinedMenuItem::fullscreen(app_handle, None)?])?,
+            &Submenu::with_items(
+                app_handle,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app_handle, None)?,
+                    &PredefinedMenuItem::maximize(app_handle, None)?,
+                    &PredefinedMenuItem::separator(app_handle)?,
+                    &PredefinedMenuItem::close_window(app_handle, None)?,
+                ],
+            )?,
+            &Submenu::with_items(app_handle, "Help", true, &[])?,
+        ],
+    )
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -196,7 +265,7 @@ fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, window: &tauri::Window<R>) {
+pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, window: &tauri::Window<R>) {
     clear_main_webview_focus(app);
 
     #[cfg(target_os = "macos")]
@@ -231,6 +300,11 @@ fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, wind
     }
 
     let _ = window.hide();
+}
+
+pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
+    show_main_window(app);
+    let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
 fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
@@ -277,7 +351,7 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
         if event.id() == "show" {
             show_main_window(app);
         } else if event.id() == "quit" {
-            app.exit(0);
+            request_app_close(app, "quit");
         }
     })
     .on_tray_icon_event(|tray, event| match event {
@@ -324,9 +398,6 @@ fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, _icon_theme: DesktopIco
 
 pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &DesktopSettings) -> tauri::Result<()> {
     apply_debug_log_level(desktop_settings.debug_logging_enabled);
-    if let Some(state) = app.try_state::<CloseBehaviorState>() {
-        state.apply(desktop_settings);
-    }
     apply_desktop_icon_theme(app, desktop_settings.icon_theme)?;
     if matches!(std::env::consts::OS, "macos" | "windows") {
         if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
@@ -344,8 +415,8 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup,
+        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
     };
     use std::ffi::OsStr;
 
@@ -374,6 +445,14 @@ mod tests {
     #[test]
     fn shows_main_window_after_regular_startup_setup() {
         assert!(should_show_main_window_after_setup());
+    }
+
+    #[test]
+    fn only_user_requested_app_exit_needs_frontend_confirmation() {
+        assert!(should_confirm_app_exit_request(None, false));
+        assert!(should_confirm_app_exit_request(Some(0), false));
+        assert!(!should_confirm_app_exit_request(Some(0), true));
+        assert!(!should_confirm_app_exit_request(Some(tauri::RESTART_EXIT_CODE), false));
     }
 
     #[test]
@@ -494,7 +573,7 @@ pub fn run() {
 
     let startup_begin = Instant::now();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -523,7 +602,18 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().build());
+
+    // macOS app menu (Cmd+Q / Dock Quit). Skip on Linux/Windows so an empty menu bar
+    // is not installed where there was none before.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
+        if event.id() == APP_MENU_QUIT_ID {
+            request_app_close(app, "quit");
+        }
+    });
+
+    builder
         .setup(move |app| {
             let setup_start = Instant::now();
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
@@ -577,7 +667,9 @@ pub fn run() {
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
-            app.manage(CloseBehaviorState::new(&desktop_settings));
+            app.manage(CloseBehaviorState::new());
+            #[cfg(target_os = "macos")]
+            macos_app_delegate::install_dock_quit_handler(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
             open_connection_deep_links(app.handle(), startup_links);
 
@@ -609,22 +701,13 @@ pub fn run() {
                     return;
                 }
                 let app = window.app_handle();
-                let Some(state) = app.try_state::<CloseBehaviorState>() else {
+                if app.try_state::<CloseBehaviorState>().is_none() {
                     api.prevent_close();
                     hide_main_window_for_close(&app, window);
                     return;
-                };
-                if !state.prompted() {
-                    api.prevent_close();
-                    let _ = app.emit("dbx-close-action-prompt", ());
-                    return;
-                }
-                if state.quit_on_close() {
-                    app.exit(0);
-                    return;
                 }
                 api.prevent_close();
-                hide_main_window_for_close(&app, window);
+                request_app_close(&app, "settings");
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -641,6 +724,8 @@ pub fn run() {
             commands::ai::delete_ai_conversation,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
+            commands::app_settings::complete_app_close,
+            commands::app_settings::request_app_close_from_window_controls,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,
@@ -1001,6 +1086,17 @@ pub fn run() {
         .run(|app_handle, event| {
             #[cfg(not(target_os = "macos"))]
             let _ = (&app_handle, &event);
+
+            if let RunEvent::ExitRequested { code, api, .. } = &event {
+                let confirmed_exit = app_handle
+                    .try_state::<CloseBehaviorState>()
+                    .map(|state| state.take_confirmed_exit())
+                    .unwrap_or(false);
+                if should_confirm_app_exit_request(*code, confirmed_exit) {
+                    api.prevent_exit();
+                    request_app_close(app_handle, "quit");
+                }
+            }
 
             #[cfg(target_os = "macos")]
             if let RunEvent::Opened { urls } = &event {

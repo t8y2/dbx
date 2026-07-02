@@ -363,6 +363,14 @@ export async function saveDesktopSettings(settings: DesktopSettings): Promise<vo
   return invoke("save_desktop_settings", { settings });
 }
 
+export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
+  return invoke("complete_app_close", { action });
+}
+
+export async function requestAppClose(): Promise<void> {
+  return invoke("request_app_close_from_window_controls");
+}
+
 export interface DriverStoreMigrationResult {
   driver_store_dir: string | null;
   plugin_store_dir: string | null;

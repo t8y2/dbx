@@ -244,10 +244,10 @@ test("restores unsaved query tabs and active tab after restart", () => {
   const restored = restoreOpenTabsState(raw, "tab-2");
 
   assert.deepEqual(
-    restored.tabs.map((tab) => ({ id: tab.id, sql: tab.sql, isExecuting: tab.isExecuting })),
+    restored.tabs.map((tab) => ({ id: tab.id, sql: tab.sql, originalSql: tab.originalSql, isExecuting: tab.isExecuting })),
     [
-      { id: "tab-1", sql: "select 1", isExecuting: false },
-      { id: "tab-2", sql: "select 2", isExecuting: false },
+      { id: "tab-1", sql: "select 1", originalSql: "", isExecuting: false },
+      { id: "tab-2", sql: "select 2", originalSql: "", isExecuting: false },
     ],
   );
   assert.equal(restored.activeTabId, "tab-2");

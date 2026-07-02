@@ -28,7 +28,7 @@ import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { useTauriEvents } from "@/composables/useTauriEvents";
-import { useCloseActionPrompt } from "@/composables/useCloseActionPrompt";
+import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import "@/i18n";
@@ -151,6 +151,9 @@ const saveSqlName = ref("");
 const saveSqlFolderId = ref("");
 const pendingSaveAndCloseTabId = ref<string | null>(null);
 const pendingPrevActiveTabId = ref<string | null>(null);
+const pendingSaveShouldCloseTab = ref(true);
+const pendingAppCloseAction = ref<AppCloseAction | null>(null);
+const pendingCloseActionChoice = ref(false);
 const ROOT_SAVED_SQL_FOLDER = "__root__";
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
@@ -252,7 +255,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openDbFilePath,
   openConnectionDeepLink,
 });
-const { showCloseActionPrompt, chooseQuit, chooseMinimize, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt();
+const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
 useWebDavAutoUpload();
 
@@ -506,7 +509,81 @@ function closePendingSavedTab() {
   pendingSaveAndCloseTabId.value = null;
   if (pendingPrevActiveTabId.value) queryStore.activeTabId = pendingPrevActiveTabId.value;
   pendingPrevActiveTabId.value = null;
-  queryStore.closeTab(closeId, { force: true });
+  const shouldCloseTab = pendingSaveShouldCloseTab.value;
+  pendingSaveShouldCloseTab.value = true;
+  if (shouldCloseTab) queryStore.closeTab(closeId, { force: true });
+}
+
+function cancelPendingSaveAndClose() {
+  showSaveSqlDialog.value = false;
+  pendingSaveAndCloseTabId.value = null;
+  pendingPrevActiveTabId.value = null;
+  pendingSaveShouldCloseTab.value = true;
+  cancelPendingAppClose();
+}
+
+function cancelPendingAppClose() {
+  pendingAppCloseAction.value = null;
+  pendingCloseActionChoice.value = false;
+  pendingSaveShouldCloseTab.value = true;
+}
+
+function finishPendingAppClose(action: AppCloseAction) {
+  if (pendingCloseActionChoice.value) {
+    pendingCloseActionChoice.value = false;
+    showCloseActionPrompt.value = true;
+    return;
+  }
+  pendingAppCloseAction.value = null;
+  pendingSaveShouldCloseTab.value = true;
+  queryStore.flushPendingPersist();
+  void performCloseAction(action);
+}
+
+function continuePendingAppCloseAfterSave() {
+  const action = pendingAppCloseAction.value;
+  if (!action) return;
+  if (queryStore.hasDirtyTabs) {
+    pendingSaveShouldCloseTab.value = false;
+    if (queryStore.requestAppCloseConfirmation()) return;
+  }
+  finishPendingAppClose(action);
+}
+
+function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions = {}) {
+  pendingCloseActionChoice.value = !!options.requireCloseActionChoice;
+  if (queryStore.hasDirtyTabs) {
+    pendingAppCloseAction.value = action;
+    pendingSaveShouldCloseTab.value = false;
+    if (queryStore.requestAppCloseConfirmation()) return;
+  }
+  finishPendingAppClose(action);
+}
+
+function completePendingTabSave(tabId: string) {
+  if (pendingAppCloseAction.value) {
+    continuePendingAppCloseAfterSave();
+    return;
+  }
+  queryStore.closeTab(tabId, { force: true });
+}
+
+function handleDiscardPendingTabClose() {
+  if (!pendingAppCloseAction.value) return;
+  continuePendingAppCloseAfterSave();
+}
+
+function handleDiscardAllPendingTabClose() {
+  if (!pendingAppCloseAction.value) return;
+  continuePendingAppCloseAfterSave();
+}
+
+function handleCloseActionPromptOpenChange(open: boolean) {
+  showCloseActionPrompt.value = open;
+  if (!open) {
+    cancelCloseActionPrompt();
+    cancelPendingAppClose();
+  }
 }
 
 async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: boolean } = {}): Promise<boolean> {
@@ -523,15 +600,69 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
   }
 }
 
+async function saveTabForCloseAll(tabId: string): Promise<boolean> {
+  const tab = queryStore.tabs.find((t) => t.id === tabId);
+  if (!tab || !canSaveSqlTab(tab)) return true;
+  queryStore.activeTabId = tabId;
+
+  if (tab.objectSource) return saveActiveObjectSource(tab);
+
+  if (await saveExternalSqlPath(tab)) return !queryStore.isTabDirty(tab);
+
+  const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
+  try {
+    const saved = await savedSqlStore.saveFile({
+      id: existing?.id,
+      connectionId: tab.connectionId,
+      folderId: existing?.folderId,
+      name: existing?.name || defaultSavedSqlName(tab.title),
+      database: tab.database,
+      schema: tab.schema,
+      sql: tab.sql,
+    });
+    queryStore.linkSavedSql(tab.id, saved.id, saved.name);
+    queryStore.markTabClean(tab);
+    return true;
+  } catch (e: any) {
+    toast(t("savedSql.saveFailed", { message: e?.message || String(e) }), 5000);
+    return false;
+  }
+}
+
+async function handleSaveAllPendingTabClose() {
+  const ids = [...queryStore.closeConfirmDirtyTabIds];
+  if (!ids.length) return;
+  queryStore.suspendCloseConfirm();
+
+  for (const id of ids) {
+    const saved = await saveTabForCloseAll(id);
+    if (!saved) break;
+  }
+
+  if (queryStore.closeConfirmDirtyTabIds.length > 0) {
+    queryStore.resumeCloseConfirm();
+    return;
+  }
+
+  const result = queryStore.completePendingCloseAfterSaveAll();
+  if (result === "app") continuePendingAppCloseAfterSave();
+}
+
 async function handleSaveTab(tabId: string) {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab || !canSaveSqlTab(tab)) return;
+  const closeAfterSave = pendingAppCloseAction.value === null;
+  pendingSaveShouldCloseTab.value = closeAfterSave;
   if (tab.objectSource) {
     const saved = await saveActiveObjectSource(tab);
-    if (saved) queryStore.closeTab(tabId, { force: true });
+    if (saved) completePendingTabSave(tabId);
+    else if (pendingAppCloseAction.value) cancelPendingAppClose();
     return;
   }
-  if (await saveExternalSqlPath(tab, { closeAfterSave: true })) return;
+  if (await saveExternalSqlPath(tab, { closeAfterSave })) {
+    if (!closeAfterSave) continuePendingAppCloseAfterSave();
+    return;
+  }
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
     const updated = await savedSqlStore.saveFile({
@@ -546,7 +677,7 @@ async function handleSaveTab(tabId: string) {
     queryStore.linkSavedSql(tab.id, updated.id, updated.name);
     queryStore.markTabClean(tab);
     toast(t("savedSql.saved"), 2000);
-    queryStore.closeTab(tabId, { force: true });
+    completePendingTabSave(tabId);
     return;
   }
   // No existing saved SQL — open save dialog, then close after save
@@ -1599,6 +1730,10 @@ onUnmounted(() => {
                 @close-driver-store="closeDriverStorePage"
                 @close-settings-page="closeSettingsPage"
                 @save-tab="handleSaveTab"
+                @discard-tab-close="handleDiscardPendingTabClose"
+                @save-all-tab-close="handleSaveAllPendingTabClose"
+                @discard-all-tab-close="handleDiscardAllPendingTabClose"
+                @cancel-tab-close="cancelPendingAppClose"
               />
               <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
               <EditorSettingsPage
@@ -1796,7 +1931,7 @@ onUnmounted(() => {
           @download-and-install="downloadAndInstallUpdate"
           @restart="restartApp"
         />
-        <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" v-model:open="showCloseActionPrompt" @quit="chooseQuit" @minimize="chooseMinimize" />
+        <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />
         <QuickOpenDialog :open="showQuickOpen" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
       </div>
       <Teleport to="body">
@@ -1812,7 +1947,7 @@ onUnmounted(() => {
         @update:open="
           (open: boolean) => {
             showSaveSqlDialog = open;
-            if (!open) pendingSaveAndCloseTabId = null;
+            if (!open && pendingSaveAndCloseTabId) cancelPendingSaveAndClose();
           }
         "
       >
@@ -1842,14 +1977,7 @@ onUnmounted(() => {
           </div>
           <DialogFooter>
             <Button v-if="isDesktop" variant="secondary" @click="saveActiveSqlAsLocalFile">{{ t("savedSql.saveToFile") }}</Button>
-            <Button
-              variant="outline"
-              @click="
-                showSaveSqlDialog = false;
-                pendingSaveAndCloseTabId = null;
-              "
-              >{{ t("dangerDialog.cancel") }}</Button
-            >
+            <Button variant="outline" @click="cancelPendingSaveAndClose()">{{ t("dangerDialog.cancel") }}</Button>
             <Button :disabled="!saveSqlName.trim()" @click="confirmSaveSqlToLibrary">{{ t("savedSql.save") }}</Button>
           </DialogFooter>
         </DialogContent>

@@ -1859,6 +1859,8 @@ dependencies = [
  "futures",
  "log",
  "mongodb",
+ "objc2",
+ "objc2-app-kit",
  "percent-encoding",
  "portpicker",
  "redis",

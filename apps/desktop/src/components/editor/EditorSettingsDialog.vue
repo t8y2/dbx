@@ -214,6 +214,7 @@ const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
 const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
+const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsavedSqlClose);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
@@ -495,6 +496,7 @@ watch(
       editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
       editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
       editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
+      editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
       editAppLayout.value = settingsStore.editorSettings.appLayout;
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
@@ -562,6 +564,7 @@ function hasChanges(): boolean {
     editSqlSemanticDiagnosticsMode.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsMode ||
     editSqlSemanticDiagnosticsEnabled.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled ||
     editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
+    editConfirmUnsavedSqlClose.value !== settingsStore.editorSettings.confirmUnsavedSqlClose ||
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
@@ -614,6 +617,7 @@ async function persistSettings() {
     wordWrap: editWordWrap.value,
     sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
+    confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
     appLayout: editAppLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
@@ -678,6 +682,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
     editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+    editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
     sqlFormatterConfigValid.value = true;
@@ -740,6 +745,7 @@ function resetAllDefaults() {
   editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+  editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
@@ -1839,6 +1845,12 @@ async function ensureCodexMcpStatus() {
 const previewRef = ref<HTMLDivElement>();
 const previewView = shallowRef<EditorViewType | null>(null);
 
+interface PreviewSqlDiagnostic {
+  from: number;
+  to: number;
+  message: string;
+}
+
 function getPreviewCustomThemeColors(): CustomThemeColors | undefined {
   if (editTheme.value !== "custom") return undefined;
   const activeTheme = editCustomThemes.value.find((t) => t.id === editActiveCustomThemeId.value);
@@ -1859,13 +1871,46 @@ const previewSettings = computed<{
   customColors: getPreviewCustomThemeColors(),
 }));
 
-const previewSql = `SELECT u.id, u.name
+const previewSqlNormal = `SELECT u.id, u.name
 FROM users u
+ORDER BY u.id LIMIT 5;`;
+const previewSqlWithSyntaxError = `SELECT u.id, u.name
+FOM users u
 ORDER BY u.id LIMIT 5;`;
 
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
+let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
+let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
+
+function currentPreviewSql(): string {
+  return editSqlSemanticDiagnosticsEnabled.value ? previewSqlWithSyntaxError : previewSqlNormal;
+}
+
+function previewDiagnosticsForSql(sql: string): PreviewSqlDiagnostic[] {
+  if (!editSqlSemanticDiagnosticsEnabled.value) return [];
+  const from = sql.indexOf("FOM");
+  return from >= 0 ? [{ from, to: from + 3, message: "Syntax error: expected FROM" }] : [];
+}
+
+function updatePreviewSqlDiagnostics() {
+  const view = previewView.value;
+  if (!view || !setPreviewDiagnosticsEffect) return;
+  const nextSql = currentPreviewSql();
+  const currentSql = view.state.doc.toString();
+  previewSqlDiagnostics = previewDiagnosticsForSql(nextSql);
+  const effects = setPreviewDiagnosticsEffect.of(previewSqlDiagnostics);
+  if (currentSql === nextSql) {
+    view.dispatch({ effects });
+    return;
+  }
+  view.dispatch({
+    changes: { from: 0, to: currentSql.length, insert: nextSql },
+    effects,
+  });
+}
 
 watch(
   [previewSettings, editCustomThemes, editActiveCustomThemeId],
@@ -1880,6 +1925,10 @@ watch(
   { deep: true },
 );
 
+watch(editSqlSemanticDiagnosticsEnabled, () => {
+  updatePreviewSqlDiagnostics();
+});
+
 let previewInitialized = false;
 
 function cleanupPreviewEditor() {
@@ -1889,7 +1938,10 @@ function cleanupPreviewEditor() {
   previewInitialized = false;
   fontThemeComp = null;
   themeComp = null;
+  diagnosticComp = null;
+  setPreviewDiagnosticsEffect = null;
   editorViewModule = null;
+  previewSqlDiagnostics = [];
 }
 
 watch(activeSettingsTab, (tab) => {
@@ -1903,18 +1955,51 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView }, { EditorState, Compartment }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, Decoration }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
   editorViewModule = { EditorView } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
+  diagnosticComp = new Compartment();
+  setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
+  previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
   const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+  const diagnosticTheme = EditorView.baseTheme({
+    ".cm-settings-preview-sql-error": {
+      textDecoration: "underline wavy var(--destructive)",
+      textUnderlineOffset: "3px",
+    },
+  });
+  const buildPreviewDiagnosticExtension = () => {
+    const diagnosticEffect = setPreviewDiagnosticsEffect;
+    const buildDecorations = () =>
+      Decoration.set(
+        previewSqlDiagnostics.map((diagnostic) =>
+          Decoration.mark({
+            class: "cm-settings-preview-sql-error",
+            attributes: { title: diagnostic.message },
+          }).range(diagnostic.from, diagnostic.to),
+        ),
+        true,
+      );
+
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const diagnosticsChanged = !!diagnosticEffect && transaction.effects.some((effect) => effect.is(diagnosticEffect));
+        return transaction.docChanged || diagnosticsChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+
+    return [field, diagnosticTheme];
+  };
 
   const state = EditorState.create({
-    doc: previewSql,
-    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily))],
+    doc: currentPreviewSql(),
+    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension())],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
@@ -2084,6 +2169,16 @@ onUnmounted(cleanupPreviewEditor);
                     </p>
                   </div>
                   <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-unsaved-sql-close">{{ t("settings.confirmUnsavedSqlClose") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmUnsavedSqlCloseDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
                 </div>
               </div>
 

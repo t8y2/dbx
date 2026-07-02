@@ -65,6 +65,13 @@ function shouldPersistTabSql(tab: QueryTab) {
   return tab.originalSql !== undefined && tab.sql !== tab.originalSql;
 }
 
+function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
+  if (mode !== "query") return undefined;
+  if (tab.externalSqlPath) return sql;
+  if (tab.savedSqlId) return sql ? "" : undefined;
+  return "";
+}
+
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
   return tabs.map((tab) => ({
     id: tab.id,
@@ -159,7 +166,7 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
         editorViewport: undefined,
         editorSelection: undefined,
         isExplaining: false,
-        originalSql: mode === "query" && tab.externalSqlPath ? tab.sql : mode === "query" && tab.savedSqlId && tab.sql ? "" : undefined,
+        originalSql: restoredOriginalSql(tab, mode, typeof tab.sql === "string" ? tab.sql : ""),
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
         resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,

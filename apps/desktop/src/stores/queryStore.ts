@@ -48,6 +48,7 @@ import type { SavedSqlFile } from "@/types/database";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
+type CloseConfirmContext = "tab" | "batch" | "app";
 
 function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -193,6 +194,8 @@ export const useQueryStore = defineStore("query", () => {
   const pendingCloseTabId = ref<string | null>(null);
   const pendingBatchCloseTabIds = ref<string[] | null>(null);
   const pendingBatchCloseFinalActiveTabId = ref<string | null | undefined>(undefined);
+  const isConfirmingAppClose = ref(false);
+  const closeConfirmContext = ref<CloseConfirmContext>("tab");
   for (const tab of restored.tabs) {
     if (tab.mode === "data") void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
   }
@@ -795,8 +798,46 @@ export const useQueryStore = defineStore("query", () => {
     return tab.sql !== original;
   }
 
+  const hasDirtyTabs = computed(() => tabs.value.some((tab) => isTabDirty(tab)));
+  const shouldConfirmUnsavedSqlClose = computed(() => useSettingsStore().editorSettings.confirmUnsavedSqlClose);
+
+  const closeConfirmDirtyTabIds = computed(() => {
+    if (isConfirmingAppClose.value) return tabs.value.filter((tab) => isTabDirty(tab)).map((tab) => tab.id);
+    if (pendingBatchCloseTabIds.value) {
+      return pendingBatchCloseTabIds.value
+        .map((id) => tabs.value.find((tab) => tab.id === id))
+        .filter((tab): tab is QueryTab => !!tab && isTabDirty(tab))
+        .map((tab) => tab.id);
+    }
+    const pendingTab = pendingCloseTabId.value ? tabs.value.find((tab) => tab.id === pendingCloseTabId.value) : undefined;
+    return pendingTab && isTabDirty(pendingTab) ? [pendingTab.id] : [];
+  });
+
+  function showDirtyTabCloseConfirm(tab: QueryTab, context: CloseConfirmContext) {
+    pendingCloseTabId.value = tab.id;
+    closeConfirmContext.value = context;
+    activeTabId.value = tab.id;
+    showCloseConfirm.value = true;
+  }
+
   function markTabClean(tab: QueryTab | undefined) {
     if (tab) tab.originalSql = tab.sql;
+  }
+
+  function discardTabChanges(id: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || tab.mode !== "query") return false;
+    if (tab.originalSql !== undefined) {
+      tab.sql = tab.originalSql;
+      return true;
+    }
+    if (tab.savedSqlId) {
+      tab.sql = "";
+      return true;
+    }
+    tab.sql = "";
+    tab.originalSql = "";
+    return true;
   }
 
   function finishPendingBatchClose() {
@@ -819,11 +860,10 @@ export const useQueryStore = defineStore("query", () => {
       return;
     }
 
-    const dirtyTab = remainingIds.map((id) => tabs.value.find((tab) => tab.id === id)).find((tab): tab is QueryTab => !!tab && isTabDirty(tab));
+    const dirtyTab = shouldConfirmUnsavedSqlClose.value ? remainingIds.map((id) => tabs.value.find((tab) => tab.id === id)).find((tab): tab is QueryTab => !!tab && isTabDirty(tab)) : undefined;
     if (dirtyTab) {
       // Batch close must pause before dropping dirty query tabs so the existing save/discard dialog can protect unsaved SQL.
-      pendingCloseTabId.value = dirtyTab.id;
-      showCloseConfirm.value = true;
+      showDirtyTabCloseConfirm(dirtyTab, "batch");
       return;
     }
 
@@ -849,9 +889,8 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string, { force = false }: { force?: boolean } = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
-    if (!force && isTabDirty(tab)) {
-      pendingCloseTabId.value = id;
-      showCloseConfirm.value = true;
+    if (!force && shouldConfirmUnsavedSqlClose.value && isTabDirty(tab)) {
+      showDirtyTabCloseConfirm(tab, "tab");
       return;
     }
     const idx = tabs.value.findIndex((t) => t.id === id);
@@ -873,9 +912,40 @@ export const useQueryStore = defineStore("query", () => {
 
   function forceClosePendingTab() {
     const id = pendingCloseTabId.value;
+    const confirmingAppClose = isConfirmingAppClose.value;
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
+    closeConfirmContext.value = "tab";
+    if (confirmingAppClose) {
+      if (id) discardTabChanges(id);
+      isConfirmingAppClose.value = false;
+      return;
+    }
     if (id) closeTab(id, { force: true });
+  }
+
+  function forceCloseAllPendingTabs() {
+    const dirtyIds = closeConfirmDirtyTabIds.value;
+    const pendingId = pendingCloseTabId.value;
+    const batchIds = pendingBatchCloseTabIds.value?.filter((id) => tabs.value.some((tab) => tab.id === id)) ?? null;
+    const finalActiveTabId = pendingBatchCloseFinalActiveTabId.value;
+    const confirmingAppClose = isConfirmingAppClose.value;
+
+    pendingCloseTabId.value = null;
+    showCloseConfirm.value = false;
+    pendingBatchCloseTabIds.value = null;
+    pendingBatchCloseFinalActiveTabId.value = undefined;
+    isConfirmingAppClose.value = false;
+    closeConfirmContext.value = "tab";
+
+    for (const id of dirtyIds) discardTabChanges(id);
+    if (confirmingAppClose) return;
+
+    const idsToClose = batchIds ?? (pendingId ? [pendingId] : []);
+    for (const id of idsToClose) closeTab(id, { force: true });
+    if (finalActiveTabId !== undefined) {
+      activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
+    }
   }
 
   function cancelClosePendingTab() {
@@ -883,14 +953,55 @@ export const useQueryStore = defineStore("query", () => {
     showCloseConfirm.value = false;
     pendingBatchCloseTabIds.value = null;
     pendingBatchCloseFinalActiveTabId.value = undefined;
+    isConfirmingAppClose.value = false;
+    closeConfirmContext.value = "tab";
   }
 
   function saveAndClosePendingTab() {
     const id = pendingCloseTabId.value;
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
+    isConfirmingAppClose.value = false;
+    closeConfirmContext.value = "tab";
     if (id) return id;
     return null;
+  }
+
+  function suspendCloseConfirm() {
+    showCloseConfirm.value = false;
+  }
+
+  function resumeCloseConfirm() {
+    const dirtyId = closeConfirmDirtyTabIds.value[0];
+    const dirtyTab = dirtyId ? tabs.value.find((tab) => tab.id === dirtyId) : undefined;
+    if (!dirtyTab) return false;
+    pendingCloseTabId.value = dirtyTab.id;
+    activeTabId.value = dirtyTab.id;
+    showCloseConfirm.value = true;
+    return true;
+  }
+
+  function completePendingCloseAfterSaveAll() {
+    const pendingId = pendingCloseTabId.value;
+    const batchIds = pendingBatchCloseTabIds.value?.filter((id) => tabs.value.some((tab) => tab.id === id)) ?? null;
+    const finalActiveTabId = pendingBatchCloseFinalActiveTabId.value;
+    const confirmingAppClose = isConfirmingAppClose.value;
+
+    pendingCloseTabId.value = null;
+    showCloseConfirm.value = false;
+    pendingBatchCloseTabIds.value = null;
+    pendingBatchCloseFinalActiveTabId.value = undefined;
+    isConfirmingAppClose.value = false;
+    closeConfirmContext.value = "tab";
+
+    if (confirmingAppClose) return "app" as const;
+
+    const idsToClose = batchIds ?? (pendingId ? [pendingId] : []);
+    for (const id of idsToClose) closeTab(id, { force: true });
+    if (finalActiveTabId !== undefined) {
+      activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
+    }
+    return "tabs" as const;
   }
 
   function closeOtherTabs(id: string) {
@@ -901,11 +1012,55 @@ export const useQueryStore = defineStore("query", () => {
     );
   }
 
+  function finalActiveTabAfterClosing(ids: string[]) {
+    const closingIds = new Set(ids);
+    const activeTab = activeTabId.value ? tabs.value.find((tab) => tab.id === activeTabId.value) : undefined;
+    if (activeTab && !closingIds.has(activeTab.id)) return activeTab.id;
+    return tabs.value.find((tab) => !closingIds.has(tab.id))?.id ?? null;
+  }
+
+  function closeOtherRegularTabs(id: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || tab.pinned) return;
+    beginBatchClose(
+      tabs.value.filter((item) => !item.pinned && item.id !== id).map((item) => item.id),
+      id,
+    );
+  }
+
+  function closeRegularTabs() {
+    const ids = tabs.value.filter((tab) => !tab.pinned).map((tab) => tab.id);
+    beginBatchClose(ids, finalActiveTabAfterClosing(ids));
+  }
+
+  function closeOtherFixedTabs(id: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || !tab.pinned) return;
+    beginBatchClose(
+      tabs.value.filter((item) => item.pinned && item.id !== id).map((item) => item.id),
+      id,
+    );
+  }
+
+  function closeFixedTabs() {
+    const ids = tabs.value.filter((tab) => tab.pinned).map((tab) => tab.id);
+    beginBatchClose(ids, finalActiveTabAfterClosing(ids));
+  }
+
   function closeAllTabs() {
     beginBatchClose(
       tabs.value.map((tab) => tab.id),
       null,
     );
+  }
+
+  function requestAppCloseConfirmation() {
+    if (!shouldConfirmUnsavedSqlClose.value) return false;
+    const dirtyTab = tabs.value.find((tab) => isTabDirty(tab));
+    if (!dirtyTab) return false;
+    isConfirmingAppClose.value = true;
+    showDirtyTabCloseConfirm(dirtyTab, "app");
+    return true;
   }
 
   function duplicateTab(id: string) {
@@ -2583,15 +2738,29 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId,
     showCloseConfirm,
     pendingCloseTabId,
+    closeConfirmContext,
+    closeConfirmDirtyTabIds,
+    hasDirtyTabs,
+    isConfirmingAppClose,
     createTab,
     closeTab,
     forceClosePendingTab,
+    forceCloseAllPendingTabs,
     cancelClosePendingTab,
     flushPendingPersist,
     saveAndClosePendingTab,
+    suspendCloseConfirm,
+    resumeCloseConfirm,
+    completePendingCloseAfterSaveAll,
     isTabDirty,
     markTabClean,
+    discardTabChanges,
+    requestAppCloseConfirmation,
     closeOtherTabs,
+    closeOtherRegularTabs,
+    closeRegularTabs,
+    closeOtherFixedTabs,
+    closeFixedTabs,
     closeAllTabs,
     duplicateTab,
     closeConnectionTabs,

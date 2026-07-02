@@ -304,7 +304,7 @@ fn format_pg_timestamptz(value: DateTime<Local>) -> String {
     value.to_rfc3339()
 }
 
-fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
+pub(crate) fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
     let upper = type_name.to_uppercase();
 
     if upper == "BYTEA" {
@@ -1513,7 +1513,7 @@ fn like_fuzzy_pattern(value: &str) -> String {
     })
 }
 
-fn list_objects_sql(include_timestamps: bool) -> &'static str {
+fn list_object_relations_sql(include_timestamps: bool) -> &'static str {
     if include_timestamps {
         return "SELECT c.relname AS object_name, \
        CASE c.relkind \
@@ -1531,6 +1531,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        ) AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
+       NULL::text AS signature, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -1540,21 +1541,7 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
      LEFT JOIN LATERAL pg_stat_file( \
        CASE WHEN c.relkind IN ('r','m','f','p') THEN pg_relation_filepath(c.oid) END, true \
      ) stat ON true \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
-     UNION ALL \
-     SELECT p.proname AS object_name, \
-       CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
-       obj_description(p.oid) AS object_comment, \
-       NULL::text AS created_at, \
-       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
-         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
-       NULL::text AS parent_schema, \
-       NULL::text AS parent_name, \
-       CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
-     FROM pg_catalog.pg_proc p \
-     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-     WHERE n.nspname = $1 AND p.prokind IN ('p','f') \
-     ORDER BY sort_order, object_name";
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S')";
     }
 
     "SELECT c.relname AS object_name, \
@@ -1569,36 +1556,126 @@ fn list_objects_sql(include_timestamps: bool) -> &'static str {
        NULL::text AS updated_at, \
        CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
        CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name, \
+       NULL::text AS signature, \
        CASE c.relkind WHEN 'v' THEN 1 WHEN 'm' THEN 1 WHEN 'S' THEN 4 ELSE 0 END AS sort_order \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S') \
-     UNION ALL \
-     SELECT p.proname AS object_name, \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S')"
+}
+
+fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) -> &'static str {
+    if has_proc_prokind {
+        if include_timestamps {
+            return "SELECT p.proname AS object_name, \
+       CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND p.prokind IN ('p','f')";
+        }
+
+        return "SELECT p.proname AS object_name, \
        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
        obj_description(p.oid) AS object_comment, \
        NULL::text AS created_at, \
        NULL::text AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
        CASE p.prokind WHEN 'p' THEN 2 ELSE 3 END AS sort_order \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-     WHERE n.nspname = $1 AND p.prokind IN ('p','f') \
-     ORDER BY sort_order, object_name"
+     WHERE n.nspname = $1 AND p.prokind IN ('p','f')";
+    }
+
+    if include_timestamps {
+        return "SELECT p.proname AS object_name, \
+       'FUNCTION' AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       3 AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow";
+    }
+
+    "SELECT p.proname AS object_name, \
+       'FUNCTION' AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       3 AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
+}
+
+fn list_objects_sql(include_timestamps: bool, has_proc_prokind: bool) -> String {
+    format!(
+        "{} UNION ALL {} ORDER BY sort_order, object_name",
+        list_object_relations_sql(include_timestamps),
+        list_object_routines_sql(include_timestamps, has_proc_prokind)
+    )
+}
+
+fn postgres_proc_has_prokind_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prokind' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_proc_has_prokind(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let stmt = client.prepare_cached(postgres_proc_has_prokind_sql()).await.map_err(|e| e.to_string())?;
+    let row = client.query_one(&stmt, &[]).await.map_err(|e| e.to_string())?;
+    Ok(row.get(0))
+}
+
+async fn list_objects_rows(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    include_timestamps: bool,
+    has_proc_prokind: bool,
+) -> Result<Vec<Row>, String> {
+    let sql = list_objects_sql(include_timestamps, has_proc_prokind);
+    let stmt = client.prepare_cached(&sql).await.map_err(|e| e.to_string())?;
+    client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())
 }
 
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client.prepare_cached(list_objects_sql(true)).await.map_err(|e| e.to_string())?;
-    let rows = match client.query(&stmt, &[&schema]).await {
+    let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+    let rows = match list_objects_rows(&client, schema, true, has_proc_prokind).await {
         Ok(rows) => rows,
-        Err(_) => {
-            let stmt = client.prepare_cached(list_objects_sql(false)).await.map_err(|e| e.to_string())?;
-            client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?
+        Err(primary_error) => {
+            log::debug!("[postgres][list_objects:timestamp-fallback] primary_error={}", primary_error);
+            match list_objects_rows(&client, schema, false, has_proc_prokind).await {
+                Ok(rows) => rows,
+                Err(fallback_error) => {
+                    return Err(format!("{primary_error}; timestamp fallback failed: {fallback_error}"));
+                }
+            }
         }
     };
 
@@ -1613,6 +1690,7 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             updated_at: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
             parent_schema: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
             parent_name: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+            signature: row.try_get::<_, Option<String>>(7).ok().flatten(),
         })
         .collect())
 }
@@ -3154,12 +3232,14 @@ mod tests {
 
     #[test]
     fn list_objects_sql_includes_routines() {
-        let sql = list_objects_sql(true);
+        let sql = list_objects_sql(true, true);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
         assert!(sql.contains("parent_schema"));
         assert!(sql.contains("parent_name"));
+        assert!(sql.contains("NULL::text AS signature"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(sql.contains("pc.relkind = 'p'"));
         assert!(sql.contains("pg_stat_file"));
         assert!(sql.contains("pg_xact_commit_timestamp"));
@@ -3169,7 +3249,7 @@ mod tests {
 
     #[test]
     fn list_objects_sql_without_timestamps_omits_stat_file() {
-        let sql = list_objects_sql(false);
+        let sql = list_objects_sql(false, true);
         assert!(!sql.contains("pg_stat_file"));
         assert!(sql.contains("NULL::text AS created_at"));
         assert!(sql.contains("NULL::text AS updated_at"));
@@ -3177,14 +3257,37 @@ mod tests {
 
     #[test]
     fn both_list_objects_sql_variants_use_parameter() {
-        assert!(list_objects_sql(true).contains("$1"));
-        assert!(list_objects_sql(false).contains("$1"));
+        assert!(list_objects_sql(true, true).contains("$1"));
+        assert!(list_objects_sql(false, true).contains("$1"));
+        assert!(list_objects_sql(true, false).contains("$1"));
+        assert!(list_objects_sql(false, false).contains("$1"));
     }
 
     #[test]
     fn both_list_objects_sql_variants_include_pg_proc() {
-        assert!(list_objects_sql(true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false).contains("pg_catalog.pg_proc"));
+    }
+
+    #[test]
+    fn legacy_list_objects_sql_avoids_pg11_proc_kind_column() {
+        let sql = list_objects_sql(true, false);
+        assert!(!sql.contains("p.prokind"));
+        assert!(sql.contains("NOT p.proisagg"));
+        assert!(sql.contains("NOT p.proiswindow"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
+        assert!(sql.contains("'FUNCTION' AS object_type"));
+        assert!(!sql.contains("'PROCEDURE'"));
+    }
+
+    #[test]
+    fn postgres_proc_has_prokind_sql_checks_catalog_attribute() {
+        let sql = postgres_proc_has_prokind_sql();
+        assert!(sql.contains("pg_catalog.pg_attribute"));
+        assert!(sql.contains("'pg_catalog.pg_proc'::regclass"));
+        assert!(sql.contains("attname = 'prokind'"));
     }
 
     #[test]

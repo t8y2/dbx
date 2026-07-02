@@ -5,6 +5,7 @@ import path from "path";
 
 const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
+const configuredBasePath = process.env.VITE_DBX_BASE_PATH || process.env.DBX_PUBLIC_BASE_PATH;
 const manualChunks: Record<string, string[]> = {
   codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/theme-one-dark"],
   "vue-echarts": ["vue-echarts"],
@@ -46,8 +47,21 @@ function chunkNameForModule(id: string): string | undefined {
   return undefined;
 }
 
+function normalizeViteBase(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "./";
+  if (trimmed === "." || trimmed === "./") return "./";
+  const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return withLeadingSlash.endsWith("/") ? withLeadingSlash : `${withLeadingSlash}/`;
+}
+
+const viteBase = normalizeViteBase(configuredBasePath);
+const publicBasePath = viteBase.startsWith("/") ? viteBase.replace(/\/+$/, "") : "";
+const apiProxyPath = publicBasePath ? `${publicBasePath}/api` : "/api";
+
 export default defineConfig(async () => ({
   root: __dirname,
+  base: viteBase,
   plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
@@ -76,10 +90,11 @@ export default defineConfig(async () => ({
         }
       : undefined,
     proxy: {
-      "/api": {
+      [apiProxyPath]: {
         target: "http://localhost:4224",
         changeOrigin: true,
         ws: true,
+        rewrite: publicBasePath ? (requestPath) => requestPath.slice(publicBasePath.length) || "/" : undefined,
       },
     },
     watch: {

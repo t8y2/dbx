@@ -17,37 +17,44 @@ export function isEnumColumn(columnInfo: Pick<ColumnInfo, "data_type"> | undefin
 export function enumValuesForColumn(columnInfo: Pick<ColumnInfo, "data_type"> | undefined): string[] {
   if (!isEnumColumn(columnInfo)) return [];
   const raw = columnInfo!.data_type.trim();
-  const inner = raw.match(/^enum\s*\(\s*(.+?)\s*\)\s*$/is)?.[1];
-  if (!inner) return [];
+  const match = raw.match(/^enum\s*\(/i);
+  if (!match) return [];
 
   const values: string[] = [];
-  let i = 0;
-  while (i < inner.length) {
-    // Skip whitespace and commas between values
-    while (i < inner.length && (inner[i] === " " || inner[i] === ",")) i++;
-    if (i >= inner.length) break;
+  let i = match[0].length;
+  while (i < raw.length) {
+    // MySQL may append CHARACTER SET/COLLATE after the enum value list.
+    if (raw[i] === ")") {
+      i++;
+      return i >= raw.length || /\s/.test(raw[i]) ? values : [];
+    }
 
-    if (inner[i] !== "'") break; // unexpected token
+    while (i < raw.length && (/\s/.test(raw[i]) || raw[i] === ",")) i++;
+    if (i >= raw.length) break;
+    if (raw[i] === ")") continue;
 
-    i++; // skip opening quote
+    if (raw[i] !== "'") return [];
+
+    i++;
     let value = "";
-    while (i < inner.length) {
-      if (inner[i] === "'") {
-        if (i + 1 < inner.length && inner[i + 1] === "'") {
-          // Escaped single quote: ''
+    let closed = false;
+    while (i < raw.length) {
+      if (raw[i] === "'") {
+        if (i + 1 < raw.length && raw[i + 1] === "'") {
           value += "'";
           i += 2;
         } else {
-          // Closing quote
           i++;
+          closed = true;
           break;
         }
       } else {
-        value += inner[i];
+        value += raw[i];
         i++;
       }
     }
+    if (!closed) return [];
     values.push(value);
   }
-  return values;
+  return [];
 }

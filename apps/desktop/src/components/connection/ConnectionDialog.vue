@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -32,13 +32,14 @@ import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
-import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
+import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
+import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/driverInstallProgressUi";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
 import { isSchemaAware } from "@/lib/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/oceanbaseConnectionMode";
@@ -48,7 +49,7 @@ type DbOption = { value: string; label: string };
 type DbCategory = { key: string; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 type DbPickerView = "icon" | "list";
-type ConfigTab = "connection" | "advanced" | "tls" | "transport";
+export type ConfigTab = "connection" | "advanced" | "tls" | "transport";
 type MqTokenSigningMode = "none" | "hs256" | "rs256";
 type NacosAuthKind = NacosAuthConfig["kind"];
 type DremioConnectionMode = "arrow-flight-sql" | "legacy";
@@ -97,6 +98,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
+  initialTab?: ConfigTab;
 }>();
 
 const emit = defineEmits<{
@@ -110,7 +112,16 @@ const store = useConnectionStore();
 const isTesting = ref(false);
 const isSaving = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
+const showAgentInstallDialog = ref(false);
+const agentInstallRunning = ref(false);
+const agentInstallDriverKey = ref("");
+const agentInstallLabel = ref("");
+const agentInstallProgress = ref<DriverInstallProgress | null>(null);
+const agentInstallError = ref("");
+const showConnectionErrorDialog = ref(false);
+const connectionErrorDetail = ref("");
 const editingId = ref<string | null>(null);
+const draftTestConnectionId = ref(uuid());
 const showVisibleDatabasesDialog = ref(false);
 const isLoadingVisibleDatabases = ref(false);
 const visibleDatabaseNames = ref<string[]>([]);
@@ -124,6 +135,11 @@ const visibleSchemaNames = ref<string[]>([]);
 const visibleSchemaInitialSelection = ref<string[]>([]);
 const visibleSchemaError = ref("");
 let testRunId = 0;
+let unlistenAgentInstallProgress: (() => void) | null = null;
+
+function initialConfigTab(): ConfigTab {
+  return props.initialTab ?? "connection";
+}
 
 const defaultForm = (): ConnectionForm => ({
   name: "",
@@ -321,8 +337,12 @@ const dbPickerView = ref<DbPickerView>("icon");
 const dbSearchQuery = ref("");
 const configTab = ref<ConfigTab>("connection");
 type MqAuthKind = MqAuth["kind"];
+const MQ_KAFKA_SECURITY_PROTOCOL_AUTO = "__auto";
 const mqAdminUrl = ref("http://127.0.0.1:8080");
 const mqSystemKind = ref<MqSystemKind>("pulsar");
+const mqKafkaBootstrapServers = ref("127.0.0.1:9092");
+const mqKafkaSecurityProtocol = ref(MQ_KAFKA_SECURITY_PROTOCOL_AUTO);
+const mqKafkaSaslMechanism = ref("PLAIN");
 const mqAuthKind = ref<MqAuthKind>("none");
 const mqToken = ref("");
 const mqBasicUsername = ref("");
@@ -338,6 +358,22 @@ const mqTlsSkipVerify = ref(false);
 const mqPinnedVersion = ref(pinnedVersionToSelection(undefined));
 const mqTokenSigningMode = ref<MqTokenSigningMode>("none");
 const mqTokenSigningKey = ref("");
+const mqSystemOptions: Array<{ value: MqSystemKind; label: string }> = [
+  { value: "pulsar", label: "Apache Pulsar" },
+  { value: "kafka", label: "Apache Kafka" },
+];
+const mqKafkaSecurityProtocolOptions = [
+  { value: MQ_KAFKA_SECURITY_PROTOCOL_AUTO, label: "Auto" },
+  { value: "PLAINTEXT", label: "PLAINTEXT" },
+  { value: "SSL", label: "SSL" },
+  { value: "SASL_PLAINTEXT", label: "SASL_PLAINTEXT" },
+  { value: "SASL_SSL", label: "SASL_SSL" },
+];
+const mqKafkaSaslMechanismOptions = [
+  { value: "PLAIN", label: "PLAIN" },
+  { value: "SCRAM-SHA-256", label: "SCRAM-SHA-256" },
+  { value: "SCRAM-SHA-512", label: "SCRAM-SHA-512" },
+];
 const nacosServerAddr = ref(NACOS_DEFAULT_CONSOLE_URL);
 const nacosNamespace = ref("");
 const nacosContextPath = ref("");
@@ -545,6 +581,7 @@ const driverProfiles: Record<
   },
   kylin: { type: "kylin", port: 7070, user: "ADMIN", label: "Apache Kylin", icon: "kylin" },
   sundb: { type: "sundb", port: 22000, user: "root", label: "SunDB", icon: "sundb" },
+  oscar: { type: "oscar", port: 2003, user: "SYSDBA", label: "神通 OSCAR", icon: "oscar" },
   jdbc: { type: "jdbc", port: 0, user: "", label: "JDBC", icon: "jdbc" },
   tdengine: { type: "tdengine", port: 6041, user: "root", label: "TDengine", icon: "tdengine" },
   xugu: { type: "xugu", port: 5138, user: "", label: "虚谷 XuguDB", icon: "xugu" },
@@ -552,6 +589,7 @@ const driverProfiles: Record<
   etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
   zookeeper: { type: "zookeeper", port: 2181, user: "", label: "Apache ZooKeeper", icon: "zookeeper" },
   mq: { type: "mq", port: 8080, user: "", label: "Apache Pulsar", icon: "pulsar", host: "127.0.0.1" },
+  kafka: { type: "mq", port: 9092, user: "", label: "Apache Kafka", icon: "kafka", host: "127.0.0.1" },
   nacos: { type: "nacos", port: 8848, user: "nacos", label: "Nacos", icon: "nacos", host: "127.0.0.1" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
   influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
@@ -579,6 +617,8 @@ function profileForConfig(config: ConnectionConfig) {
     if (config.driver_profile === "oceanbase-oracle") return "oceanbase";
     return config.driver_profile;
   }
+  if (config.db_type === "mq" && (config.external_config as MqAdminConfig | undefined)?.systemKind === "kafka") return "kafka";
+  if (config.db_type === "mq") return "mq";
   if (config.db_type === "dameng") return "dm";
   if (config.db_type === "oceanbase-oracle") return "oceanbase";
   return config.db_type;
@@ -588,13 +628,28 @@ function selectedProfile() {
   return driverProfiles[selectedType.value] ?? driverProfiles.mysql;
 }
 
+function mqExtraRecord(config?: Partial<MqAdminConfig>): Record<string, unknown> {
+  const extra = config?.extra;
+  return extra && typeof extra === "object" && !Array.isArray(extra) ? (extra as Record<string, unknown>) : {};
+}
+
+function mqExtraString(extra: Record<string, unknown>, key: string): string {
+  const value = extra[key];
+  return typeof value === "string" ? value : "";
+}
+
 function resetMqFields(config?: Partial<MqAdminConfig>) {
-  mqSystemKind.value = "pulsar";
-  mqAdminUrl.value = config?.adminUrl?.trim() || "http://127.0.0.1:8080";
+  const systemKind = config?.systemKind === "kafka" ? "kafka" : "pulsar";
+  const extra = mqExtraRecord(config);
+  mqSystemKind.value = systemKind;
+  mqAdminUrl.value = config?.adminUrl?.trim() || (systemKind === "kafka" ? "" : "http://127.0.0.1:8080");
+  mqKafkaBootstrapServers.value = mqExtraString(extra, "bootstrapServers") || "127.0.0.1:9092";
+  mqKafkaSecurityProtocol.value = mqExtraString(extra, "securityProtocol") || MQ_KAFKA_SECURITY_PROTOCOL_AUTO;
+  mqKafkaSaslMechanism.value = mqExtraString(extra, "saslMechanism") || "PLAIN";
   mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
   mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
   const auth = (config?.auth || { kind: "none" }) as MqAuth;
-  mqAuthKind.value = auth.kind || "none";
+  mqAuthKind.value = systemKind === "kafka" && auth.kind !== "basic" ? "none" : auth.kind || "none";
   mqToken.value = auth.token || "";
   mqBasicUsername.value = auth.username || "";
   mqBasicPassword.value = auth.password || "";
@@ -610,6 +665,16 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   mqTokenSigningKey.value = tokenSigning?.key || "";
 }
 
+function defaultMqFieldsForProfile(profile: string): Partial<MqAdminConfig> | undefined {
+  if (profile !== "kafka") return undefined;
+  return {
+    systemKind: "kafka",
+    adminUrl: "",
+    auth: { kind: "none" },
+    extra: { bootstrapServers: "127.0.0.1:9092" },
+  };
+}
+
 function hydrateMqFields(value: unknown) {
   if (!value || typeof value !== "object") {
     resetMqFields();
@@ -617,6 +682,15 @@ function hydrateMqFields(value: unknown) {
   }
   resetMqFields(value as Partial<MqAdminConfig>);
 }
+
+watch(mqSystemKind, (kind) => {
+  if (kind === "kafka") {
+    if (!mqKafkaBootstrapServers.value.trim()) mqKafkaBootstrapServers.value = "127.0.0.1:9092";
+    if (!["none", "basic"].includes(mqAuthKind.value)) mqAuthKind.value = "none";
+    return;
+  }
+  if (!mqAdminUrl.value.trim()) mqAdminUrl.value = "http://127.0.0.1:8080";
+});
 
 function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   nacosServerAddr.value = config?.serverAddr?.trim() || NACOS_DEFAULT_CONSOLE_URL;
@@ -642,6 +716,32 @@ function requireMqField(value: string, message: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(message);
   return trimmed;
+}
+
+function normalizeMqKafkaBootstrapServer(server: string): string {
+  if (server.includes("://")) {
+    throw new Error("Kafka bootstrap servers must be host:port values without a URL scheme");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(`kafka://${server}`);
+  } catch {
+    throw new Error("Kafka bootstrap servers are invalid");
+  }
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
+    throw new Error("Kafka bootstrap servers are invalid");
+  }
+  return server;
+}
+
+function normalizeMqKafkaBootstrapServers(value: string): string {
+  const servers = requireMqField(value, "Kafka bootstrap servers are required")
+    .split(",")
+    .map((server) => server.trim())
+    .filter(Boolean)
+    .map(normalizeMqKafkaBootstrapServer);
+  if (!servers.length) throw new Error("Kafka bootstrap servers are required");
+  return servers.join(",");
 }
 
 function buildMqAuth(): MqAuth {
@@ -683,8 +783,25 @@ function buildMqTokenSigning() {
 }
 
 function buildMqAdminConfig(): MqAdminConfig {
+  const systemKind = mqSystemKind.value;
+  if (systemKind === "kafka") {
+    const bootstrapServers = normalizeMqKafkaBootstrapServers(mqKafkaBootstrapServers.value);
+    const extra: Record<string, string> = { bootstrapServers };
+    const securityProtocol = mqKafkaSecurityProtocol.value === MQ_KAFKA_SECURITY_PROTOCOL_AUTO ? "" : mqKafkaSecurityProtocol.value.trim();
+    const saslMechanism = mqKafkaSaslMechanism.value.trim();
+    if (securityProtocol) extra.securityProtocol = securityProtocol;
+    if (mqAuthKind.value === "basic" && saslMechanism) extra.saslMechanism = saslMechanism;
+    return {
+      systemKind: mqSystemKind.value,
+      adminUrl: "",
+      auth: buildMqAuth(),
+      tlsSkipVerify: mqTlsSkipVerify.value || undefined,
+      extra,
+    };
+  }
+
   return {
-    systemKind: "pulsar",
+    systemKind: mqSystemKind.value,
     adminUrl: requireMqField(mqAdminUrl.value, "MQ Admin URL is required"),
     auth: buildMqAuth(),
     tlsSkipVerify: mqTlsSkipVerify.value || undefined,
@@ -757,6 +874,118 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
+  if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
+  return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
+}
+
+function installedAgentDriver(drivers: readonly AgentDriverInstallState[], key: string): AgentDriverInstallState | undefined {
+  return drivers.find((driver) => driver.db_type === key);
+}
+
+async function refreshLocalAgentDrivers(): Promise<AgentDriverInstallState[]> {
+  const drivers = await api.listInstalledAgentsLocal();
+  agentDrivers.value = drivers;
+  return drivers;
+}
+
+function beginAgentDriverInstall(driverKey: string, label: string) {
+  agentInstallDriverKey.value = driverKey;
+  agentInstallLabel.value = label;
+  agentInstallProgress.value = null;
+  agentInstallError.value = "";
+  agentInstallRunning.value = true;
+  showAgentInstallDialog.value = true;
+}
+
+function finishAgentDriverInstall() {
+  agentInstallRunning.value = false;
+  agentInstallProgress.value = null;
+  agentInstallError.value = "";
+  showAgentInstallDialog.value = false;
+}
+
+function failAgentDriverInstall(error: unknown) {
+  agentInstallRunning.value = false;
+  agentInstallError.value = errorMessage(error);
+  showAgentInstallDialog.value = true;
+}
+
+function showConnectionError(message: string) {
+  connectionErrorDetail.value = translateBackendError(t, message);
+  showConnectionErrorDialog.value = true;
+}
+
+function setAgentInstallDialogOpen(value: boolean) {
+  if (value || canCloseAgentInstallDialog.value) {
+    showAgentInstallDialog.value = value;
+  }
+}
+
+function handleAgentInstallProgress(payload: DriverInstallProgress) {
+  if (!agentInstallRunning.value || !agentInstallDriverKey.value) return;
+  if (payload.db_type && payload.db_type !== agentInstallDriverKey.value) return;
+  if (payload.step === "done" || payload.step === "all-done") {
+    agentInstallProgress.value = null;
+    return;
+  }
+  agentInstallProgress.value = payload;
+}
+
+function formatInstallSize(bytes: number): string {
+  if (!bytes) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Promise<void> {
+  const driverKey = agentDriverInstallKey(config.db_type, config.driver_profile);
+  if (!driverKey) return;
+
+  let drivers = agentDrivers.value.length ? agentDrivers.value : await refreshLocalAgentDrivers();
+  if (!showAgentDriverInstallHint(config.db_type, drivers, config.driver_profile)) return;
+  if (installedAgentDriver(drivers, driverKey)?.installed === true) return;
+
+  drivers = await refreshLocalAgentDrivers();
+  if (installedAgentDriver(drivers, driverKey)?.installed === true) return;
+
+  const label = config.driver_label || driverKey;
+  testResult.value = { ok: true, message: `Installing ${label} driver...` };
+  beginAgentDriverInstall(driverKey, label);
+  try {
+    await api.installAgent(driverKey);
+    await refreshLocalAgentDrivers();
+    finishAgentDriverInstall();
+  } catch (error) {
+    testResult.value = { ok: false, message: errorMessage(error) };
+    failAgentDriverInstall(error);
+    throw error;
+  }
+}
+
+function isSqlServerLegacyUnencryptedMode(params: string | undefined): boolean {
+  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
+  if (!normalized) return false;
+  const parsed = new URLSearchParams(normalized);
+  for (const [key, value] of parsed.entries()) {
+    if (key.trim().toLowerCase() === "sqlserverencryption") {
+      return ["disabled", "disable", "false", "0", "off"].includes(value.trim().toLowerCase());
+    }
+  }
+  return false;
+}
+
+function setSqlServerLegacyUnencryptedMode(params: string | undefined, enabled: boolean): string {
+  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
+  return setUrlParam(normalized, "sqlserverEncryption", enabled ? "disabled" : "");
+}
+
+function isSqlServerTlsHandshakeFailure(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes("sql server") && text.includes("tls") && (text.includes("handshake") || text.includes("eof") || text.includes("performing i/o"));
+}
+
 async function testConnectionWithTimeout(config: ConnectionConfig, runId: number): Promise<string> {
   const timeoutMs = connectionAttemptTimeoutMs(config);
   const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
@@ -768,7 +997,7 @@ async function testConnectionWithTimeout(config: ConnectionConfig, runId: number
     if (runId !== testRunId) return;
     testResult.value = {
       ok: false,
-      message: connectionAttemptOriginalErrorMessage(timeoutMessage, errorMessage(error)),
+      message: connectionErrorWithDriverUpdateHint(config, connectionAttemptOriginalErrorMessage(timeoutMessage, errorMessage(error))),
     };
   });
   try {
@@ -797,6 +1026,20 @@ function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
   config.host = parsed.hostname;
   config.port = port;
   config.ssl = parsed.protocol === "https:";
+}
+
+function applyMqKafkaBootstrapServers(config: LegacyConnectionConfig, bootstrapServers: string, securityProtocol?: string) {
+  const first = normalizeMqKafkaBootstrapServers(bootstrapServers).split(",")[0];
+  if (!first) throw new Error("Kafka bootstrap servers are required");
+  let parsed: URL;
+  try {
+    parsed = new URL(`kafka://${first}`);
+  } catch {
+    throw new Error("Kafka bootstrap servers are invalid");
+  }
+  config.host = parsed.hostname;
+  config.port = Number(parsed.port) || 9092;
+  config.ssl = securityProtocol === "SSL" || securityProtocol === "SASL_SSL";
 }
 
 function applyNacosServerAddr(config: LegacyConnectionConfig, serverAddr: string) {
@@ -929,7 +1172,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       applyPrestoSqlBuiltinDriverPathsIfAvailable();
     }
     if (profile.type === "mq") {
-      resetMqFields();
+      resetMqFields(defaultMqFieldsForProfile(val));
       form.value.database = undefined;
       form.value.connection_string = undefined;
     }
@@ -1046,7 +1289,7 @@ watch(
       jdbcManualClasspathOpen.value = config.db_type === "prestosql" || (config.jdbc_driver_paths || []).length > 0;
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
-      configTab.value = "connection";
+      configTab.value = initialConfigTab();
     } else {
       editingId.value = null;
       form.value = defaultForm();
@@ -1197,6 +1440,7 @@ const iconTypeMap: Record<string, string> = {
   etcd: "etcd",
   zookeeper: "zookeeper",
   mq: "mq",
+  kafka: "kafka",
   nacos: "nacos",
   dm: "dm",
   h2: "h2",
@@ -1213,6 +1457,7 @@ const iconTypeMap: Record<string, string> = {
   bigquery: "bigquery",
   kylin: "kylin",
   sundb: "sundb",
+  oscar: "oscar",
   influxdb: "influxdb",
   jdbc: "jdbc",
   custom_mysql: "mysql",
@@ -1279,11 +1524,13 @@ const dbOptions: DbOption[] = [
   { value: "bigquery", label: "BigQuery" },
   { value: "kylin", label: "Kylin" },
   { value: "sundb", label: "SunDB" },
+  { value: "oscar", label: "神通 OSCAR" },
   { value: "xugu", label: "虚谷 XuguDB" },
   { value: "iotdb", label: "Apache IoTDB" },
   { value: "etcd", label: "etcd" },
   { value: "zookeeper", label: "Apache ZooKeeper" },
   { value: "mq", label: "Apache Pulsar" },
+  { value: "kafka", label: "Apache Kafka" },
   { value: "nacos", label: "Nacos" },
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
@@ -1340,12 +1587,12 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
-const bareMysqlProfiles = new Set(["doris", "starrocks", "selectdb", "oceanbase"]);
-const supportsMysqlTlsOptions = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
+const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const mysqlTlsMode = computed({
   get: () => mysqlTlsModeFromParams(form.value.url_params, form.value.ssl),
   set: (value: string) => {
@@ -1431,7 +1678,7 @@ const listedVisibleDatabaseNames = computed(() => {
   if (visibleFilterUsesSchemas.value) return visibleDatabaseNames.value;
   const connection = connectionConfigSnapshotForVisibleDatabases();
   if (visibleDatabaseShowSystem.value) return visibleDatabaseNames.value;
-  return filterDatabaseNamesForConnection(visibleDatabaseNames.value, connection);
+  return filterDatabaseNamesForVisiblePicker(visibleDatabaseNames.value, connection);
 });
 const filteredVisibleDatabaseNames = computed(() => {
   const query = visibleDatabaseSearchText.value.trim().toLowerCase();
@@ -1482,6 +1729,25 @@ const testResultMessage = computed(() => {
   if (!testResult.value) return "";
   return testResult.value.ok ? t("connection.testSuccess") : translateBackendError(t, testResult.value.message);
 });
+const agentInstallPercent = computed(() => driverInstallProgressPercent(agentInstallProgress.value));
+const agentInstallProgressLabel = computed(() => {
+  const progress = agentInstallProgress.value;
+  if (agentInstallError.value) return "安装失败";
+  if (!agentInstallRunning.value) return "等待安装";
+  if (!progress) return "准备安装驱动...";
+  if (progress.step === "jre-extract") return "解压 JRE...";
+  const label = progress.step === "jre" ? "下载 JRE" : progress.step === "driver" ? "下载驱动" : progress.step || "安装驱动";
+  if (!progress.total) return `${label}...`;
+  return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
+});
+const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
+const sqlServerLegacyUnencryptedModeEnabled = computed({
+  get: () => form.value.db_type === "sqlserver" && isSqlServerLegacyUnencryptedMode(form.value.url_params),
+  set: (enabled: boolean) => {
+    if (form.value.db_type !== "sqlserver") return;
+    form.value.url_params = setSqlServerLegacyUnencryptedMode(form.value.url_params, enabled);
+  },
+});
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "sm:max-w-[760px]";
@@ -1492,7 +1758,9 @@ const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
 const connectionLabelTopClass = `${connectionLabelClass} mt-2`;
 const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
 const hasRequiredConnectionTarget = computed(() => {
-  if (form.value.db_type === "mq") return !!mqAdminUrl.value.trim();
+  if (form.value.db_type === "mq") {
+    return mqSystemKind.value === "kafka" ? !!mqKafkaBootstrapServers.value.trim() : !!mqAdminUrl.value.trim();
+  }
   if (form.value.db_type === "zookeeper") return !!(form.value.host || form.value.connection_string || connectionUrlInput.value.trim());
   if (form.value.db_type === "nacos") return !!nacosServerAddr.value.trim();
   if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
@@ -1544,8 +1812,9 @@ async function testConnection() {
   const runId = ++testRunId;
   isTesting.value = true;
   testResult.value = null;
-  const config = connectionConfigForSubmit(editingId.value || uuid());
+  const config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
   try {
+    await ensureRequiredAgentDriverInstalled(config);
     const msg = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
     if (config.db_type === "mongodb" && /legacy driver/i.test(msg)) {
@@ -1554,10 +1823,17 @@ async function testConnection() {
     testResult.value = { ok: true, message: msg };
   } catch (e: any) {
     if (runId !== testRunId) return;
-    const message = mongodbAuthFailureHint(String(e));
+    const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
     const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
     if (runId !== testRunId) return;
+    const shouldShowSqlServerLegacyMode = !fallbackMessage && config.db_type === "sqlserver" && !isSqlServerLegacyUnencryptedMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
+    if (shouldShowSqlServerLegacyMode) {
+      configTab.value = "advanced";
+    }
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
+    if (!fallbackMessage) {
+      showConnectionError(message);
+    }
   } finally {
     if (runId === testRunId) {
       isTesting.value = false;
@@ -1740,7 +2016,14 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   if (config.db_type === "mq") {
     const mqConfig = buildMqAdminConfig();
     config.external_config = mqConfig;
-    applyMqAdminUrl(config, mqConfig.adminUrl);
+    config.driver_profile = mqConfig.systemKind === "kafka" ? "kafka" : "pulsar";
+    config.driver_label = mqConfig.systemKind === "kafka" ? "Apache Kafka" : "Apache Pulsar";
+    if (mqConfig.systemKind === "kafka") {
+      const extra = mqExtraRecord(mqConfig);
+      applyMqKafkaBootstrapServers(config, mqExtraString(extra, "bootstrapServers"), mqExtraString(extra, "securityProtocol"));
+    } else {
+      applyMqAdminUrl(config, mqConfig.adminUrl);
+    }
     config.username = "";
     config.password = "";
     config.database = undefined;
@@ -1849,7 +2132,7 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd") {
+  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "starrocks") {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -2133,6 +2416,8 @@ function resetTestState() {
   testRunId += 1;
   isTesting.value = false;
   testResult.value = null;
+  showConnectionErrorDialog.value = false;
+  connectionErrorDetail.value = "";
 }
 
 function resetVisibleDatabaseDraftState() {
@@ -2323,6 +2608,26 @@ async function copyTestResult() {
   }
 }
 
+async function copyAgentInstallError() {
+  if (!agentInstallError.value) return;
+  try {
+    await copyToClipboard(agentInstallError.value);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyConnectionErrorDetail() {
+  if (!connectionErrorDetail.value) return;
+  try {
+    await copyToClipboard(connectionErrorDetail.value);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
@@ -2417,8 +2722,13 @@ watch(
   open,
   (value) => {
     if (!value) {
+      const draftId = editingId.value ? null : draftTestConnectionId.value;
       submittedOneTimePrefillKey.value = null;
       resetForm();
+      if (draftId) {
+        void api.disconnectDb(draftId).catch(() => undefined);
+        draftTestConnectionId.value = uuid();
+      }
       return;
     }
     if (!props.editConfig) {
@@ -2584,11 +2894,14 @@ async function save() {
   try {
     if (editingId.value) {
       const updated = connectionConfigForSubmit(editingId.value);
+      await ensureRequiredAgentDriverInstalled(updated);
       await store.updateConnection(updated);
       store.stopEditing();
     } else {
-      const config = connectionConfigForSubmit(uuid());
+      const config = connectionConfigForSubmit(draftTestConnectionId.value);
+      await ensureRequiredAgentDriverInstalled(config);
       await store.addConnection(config);
+      draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
         open.value = false;
         return;
@@ -2609,7 +2922,9 @@ async function save() {
     }
     open.value = false;
   } catch (e: any) {
-    testResult.value = { ok: false, message: mongodbAuthFailureHint(String(e?.message || e)) };
+    const message = mongodbAuthFailureHint(String(e?.message || e));
+    testResult.value = { ok: false, message };
+    showConnectionError(message);
   } finally {
     isSaving.value = false;
   }
@@ -2878,6 +3193,15 @@ function onJdbcDriverSelect(id: any) {
   addJdbcDriverPaths(item.paths);
   jdbcManualClasspathOpen.value = false;
 }
+
+onMounted(async () => {
+  unlistenAgentInstallProgress = await api.listenAgentInstallProgress(handleAgentInstallProgress);
+});
+
+onUnmounted(() => {
+  unlistenAgentInstallProgress?.();
+  unlistenAgentInstallProgress = null;
+});
 
 function openExternalUrl(url: string) {
   if (isTauriRuntime()) {
@@ -3261,27 +3585,57 @@ function openExternalUrl(url: string) {
                 <!-- Message Queue: admin URL and auth -->
                 <template v-else-if="form.db_type === 'mq'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelClass">Admin URL</Label>
-                    <Input v-model="mqAdminUrl" class="col-span-3" placeholder="http://127.0.0.1:8080" />
-                  </div>
-                  <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">System</Label>
-                    <div class="col-span-3 h-9 rounded-md border border-input bg-muted px-3 py-2 text-sm text-muted-foreground">Apache Pulsar</div>
+                    <Select v-model="mqSystemKind">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="option in mqSystemOptions" :key="option.value" :value="option.value">
+                          {{ option.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
+                  <template v-if="mqSystemKind === 'kafka'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Bootstrap Servers</Label>
+                      <Input v-model="mqKafkaBootstrapServers" class="col-span-3" placeholder="127.0.0.1:9092" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Security</Label>
+                      <Select v-model="mqKafkaSecurityProtocol">
+                        <SelectTrigger class="col-span-3 h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="option in mqKafkaSecurityProtocolOptions" :key="option.value" :value="option.value">
+                            {{ option.label }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Admin URL</Label>
+                      <Input v-model="mqAdminUrl" class="col-span-3" placeholder="http://127.0.0.1:8080" />
+                    </div>
+                  </template>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">Auth</Label>
                     <div class="col-span-3 flex flex-wrap gap-2">
                       <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">None</Button>
-                      <Button size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">Token</Button>
+                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">Token</Button>
                       <Button size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">Basic</Button>
-                      <Button size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">API Key</Button>
-                      <Button size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">OAuth2</Button>
+                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">API Key</Button>
+                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">OAuth2</Button>
                     </div>
                   </div>
                   <template v-if="mqAuthKind === 'token'">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">Token</Label>
-                      <Input v-model="mqToken" type="password" class="col-span-3" />
+                      <PasswordInput v-model="mqToken" class="col-span-3" />
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'basic'">
@@ -3291,7 +3645,20 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
-                      <Input v-model="mqBasicPassword" type="password" class="col-span-3" />
+                      <PasswordInput v-model="mqBasicPassword" class="col-span-3" />
+                    </div>
+                    <div v-if="mqSystemKind === 'kafka'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">SASL Mechanism</Label>
+                      <Select v-model="mqKafkaSaslMechanism">
+                        <SelectTrigger class="col-span-3 h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="option in mqKafkaSaslMechanismOptions" :key="option.value" :value="option.value">
+                            {{ option.label }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'apiKey'">
@@ -3301,7 +3668,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">Value</Label>
-                      <Input v-model="mqApiKeyValue" type="password" class="col-span-3" />
+                      <PasswordInput v-model="mqApiKeyValue" class="col-span-3" />
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'oauth2'">
@@ -3315,7 +3682,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">Client Secret</Label>
-                      <Input v-model="mqOauthClientSecret" type="password" class="col-span-3" />
+                      <PasswordInput v-model="mqOauthClientSecret" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">Audience</Label>
@@ -3333,7 +3700,7 @@ function openExternalUrl(url: string) {
                       <span class="text-xs text-muted-foreground">Skip certificate verification</span>
                     </label>
                   </div>
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="mqSystemKind !== 'kafka'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">Pinned Version</Label>
                     <Select v-model="mqPinnedVersion">
                       <SelectTrigger class="col-span-3 h-9">
@@ -3349,7 +3716,7 @@ function openExternalUrl(url: string) {
                       </SelectContent>
                     </Select>
                   </div>
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="mqSystemKind !== 'kafka'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">Broker Token 签发</Label>
                     <Select v-model="mqTokenSigningMode">
                       <SelectTrigger class="col-span-3 h-9">
@@ -3362,7 +3729,7 @@ function openExternalUrl(url: string) {
                       </SelectContent>
                     </Select>
                   </div>
-                  <div v-if="mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
+                  <div v-if="mqSystemKind !== 'kafka' && mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
                     <Label class="pt-2 text-right">签发密钥</Label>
                     <textarea
                       v-model="mqTokenSigningKey"
@@ -3370,7 +3737,7 @@ function openExternalUrl(url: string) {
                       :placeholder="mqTokenSigningMode === 'hs256' ? 'Broker SECRET' : '-----BEGIN PRIVATE KEY-----'"
                     />
                   </div>
-                  <div v-if="mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
+                  <div v-if="mqSystemKind !== 'kafka' && mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
                     <span />
                     <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">按 Broker 的 jwt.broker.token.mode 选择：SECRET 使用 HS256，PRIVATE 使用 RS256。密钥会走连接 secret 存储。</p>
                   </div>
@@ -4119,6 +4486,18 @@ function openExternalUrl(url: string) {
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
                   </label>
                 </div>
+                <div v-show="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyUnencryptedMode") }}</Label>
+                  <div class="col-span-3 flex flex-col gap-1">
+                    <label class="flex h-5 cursor-pointer items-center gap-2">
+                      <input type="checkbox" v-model="sqlServerLegacyUnencryptedModeEnabled" class="mr-0" />
+                      <span class="text-xs text-foreground">{{ t("connection.sqlServerLegacyUnencryptedModeEnable") }}</span>
+                    </label>
+                    <p class="m-0 whitespace-pre-line text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.sqlServerLegacyUnencryptedModeHint") }}
+                    </p>
+                  </div>
+                </div>
                 <div v-show="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
                   <div class="col-span-3 flex flex-col gap-1">
@@ -4140,7 +4519,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0">
               <div class="connection-form-body grid gap-4 py-4 pr-2 max-h-[65vh] overflow-y-auto">
-                <div class="grid grid-cols-4 items-start gap-4">
+                <div class="connection-label-wide-grid grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.sshHops") }}</Label>
                   <div class="col-span-3 grid gap-3">
                     <div class="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
@@ -4348,6 +4727,65 @@ function openExternalUrl(url: string) {
     </DialogContent>
   </Dialog>
 
+  <Dialog :open="showAgentInstallDialog" @update:open="setAgentInstallDialogOpen">
+    <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent @escape-key-down.prevent>
+      <DialogHeader>
+        <DialogTitle>{{ agentInstallError ? "驱动安装失败" : "正在安装驱动" }}</DialogTitle>
+      </DialogHeader>
+
+      <div class="space-y-4">
+        <div class="rounded-lg border bg-muted/20 p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="truncate text-sm font-medium">{{ agentInstallLabel || agentInstallDriverKey }}</div>
+              <div class="mt-1 text-xs text-muted-foreground">{{ agentInstallProgressLabel }}</div>
+            </div>
+            <Loader2 v-if="agentInstallRunning && !agentInstallError" class="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+          </div>
+          <div v-if="!agentInstallError" class="mt-4 h-2 overflow-hidden rounded-full bg-muted">
+            <div class="h-full rounded-full bg-primary transition-all" :class="{ 'animate-pulse': agentInstallPercent === null }" :style="{ width: `${agentInstallPercent ?? 35}%` }" />
+          </div>
+        </div>
+
+        <div v-if="agentInstallError" class="space-y-2">
+          <div class="text-sm font-medium text-destructive">完整错误</div>
+          <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
+        </div>
+      </div>
+
+      <DialogFooter class="gap-2">
+        <Button v-if="agentInstallError" variant="outline" @click="copyAgentInstallError">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          复制错误
+        </Button>
+        <Button :disabled="!canCloseAgentInstallDialog" @click="showAgentInstallDialog = false">
+          {{ agentInstallError ? "关闭" : "安装中..." }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showConnectionErrorDialog">
+    <DialogContent class="sm:max-w-[560px]">
+      <DialogHeader>
+        <DialogTitle>连接失败</DialogTitle>
+      </DialogHeader>
+
+      <div class="space-y-2">
+        <div class="text-sm text-muted-foreground">完整错误信息</div>
+        <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
+      </div>
+
+      <DialogFooter class="gap-2">
+        <Button variant="outline" @click="copyConnectionErrorDetail">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          复制错误
+        </Button>
+        <Button @click="showConnectionErrorDialog = false">关闭</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
   <Dialog v-model:open="showVisibleDatabasesDialog">
     <DialogContent class="sm:max-w-[460px]">
       <DialogHeader>
@@ -4450,5 +4888,9 @@ function openExternalUrl(url: string) {
 .connection-dialog-content[data-wide="true"] .connection-form-body {
   width: min(100%, 36rem);
   margin-inline: auto;
+}
+
+.connection-dialog-content .grid.grid-cols-4.connection-label-wide-grid {
+  grid-template-columns: 7.75rem repeat(3, minmax(0, 1fr));
 }
 </style>

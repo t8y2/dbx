@@ -64,6 +64,25 @@ export interface DataGridColumnValueFilterConditionOptions {
   rawValue: string;
 }
 
+export interface DataGridColumnValuesFilterConditionOptions {
+  databaseType?: DatabaseType;
+  columnName: string;
+  columnInfo?: DataGridColumnInfo;
+  values: GridCellValue[];
+}
+
+export interface DataGridColumnDistinctValuesSqlOptions {
+  databaseType?: DatabaseType;
+  schema?: string;
+  tableName: string;
+  columnName: string;
+  columnInfo?: DataGridColumnInfo;
+  whereInput?: string;
+  searchValue?: string;
+  limit?: number;
+  includeCounts?: boolean;
+}
+
 export interface DataGridCountSqlOptions {
   databaseType?: DatabaseType;
   schema?: string;
@@ -91,6 +110,14 @@ export function buildDataGridContextFilterCondition(options: DataGridContextFilt
 
 export function buildDataGridColumnValueFilterCondition(options: DataGridColumnValueFilterConditionOptions): Promise<string | undefined> {
   return api.buildDataGridColumnValueFilterCondition(options);
+}
+
+export function buildDataGridColumnValuesFilterCondition(options: DataGridColumnValuesFilterConditionOptions): Promise<string | undefined> {
+  return api.buildDataGridColumnValuesFilterCondition(options);
+}
+
+export function buildDataGridColumnDistinctValuesSql(options: DataGridColumnDistinctValuesSqlOptions): Promise<string> {
+  return api.buildDataGridColumnDistinctValuesSql(options);
 }
 
 export function buildDataGridCountSql(options: DataGridCountSqlOptions): Promise<string> {

@@ -3,6 +3,7 @@ import type { QueryResult } from "@/types/database";
 export interface MongoFindCommand {
   collection: string;
   filter: string;
+  projection?: string;
   skip: number;
   limit: number;
   sort?: string;
@@ -26,7 +27,37 @@ export interface MongoUseCommand {
   database: string;
 }
 
-export type MongoWriteCommand = { kind: "insert"; collection: string; docsJson: string } | { kind: "update"; collection: string; filter: string; update: string; many: boolean } | { kind: "delete"; collection: string; filter: string; many: boolean };
+export interface MongoVersionCommand {
+  kind: "version";
+}
+
+type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes";
+
+export type MongoCommand =
+  | ({ kind: "find" } & MongoFindCommand)
+  | MongoVersionCommand
+  | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
+  | ({ kind: "aggregate" } & MongoAggregateCommand)
+  | ({ kind: "getIndexes" } & MongoGetIndexesCommand)
+  | ({ kind: "use" } & MongoUseCommand)
+  | { kind: "insert"; collection: string; docsJson: string }
+  | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
+  | { kind: "delete"; collection: string; filter: string; many: boolean }
+  | { kind: "createIndex"; collection: string; keys: string; options?: string }
+  | { kind: "dropIndex"; collection: string; index: string }
+  | { kind: "dropIndexes"; collection: string; indexes?: string };
+
+export type MongoWriteCommand = Extract<MongoCommand, { kind: MongoWriteKind }>;
+
+export interface ParsedMongoCommand {
+  text: string;
+  command: MongoCommand;
+}
+
+export interface ParsedMongoCommandRange extends ParsedMongoCommand {
+  from: number;
+  to: number;
+}
 
 export interface MongoAggregateSafetyOptions {
   allowWrites?: boolean;
@@ -45,8 +76,15 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   if (findCloseIndex < 0) return null;
 
   const findArgs = splitTopLevel(source.slice(findOpenIndex + 1, findCloseIndex));
+  if (findArgs.length > 2 && findArgs.slice(2).some((arg) => arg.trim())) return null;
   const filter = normalizeJsonArgument(findArgs[0] || "{}");
   if (!filter) return null;
+  let projection: string | undefined;
+  if (findArgs[1]?.trim()) {
+    const parsedProjection = normalizeJsonArgument(findArgs[1]);
+    if (!parsedProjection) return null;
+    projection = parsedProjection;
+  }
 
   const chain = source.slice(findCloseIndex + 1).trim();
   if (chain && !chain.startsWith(".")) return null;
@@ -66,6 +104,7 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   return {
     collection: target.collection,
     filter,
+    ...(projection ? { projection } : {}),
     skip,
     limit,
     sort,
@@ -143,6 +182,11 @@ export function parseMongoUseCommand(input: string): MongoUseCommand | null {
   };
 }
 
+export function parseMongoVersionCommand(input: string): MongoVersionCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  return /^db\s*\.\s*version\s*\(\s*\)$/i.test(source) ? { kind: "version" } : null;
+}
+
 export function parseMongoWriteCommand(input: string): MongoWriteCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   const insertOne = parseCollectionMethodTarget(source, "insertOne");
@@ -183,7 +227,119 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return { kind: "delete", collection: target.collection, filter, many: method === "deleteMany" };
   }
 
+  const createIndex = parseCollectionMethodTarget(source, "createIndex");
+  if (createIndex) {
+    const args = parseMethodArgs(source, createIndex.methodCallIndex);
+    if (!args || args.length < 1 || args.length > 2) return null;
+    const keys = normalizeJsonArgument(args[0]);
+    if (!keys) return null;
+    let options: string | undefined;
+    if (args[1]?.trim()) {
+      const parsedOptions = normalizeJsonArgument(args[1]);
+      if (!parsedOptions) return null;
+      options = parsedOptions;
+    }
+    return { kind: "createIndex", collection: createIndex.collection, keys, ...(options ? { options } : {}) };
+  }
+
+  const dropIndex = parseCollectionMethodTarget(source, "dropIndex");
+  if (dropIndex) {
+    const args = parseMethodArgs(source, dropIndex.methodCallIndex);
+    if (!args) return null;
+    const index = parseMongoDropIndexArgument(args);
+    return index ? { kind: "dropIndex", collection: dropIndex.collection, index } : null;
+  }
+
+  const dropIndexes = parseCollectionMethodTarget(source, "dropIndexes");
+  if (dropIndexes) {
+    const args = parseMethodArgs(source, dropIndexes.methodCallIndex);
+    if (!args) return null;
+    const indexes = parseMongoDropIndexesArgument(args);
+    return indexes !== null ? { kind: "dropIndexes", collection: dropIndexes.collection, ...(indexes ? { indexes } : {}) } : null;
+  }
+
   return null;
+}
+
+export function parseMongoCommand(input: string): ParsedMongoCommand | null {
+  const text = trimMongoOuterComments(input);
+  if (!text) return null;
+
+  // Keep the more specific readers ahead of generic write parsing so the
+  // returned kind matches the result renderer we want to use downstream.
+  const parsers: Array<(source: string) => MongoCommand | null> = [
+    (source) => {
+      const find = parseMongoFindCommand(source);
+      return find ? { kind: "find", ...find } : null;
+    },
+    (source) => {
+      const version = parseMongoVersionCommand(source);
+      return version ?? null;
+    },
+    (source) => {
+      const count = parseMongoCountDocumentsCommand(source);
+      return count ? { kind: "countDocuments", ...count } : null;
+    },
+    (source) => {
+      const aggregate = parseMongoAggregateCommand(source);
+      return aggregate ? { kind: "aggregate", ...aggregate } : null;
+    },
+    (source) => {
+      const getIndexes = parseMongoGetIndexesCommand(source);
+      return getIndexes ? { kind: "getIndexes", ...getIndexes } : null;
+    },
+    (source) => {
+      const write = parseMongoWriteCommand(source);
+      return write ?? null;
+    },
+    (source) => {
+      const use = parseMongoUseCommand(source);
+      return use ? { kind: "use", ...use } : null;
+    },
+  ];
+
+  for (const parse of parsers) {
+    const command = parse(text);
+    if (command) return { text, command };
+  }
+
+  return null;
+}
+
+export function splitMongoCommands(input: string): ParsedMongoCommand[] {
+  return splitMongoCommandRanges(input).map(({ from: _from, to: _to, ...command }) => command);
+}
+
+export function splitMongoCommandRanges(input: string): ParsedMongoCommandRange[] {
+  const commands: ParsedMongoCommandRange[] = [];
+  for (const segment of splitMongoCommandTextRanges(input)) {
+    const parsed = parseMongoCommand(segment.text);
+    if (!parsed) return [];
+    commands.push({ from: segment.from, to: segment.to, ...parsed });
+  }
+  return commands;
+}
+
+export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: MongoAggregateSafetyOptions): { allowed: boolean; reason?: string } {
+  if (!options.allowWrites) {
+    return {
+      allowed: false,
+      reason: "MCP MongoDB execution is read-only by default. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.",
+    };
+  }
+  if (!options.allowDangerous && (command.kind === "update" || command.kind === "delete") && isEmptyJsonObject(command.filter)) {
+    return {
+      allowed: false,
+      reason: "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
+    };
+  }
+  if (!options.allowDangerous && mongoDropIndexesRequiresDangerous(command)) {
+    return {
+      allowed: false,
+      reason: "MongoDB dropIndexes() without a specific single index requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
+    };
+  }
+  return { allowed: true };
 }
 
 export function mongoAggregateWriteStage(pipelineJson: string): "$out" | "$merge" | null {
@@ -264,11 +420,38 @@ export function mongoWriteToQueryResult(affectedRows: number, executionTimeMs: n
   };
 }
 
+export function mongoCreateIndexToQueryResult(name: string, executionTimeMs: number): QueryResult {
+  return {
+    columns: ["name"],
+    rows: [[name]],
+    affected_rows: 1,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
+export function mongoDroppedIndexesToQueryResult(names: string[], executionTimeMs: number): QueryResult {
+  return {
+    columns: ["name"],
+    rows: names.map((name) => [name]),
+    affected_rows: names.length,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
 export function mongoUseToQueryResult(database: string, executionTimeMs: number): QueryResult {
   return {
     columns: ["message"],
     rows: [[`switched to db ${database}`]],
     affected_rows: 0,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
+export function mongoVersionToQueryResult(version: string, executionTimeMs: number): QueryResult {
+  return {
+    columns: ["version"],
+    rows: [[version]],
+    affected_rows: 1,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
   };
 }
@@ -343,6 +526,263 @@ function parseMethodArgs(source: string, methodCallIndex: number): string[] | nu
   return splitTopLevel(source.slice(openIndex + 1, closeIndex));
 }
 
+interface MongoTextRange {
+  from: number;
+  to: number;
+  text: string;
+}
+
+function splitMongoCommandTextRanges(input: string): MongoTextRange[] {
+  const commands: MongoTextRange[] = [];
+  for (const segment of splitMongoSemicolonSeparatedSegments(input)) {
+    const parsed = parseMongoCommand(segment.text);
+    if (parsed) {
+      commands.push({ ...segment, text: parsed.text });
+      continue;
+    }
+
+    // Mongo shell users often omit semicolons and rely on one top-level
+    // command per line, so fall back to a conservative newline split.
+    const softSplit = splitMongoSegmentAtSoftStarts(segment);
+    if (softSplit.length > 1) {
+      commands.push(...softSplit);
+      continue;
+    }
+
+    commands.push(segment);
+  }
+  return commands;
+}
+
+function splitMongoSemicolonSeparatedSegments(input: string): MongoTextRange[] {
+  const segments: MongoTextRange[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  // Respect semicolons only when they appear at the top level; JSON literals,
+  // strings and comments are allowed to contain semicolons verbatim.
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i] ?? "";
+    const next = input[i + 1] ?? "";
+
+    if (lineComment) {
+      if (char === "\n") lineComment = false;
+      continue;
+    }
+
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    else if ((char === "}" || char === "]" || char === ")") && depth > 0) depth -= 1;
+    else if (char === ";" && depth === 0) {
+      pushMongoSegment(segments, input, start, i);
+      start = i + 1;
+    }
+  }
+
+  pushMongoSegment(segments, input, start, input.length);
+  return segments;
+}
+
+function splitMongoSegmentAtSoftStarts(segment: MongoTextRange): MongoTextRange[] {
+  const boundaries = mongoTopLevelCommandLineStarts(segment.text);
+  if (boundaries.length <= 1) return [segment];
+
+  const segments: MongoTextRange[] = [];
+  let start = boundaries[0] ?? 0;
+  for (let index = 1; index < boundaries.length; index += 1) {
+    const boundary = boundaries[index] ?? 0;
+    const candidate = trimMongoOuterCommentRange(segment.text, start, boundary);
+    // Only accept newline-based splitting when every slice is a valid command;
+    // otherwise keep the original text intact and let normal parsing reject it.
+    if (!candidate || !parseMongoCommand(candidate.text)) return [segment];
+    segments.push({
+      from: segment.from + candidate.from,
+      to: segment.from + candidate.to,
+      text: candidate.text,
+    });
+    start = boundary;
+  }
+
+  const last = trimMongoOuterCommentRange(segment.text, start, segment.text.length);
+  if (!last || !parseMongoCommand(last.text)) return [segment];
+  segments.push({
+    from: segment.from + last.from,
+    to: segment.from + last.to,
+    text: last.text,
+  });
+  return segments;
+}
+
+function mongoTopLevelCommandLineStarts(segment: string): number[] {
+  const starts: number[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  let lineStart = 0;
+  let firstNonWhitespaceOnLine = -1;
+
+  for (let i = 0; i < segment.length; i += 1) {
+    const char = segment[i] ?? "";
+    const next = segment[i + 1] ?? "";
+
+    if (char === "\n") {
+      if (lineComment) lineComment = false;
+      lineStart = i + 1;
+      firstNonWhitespaceOnLine = -1;
+      continue;
+    }
+
+    if (lineComment) continue;
+
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      if (firstNonWhitespaceOnLine === -1 && !/\s/.test(char)) firstNonWhitespaceOnLine = i;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    else if ((char === "}" || char === "]" || char === ")") && depth > 0) depth -= 1;
+
+    if (firstNonWhitespaceOnLine === -1 && !/\s/.test(char)) {
+      firstNonWhitespaceOnLine = i;
+      if (depth === 0 && char !== "." && isMongoCommandLineStart(segment, i)) starts.push(i);
+    }
+  }
+
+  return starts.length > 0 ? starts : [lineStart];
+}
+
+function isMongoCommandLineStart(segment: string, index: number): boolean {
+  const rest = segment.slice(index);
+  return /^use\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
+}
+
+function pushMongoSegment(segments: MongoTextRange[], source: string, from: number, to: number) {
+  const trimmed = trimMongoOuterCommentRange(source, from, to);
+  if (trimmed) segments.push(trimmed);
+}
+
+function trimMongoOuterComments(source: string): string {
+  let value = source.trim();
+  while (value) {
+    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    if (next === value) break;
+    value = next.trimStart();
+  }
+  while (value) {
+    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
+    if (next === value) break;
+    value = next.trimEnd();
+  }
+  return value.trim();
+}
+
+function trimMongoOuterCommentRange(source: string, from: number, to: number): MongoTextRange | null {
+  let start = from;
+  let end = to;
+
+  while (start < end) {
+    const value = source.slice(start, end);
+    const trimmed = value.trimStart();
+    if (trimmed !== value) {
+      start += value.length - trimmed.length;
+      continue;
+    }
+    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    if (next !== value) {
+      start += value.length - next.length;
+      continue;
+    }
+    break;
+  }
+
+  while (start < end) {
+    const value = source.slice(start, end);
+    const trimmed = value.trimEnd();
+    if (trimmed !== value) {
+      end -= value.length - trimmed.length;
+      continue;
+    }
+    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
+    if (next !== value) {
+      end -= value.length - next.length;
+      continue;
+    }
+    break;
+  }
+
+  if (start >= end) return null;
+  return {
+    from: start,
+    to: end,
+    text: source.slice(start, end),
+  };
+}
+
 function convertSingleQuotedStrings(source: string): string {
   let result = "";
   let copiedUntil = 0;
@@ -387,6 +827,26 @@ function convertSingleQuotedStrings(source: string): string {
   }
 
   return quote === "'" ? source : result + source.slice(copiedUntil);
+}
+
+function parseMongoDropIndexArgument(args: string[]): string | null {
+  if (args.length !== 1 || !args[0]?.trim()) return null;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return parsed === "*" ? null : normalized;
+  return isNonEmptyRecord(parsed) ? normalized : null;
+}
+
+function parseMongoDropIndexesArgument(args: string[]): string | undefined | null {
+  if (args.length !== 1) return null;
+  if (!args[0]?.trim()) return undefined;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return normalized;
+  if (isNonEmptyRecord(parsed)) return normalized;
+  return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string") ? normalized : null;
 }
 
 export function quoteUnquotedObjectKeys(source: string): string {
@@ -520,6 +980,31 @@ function findMatchingParen(source: string, openIndex: number): number {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseNormalizedJson(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function isEmptyJsonObject(json: string): boolean {
+  const parsed = parseNormalizedJson(json);
+  return isRecord(parsed) && Object.keys(parsed).length === 0;
+}
+
+function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean {
+  if (command.kind !== "dropIndexes") return false;
+  if (!command.indexes) return true;
+  const parsed = parseNormalizedJson(command.indexes);
+  if (parsed === "*") return true;
+  return Array.isArray(parsed) && parsed.length > 1;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -35,7 +35,17 @@ import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
 import type { QueryEditability } from "@/lib/sqlAnalysis";
-import type { DataGridColumnValueFilterConditionOptions, DataGridContextFilterConditionOptions, DataGridCountSqlOptions, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridSaveStatementOptions, HiveTablePropertiesSqlOptions } from "@/lib/dataGridSql";
+import type {
+  DataGridColumnDistinctValuesSqlOptions,
+  DataGridColumnValueFilterConditionOptions,
+  DataGridColumnValuesFilterConditionOptions,
+  DataGridContextFilterConditionOptions,
+  DataGridCountSqlOptions,
+  DataGridCopyInsertStatementOptions,
+  DataGridCopyUpdateStatementOptions,
+  DataGridSaveStatementOptions,
+  HiveTablePropertiesSqlOptions,
+} from "@/lib/dataGridSql";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataCompare";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schemaDiff";
 import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, TableStructureChangeSql } from "@/lib/tableStructureEditorSql";
@@ -45,7 +55,7 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/dbAdminSql";
+import type { DatabaseNameSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/databaseExport";
 
 export interface AgentDriverInfo {
@@ -56,6 +66,7 @@ export interface AgentDriverInfo {
   installed: boolean;
   installed_version: string | null;
   update_available: boolean;
+  requires_java_runtime?: boolean;
   jre: string;
   jre_installed: boolean;
 }
@@ -264,7 +275,6 @@ export interface AiCompletionRequest {
   messages: AiMessage[];
   taskContract?: AiTaskContract;
   maxTokens?: number;
-  temperature?: number;
 }
 
 export interface AiModelInfo {
@@ -328,6 +338,14 @@ export async function saveAiConfig(config: AiConfig): Promise<void> {
   return invoke("save_ai_config", { config });
 }
 
+export async function saveAiProviderConfig(provider: string, config: AiConfig): Promise<void> {
+  return invoke("save_ai_provider_config", { provider, config });
+}
+
+export async function loadAiProviderConfigs(): Promise<Record<string, AiConfig>> {
+  return invoke("load_ai_provider_configs");
+}
+
 export async function aiTestConnection(config: AiConfig): Promise<AiTestConnectionResult> {
   return invoke("ai_test_connection", { config });
 }
@@ -350,6 +368,14 @@ export async function loadDesktopSettings(): Promise<DesktopSettings> {
 
 export async function saveDesktopSettings(settings: DesktopSettings): Promise<void> {
   return invoke("save_desktop_settings", { settings });
+}
+
+export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
+  return invoke("complete_app_close", { action });
+}
+
+export async function requestAppClose(): Promise<void> {
+  return invoke("request_app_close_from_window_controls");
 }
 
 export interface DriverStoreMigrationResult {
@@ -604,6 +630,7 @@ export async function executeMulti(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
+    useTransaction?: boolean;
   },
 ): Promise<QueryResult[]> {
   return invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
@@ -635,6 +662,22 @@ export async function executeScript(connectionId: string, database: string, sql:
 
 export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
   return invoke("execute_in_transaction", { connectionId, database, statements, schema });
+}
+
+export async function beginManualTransaction(connectionId: string, database: string, schema?: string): Promise<string> {
+  return invoke("begin_manual_transaction", { connectionId, database, schema });
+}
+
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number): Promise<QueryResult[]> {
+  return invoke("execute_in_manual_transaction", { txnSessionId, sql, database, schema, maxRows });
+}
+
+export async function commitManualTransaction(txnSessionId: string): Promise<QueryResult> {
+  return invoke("commit_manual_transaction", { txnSessionId });
+}
+
+export async function rollbackManualTransaction(txnSessionId: string): Promise<QueryResult> {
+  return invoke("rollback_manual_transaction", { txnSessionId });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -736,6 +779,10 @@ export async function buildDuplicateTableStructureSql(options: DuplicateTableStr
   return invoke("build_duplicate_table_structure_sql", { options });
 }
 
+export async function buildCopyTableDataSql(options: CopyTableDataSqlOptions): Promise<string> {
+  return invoke("build_copy_table_data_sql", { options });
+}
+
 export async function buildExecutableObjectSourceStatements(input: BuildEditableObjectSourceSqlInput): Promise<string[]> {
   return invoke("build_executable_object_source_statements", { input });
 }
@@ -800,6 +847,15 @@ export async function buildDataGridContextFilterCondition(options: DataGridConte
 export async function buildDataGridColumnValueFilterCondition(options: DataGridColumnValueFilterConditionOptions): Promise<string | undefined> {
   const result = await invoke<string | null>("build_data_grid_column_value_filter_condition", { options });
   return result ?? undefined;
+}
+
+export async function buildDataGridColumnValuesFilterCondition(options: DataGridColumnValuesFilterConditionOptions): Promise<string | undefined> {
+  const result = await invoke<string | null>("build_data_grid_column_values_filter_condition", { options });
+  return result ?? undefined;
+}
+
+export async function buildDataGridColumnDistinctValuesSql(options: DataGridColumnDistinctValuesSqlOptions): Promise<string> {
+  return invoke("build_data_grid_column_distinct_values_sql", { options });
 }
 
 export async function buildDataGridCountSql(options: DataGridCountSqlOptions): Promise<string> {
@@ -1117,11 +1173,13 @@ export interface UpdateDownloadProgress {
 export interface McpServerStatus {
   installed: boolean;
   npm_available: boolean;
+  node_path: string | null;
   node_version: string | null;
   current_version: string | null;
   latest_version: string | null;
   update_available: boolean;
   bin_path: string | null;
+  script_path: string | null;
   install_command: string;
   update_command: string;
   error: string | null;
@@ -1306,6 +1364,11 @@ export async function redisPubSubPublish(connectionId: string, db: number, chann
   return invoke("redis_pubsub_publish", { connectionId, db, channel, message });
 }
 
+export async function redisPubSubConnect(connectionId: string): Promise<WebSocket> {
+  const port = await invoke<number>("redis_pubsub_server_port");
+  return new WebSocket(`ws://127.0.0.1:${port}/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`);
+}
+
 export async function redisSlowlogGet(connectionId: string, count: number, nodeHost?: string, nodePort?: number): Promise<RedisSlowlogEntry[]> {
   return invoke("redis_slowlog_get", { connectionId, count, nodeHost, nodePort });
 }
@@ -1421,12 +1484,24 @@ export interface MongoDocumentResult {
   total: number;
 }
 
+export async function documentListDatabases(connectionId: string): Promise<string[]> {
+  return invoke("document_list_databases", { connectionId });
+}
+
 export async function mongoListDatabases(connectionId: string): Promise<string[]> {
-  return invoke("mongo_list_databases", { connectionId });
+  return documentListDatabases(connectionId);
+}
+
+export async function documentListCollections(connectionId: string, database: string): Promise<CollectionInfo[]> {
+  return invoke("document_list_collections", { connectionId, database });
 }
 
 export async function mongoListCollections(connectionId: string, database: string): Promise<CollectionInfo[]> {
-  return invoke("mongo_list_collections", { connectionId, database });
+  return documentListCollections(connectionId, database);
+}
+
+export async function vectorGetCollectionDetail(connectionId: string, database: string, collection: string): Promise<CollectionInfo> {
+  return invoke("vector_collection_detail", { connectionId, database, collection });
 }
 
 export async function mongoCreateDatabase(connectionId: string, database: string): Promise<void> {
@@ -1442,28 +1517,44 @@ export async function mongoDropCollection(connectionId: string, database: string
 }
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
-  const collections = await mongoListCollections(connectionId, "default");
+  const collections = await documentListCollections(connectionId, "default");
   return collections.map((c) => c.name);
 }
 
-export async function vectorListCollections(connectionId: string): Promise<CollectionInfo[]> {
-  return mongoListCollections(connectionId, "default");
+export async function vectorListCollections(connectionId: string, database?: string): Promise<CollectionInfo[]> {
+  return documentListCollections(connectionId, database || "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
-  return invoke("mongo_find_documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, executionId);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
-  return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
+}
+
+export async function mongoServerVersion(connectionId: string, database: string, executionId?: string): Promise<string> {
+  return invoke("mongo_server_version", { connectionId, database, executionId });
 }
 
 export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
   return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
+export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {
+  return invoke("mongo_create_index", { connectionId, database, collection, keysJson, optionsJson });
+}
+
+export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<{ dropped_names: string[]; affected_rows: number }> {
+  return invoke("mongo_drop_indexes", { connectionId, database, collection, indexesJson, single });
+}
+
 export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return invoke("mongo_insert_document", { connectionId, database, collection, docJson });
+  return documentInsertDocument(connectionId, database, collection, docJson);
+}
+
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
+  return invoke("document_insert_document", { connectionId, database, collection, docJson });
 }
 
 export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {
@@ -1471,8 +1562,12 @@ export async function mongoInsertDocuments(connectionId: string, database: strin
   return { affected_rows: affectedRows };
 }
 
-export async function mongoUpdateDocument(connectionId: string, database: string, collection: string, id: string, docJson: string): Promise<number> {
-  return invoke("mongo_update_document", { connectionId, database, collection, id, docJson });
+export async function mongoUpdateDocument(connectionId: string, database: string, collection: string, id: string, docJson: string, routing?: string): Promise<number> {
+  return documentUpdateDocument(connectionId, database, collection, id, docJson, routing);
+}
+
+export async function documentUpdateDocument(connectionId: string, database: string, collection: string, id: string, docJson: string, routing?: string): Promise<number> {
+  return invoke("document_update_document", { connectionId, database, collection, id, docJson, routing });
 }
 
 export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean): Promise<{ affected_rows: number }> {
@@ -1487,8 +1582,12 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
   return { affected_rows: affectedRows };
 }
 
-export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string): Promise<number> {
-  return invoke("mongo_delete_document", { connectionId, database, collection, id });
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+  return documentDeleteDocument(connectionId, database, collection, id, routing);
+}
+
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+  return invoke("document_delete_document", { connectionId, database, collection, id, routing });
 }
 
 export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {
@@ -1562,6 +1661,7 @@ export interface SqlFilePreview {
   filePath: string;
   sizeBytes: number;
   preview: string;
+  canExecuteWithoutSelectedDatabase: boolean;
 }
 
 export interface SqlFileProgress {

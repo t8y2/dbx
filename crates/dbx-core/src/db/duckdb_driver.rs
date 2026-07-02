@@ -1,5 +1,6 @@
 #![cfg(feature = "duckdb-bundled")]
 
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -16,6 +17,7 @@ pub fn connect_path(path: &str) -> Result<Arc<Mutex<duckdb::Connection>>, String
     let is_memory = is_memory_database_path(path);
     if !is_memory {
         validate_duckdb_path(path)?;
+        remove_empty_placeholder_file(path)?;
     }
 
     let connection = if is_memory { duckdb::Connection::open_in_memory() } else { duckdb::Connection::open(path) }
@@ -46,6 +48,19 @@ fn validate_duckdb_path(path: &str) -> Result<(), String> {
                 return Err(format!("Parent directory does not exist: {}", parent.display()));
             }
         }
+    }
+    Ok(())
+}
+
+fn remove_empty_placeholder_file(path: &str) -> Result<(), String> {
+    let path_obj = Path::new(path);
+    if is_network_path(path) || !path_obj.exists() {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(path_obj).map_err(|e| format!("Failed to read database file metadata: {e}"))?;
+    if metadata.is_file() && metadata.len() == 0 {
+        fs::remove_file(path_obj).map_err(|e| format!("Failed to replace empty DuckDB placeholder file: {e}"))?;
     }
     Ok(())
 }
@@ -93,5 +108,18 @@ mod tests {
         let value: i32 = locked.query_row("SELECT id FROM memory_probe;", [], |row| row.get(0)).expect("select row");
 
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn connect_path_replaces_empty_placeholder_file() {
+        let path = std::env::temp_dir().join(format!("dbx-duckdb-empty-{}.duckdb", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "").expect("write empty placeholder");
+        assert_eq!(std::fs::metadata(&path).expect("placeholder metadata").len(), 0);
+
+        let con = connect_path(path.to_string_lossy().as_ref()).expect("connect empty placeholder DuckDB file");
+        close_connection(con);
+
+        assert!(std::fs::metadata(&path).expect("database metadata").len() > 0);
+        let _ = std::fs::remove_file(path);
     }
 }

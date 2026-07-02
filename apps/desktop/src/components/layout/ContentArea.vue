@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, SquareDashed } from "@lucide/vue";
+import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -49,7 +49,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
@@ -60,9 +60,12 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/chartData";
+import * as api from "@/lib/api";
+import { buildMongoUpdateDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
+import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sqlFormatter";
 
@@ -107,6 +110,7 @@ const props = defineProps<{
   formatSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
   cursorPos: number;
+  blockDangerousRedisCommands: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -129,11 +133,13 @@ const emit = defineEmits<{
   clickTable: [tableName: string];
   viewTableData: [tableName: string];
   viewTableDdl: [tableName: string];
+  editTableStructure: [tableName: string];
   openObjectTable: [target: { tableName: string; schema?: string }];
   objectSchemaChange: [schema: string | undefined];
   structureEditorSaved: [commentChanged: boolean];
   structureEditorClose: [];
   openSettings: [initialTab?: string, initialSection?: string];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
 }>();
 
 const { t } = useI18n();
@@ -172,7 +178,13 @@ const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
+
+function isQueryTimeoutError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("query timed out") || lower.includes("查询超时");
+}
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
@@ -191,8 +203,20 @@ function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
   return undefined;
 }
 
-function setDataGridCanvasRenderMode(value: boolean) {
-  settingsStore.updateEditorSettings({ dataGridRenderMode: value ? "canvas" : "dom" });
+function setDataGridRenderMode(value: "canvas" | "dom") {
+  settingsStore.updateEditorSettings({ dataGridRenderMode: value });
+}
+
+function setTableFontSize(value: number) {
+  settingsStore.updateEditorSettings({ tableFontSize: value });
+}
+
+function decreaseTableFontSize() {
+  setTableFontSize(tableFontSize.value - 1);
+}
+
+function increaseTableFontSize() {
+  setTableFontSize(tableFontSize.value + 1);
 }
 
 const activeTabDimension = computed(() => {
@@ -279,6 +303,60 @@ const hasTabularResult = computed(() => {
   return visibleResultItems.value.length > 0;
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
+type MongoQueryGridChanges = {
+  dirtyRows: Map<number, Map<number, MongoInputValue>>;
+  deletedRows: Set<number>;
+  newRows: MongoInputValue[][];
+  columns: string[];
+  rows: MongoInputValue[][];
+};
+function mongoIdPreview(val: unknown): string {
+  if (val === null || val === undefined) return "null";
+  if (typeof val === "string" && /^[a-fA-F0-9]{24}$/.test(val)) return `ObjectId("${val}")`;
+  return formatMongoShellLiteral(val);
+}
+function mongoCollectionExpression(collection: string): string {
+  return `db.getCollection(${JSON.stringify(collection)})`;
+}
+const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() => {
+  const tab = props.activeTab;
+  const target = tab.mongoEditTarget;
+  if (tab.mode !== "query" || activeEffectiveDatabaseType.value !== "mongodb" || !target || !tab.connectionId || !tab.database || !tab.result) return undefined;
+  if (!tab.result.columns.includes(target.idColumn)) return undefined;
+
+  const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
+    if (changes.newRows.length > 0 || changes.deletedRows.size > 0) {
+      throw new Error("MongoDB query result editing only supports updating existing rows.");
+    }
+    const idColIdx = changes.columns.indexOf(target.idColumn);
+    if (idColIdx < 0) throw new Error("No _id column");
+    for (const [rowIdx, dirtyCols] of changes.dirtyRows) {
+      const row = changes.rows[rowIdx];
+      const id = row?.[idColIdx];
+      if (id === null || id === undefined || String(id).trim() === "") continue;
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns);
+      if (Object.keys(updateDoc).length === 0) continue;
+      await api.mongoUpdateDocument(tab.connectionId, tab.database, target.collection, String(id), JSON.stringify(updateDoc));
+    }
+  };
+
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => {
+    const idColIdx = changes.columns.indexOf(target.idColumn);
+    if (idColIdx < 0) return [];
+    const stmts: string[] = [];
+    for (const [rowIdx, dirtyCols] of changes.dirtyRows) {
+      const row = changes.rows[rowIdx];
+      const id = row?.[idColIdx];
+      if (id === null || id === undefined || String(id).trim() === "") continue;
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns);
+      if (Object.keys(updateDoc).length === 0) continue;
+      stmts.push(`${mongoCollectionExpression(target.collection)}.updateOne({_id: ${mongoIdPreview(id)}}, ${formatMongoShellLiteral(updateDoc)})`);
+    }
+    return stmts;
+  };
+
+  return { save, preview, canInsert: false, canDelete: false, supportsInsert: false, readonlyColumns: [target.idColumn], targetLabel: target.collection };
+});
 const resultsPaneOpen = ref(false);
 const resultsPaneSize = ref(Number(safeLocalStorageGet("dbx-results-pane-size")) || DEFAULT_QUERY_RESULTS_PANE_SIZE);
 const editorPaneSize = computed(() => (resultsPaneOpen.value ? 100 - resultsPaneSize.value : 100));
@@ -484,6 +562,10 @@ function onHandleViewTableDdl(tableName: string) {
   emit("viewTableDdl", tableName);
 }
 
+function onHandleEditTableStructure(tableName: string) {
+  emit("editTableStructure", tableName);
+}
+
 function onHandleCloseColumnPanel() {
   showColumnInfo.value = false;
   columnInfoColumns.value = [];
@@ -604,6 +686,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               @save="emit('saveSql')"
               @click-table="onHandleClickTable"
               @view-table-data="onHandleViewTableData"
+              @edit-table-structure="onHandleEditTableStructure"
               @view-table-ddl="onHandleViewTableDdl"
               @click-column="onHandleClickColumn"
               @close-column-panel="onHandleCloseColumnPanel"
@@ -708,16 +791,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                      :class="{
-                        'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose || dataGridRenderMode === 'dom',
-                      }"
-                      :title="t('grid.viewOptions')"
-                      :aria-label="t('grid.viewOptions')"
-                    >
+                    <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
                     </Button>
                   </PopoverTrigger>
@@ -725,34 +799,93 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                     <div class="border-b bg-muted/40 px-3 py-2">
                       <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
                     </div>
-                    <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                      <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                        <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                          <SquareDashed class="h-3.5 w-3.5 text-muted-foreground" />
-                          {{ t("grid.canvasRenderMode") }}
-                          <span class="text-muted-foreground">/ {{ t("grid.domRenderMode") }}</span>
-                        </span>
-                        <Switch size="sm" :model-value="dataGridRenderMode === 'canvas'" :aria-label="t('grid.renderModeHint')" @update:model-value="setDataGridCanvasRenderMode" />
-                      </label>
-                    </LightTooltip>
-                    <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                      <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                        <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                          {{ t("grid.transposeMultiRowToggle") }}
-                          <span class="text-muted-foreground">
-                            {{ dataGridRef?.multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
-                          </span>
-                        </span>
-                        <Switch size="sm" :model-value="!!dataGridRef?.multiRowTranspose" :aria-label="t('grid.transposeMultiRow')" @update:model-value="(value: boolean) => dataGridRef?.setMultiRowTranspose(value)" />
-                      </label>
-                    </LightTooltip>
-                    <label class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent" :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }">
-                      <input type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :checked="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" @change="dataGridRef?.toggleAllNullColumns()" />
-                      <span class="min-w-0 flex items-center gap-1.5 font-medium">
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <SquareDashed class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.renderMode") }}</span>
+                      </div>
+                      <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRenderMode === 'canvas' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRenderMode('canvas')"
+                          >
+                            {{ t("grid.canvasRenderMode") }}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRenderMode === 'dom' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="setDataGridRenderMode('dom')"
+                          >
+                            {{ t("grid.domRenderMode") }}
+                          </button>
+                        </div>
+                      </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
+                        <span>{{ t("grid.tableFontSize") }}</span>
+                      </div>
+                      <div class="flex h-7 w-32 items-center rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                          :disabled="tableFontSize <= TABLE_FONT_SIZE_MIN"
+                          :aria-label="t('common.decrease')"
+                          @click="decreaseTableFontSize"
+                        >
+                          <Minus class="h-3.5 w-3.5" />
+                        </button>
+                        <span class="flex-1 text-center text-xs font-semibold tabular-nums">{{ tableFontSize }}</span>
+                        <button
+                          type="button"
+                          class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                          :disabled="tableFontSize >= TABLE_FONT_SIZE_MAX"
+                          :aria-label="t('common.increase')"
+                          @click="increaseTableFontSize"
+                        >
+                          <Plus class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.transposeMultiRowToggle") }}</span>
+                      </div>
+                      <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="!dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="dataGridRef?.setMultiRowTranspose(false)"
+                          >
+                            {{ t("grid.transposeSingleRow") }}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                            :class="dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            @click="dataGridRef?.setMultiRowTranspose(true)"
+                          >
+                            {{ t("grid.transposeMultiRow") }}
+                          </button>
+                        </div>
+                      </LightTooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
+                      <span class="min-w-0 flex items-center gap-2 font-medium">
+                        <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         {{ t("grid.hideNullColumns") }}
                         <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
                       </span>
-                    </label>
+                      <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
+                    </div>
                   </PopoverContent>
                 </Popover>
                 <Button v-if="activeOutputView === 'result' && hasTabularResult" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="activeTab.isExecuting" @click="refreshData">
@@ -821,8 +954,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 :initial-order-by-input="activeTab.orderByInput"
                 :sql="activeTab.lastExecutedSql || activeTab.sql"
                 :loading="activeTab.isExecuting"
-                :editable="!!activeTab.queryAnalysis"
+                :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
+                :custom-save-handler="mongoQueryResultSaveHandler"
                 context="results"
                 :database-type="activeEffectiveDatabaseType"
                 :connection-id="activeTab.connectionId"
@@ -846,6 +980,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
+                  <Button v-if="activeTab.connectionId && isQueryTimeoutError(String(errorMessage))" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('openConnectionSettings', activeTab.connectionId, 'advanced')">
+                    <Wrench class="h-3.5 w-3.5" />
+                    {{ t("editor.changeQueryTimeout") }}
+                  </Button>
                   <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('fixWithAi', String(errorMessage))">
                     <Bot class="h-3.5 w-3.5" />
                     {{ t("ai.fixWithAi") }}
@@ -967,16 +1105,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           </DropdownMenu>
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                :class="{
-                  'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose || dataGridRenderMode === 'dom',
-                }"
-                :title="t('grid.viewOptions')"
-                :aria-label="t('grid.viewOptions')"
-              >
+              <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                 <Wrench class="h-4 w-4" />
               </Button>
             </PopoverTrigger>
@@ -984,34 +1113,93 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               <div class="border-b bg-muted/40 px-3 py-2">
                 <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
               </div>
-              <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                  <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                    <SquareDashed class="h-3.5 w-3.5 text-muted-foreground" />
-                    {{ t("grid.canvasRenderMode") }}
-                    <span class="text-muted-foreground">/ {{ t("grid.domRenderMode") }}</span>
-                  </span>
-                  <Switch size="sm" :model-value="dataGridRenderMode === 'canvas'" :aria-label="t('grid.renderModeHint')" @update:model-value="setDataGridCanvasRenderMode" />
-                </label>
-              </LightTooltip>
-              <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
-                  <span class="min-w-0 flex items-center gap-1.5 font-medium">
-                    {{ t("grid.transposeMultiRowToggle") }}
-                    <span class="text-muted-foreground">
-                      {{ dataGridRef?.multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
-                    </span>
-                  </span>
-                  <Switch size="sm" :model-value="!!dataGridRef?.multiRowTranspose" :aria-label="t('grid.transposeMultiRow')" @update:model-value="(value: boolean) => dataGridRef?.setMultiRowTranspose(value)" />
-                </label>
-              </LightTooltip>
-              <label class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs hover:bg-accent" :class="{ 'cursor-not-allowed opacity-60': !dataGridRef?.canToggleAllNullColumns }">
-                <input type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :checked="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" @change="dataGridRef?.toggleAllNullColumns()" />
-                <span class="min-w-0 flex items-center gap-1 font-medium">
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <SquareDashed class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.renderMode") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRenderMode === 'canvas' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRenderMode('canvas')"
+                    >
+                      {{ t("grid.canvasRenderMode") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRenderMode === 'dom' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="setDataGridRenderMode('dom')"
+                    >
+                      {{ t("grid.domRenderMode") }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
+                  <span>{{ t("grid.tableFontSize") }}</span>
+                </div>
+                <div class="flex h-7 w-32 items-center rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                    :disabled="tableFontSize <= TABLE_FONT_SIZE_MIN"
+                    :aria-label="t('common.decrease')"
+                    @click="decreaseTableFontSize"
+                  >
+                    <Minus class="h-3.5 w-3.5" />
+                  </button>
+                  <span class="flex-1 text-center text-xs font-semibold tabular-nums">{{ tableFontSize }}</span>
+                  <button
+                    type="button"
+                    class="flex h-6 w-8 items-center justify-center rounded-[5px] bg-background text-foreground shadow-sm transition-colors hover:text-foreground disabled:pointer-events-none disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-50 disabled:shadow-none"
+                    :disabled="tableFontSize >= TABLE_FONT_SIZE_MAX"
+                    :aria-label="t('common.increase')"
+                    @click="increaseTableFontSize"
+                  >
+                    <Plus class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Rows3 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.transposeMultiRowToggle") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="!dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="dataGridRef?.setMultiRowTranspose(false)"
+                    >
+                      {{ t("grid.transposeSingleRow") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-6 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="dataGridRef?.multiRowTranspose ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="dataGridRef?.setMultiRowTranspose(true)"
+                    >
+                      {{ t("grid.transposeMultiRow") }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
+                <span class="min-w-0 flex items-center gap-2 font-medium">
+                  <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   {{ t("grid.hideNullColumns") }}
                   <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
                 </span>
-              </label>
+                <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
+              </div>
             </PopoverContent>
           </Popover>
         </div>
@@ -1068,7 +1256,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <!-- Redis mode: key browser -->
     <template v-else-if="activeTab.mode === 'redis'">
       <div class="flex-1 min-h-0">
-        <RedisKeyBrowser ref="redisKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" />
+        <RedisKeyBrowser ref="redisKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" :block-dangerous-redis-commands="props.blockDangerousRedisCommands" />
       </div>
     </template>
 
@@ -1109,7 +1297,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
-        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :read-only="activeConnection?.read_only ?? false" />
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="activeConnection?.read_only ?? false" />
       </div>
     </template>
 
@@ -1121,15 +1309,17 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <!-- Objects mode: virtualized database object browser -->
     <template v-else-if="activeTab.mode === 'objects' && activeConnection">
-      <ObjectBrowser
-        ref="objectBrowserRef"
-        :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
-        :connection="activeConnection"
-        :database="activeTab.database"
-        :schema="activeTab.objectBrowser?.schema"
-        @open-table="emit('openObjectTable', $event)"
-        @schema-change="emit('objectSchemaChange', $event)"
-      />
+      <div class="min-w-0 flex-1 min-h-0">
+        <ObjectBrowser
+          ref="objectBrowserRef"
+          :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
+          :connection="activeConnection"
+          :database="activeTab.database"
+          :schema="activeTab.objectBrowser?.schema"
+          @open-table="emit('openObjectTable', $event)"
+          @schema-change="emit('objectSchemaChange', $event)"
+        />
+      </div>
     </template>
 
     <!-- Structure mode: table structure editor -->
@@ -1140,6 +1330,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
         :database="activeTab.database"
         :schema="activeTab.schema"
         :table-name="activeTab.structureTableName || ''"
+        :initial-tab="activeTab.structureInitialTab"
+        :initial-tab-request-id="activeTab.structureInitialTabRequestId"
+        :draft="activeTab.structureDraft"
+        @update:draft="(draft) => (activeTab.structureDraft = draft)"
         @saved="(commentChanged) => emit('structureEditorSaved', commentChanged)"
         @close="emit('structureEditorClose')"
         @open-settings="(initialTab, initialSection) => emit('openSettings', initialTab, initialSection)"

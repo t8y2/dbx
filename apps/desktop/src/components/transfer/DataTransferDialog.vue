@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
@@ -15,7 +16,7 @@ import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/databaseCapabilities";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { ArrowRightLeft, Loader2, Square, CheckSquare } from "@lucide/vue";
+import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
 
 const { t } = useI18n();
 const { startDataTransferTask } = useExportTracker();
@@ -289,15 +290,11 @@ async function startTransfer() {
 function getConnectionName(id: string) {
   return store.connections.find((c) => c.id === id)?.name ?? id;
 }
-
-function getConnectionType(id: string): DatabaseType {
-  return store.connections.find((c) => c.id === id)?.db_type ?? "mysql";
-}
 </script>
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-[560px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
+    <DialogContent class="sm:max-w-[780px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <ArrowRightLeft class="w-4 h-4" />
@@ -307,111 +304,127 @@ function getConnectionType(id: string): DatabaseType {
 
       <div class="flex-1 min-h-0 overflow-auto">
         <div class="grid gap-4 py-3">
-          <!-- Source Section -->
-          <div class="space-y-3">
-            <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              {{ t("transfer.source") }}
-            </div>
+          <!-- Source / Target Side by Side -->
+          <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
+            <!-- Source Section -->
+            <div class="space-y-3">
+              <div class="text-sm font-medium text-blue-500">
+                {{ t("transfer.source") }}
+              </div>
 
-            <div class="grid grid-cols-2 gap-3">
               <div class="space-y-1.5">
                 <Label class="text-xs">{{ t("transfer.sourceConnection") }}</Label>
-                <Select v-model="sourceConnectionId">
-                  <SelectTrigger class="h-8 text-xs">
-                    <div v-if="sourceConnectionId" class="flex items-center gap-1.5">
-                      <DatabaseIcon :db-type="getConnectionType(sourceConnectionId)" class="w-3.5 h-3.5" />
-                      <span class="truncate">{{ getConnectionName(sourceConnectionId) }}</span>
+                <SearchableSelect
+                  v-model="sourceConnectionId"
+                  :options="sqlConnections.map((c) => c.id)"
+                  :placeholder="t('transfer.selectConnection')"
+                  :search-placeholder="t('transfer.searchConnection')"
+                  :empty-text="t('common.noResults')"
+                  :display-name="getConnectionName"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                >
+                  <template #option-label="{ option, label }">
+                    <div class="flex items-center gap-1.5">
+                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="w-3.5 h-3.5" />
+                      {{ label }}
                     </div>
-                    <SelectValue v-else />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                      <div class="flex items-center gap-1.5">
-                        <DatabaseIcon :db-type="c.db_type" class="w-3.5 h-3.5" />
-                        {{ c.name }}
-                      </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                  </template>
+                </SearchableSelect>
               </div>
 
               <div class="space-y-1.5">
                 <Label class="text-xs">{{ t("transfer.sourceDatabase") }}</Label>
-                <Select v-model="sourceDatabase" :disabled="!sourceDatabases.length">
-                  <SelectTrigger class="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="db in sourceDatabases" :key="db" :value="db">{{ db }}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  v-model="sourceDatabase"
+                  :options="sourceDatabases"
+                  :placeholder="t('transfer.selectDatabase')"
+                  :search-placeholder="t('transfer.searchDatabase')"
+                  :empty-text="t('common.noResults')"
+                  :disabled="!sourceDatabases.length"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
+              </div>
+
+              <div v-if="sourceSchemas.length" class="space-y-1.5">
+                <Label class="text-xs">{{ t("transfer.sourceSchema") }}</Label>
+                <SearchableSelect
+                  v-model="sourceSchema"
+                  :options="sourceSchemas"
+                  :placeholder="t('transfer.selectSchema')"
+                  :search-placeholder="t('transfer.searchSchema')"
+                  :empty-text="t('common.noResults')"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
               </div>
             </div>
 
-            <div v-if="sourceSchemas.length" class="space-y-1.5">
-              <Label class="text-xs">{{ t("transfer.sourceSchema") }}</Label>
-              <Select v-model="sourceSchema">
-                <SelectTrigger class="h-8 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="schema in sourceSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <!-- Target Section -->
-          <div class="space-y-3">
-            <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              {{ t("transfer.target") }}
+            <!-- Arrow -->
+            <div class="flex items-center pt-8">
+              <ArrowLeftRight class="w-5 h-5 text-muted-foreground" />
             </div>
 
-            <div class="grid grid-cols-2 gap-3">
+            <!-- Target Section -->
+            <div class="space-y-3">
+              <div class="text-sm font-medium text-green-500">
+                {{ t("transfer.target") }}
+              </div>
+
               <div class="space-y-1.5">
                 <Label class="text-xs">{{ t("transfer.targetConnection") }}</Label>
-                <Select v-model="targetConnectionId">
-                  <SelectTrigger class="h-8 text-xs">
-                    <div v-if="targetConnectionId" class="flex items-center gap-1.5">
-                      <DatabaseIcon :db-type="getConnectionType(targetConnectionId)" class="w-3.5 h-3.5" />
-                      <span class="truncate">{{ getConnectionName(targetConnectionId) }}</span>
+                <SearchableSelect
+                  v-model="targetConnectionId"
+                  :options="sqlConnections.map((c) => c.id)"
+                  :placeholder="t('transfer.selectConnection')"
+                  :search-placeholder="t('transfer.searchConnection')"
+                  :empty-text="t('common.noResults')"
+                  :display-name="getConnectionName"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                >
+                  <template #option-label="{ option, label }">
+                    <div class="flex items-center gap-1.5">
+                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="w-3.5 h-3.5" />
+                      {{ label }}
                     </div>
-                    <SelectValue v-else />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                      <div class="flex items-center gap-1.5">
-                        <DatabaseIcon :db-type="c.db_type" class="w-3.5 h-3.5" />
-                        {{ c.name }}
-                      </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                  </template>
+                </SearchableSelect>
               </div>
 
               <div class="space-y-1.5">
                 <Label class="text-xs">{{ t("transfer.targetDatabase") }}</Label>
-                <Select v-model="targetDatabase" :disabled="!targetDatabases.length">
-                  <SelectTrigger class="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="db in targetDatabases" :key="db" :value="db">{{ db }}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  v-model="targetDatabase"
+                  :options="targetDatabases"
+                  :placeholder="t('transfer.selectDatabase')"
+                  :search-placeholder="t('transfer.searchDatabase')"
+                  :empty-text="t('common.noResults')"
+                  :disabled="!targetDatabases.length"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
               </div>
-            </div>
 
-            <div v-if="targetSchemas.length" class="space-y-1.5">
-              <Label class="text-xs">{{ t("transfer.targetSchema") }}</Label>
-              <Select v-model="targetSchema">
-                <SelectTrigger class="h-8 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="schema in targetSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-                </SelectContent>
-              </Select>
+              <div v-if="targetSchemas.length" class="space-y-1.5">
+                <Label class="text-xs">{{ t("transfer.targetSchema") }}</Label>
+                <SearchableSelect
+                  v-model="targetSchema"
+                  :options="targetSchemas"
+                  :placeholder="t('transfer.selectSchema')"
+                  :search-placeholder="t('transfer.searchSchema')"
+                  :empty-text="t('common.noResults')"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
+              </div>
             </div>
           </div>
 

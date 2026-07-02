@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection } from "../../apps/desktop/src/lib/visibleDatabases.ts";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker } from "../../apps/desktop/src/lib/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -47,6 +47,24 @@ test("initial selection uses configured visible databases when available", () =>
 
 test("initial selection uses default visible database names when no filter is configured", () => {
   assert.deepEqual(initialVisibleDatabaseSelection(["app", "mysql", "sys"], undefined, config()), ["app"]);
+});
+
+test("visible database picker ignores saved filters while keeping default system database hiding", () => {
+  const databaseNames = ["app", "analytics", "mysql", "sys"];
+  const connection = config({ visible_databases: ["app"] });
+  assert.deepEqual(filterDatabaseNamesForVisiblePicker(databaseNames, connection), ["app", "analytics"]);
+  assert.deepEqual(initialVisibleDatabaseSelection(databaseNames, connection.visible_databases, connection), ["app"]);
+});
+
+test("Redis visible database picker keeps every database and initial selection uses saved filters", () => {
+  const databaseNames = ["0", "1", "2"];
+  const connection = config({ db_type: "redis", driver_profile: "redis", visible_databases: ["0"] });
+  assert.deepEqual(filterDatabaseNamesForVisiblePicker(databaseNames, connection), ["0", "1", "2"]);
+  assert.deepEqual(initialVisibleDatabaseSelection(databaseNames, connection.visible_databases, connection), ["0"]);
+});
+
+test("connection database filtering still applies saved visible database filters for sidebar display", () => {
+  assert.deepEqual(filterDatabaseNamesForConnection(["app", "analytics", "mysql", "sys"], config({ visible_databases: ["app"] })), ["app"]);
 });
 
 test("ZooKeeper connections do not offer visible database selection", () => {

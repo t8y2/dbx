@@ -1,4 +1,4 @@
-import { shallowRef, onBeforeUnmount, type ShallowRef, createApp, watch } from "vue";
+import { shallowRef, onBeforeUnmount, getCurrentInstance, type ShallowRef, createApp, watch } from "vue";
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, dropCursor, highlightSpecialChars, highlightActiveLine } from "@codemirror/view";
 import { json } from "@codemirror/lang-json";
@@ -20,6 +20,7 @@ export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
   onEscape?: () => void;
   onBlur?: () => void;
+  language?: "auto" | "json";
   readOnly?: boolean;
   editorTheme: () => EditorTheme;
   appAppearance: () => AppThemeAppearance;
@@ -147,7 +148,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (destroyed) return;
 
     const doc = initialValue ?? "";
-    currentIsJson = shouldUseJsonMode(columnType, doc);
+    currentIsJson = options.language === "json" || shouldUseJsonMode(columnType, doc);
 
     const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance());
     liveFontSize = clampEditorFontSize(options.fontSize());
@@ -251,7 +252,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (!editor || destroyed) return;
 
     const text = value ?? "";
-    const newIsJson = shouldUseJsonMode(columnType, text);
+    const newIsJson = options.language === "json" || shouldUseJsonMode(columnType, text);
     const effects: ReturnType<typeof Compartment.prototype.reconfigure>[] = [];
 
     if (newIsJson !== currentIsJson) {
@@ -297,9 +298,11 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     wrapperEl = null;
   }
 
-  onBeforeUnmount(() => {
-    destroy();
-  });
+  if (getCurrentInstance()) {
+    onBeforeUnmount(() => {
+      destroy();
+    });
+  }
 
   return { create, setValue, getValue, openSearch, openReplace, destroy, view };
 }

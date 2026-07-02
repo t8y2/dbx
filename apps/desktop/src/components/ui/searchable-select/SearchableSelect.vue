@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { HTMLAttributes } from "vue";
-import { Check, ChevronDown, Search } from "@lucide/vue";
+import { Check, ChevronDown, Search, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import type { ButtonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,20 +16,27 @@ const props = withDefaults(
     placeholder: string;
     searchPlaceholder: string;
     emptyText: string;
-    loadingText: string;
+    loadingText?: string;
     loading?: boolean;
+    disabled?: boolean;
     allowCustom?: boolean;
     triggerVariant?: ButtonVariants["variant"];
     triggerClass?: HTMLAttributes["class"];
+    triggerIconClass?: HTMLAttributes["class"];
     contentClass?: HTMLAttributes["class"];
     itemClass?: HTMLAttributes["class"];
     displayName?: (option: string) => string;
     normalizeCustom?: (value: string) => string;
+    clearable?: boolean;
   }>(),
   {
     loading: false,
+    disabled: false,
     allowCustom: false,
+    clearable: false,
+    loadingText: "Loading...",
     triggerVariant: "ghost",
+    triggerIconClass: "h-3 w-3",
     displayName: (option: string) => option,
     normalizeCustom: (value: string) => value,
   },
@@ -149,11 +156,12 @@ function handleKeydown(event: KeyboardEvent) {
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" :variant="triggerVariant" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
+      <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
           <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
         </slot>
-        <ChevronDown class="h-3 w-3 shrink-0 opacity-60" />
+        <X v-if="clearable && !disabled && modelValue" :class="cn('shrink-0 opacity-60 hover:opacity-100', triggerIconClass)" @pointerdown.stop.prevent="emit('update:modelValue', '')" />
+        <ChevronDown v-else :class="cn('shrink-0 opacity-60', triggerIconClass)" />
       </Button>
     </PopoverTrigger>
     <PopoverContent align="end" :class="cn('w-52 gap-1 p-1.5', contentClass)">
@@ -182,8 +190,8 @@ function handleKeydown(event: KeyboardEvent) {
             @click="selectOption(option)"
           >
             <Check :class="cn('h-3.5 w-3.5 shrink-0', option === modelValue ? 'opacity-100' : 'opacity-0')" />
-            <slot name="option-label" :option="option" :label="displayName(option)">
-              <span class="truncate">{{ displayName(option) }}</span>
+            <slot name="option-label" :option="option" :label="displayName?.(option)">
+              <span class="truncate">{{ displayName?.(option) }}</span>
             </slot>
           </button>
           <button

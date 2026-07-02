@@ -20,6 +20,35 @@ export interface AiAgentStepItem {
   explainData?: unknown;
 }
 
+/** Backend fallback tool_call_id values that repeat across calls and must not be used as stable merge keys. */
+const REPEATING_TOOL_CALL_IDS = new Set(["cli-tool-call"]);
+
+/**
+ * Build a tool step key. Real tool_call_id values merge start/end into one card;
+ * missing or known repeating fallback IDs stay event-specific to avoid collapsing unrelated calls.
+ */
+export function toolCallStepKey(toolCallId: string, index: number, eventType: string): string {
+  if (toolCallId && !REPEATING_TOOL_CALL_IDS.has(toolCallId)) return `tool-${toolCallId}`;
+  return `tool-${eventType}-${index}`;
+}
+
+/** Upsert a step, preserving details gathered from the previous state of the same card. */
+export function upsertAgentStep(steps: AiAgentStepItem[], step: AiAgentStepItem) {
+  const idx = steps.findIndex((s) => s.key === step.key);
+  if (idx < 0) {
+    steps.push(step);
+    return;
+  }
+
+  const existing = steps[idx];
+  const merged: AiAgentStepItem = { ...step };
+  if (!merged.toolArgs && existing.toolArgs) merged.toolArgs = existing.toolArgs;
+  if (!merged.explainData && existing.explainData) merged.explainData = existing.explainData;
+  if (!merged.titleKey && existing.titleKey) merged.titleKey = existing.titleKey;
+  if (!merged.titleParams && existing.titleParams) merged.titleParams = existing.titleParams;
+  steps.splice(idx, 1, merged);
+}
+
 export function buildAiAgentStepItems(plan: AiAgentPlan): AiAgentStepItem[] {
   return plan.steps.map(presentStep);
 }

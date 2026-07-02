@@ -156,6 +156,8 @@ Add to your `.mcp.json`:
 }
 ```
 
+Windows portable builds need `DBX_DATA_DIR` in the MCP config, pointing to the `data` directory next to `DBX.exe` (the folder that contains `dbx.db`).
+
 Works with Claude Code, Cursor, Windsurf, and any MCP-compatible agent. Supports listing connections, browsing tables, executing SQL, and opening tables directly in DBX's UI.
 
 DBX also provides a dedicated CLI package for terminal, script, and Codex workflows:
@@ -219,6 +221,17 @@ volumes:
 
 Open `http://localhost:4224` in your browser. Multi-arch images (amd64 / arm64) are available.
 
+To publish DBX under a reverse-proxy context path such as `/dbx`, set the
+runtime base path and proxy the same prefix to the container:
+
+```yaml
+environment:
+  - DBX_PUBLIC_BASE_PATH=/dbx
+```
+
+When building the frontend yourself with an absolute asset base, set
+`VITE_DBX_BASE_PATH=/dbx/` before `pnpm build`.
+
 ## Getting Started
 
 ### Prerequisites
@@ -238,6 +251,10 @@ No additional dependencies required.
 ```bash
 sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 ```
+
+**NIXOS/NIX :** 
+
+<a href="README-NIX.md">See README-NIX.md</a>
 
 **Windows:**
 

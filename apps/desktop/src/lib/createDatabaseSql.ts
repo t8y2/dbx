@@ -13,7 +13,7 @@ export interface CreateDatabaseSqlOptions {
 }
 
 export function supportsCreateDatabaseCharset(databaseType?: DatabaseType, driverProfile?: string | null): boolean {
-  return MYSQL_COMPATIBLE_TYPES.has(databaseType as DatabaseType) || (!!driverProfile && MYSQL_COMPATIBLE_PROFILES.has(driverProfile));
+  return MYSQL_COMPATIBLE_TYPES.has(databaseType as DatabaseType) || (!!driverProfile && MYSQL_COMPATIBLE_PROFILES.has(driverProfile.toLowerCase()));
 }
 
 export function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions): Promise<string> {

@@ -34,6 +34,8 @@ import {
   type DesktopIconTheme,
   type InterfaceLayout,
   type DisconnectTabHandlingMode,
+  type OpenTabsRestoreMode,
+  type SqlSemanticDiagnosticsMode,
   type UpdateDownloadSource,
   type CustomThemeColors,
   type CustomTheme,
@@ -66,7 +68,8 @@ import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, 
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/tableColumnTemplates";
-import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry } from "@/lib/mcpConfigTemplates";
+import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcpConfigTemplates";
+import { isWindows } from "@/lib/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/tableStructureEditorState";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/utils";
@@ -80,6 +83,8 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
 import { LOCALE_OPTIONS } from "@/lib/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdavAutoUploadConfig";
+import { apiUrl } from "@/lib/webPath";
+import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/appFonts";
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
@@ -91,7 +96,8 @@ let cachedSystemFonts: string[] | null = null;
 let pendingSystemFonts: Promise<string[]> | null = null;
 
 const props = defineProps<{
-  open: boolean;
+  open?: boolean;
+  variant?: "dialog" | "page";
   initialTab?: string;
   initialSection?: string;
   appVersion?: string;
@@ -100,6 +106,23 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
+
+const isSettingsPage = computed(() => props.variant === "page");
+const settingsVisible = computed(() => isSettingsPage.value || props.open === true);
+const settingsRootComponent = computed(() => (isSettingsPage.value ? "div" : Dialog));
+const settingsRootProps = computed(() => (isSettingsPage.value ? {} : { open: props.open === true }));
+const settingsRootClass = computed(() => (isSettingsPage.value ? "h-full min-h-0 overflow-hidden bg-background" : ""));
+const settingsContentComponent = computed(() => (isSettingsPage.value ? "div" : DialogContent));
+const settingsContentClass = computed(() => (isSettingsPage.value ? "flex h-full min-h-0 flex-col gap-4 overflow-hidden bg-background p-4" : "h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]"));
+const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : DialogTitle));
+
+function onSettingsRootOpenChange(value: boolean) {
+  if (!isSettingsPage.value) emit("update:open", value);
+}
+
+function closeSettings() {
+  emit("update:open", false);
+}
 
 interface TableColumnTemplateOverrideRow {
   id: string;
@@ -180,6 +203,7 @@ function createEmptyTableColumnTemplateRow(): TableColumnTemplateGridRow {
 // Local edit state
 const editFontFamily = ref(settingsStore.editorSettings.fontFamily);
 const editFontSize = ref(settingsStore.editorSettings.fontSize);
+const editUiFontFamily = ref(settingsStore.editorSettings.uiFontFamily);
 const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
 const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
@@ -189,7 +213,10 @@ const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
+const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
+const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
+const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsavedSqlClose);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
@@ -202,6 +229,7 @@ const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
+const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
 const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
 const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
 const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields));
@@ -217,6 +245,7 @@ const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
+const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
@@ -233,6 +262,9 @@ const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
 const uiScaleOptions = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const fontSearchTriggerClass =
+  "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
+const fontSearchTriggerIconClass = "size-4 text-muted-foreground";
 const disconnectTabHandlingModeDescriptionKey = computed(() => {
   switch (editDisconnectTabHandlingMode.value) {
     case "close-tabs":
@@ -398,6 +430,7 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
 
 const presetFontLabels = new Map(FONT_FAMILIES.map((font) => [font.value, font.label]));
 const presetFontValues = new Set(FONT_FAMILIES.map((font) => font.value));
+const uiFontPreviewValues = new Set([DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY]);
 
 function cssFontFamilyForName(name: string): string {
   return `'${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}', monospace`;
@@ -422,12 +455,24 @@ const systemFontOptions = computed(() => {
   return [...options];
 });
 
+const uiFontOptions = computed(() => {
+  const options = new Set([SYSTEM_UI_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, ...systemFontOptions.value]);
+  if (editUiFontFamily.value) options.add(editUiFontFamily.value);
+  return [...options];
+});
+
 function displayFontFamily(value: string): string {
   return presetFontLabels.get(value) ?? readableFontFamily(value);
 }
 
-function fontOptionStyle(value: string) {
-  return presetFontValues.has(value) || value === editFontFamily.value ? { fontFamily: value } : undefined;
+function displayUiFontFamily(value: string): string {
+  if (value === SYSTEM_UI_FONT_FAMILY) return t("settings.uiFontSystemDefault");
+  if (value === DEFAULT_UI_FONT_FAMILY) return t("settings.uiFontAppDefault");
+  return displayFontFamily(value);
+}
+
+function fontOptionStyle(value: string, selectedValue = editFontFamily.value) {
+  return presetFontValues.has(value) || uiFontPreviewValues.has(value) || value === selectedValue ? { fontFamily: value } : undefined;
 }
 
 async function loadSystemFontOptions() {
@@ -453,11 +498,12 @@ async function loadSystemFontOptions() {
 
 // Sync from store when dialog opens
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
     if (open) {
       editFontFamily.value = settingsStore.editorSettings.fontFamily;
       editFontSize.value = settingsStore.editorSettings.fontSize;
+      editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
       editUiScale.value = settingsStore.editorSettings.uiScale;
       editTheme.value = settingsStore.editorSettings.theme;
       editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
@@ -466,7 +512,10 @@ watch(
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
+      editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
+      editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
       editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
+      editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
       editAppLayout.value = settingsStore.editorSettings.appLayout;
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
@@ -476,6 +525,7 @@ watch(
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
       editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
+      editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
       editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
       editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
       editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
@@ -485,6 +535,7 @@ watch(
       editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
       editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
       editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+      editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
       editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
       editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
       editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
@@ -521,6 +572,7 @@ function hasChanges(): boolean {
   return (
     editFontFamily.value !== settingsStore.editorSettings.fontFamily ||
     editFontSize.value !== settingsStore.editorSettings.fontSize ||
+    editUiFontFamily.value !== settingsStore.editorSettings.uiFontFamily ||
     editUiScale.value !== settingsStore.editorSettings.uiScale ||
     editTheme.value !== settingsStore.editorSettings.theme ||
     JSON.stringify(editCustomThemes.value) !== JSON.stringify(settingsStore.editorSettings.customThemes) ||
@@ -529,7 +581,10 @@ function hasChanges(): boolean {
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
+    editSqlSemanticDiagnosticsMode.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsMode ||
+    editSqlSemanticDiagnosticsEnabled.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled ||
     editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
+    editConfirmUnsavedSqlClose.value !== settingsStore.editorSettings.confirmUnsavedSqlClose ||
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
@@ -539,6 +594,7 @@ function hasChanges(): boolean {
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
     editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
+    editDataGridQuickEntry.value !== settingsStore.editorSettings.dataGridQuickEntry ||
     editInfiniteScroll.value !== settingsStore.editorSettings.infiniteScroll ||
     editInfiniteScrollMaxRows.value !== settingsStore.editorSettings.infiniteScrollMaxRows ||
     JSON.stringify(normalizedEditTableColumnTemplateFields.value) !== JSON.stringify(settingsStore.editorSettings.tableColumnTemplateFields) ||
@@ -547,6 +603,7 @@ function hasChanges(): boolean {
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
     editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
     editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
+    editOpenTabsRestoreMode.value !== settingsStore.editorSettings.openTabsRestoreMode ||
     editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
     editReuseDataTab.value !== settingsStore.editorSettings.reuseDataTab ||
     editUpdateNotificationsEnabled.value !== settingsStore.editorSettings.updateNotificationsEnabled ||
@@ -570,6 +627,7 @@ async function persistSettings() {
   settingsStore.updateEditorSettings({
     fontFamily: editFontFamily.value,
     fontSize: editFontSize.value,
+    uiFontFamily: editUiFontFamily.value,
     uiScale: editUiScale.value,
     theme: editTheme.value,
     customThemes: editCustomThemes.value,
@@ -578,11 +636,14 @@ async function persistSettings() {
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
+    sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
+    confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
     appLayout: editAppLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
+    dataGridQuickEntry: editDataGridQuickEntry.value,
     infiniteScroll: editInfiniteScroll.value,
     infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
@@ -591,6 +652,7 @@ async function persistSettings() {
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     reuseDataTab: editReuseDataTab.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
@@ -627,7 +689,7 @@ async function applySettings() {
 
 async function applySettingsAndClose() {
   await persistSettings();
-  emit("update:open", false);
+  closeSettings();
 }
 
 function resetDefaultsForTab(tab: SettingsCategory) {
@@ -638,11 +700,15 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+    editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+    editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+    editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
     sqlFormatterConfigValid.value = true;
   } else if (tab === "appearance") {
+    editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
     editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
     editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
@@ -658,6 +724,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+    editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -669,6 +736,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
+    editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
     editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
     editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
@@ -688,6 +756,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
 function resetAllDefaults() {
   editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
   editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
+  editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
   editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
   editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
@@ -696,7 +765,10 @@ function resetAllDefaults() {
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+  editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+  editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+  editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
@@ -707,6 +779,7 @@ function resetAllDefaults() {
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
+  editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
   editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
@@ -716,6 +789,7 @@ function resetAllDefaults() {
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+  editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -859,8 +933,17 @@ function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
 }
 
+function onSqlSemanticDiagnosticsEnabledChange(value: boolean) {
+  editSqlSemanticDiagnosticsEnabled.value = value;
+  editSqlSemanticDiagnosticsMode.value = value ? "enabled" : "disabled";
+}
+
 function onFontFamilyChange(v: any) {
   if (typeof v === "string") editFontFamily.value = v;
+}
+
+function onUiFontFamilyChange(v: any) {
+  if (typeof v === "string") editUiFontFamily.value = v;
 }
 
 const themeSelectValue = computed(() => {
@@ -1090,13 +1173,21 @@ const mcpEnvEntries = computed<McpEnvEntry[]>(() => {
   return entries;
 });
 
-const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value));
+const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
+  if (!isWindows() || !mcpStatus.value?.script_path) return undefined;
+  return {
+    command: mcpStatus.value.node_path || "node",
+    args: [mcpStatus.value.script_path],
+  };
+});
 
-const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpEnvEntries.value));
+const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
-const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value));
+const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
-const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value));
+const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+
+const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
@@ -1312,7 +1403,7 @@ async function scrollToInitialSettingsSection() {
 }
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   async (open) => {
     if (open) {
       activeSettingsTab.value = props.initialTab || "editor";
@@ -1341,7 +1432,16 @@ watch(
 watch(
   () => props.initialSection,
   () => {
-    if (props.open) void scrollToInitialSettingsSection();
+    if (settingsVisible.value) void scrollToInitialSettingsSection();
+  },
+);
+
+watch(
+  () => props.initialTab,
+  (tab) => {
+    if (!settingsVisible.value || !tab) return;
+    activeSettingsTab.value = tab;
+    void scrollToInitialSettingsSection();
   },
 );
 
@@ -1386,7 +1486,7 @@ async function changePassword() {
   changingPassword.value = true;
   passwordMessage.value = "";
   try {
-    const res = await fetch("/api/auth/change-password", {
+    const res = await fetch(apiUrl("/api/auth/change-password"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ old_password: oldPassword.value, new_password: newPassword.value }),
@@ -1679,20 +1779,15 @@ function syncAiEditState() {
 
 function aiSelectProvider(provider: AiProvider) {
   if (isWeb && provider === "codex-cli") return;
-  aiEditProvider.value = provider;
-  aiEditEndpoint.value = AI_PROVIDER_PRESETS[provider].endpoint;
-  aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;
-  aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
-  aiEditAuthMethod.value = AI_PROVIDER_PRESETS[provider].authMethod;
-  aiEditReasoningLevel.value = "default";
-  if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
-  aiEditCodexCliPath.value = "";
-  aiEditCodexCliEnvRows.value = [];
-  aiTestResult.value = "";
-  aiTestError.value = "";
-  aiTestLatency.value = null;
-  aiTestErrorCopied.value = false;
-  clearAiModelOptions();
+  if (provider === aiEditProvider.value) return;
+
+  // Save current form edits before switching to prevent data loss.
+  if (aiHasChanges()) {
+    settingsStore.updateAiConfig(currentAiEditConfig());
+  }
+
+  settingsStore.updateAiConfig({ provider });
+  syncAiEditState();
   if (provider === "codex-cli") void ensureCodexMcpStatus();
 }
 
@@ -1772,6 +1867,12 @@ async function ensureCodexMcpStatus() {
 const previewRef = ref<HTMLDivElement>();
 const previewView = shallowRef<EditorViewType | null>(null);
 
+interface PreviewSqlDiagnostic {
+  from: number;
+  to: number;
+  message: string;
+}
+
 function getPreviewCustomThemeColors(): CustomThemeColors | undefined {
   if (editTheme.value !== "custom") return undefined;
   const activeTheme = editCustomThemes.value.find((t) => t.id === editActiveCustomThemeId.value);
@@ -1792,13 +1893,46 @@ const previewSettings = computed<{
   customColors: getPreviewCustomThemeColors(),
 }));
 
-const previewSql = `SELECT u.id, u.name
+const previewSqlNormal = `SELECT u.id, u.name
 FROM users u
+ORDER BY u.id LIMIT 5;`;
+const previewSqlWithSyntaxError = `SELECT u.id, u.name
+FOM users u
 ORDER BY u.id LIMIT 5;`;
 
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
+let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
+let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
+
+function currentPreviewSql(): string {
+  return editSqlSemanticDiagnosticsEnabled.value ? previewSqlWithSyntaxError : previewSqlNormal;
+}
+
+function previewDiagnosticsForSql(sql: string): PreviewSqlDiagnostic[] {
+  if (!editSqlSemanticDiagnosticsEnabled.value) return [];
+  const from = sql.indexOf("FOM");
+  return from >= 0 ? [{ from, to: from + 3, message: "Syntax error: expected FROM" }] : [];
+}
+
+function updatePreviewSqlDiagnostics() {
+  const view = previewView.value;
+  if (!view || !setPreviewDiagnosticsEffect) return;
+  const nextSql = currentPreviewSql();
+  const currentSql = view.state.doc.toString();
+  previewSqlDiagnostics = previewDiagnosticsForSql(nextSql);
+  const effects = setPreviewDiagnosticsEffect.of(previewSqlDiagnostics);
+  if (currentSql === nextSql) {
+    view.dispatch({ effects });
+    return;
+  }
+  view.dispatch({
+    changes: { from: 0, to: currentSql.length, insert: nextSql },
+    effects,
+  });
+}
 
 watch(
   [previewSettings, editCustomThemes, editActiveCustomThemeId],
@@ -1813,16 +1947,28 @@ watch(
   { deep: true },
 );
 
+watch(editSqlSemanticDiagnosticsEnabled, () => {
+  updatePreviewSqlDiagnostics();
+});
+
 let previewInitialized = false;
+
+function cleanupPreviewEditor() {
+  if (!previewView.value) return;
+  previewView.value.destroy();
+  previewView.value = null;
+  previewInitialized = false;
+  fontThemeComp = null;
+  themeComp = null;
+  diagnosticComp = null;
+  setPreviewDiagnosticsEffect = null;
+  editorViewModule = null;
+  previewSqlDiagnostics = [];
+}
 
 watch(activeSettingsTab, (tab) => {
   if (tab !== "editor" && previewView.value) {
-    previewView.value.destroy();
-    previewView.value = null;
-    previewInitialized = false;
-    fontThemeComp = null;
-    themeComp = null;
-    editorViewModule = null;
+    cleanupPreviewEditor();
   }
 });
 
@@ -1831,46 +1977,74 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView }, { EditorState, Compartment }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, Decoration }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
   editorViewModule = { EditorView } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
+  diagnosticComp = new Compartment();
+  setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
+  previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
   const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+  const diagnosticTheme = EditorView.baseTheme({
+    ".cm-settings-preview-sql-error": {
+      textDecoration: "underline wavy var(--destructive)",
+      textUnderlineOffset: "3px",
+    },
+  });
+  const buildPreviewDiagnosticExtension = () => {
+    const diagnosticEffect = setPreviewDiagnosticsEffect;
+    const buildDecorations = () =>
+      Decoration.set(
+        previewSqlDiagnostics.map((diagnostic) =>
+          Decoration.mark({
+            class: "cm-settings-preview-sql-error",
+            attributes: { title: diagnostic.message },
+          }).range(diagnostic.from, diagnostic.to),
+        ),
+        true,
+      );
+
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const diagnosticsChanged = !!diagnosticEffect && transaction.effects.some((effect) => effect.is(diagnosticEffect));
+        return transaction.docChanged || diagnosticsChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+
+    return [field, diagnosticTheme];
+  };
 
   const state = EditorState.create({
-    doc: previewSql,
-    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily))],
+    doc: currentPreviewSql(),
+    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension())],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
 });
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
-    if (!open && previewView.value) {
-      previewView.value.destroy();
-      previewView.value = null;
-      previewInitialized = false;
-      fontThemeComp = null;
-      themeComp = null;
-      editorViewModule = null;
-    }
+    if (!open) cleanupPreviewEditor();
   },
 );
+
+onUnmounted(cleanupPreviewEditor);
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(v: boolean) => emit('update:open', v)">
-    <DialogContent class="h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]">
+  <component :is="settingsRootComponent" v-bind="settingsRootProps" :class="settingsRootClass" @update:open="onSettingsRootOpenChange">
+    <component :is="settingsContentComponent" :class="settingsContentClass">
       <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
+        <component :is="settingsTitleComponent" class="flex items-center gap-2 text-base leading-none font-medium cn-font-heading">
           <Settings class="h-4 w-4" />
           {{ t("settings.title") }}
-        </DialogTitle>
+        </component>
       </DialogHeader>
 
       <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
@@ -1897,7 +2071,8 @@ watch(
                     allow-custom
                     :display-name="displayFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
-                    trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
+                    :trigger-class="fontSearchTriggerClass"
+                    :trigger-icon-class="fontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onFontFamilyChange"
                     @update:open="(open: boolean) => open && loadSystemFontOptions()"
@@ -1998,14 +2173,36 @@ watch(
                 </div>
               </div>
 
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.confirmDangerousSqlExecutionDescription") }}
-                  </p>
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sqlSemanticDiagnosticsEnabledDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-sql-semantic-diagnostics" :model-value="editSqlSemanticDiagnosticsEnabled" class="mt-0.5" @update:model-value="onSqlSemanticDiagnosticsEnabledChange" />
                 </div>
-                <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmDangerousSqlExecutionDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-unsaved-sql-close">{{ t("settings.confirmUnsavedSqlClose") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmUnsavedSqlCloseDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
+                </div>
               </div>
 
               <Separator />
@@ -2078,6 +2275,7 @@ watch(
                         >
                           <X class="h-4 w-4" />
                         </Button>
+                        <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
                       </div>
                       <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
                         {{ t("settings.shortcutConflict") }}
@@ -2090,23 +2288,60 @@ watch(
             </section>
 
             <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
-              <div class="space-y-2">
-                <Label>{{ t("settings.languageTitle") }}</Label>
-                <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
-                  <SelectTrigger class="min-w-36">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
-                      <div class="flex items-center gap-2">
-                        <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
-                          {{ locale.flag }}
-                        </span>
-                        <span>{{ locale.label }}</span>
-                      </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+              <div class="grid gap-4 md:grid-cols-[minmax(220px,280px)_minmax(260px,1fr)]">
+                <div class="space-y-2 min-w-0">
+                  <Label>{{ t("settings.languageTitle") }}</Label>
+                  <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
+                    <SelectTrigger class="h-8 w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
+                        <div class="flex items-center gap-2">
+                          <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
+                            {{ locale.flag }}
+                          </span>
+                          <span>{{ locale.label }}</span>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <Label>{{ t("settings.uiFontFamily") }}</Label>
+                  <SearchableSelect
+                    :model-value="editUiFontFamily"
+                    :options="uiFontOptions"
+                    :placeholder="t('settings.selectFont')"
+                    :search-placeholder="t('settings.searchFont')"
+                    :empty-text="t('settings.noFontsFound')"
+                    :loading-text="t('settings.loadingFonts')"
+                    allow-custom
+                    :display-name="displayUiFontFamily"
+                    :normalize-custom="normalizeCustomFontFamilyInput"
+                    :trigger-class="fontSearchTriggerClass"
+                    :trigger-icon-class="fontSearchTriggerIconClass"
+                    content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
+                    @update:model-value="onUiFontFamilyChange"
+                    @update:open="(open: boolean) => open && loadSystemFontOptions()"
+                  >
+                    <template #trigger-label="{ label, loading }">
+                      <span class="truncate" :style="{ fontFamily: editUiFontFamily }">
+                        {{ loading ? t("settings.loadingFonts") : label }}
+                      </span>
+                    </template>
+                    <template #option-label="{ option, label }">
+                      <span class="truncate" :style="fontOptionStyle(option, editUiFontFamily)">{{ label }}</span>
+                    </template>
+                    <template #custom-option-label="{ value }">
+                      <span class="truncate" :style="{ fontFamily: value }">
+                        {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                      </span>
+                    </template>
+                  </SearchableSelect>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.uiFontFamilyDescription") }}</p>
+                </div>
               </div>
 
               <div class="space-y-2">
@@ -2324,6 +2559,17 @@ watch(
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="data-grid-quick-entry">
+                      {{ t("settings.dataGridQuickEntry") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridQuickEntryDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="infinite-scroll">
                       {{ t("settings.infiniteScroll") }}
                     </Label>
@@ -2466,6 +2712,27 @@ watch(
                   </HelpTooltip>
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
+              </div>
+              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="open-tabs-restore-mode">{{ t("settings.openTabsRestoreMode") }}</Label>
+                  <HelpTooltip :label="t('settings.openTabsRestoreMode')">
+                    {{ t("settings.openTabsRestoreModeDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Select :model-value="editOpenTabsRestoreMode" @update:model-value="(value) => (editOpenTabsRestoreMode = value as OpenTabsRestoreMode)">
+                  <SelectTrigger id="open-tabs-restore-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">{{ t("settings.openTabsRestoreModeAll") }}</SelectItem>
+                    <SelectItem value="pinned">{{ t("settings.openTabsRestoreModePinned") }}</SelectItem>
+                    <SelectItem value="none">{{ t("settings.openTabsRestoreModeNone") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.openTabsRestoreModeHint") }}
+                </p>
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
@@ -2747,6 +3014,7 @@ watch(
                       >
                         <X class="h-4 w-4" />
                       </Button>
+                      <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
                     </div>
                     <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
                       {{ t("settings.shortcutConflict") }}
@@ -2913,9 +3181,17 @@ watch(
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="provider in aiProviderOptions" :key="provider.provider" :value="provider.provider">
-                        <span class="flex items-center gap-2">
-                          <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
-                          <span>{{ provider.label }}</span>
+                        <span class="flex w-full items-center justify-between gap-4">
+                          <span class="flex items-center gap-2">
+                            <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
+                            <span>{{ provider.label }}</span>
+                          </span>
+                          <span class="flex shrink-0 items-center gap-1">
+                            <span v-if="aiEditProvider === provider.provider" class="rounded px-1 py-0.5 text-[10px] font-medium leading-none" :class="settingsStore.isAiProviderConfigured(provider.provider) ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">{{
+                              t("ai.providerStatusActive")
+                            }}</span>
+                            <span v-else-if="settingsStore.isAiProviderConfigured(provider.provider)" class="rounded bg-green-500/15 px-1 py-0.5 text-[10px] font-medium leading-none text-green-700 dark:text-green-400">{{ t("ai.providerStatusConfigured") }}</span>
+                          </span>
                         </span>
                       </SelectItem>
                     </SelectContent>
@@ -3463,7 +3739,7 @@ watch(
               {{ t("settings.resetDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
@@ -3500,12 +3776,12 @@ watch(
                 </Button>
               </span>
             </div>
-            <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>
+            <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             <Button :disabled="!aiHasChanges() || !!aiCodexValidationError" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <p v-if="webdavMessage" class="text-xs self-center truncate max-w-[280px]" :class="webdavError ? 'text-destructive' : 'text-green-500'">
@@ -3529,7 +3805,7 @@ watch(
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <div class="flex-1" />
@@ -3545,7 +3821,7 @@ watch(
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'security' && isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword" @click="changePassword">
@@ -3558,7 +3834,7 @@ watch(
               {{ t("settings.resetAllDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
@@ -3570,7 +3846,7 @@ watch(
           </DialogFooter>
         </div>
       </div>
-    </DialogContent>
+    </component>
 
     <!-- Theme Customizer Dialog -->
     <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
@@ -3610,5 +3886,5 @@ watch(
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  </Dialog>
+  </component>
 </template>

@@ -13,6 +13,7 @@ import {
   removeConnectionFromSidebarLayout,
   emptyLayout,
   remapSidebarLayoutConnectionIds,
+  collapseAllGroups,
 } from "../../apps/desktop/src/lib/sidebarLayout.ts";
 import type { ConnectionConfig, SidebarLayout } from "../../apps/desktop/src/types/database.ts";
 
@@ -168,6 +169,21 @@ test("createGroup adds a new empty group", () => {
   assert.ok(result.layout.order[0].type === "group");
 });
 
+test("createGroup expands parent group when adding a subgroup", () => {
+  const layout: SidebarLayout = {
+    groups: [{ id: "g1", name: "Parent", collapsed: true }],
+    order: [{ type: "group", id: "g1", children: [] }],
+  };
+
+  const result = createGroup(layout, "Child", "g1");
+  const parentGroup = result.layout.groups.find((group) => group.id === "g1");
+  const parentEntry = result.layout.order[0];
+
+  assert.equal(parentGroup?.collapsed, false);
+  assert.equal(parentEntry.type, "group");
+  assert.deepEqual(parentEntry.type === "group" ? parentEntry.children : undefined, [{ type: "group", id: result.groupId, children: [] }]);
+});
+
 // --- renameGroup ---
 
 test("renameGroup updates group name", () => {
@@ -196,6 +212,37 @@ test("toggleGroupCollapsed flips collapsed state", () => {
   assert.equal(layout.groups[0].collapsed, false);
   const toggled = toggleGroupCollapsed(layout, groupId);
   assert.equal(toggled.groups[0].collapsed, true);
+});
+
+test("collapseAllGroups keeps other groups collapsed after one group is reopened", async () => {
+  const layout: SidebarLayout = {
+    groups: [
+      { id: "g1", name: "G1", collapsed: false },
+      { id: "g2", name: "G2", collapsed: false },
+    ],
+    order: [
+      { type: "group", id: "g1", children: [{ type: "connection", id: "a" }] },
+      { type: "group", id: "g2", children: [{ type: "connection", id: "b" }] },
+    ],
+  };
+
+  const collapsed = collapseAllGroups(layout);
+  assert.deepEqual(
+    collapsed.groups.map((group) => [group.id, group.collapsed]),
+    [
+      ["g1", true],
+      ["g2", true],
+    ],
+  );
+
+  const reopenedFirst = toggleGroupCollapsed(collapsed, "g1");
+  assert.deepEqual(
+    reopenedFirst.groups.map((group) => [group.id, group.collapsed]),
+    [
+      ["g1", false],
+      ["g2", true],
+    ],
+  );
 });
 
 // --- moveConnectionToGroup ---

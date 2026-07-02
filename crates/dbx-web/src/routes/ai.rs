@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -19,6 +20,13 @@ use crate::state::WebState;
 // ---------------------------------------------------------------------------
 // Request types
 // ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAiProviderConfigRequest {
+    pub provider: String,
+    pub config: AiConfig,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +96,11 @@ fn reject_web_unsupported_ai_provider(config: &AiConfig) -> Result<(), AppError>
     Ok(())
 }
 
+fn ai_provider_from_key(provider: &str) -> Result<AiProvider, AppError> {
+    serde_json::from_value(serde_json::Value::String(provider.to_string()))
+        .map_err(|_| AppError::bad_request(format!("Invalid AI provider: {provider}")))
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -104,6 +117,25 @@ pub async fn save_ai_config(
 pub async fn load_ai_config(State(state): State<Arc<WebState>>) -> Result<Json<Option<AiConfig>>, AppError> {
     let config = state.app.storage.load_ai_config().await.map_err(AppError)?;
     Ok(Json(config))
+}
+
+pub async fn save_ai_provider_config(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveAiProviderConfigRequest>,
+) -> Result<Json<()>, AppError> {
+    let parsed_provider = ai_provider_from_key(&body.provider)?;
+    let mut config = body.config;
+    config.provider = parsed_provider;
+    reject_web_unsupported_ai_provider(&config)?;
+    state.app.storage.save_ai_provider_config(&body.provider, &config).await.map_err(AppError)?;
+    Ok(Json(()))
+}
+
+pub async fn load_ai_provider_configs(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<HashMap<String, AiConfig>>, AppError> {
+    let configs = state.app.storage.load_ai_provider_configs().await.map_err(AppError)?;
+    Ok(Json(configs))
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +273,6 @@ pub async fn ai_agent_stream(
     let req_messages = request.messages;
     let req_task_contract = request.task_contract;
     let req_max_tokens = request.max_tokens;
-    let req_temperature = request.temperature;
     let is_agent_mode = body.mode == "agent";
     let tx2 = tx.clone();
     tokio::task::spawn_blocking(move || {
@@ -259,7 +290,6 @@ pub async fn ai_agent_stream(
                 },
                 &cancelled,
                 req_max_tokens,
-                req_temperature,
                 req_task_contract.as_ref(),
                 is_agent_mode,
             )

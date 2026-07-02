@@ -1,4 +1,5 @@
-*/libs/*.jar
+**/libs/*.jar
+!drivers/oscar/libs/oscarJDBC8.jar
 gradle.properties
 build/
 */bin/

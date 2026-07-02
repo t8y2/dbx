@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { Settings2 } from "@lucide/vue";
 import type { AiProvider } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { webPath } from "@/lib/webPath";
 
 const props = defineProps<{
   provider: AiProvider;
@@ -22,8 +23,8 @@ watch(
 
 const usesWhiteDarkIcon = computed(() => props.provider === "claude" || props.provider === "ollama" || props.provider === "openai" || props.provider === "openai-compatible");
 const localIconUrl = computed(() => {
-  if (props.provider === "openai-compatible") return "/icons/ai/openai.svg";
-  return props.iconSlug ? `/icons/ai/${props.iconSlug}.svg` : "";
+  if (props.provider === "openai-compatible") return webPath("/icons/ai/openai.svg");
+  return props.iconSlug ? webPath(`/icons/ai/${props.iconSlug}.svg`) : "";
 });
 const fallbackText = computed(() => {
   if (props.provider === "openai-compatible") return "OC";

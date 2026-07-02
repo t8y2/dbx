@@ -248,11 +248,13 @@ export function createGroup(layout: SidebarLayout, name: string, parentGroupId?:
   const group: ConnectionGroup = { id: groupId, name, collapsed: false };
   const order = cloneEntries(layout.order);
   const entry: SidebarOrderEntry = { type: "group", id: groupId, children: [] };
+  let parentFound = false;
 
   if (parentGroupId) {
     const parent = findGroupEntry(order, parentGroupId);
     if (parent) {
       parent.children = [...(parent.children ?? []), entry];
+      parentFound = true;
     } else {
       order.push(entry);
     }
@@ -263,7 +265,7 @@ export function createGroup(layout: SidebarLayout, name: string, parentGroupId?:
   return {
     groupId,
     layout: {
-      groups: [...layout.groups, group],
+      groups: [...layout.groups, group].map((current) => (parentFound && current.id === parentGroupId ? { ...current, collapsed: false } : current)),
       order,
     },
   };
@@ -304,6 +306,13 @@ export function toggleGroupCollapsed(layout: SidebarLayout, groupId: string): Si
   return {
     ...layout,
     groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: !group.collapsed } : group)),
+  };
+}
+
+export function collapseAllGroups(layout: SidebarLayout): SidebarLayout {
+  return {
+    ...layout,
+    groups: layout.groups.map((group) => (group.collapsed ? group : { ...group, collapsed: true })),
   };
 }
 

@@ -86,6 +86,11 @@ export function eventTargetAllowsNativeClipboard(event: ClipboardShortcutEvent, 
   return isPlainClipboardShortcut(event, "c") && hasNativeClipboardSelection(env);
 }
 
+export function eventTargetAllowsAppClipboardShortcut(event: ClipboardShortcutEvent, key = "v"): boolean {
+  if (!isPlainClipboardShortcut(event, key)) return false;
+  return !closestElement(event.target, EDITABLE_CLIPBOARD_TARGET_SELECTOR);
+}
+
 export async function readTextFromClipboard(env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<string> {
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {

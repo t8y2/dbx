@@ -175,6 +175,32 @@ fn selected_columns_include_identity_columns(columns: &[String], all_columns: &[
     })
 }
 
+fn is_sqlserver_rowversion_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    matches!(normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or(""), "timestamp" | "rowversion")
+}
+
+fn is_sqlserver_non_insertable_transfer_column(
+    column: &db::ColumnInfo,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::SqlServer, DatabaseType::SqlServer))
+        && is_sqlserver_rowversion_type(&column.data_type)
+}
+
+fn writable_transfer_columns(
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> Vec<db::ColumnInfo> {
+    columns
+        .iter()
+        .filter(|column| !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type))
+        .cloned()
+        .collect()
+}
+
 fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
     let full_table = qualified_table(table, schema, &DatabaseType::Dameng);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
@@ -582,6 +608,61 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
 }
 
 #[derive(Debug, Clone)]
+struct PostgresOwnedSequence {
+    name: String,
+    owner_table: String,
+    owner_column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresSequenceSnapshot {
+    name: String,
+    owner_table: Option<String>,
+    owner_column: Option<String>,
+}
+
+fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
+    if schema.trim().is_empty() {
+        quote_identifier(sequence_name, &DatabaseType::Postgres)
+    } else {
+        format!(
+            "{}.{}",
+            quote_identifier(schema, &DatabaseType::Postgres),
+            quote_identifier(sequence_name, &DatabaseType::Postgres)
+        )
+    }
+}
+
+/// Reuse an existing target sequence only when it is already bound to the same
+/// target table column; otherwise the later `OWNED BY` rebind would silently
+/// change unrelated objects.
+fn validate_existing_postgres_sequence(
+    sequence: &PostgresOwnedSequence,
+    existing: Option<&PostgresSequenceSnapshot>,
+    schema: &str,
+) -> Result<bool, String> {
+    let Some(existing) = existing else {
+        return Ok(true);
+    };
+
+    let owner_matches = match (existing.owner_table.as_deref(), existing.owner_column.as_deref()) {
+        (None, None) => true,
+        (Some(owner_table), Some(owner_column)) => {
+            owner_table == sequence.owner_table && owner_column == sequence.owner_column
+        }
+        _ => false,
+    };
+
+    if owner_matches {
+        return Ok(false);
+    }
+
+    Err(format!(
+        "PostgreSQL sequence {} already exists with incompatible ownership",
+        postgres_sequence_qualified_name(schema, &sequence.name)
+    ))
+}
+#[derive(Debug, Clone)]
 struct PostgresTriggerSource {
     table_name: String,
     trigger_name: String,
@@ -926,7 +1007,10 @@ fn format_ch_array_element(val: &serde_json::Value) -> String {
 }
 
 fn format_literal_string(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> String {
-    if is_mysql_datetime_literal_database(db_type) && column_type.map(is_temporal_column_type).unwrap_or(true) {
+    if *db_type == DatabaseType::SqlServer {
+        crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(value, column_type)
+            .unwrap_or_else(|| value.to_string())
+    } else if is_mysql_datetime_literal_database(db_type) && column_type.map(is_temporal_column_type).unwrap_or(true) {
         normalize_mysql_temporal_literal(value, column_type).unwrap_or_else(|| value.to_string())
     } else {
         value.to_string()
@@ -1951,7 +2035,29 @@ fn sql_rows_to_mongo_documents(columns: &[String], rows: &[Vec<serde_json::Value
         .collect()
 }
 
-async fn find_mongo_documents_for_transfer(
+async fn find_mongo_documents_extended_json(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    offset: u64,
+    batch_size: usize,
+) -> Result<MongoDocumentResult, String> {
+    crate::mongo_ops::mongo_find_documents_extended_json_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        offset,
+        batch_size as i64,
+        None,
+        None,
+        Some(r#"{"_id":1}"#),
+    )
+    .await
+}
+
+async fn find_mongo_documents_for_rows(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -1966,6 +2072,7 @@ async fn find_mongo_documents_for_transfer(
         collection,
         offset,
         batch_size as i64,
+        None,
         None,
         Some(r#"{"_id":1}"#),
     )
@@ -1995,6 +2102,34 @@ async fn insert_mongo_documents_for_transfer(
                 inserted += 1;
             }
             Ok(inserted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn insert_mongo_documents_extended_json_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    documents: &[serde_json::Value],
+) -> Result<u64, String> {
+    if documents.is_empty() {
+        return Ok(0);
+    }
+    let docs_json = serde_json::to_string(documents).map_err(|e| format!("Failed to encode MongoDB documents: {e}"))?;
+    match crate::mongo_ops::mongo_insert_documents_extended_json_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        &docs_json,
+    )
+    .await
+    {
+        Ok(count) => Ok(count),
+        Err(error) if error.to_ascii_lowercase().contains("legacy agent") => {
+            insert_mongo_documents_for_transfer(state, connection_id, database, collection, documents).await
         }
         Err(error) => Err(error),
     }
@@ -2057,6 +2192,24 @@ async fn execute_transfer_ddl_on_pool(
         execute_on_pool(state, pool_key, &statement).await?;
     }
     Ok(())
+}
+
+fn transfer_table_already_exists_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("already exists")
+        || lower.contains("there is already")
+        || lower.contains("duplicate_table")
+        || lower.contains("42p07")
+        || error.contains("已经存在")
+        || error.contains("已存在")
+}
+
+fn transfer_create_table_created(result: Result<(), String>, error_prefix: &str) -> Result<bool, String> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(e) if transfer_table_already_exists_error(&e) => Ok(false),
+        Err(e) => Err(format!("{error_prefix}: {e}")),
+    }
 }
 
 fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
@@ -2385,6 +2538,181 @@ async fn get_postgres_foreign_keys_for_transfer(
     let pool = pool.clone();
     drop(connections);
     db::postgres::list_foreign_keys(&pool, schema, table).await
+}
+
+async fn get_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+    tables: &[String],
+) -> Result<Vec<PostgresOwnedSequence>, String> {
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pool = {
+        let connections = state.connections.read().await;
+        match connections.get(pool_key) {
+            Some(PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = client
+        .query(
+            "SELECT c.relname, \
+              t.relname, \
+              a.attname \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+             JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
+               AND d.objid = c.oid \
+               AND d.refclassid = 'pg_class'::regclass \
+               AND d.deptype IN ('a', 'i') \
+             JOIN pg_class t ON t.oid = d.refobjid \
+             JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+             WHERE c.relkind = 'S' AND n.nspname = $1 \
+             ORDER BY t.relname, c.relname",
+            &[&schema],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let selected: HashSet<&str> = tables.iter().map(String::as_str).collect();
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let owner_table = row.get::<_, String>(1);
+            if !selected.contains(owner_table.as_str()) {
+                return None;
+            }
+            Some(PostgresOwnedSequence {
+                name: row.get::<_, String>(0),
+                owner_table,
+                owner_column: row.get::<_, String>(2),
+            })
+        })
+        .collect())
+}
+
+async fn get_postgres_sequence_snapshots_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+) -> Result<Vec<PostgresSequenceSnapshot>, String> {
+    let pool = {
+        let connections = state.connections.read().await;
+        match connections.get(pool_key) {
+            Some(PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = client
+        .query(
+            "SELECT c.relname, \
+              t.relname, \
+              a.attname \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+             LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
+               AND d.objid = c.oid \
+               AND d.refclassid = 'pg_class'::regclass \
+               AND d.deptype IN ('a', 'i') \
+             LEFT JOIN pg_class t ON t.oid = d.refobjid \
+             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+             WHERE c.relkind = 'S' AND n.nspname = $1 \
+             ORDER BY c.relname",
+            &[&schema],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| PostgresSequenceSnapshot {
+            name: row.get::<_, String>(0),
+            owner_table: row.get::<_, Option<String>>(1),
+            owner_column: row.get::<_, Option<String>>(2),
+        })
+        .collect())
+}
+
+/// Create owned PostgreSQL sequences before executing reused table DDL because
+/// serial defaults still reference `nextval('...')` in `CREATE TABLE`.
+async fn prepare_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    request: &TransferRequest,
+    table: &str,
+    target_table: &str,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    pg_compat_transfer: bool,
+    preserves_target_table_name: bool,
+    target_table_preexisting: bool,
+) -> Result<Vec<PostgresOwnedSequence>, String> {
+    if !(request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting) {
+        return Ok(Vec::new());
+    }
+
+    let owned_sequences =
+        get_postgres_owned_sequences_for_transfer(state, source_pool_key, &request.source_schema, &[table.to_string()])
+            .await?;
+    if owned_sequences.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let existing_sequences =
+        get_postgres_sequence_snapshots_for_transfer(state, target_pool_key, &request.target_schema)
+            .await?
+            .into_iter()
+            .map(|sequence| (sequence.name.clone(), sequence))
+            .collect::<HashMap<_, _>>();
+
+    for sequence in &owned_sequences {
+        let should_create = validate_existing_postgres_sequence(
+            sequence,
+            existing_sequences.get(&sequence.name),
+            &request.target_schema,
+        )?;
+        if should_create {
+            let create_sql = format!(
+                "CREATE SEQUENCE IF NOT EXISTS {}",
+                postgres_sequence_qualified_name(&request.target_schema, &sequence.name)
+            );
+            execute_on_pool(state, target_pool_key, &create_sql)
+                .await
+                .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
+        }
+    }
+
+    Ok(owned_sequences)
+}
+
+/// Bind created or reused sequences after the table exists so
+/// `pg_get_serial_sequence(...)` can find them during later sequence sync.
+async fn bind_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    request: &TransferRequest,
+    target_table: &str,
+    target_pool_key: &str,
+    owned_sequences: &[PostgresOwnedSequence],
+) -> Result<(), String> {
+    for sequence in owned_sequences {
+        let owner_sql = format!(
+            "ALTER SEQUENCE {} OWNED BY {}.{}",
+            postgres_sequence_qualified_name(&request.target_schema, &sequence.name),
+            qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres),
+            quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
+        );
+        execute_on_pool(state, target_pool_key, &owner_sql)
+            .await
+            .map_err(|e| format!("Failed to bind PostgreSQL sequence for {target_table}: {e}"))?;
+    }
+    Ok(())
 }
 
 async fn get_postgres_schema_object_sources_for_transfer(
@@ -2918,15 +3246,27 @@ where
         }
 
         let documents = if is_mongodb_transfer_type(source_db_type) {
-            let result = find_mongo_documents_for_transfer(
-                state,
-                &request.source_connection_id,
-                &request.source_database,
-                table,
-                offset,
-                batch_size,
-            )
-            .await?;
+            let result = if is_mongodb_transfer_type(target_db_type) {
+                find_mongo_documents_extended_json(
+                    state,
+                    &request.source_connection_id,
+                    &request.source_database,
+                    table,
+                    offset,
+                    batch_size,
+                )
+                .await?
+            } else {
+                find_mongo_documents_for_rows(
+                    state,
+                    &request.source_connection_id,
+                    &request.source_database,
+                    table,
+                    offset,
+                    batch_size,
+                )
+                .await?
+            };
             total_rows = Some(result.total);
             result.documents
         } else {
@@ -2964,14 +3304,25 @@ where
         }
 
         if is_mongodb_transfer_type(target_db_type) {
-            insert_mongo_documents_for_transfer(
-                state,
-                &request.target_connection_id,
-                &request.target_database,
-                &target_table,
-                &documents,
-            )
-            .await
+            if is_mongodb_transfer_type(source_db_type) {
+                insert_mongo_documents_extended_json_for_transfer(
+                    state,
+                    &request.target_connection_id,
+                    &request.target_database,
+                    &target_table,
+                    &documents,
+                )
+                .await
+            } else {
+                insert_mongo_documents_for_transfer(
+                    state,
+                    &request.target_connection_id,
+                    &request.target_database,
+                    &target_table,
+                    &documents,
+                )
+                .await
+            }
             .map_err(|e| format!("Insert failed for MongoDB collection '{target_table}' at offset {offset}: {e}"))?;
         } else {
             if !sql_target_prepared {
@@ -2995,42 +3346,55 @@ where
                     sql_target_columns.iter().map(|column| Some(column.data_type.clone())).collect();
 
                 if request.create_table {
-                    let ddl = generate_create_table_ddl(
-                        &sql_target_columns,
-                        &target_table,
-                        &request.source_schema,
+                    let target_table_preexisting = crate::schema::list_tables_core(
+                        state,
+                        &request.target_connection_id,
+                        &request.target_database,
                         &request.target_schema,
-                        target_db_type,
-                        source_db_type,
+                        Some(&target_table),
+                        Some(1),
                         None,
-                    );
-                    let table_exists = match execute_on_pool(state, target_pool_key, &ddl).await {
-                        Ok(_) => true,
-                        Err(e) => {
-                            let err_lower = e.to_lowercase();
-                            if err_lower.contains("already exists") || err_lower.contains("there is already") {
-                                true
-                            } else {
-                                return Err(format!("Failed to create table from MongoDB collection '{table}': {e}"));
-                            }
-                        }
-                    };
-                    if table_exists {
-                        for stmt in generate_comment_ddl(
+                        None,
+                    )
+                    .await
+                    .map(|tables| !tables.is_empty())
+                    .unwrap_or(false);
+                    if !target_table_preexisting {
+                        let ddl = generate_create_table_ddl(
                             &sql_target_columns,
                             &target_table,
+                            &request.source_schema,
                             &request.target_schema,
                             target_db_type,
+                            source_db_type,
                             None,
-                        ) {
-                            if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
-                                log::warn!(
-                                    "[transfer] failed to set MongoDB transfer column comment for {}: {}",
-                                    target_table,
-                                    e
-                                );
+                        );
+                        let target_table_created = transfer_create_table_created(
+                            execute_on_pool(state, target_pool_key, &ddl).await.map(|_| ()),
+                            &format!("Failed to create table from MongoDB collection '{table}'"),
+                        )?;
+                        if target_table_created {
+                            for stmt in generate_comment_ddl(
+                                &sql_target_columns,
+                                &target_table,
+                                &request.target_schema,
+                                target_db_type,
+                                None,
+                            ) {
+                                if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
+                                    log::warn!(
+                                        "[transfer] failed to set MongoDB transfer column comment for {}: {}",
+                                        target_table,
+                                        e
+                                    );
+                                }
                             }
                         }
+                    } else {
+                        log::info!(
+                            "[transfer] target table {} already exists, skipping create-table DDL",
+                            target_table
+                        );
                     }
                 }
 
@@ -3152,10 +3516,15 @@ where
         return Err(format!("No columns found for table {table}"));
     }
 
-    let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-    let col_types: Vec<Option<String>> = columns.iter().map(|c| Some(c.data_type.clone())).collect();
+    let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
+    if writable_columns.is_empty() {
+        return Err(format!("No writable columns found for table {table}"));
+    }
+
+    let col_names: Vec<String> = writable_columns.iter().map(|c| c.name.clone()).collect();
+    let col_types: Vec<Option<String>> = writable_columns.iter().map(|c| Some(c.data_type.clone())).collect();
     let primary_key_columns: Vec<String> =
-        columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+        writable_columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
     log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
 
     // Fetch source table comment
@@ -3175,7 +3544,7 @@ where
     .next()
     .and_then(|t| t.comment);
 
-    let target_table_preexisting = crate::schema::list_tables_core(
+    let mut target_table_preexisting = crate::schema::list_tables_core(
         state,
         &request.target_connection_id,
         &request.target_database,
@@ -3228,19 +3597,52 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
-        let can_reuse_source_ddl =
-            can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
-        let ddl = if can_reuse_source_ddl {
-            let source_ddl = crate::schema::get_table_ddl_core(
-                &state,
-                &request.source_connection_id,
-                &request.source_database,
-                &request.source_schema,
+        if target_table_preexisting {
+            log::info!("[transfer] target table {} already exists, skipping create-table DDL", target_table);
+        } else {
+            let owned_sequences = prepare_postgres_owned_sequences_for_transfer(
+                state,
+                request,
                 table,
-                None,
+                &target_table,
+                source_pool_key,
+                target_pool_key,
+                pg_compat_transfer,
+                preserves_target_table_name,
+                target_table_preexisting,
             )
-            .await
-            .unwrap_or_else(|_| {
+            .await?;
+            let can_reuse_source_ddl =
+                can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
+            let ddl = if can_reuse_source_ddl {
+                let source_ddl = crate::schema::get_table_ddl_core(
+                    &state,
+                    &request.source_connection_id,
+                    &request.source_database,
+                    &request.source_schema,
+                    table,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    generate_create_table_ddl(
+                        &columns,
+                        &target_table,
+                        &request.source_schema,
+                        &request.target_schema,
+                        target_db_type,
+                        source_db_type,
+                        table_comment.as_deref(),
+                    )
+                });
+                rewrite_transfer_source_table_ddl(
+                    &source_ddl,
+                    &request.source_schema,
+                    &request.target_schema,
+                    source_db_type,
+                    target_db_type,
+                )
+            } else {
                 generate_create_table_ddl(
                     &columns,
                     &target_table,
@@ -3250,49 +3652,37 @@ where
                     source_db_type,
                     table_comment.as_deref(),
                 )
-            });
-            rewrite_transfer_source_table_ddl(
-                &source_ddl,
-                &request.source_schema,
-                &request.target_schema,
-                source_db_type,
-                target_db_type,
-            )
-        } else {
-            generate_create_table_ddl(
-                &columns,
-                &target_table,
-                &request.source_schema,
-                &request.target_schema,
-                target_db_type,
-                source_db_type,
-                table_comment.as_deref(),
-            )
-        };
-        log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
-        let table_exists = match execute_transfer_ddl_on_pool(state, target_pool_key, &ddl, target_db_type).await {
-            Ok(_) => true,
-            Err(e) => {
-                let err_lower = e.to_lowercase();
-                if err_lower.contains("already exists") || err_lower.contains("there is already") {
-                    true
-                } else {
-                    return Err(format!("Failed to create table: {e}"));
+            };
+            log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
+            let target_table_created = transfer_create_table_created(
+                execute_transfer_ddl_on_pool(state, target_pool_key, &ddl, target_db_type).await,
+                "Failed to create table",
+            )?;
+            if target_table_created {
+                let comment_stmts = generate_comment_ddl(
+                    &columns,
+                    &target_table,
+                    &request.target_schema,
+                    target_db_type,
+                    table_comment.as_deref(),
+                );
+                for stmt in &comment_stmts {
+                    if let Err(e) = execute_on_pool(state, target_pool_key, stmt).await {
+                        log::warn!("[transfer] failed to set column comment for {}: {}", target_table, e);
+                    }
                 }
-            }
-        };
-        if table_exists {
-            let comment_stmts = generate_comment_ddl(
-                &columns,
-                &target_table,
-                &request.target_schema,
-                target_db_type,
-                table_comment.as_deref(),
-            );
-            for stmt in &comment_stmts {
-                if let Err(e) = execute_on_pool(state, target_pool_key, stmt).await {
-                    log::warn!("[transfer] failed to set column comment for {}: {}", target_table, e);
-                }
+                bind_postgres_owned_sequences_for_transfer(
+                    state,
+                    request,
+                    &target_table,
+                    target_pool_key,
+                    &owned_sequences,
+                )
+                .await?;
+            } else {
+                // DDL may report the table already exists even when metadata
+                // lookup missed it (case/schema differences or localized errors).
+                target_table_preexisting = true;
             }
         }
     }
@@ -3323,7 +3713,11 @@ where
             )
             .await
             .unwrap_or_default();
-            let pks: Vec<String> = target_columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+            let pks: Vec<String> = target_columns
+                .iter()
+                .filter(|c| c.is_primary_key && col_names.iter().any(|name| name.eq_ignore_ascii_case(&c.name)))
+                .map(|c| c.name.clone())
+                .collect();
             if pks.is_empty() {
                 log::warn!("[transfer] table {} has no primary key, falling back to append", table);
                 (TransferMode::Append, vec![])
@@ -3955,6 +4349,37 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_writable_transfer_columns_skip_rowversion_types() {
+        let columns = vec![
+            test_column("id", "int"),
+            test_column("TimeSpan", "timestamp"),
+            test_column("rv", "ROWVERSION"),
+            test_column("name", "nvarchar(64)"),
+        ];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::SqlServer, &DatabaseType::SqlServer);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn non_sqlserver_target_writable_transfer_columns_keep_timestamp_type() {
+        let columns = vec![test_column("id", "int"), test_column("updated_at", "timestamp")];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Postgres, &DatabaseType::Postgres);
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "updated_at"]);
+    }
+
+    #[test]
+    fn sqlserver_target_keeps_timestamp_from_other_source_databases() {
+        let columns = vec![test_column("id", "int"), test_column("updated_at", "timestamp")];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Postgres, &DatabaseType::SqlServer);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["id", "updated_at"]);
+    }
+
+    #[test]
     fn dameng_identity_insert_wrapper_quotes_schema_and_table() {
         let sql = wrap_dameng_identity_insert_sql(
             "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\") VALUES\n(1);",
@@ -4141,6 +4566,28 @@ mod tests {
         assert_eq!(
             statements,
             vec!["CREATE TABLE \"public\".\"audit_logs\" (\n  \"id\" integer,\n  \"user_id\" integer\n)".to_string()]
+        );
+    }
+
+    #[test]
+    fn transfer_create_table_result_treats_existing_table_as_preexisting() {
+        assert_eq!(
+            transfer_create_table_created(
+                Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
+                "create"
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(
+            transfer_create_table_created(Err("错误: 关系 \"items\" 已经存在".to_string()), "create").unwrap(),
+            false
+        );
+        assert_eq!(transfer_create_table_created(Ok(()), "create").unwrap(), true);
+        assert_eq!(
+            transfer_create_table_created(Err("permission denied for schema public".to_string()), "create")
+                .unwrap_err(),
+            "create: permission denied for schema public"
         );
     }
 
@@ -4625,6 +5072,119 @@ mod tests {
     }
 
     #[test]
+    fn postgres_transfer_owned_sequence_ddl_uses_precreate_and_post_bind_steps() {
+        let sequence = PostgresOwnedSequence {
+            name: "it_quick_entry_id_seq".to_string(),
+            owner_table: "it_quick_entry".to_string(),
+            owner_column: "id".to_string(),
+        };
+        let create_sql =
+            format!("CREATE SEQUENCE IF NOT EXISTS {}", postgres_sequence_qualified_name("public", &sequence.name));
+        let owner_sql = format!(
+            "ALTER SEQUENCE {} OWNED BY {}.{}",
+            postgres_sequence_qualified_name("public", &sequence.name),
+            qualified_table(&sequence.owner_table, "public", &DatabaseType::Postgres),
+            quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
+        );
+
+        assert_eq!(create_sql, "CREATE SEQUENCE IF NOT EXISTS \"public\".\"it_quick_entry_id_seq\"".to_string());
+        assert_eq!(
+            owner_sql,
+            "ALTER SEQUENCE \"public\".\"it_quick_entry_id_seq\" OWNED BY \"public\".\"it_quick_entry\".\"id\""
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn postgres_owned_sequence_state_detects_conflicting_existing_sequence() {
+        let source = PostgresOwnedSequence {
+            name: "it_quick_entry_id_seq".to_string(),
+            owner_table: "it_quick_entry".to_string(),
+            owner_column: "id".to_string(),
+        };
+
+        let conflicting = PostgresSequenceSnapshot {
+            name: "it_quick_entry_id_seq".to_string(),
+            owner_table: Some("other_table".to_string()),
+            owner_column: Some("id".to_string()),
+        };
+
+        let error = validate_existing_postgres_sequence(&source, Some(&conflicting), "archive").unwrap_err();
+
+        assert!(error.contains("\"archive\".\"it_quick_entry_id_seq\""));
+        assert!(error.contains("already exists with incompatible ownership"));
+    }
+
+    #[test]
+    fn postgres_transfer_reused_table_ddl_preserves_serial_sequence_dependencies() {
+        let columns = vec![
+            db::ColumnInfo {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                column_default: Some("nextval('public.it_quick_entry_id_seq'::regclass)".to_string()),
+                is_primary_key: true,
+                extra: None,
+                comment: None,
+                numeric_precision: None,
+                numeric_scale: None,
+                character_maximum_length: None,
+            },
+            db::ColumnInfo {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                column_default: None,
+                is_primary_key: false,
+                extra: None,
+                comment: None,
+                numeric_precision: None,
+                numeric_scale: None,
+                character_maximum_length: None,
+            },
+        ];
+        let source_ddl = crate::schema::render_postgres_table_ddl("public", "it_quick_entry", &columns, &[], &[]);
+        let rewritten = rewrite_transfer_source_table_ddl(
+            &source_ddl,
+            "public",
+            "archive",
+            &DatabaseType::Postgres,
+            &DatabaseType::Postgres,
+        );
+        let sequence = PostgresOwnedSequence {
+            name: "it_quick_entry_id_seq".to_string(),
+            owner_table: "it_quick_entry".to_string(),
+            owner_column: "id".to_string(),
+        };
+        let create_sql =
+            format!("CREATE SEQUENCE IF NOT EXISTS {}", postgres_sequence_qualified_name("archive", &sequence.name));
+        let owner_sql = format!(
+            "ALTER SEQUENCE {} OWNED BY {}.{}",
+            postgres_sequence_qualified_name("archive", &sequence.name),
+            qualified_table(&sequence.owner_table, "archive", &DatabaseType::Postgres),
+            quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
+        );
+        let sequence_sync_sql = generate_postgres_sequence_sync_sql(&columns, "it_quick_entry", "archive");
+
+        assert!(source_ddl.starts_with("CREATE TABLE \"public\".\"it_quick_entry\""));
+        assert!(!source_ddl.contains("CREATE SEQUENCE"));
+        assert!(rewritten.contains("CREATE TABLE \"archive\".\"it_quick_entry\""));
+        assert!(rewritten.contains("nextval('\"archive\".it_quick_entry_id_seq'::regclass)"));
+        assert_eq!(create_sql, "CREATE SEQUENCE IF NOT EXISTS \"archive\".\"it_quick_entry_id_seq\"".to_string());
+        assert_eq!(
+            owner_sql,
+            "ALTER SEQUENCE \"archive\".\"it_quick_entry_id_seq\" OWNED BY \"archive\".\"it_quick_entry\".\"id\""
+                .to_string()
+        );
+        assert_eq!(
+            sequence_sync_sql,
+            vec![
+                "SELECT setval(pg_get_serial_sequence('\"archive\".\"it_quick_entry\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 0), 1), MAX(\"id\") IS NOT NULL) FROM \"archive\".\"it_quick_entry\"".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn postgres_routine_schema_rewrite_targets_destination_schema() {
         let rewritten = rewrite_postgres_routine_schema(
             "CREATE OR REPLACE FUNCTION public.bump_counter(id integer)\nRETURNS integer\nLANGUAGE plpgsql\nAS $$ BEGIN INSERT INTO public.audit_logs(user_id) VALUES (id); RETURN id + 1; END; $$",
@@ -4765,6 +5325,33 @@ mod tests {
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
+    }
+
+    #[test]
+    fn sqlserver_insert_formats_datetime_literals_with_supported_precision() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("date1"), String::from("date2"), String::from("note")],
+            &[
+                Some(String::from("int")),
+                Some(String::from("datetime")),
+                Some(String::from("datetime2(7)")),
+                Some(String::from("nvarchar(100)")),
+            ],
+            &[vec![
+                json!(1),
+                json!("2026-06-29 10:11:12.896666666"),
+                json!("2026-06-29T10:11:12.8966666Z"),
+                json!("2026-06-29 10:11:12.896666666"),
+            ]],
+            "test",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[test] ([id], [date1], [date2], [note]) VALUES\n(1, N'2026-06-29 10:11:12.897', N'2026-06-29 10:11:12.8966666', N'2026-06-29 10:11:12.896666666')"
+        );
     }
 
     #[test]

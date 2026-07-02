@@ -29,6 +29,22 @@ const markedInstance = new Marked({
       const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
       return `<a href="${escapeHtml(safeHref)}"${titleAttr} target="_blank" rel="noopener noreferrer">${label}</a>`;
     },
+    table({ header, rows, align }: Tokens.Table) {
+      const renderCell = (cell: Tokens.TableCell, tag: "th" | "td", colIndex: number): string => {
+        const content = this.parser.parseInline(cell.tokens);
+        const alignAttr = align?.[colIndex] ? ` align="${escapeHtml(align[colIndex]!)}"` : "";
+        return `<${tag}${alignAttr}>${content}</${tag}>`;
+      };
+      const thead = header.length > 0 ? `<thead><tr>${header.map((cell, i) => renderCell(cell, "th", i)).join("")}</tr></thead>` : "";
+      const tbodyRows = rows
+        .map((row) => {
+          const cells = row.map((cell, i) => renderCell(cell, "td", i)).join("");
+          return `<tr>${cells}</tr>`;
+        })
+        .join("");
+      const tbody = `<tbody>${tbodyRows}</tbody>`;
+      return `<div class="ai-markdown-table-wrap"><table>${thead}${tbody}</table></div>`;
+    },
   },
 });
 

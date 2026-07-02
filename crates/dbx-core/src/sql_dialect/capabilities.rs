@@ -35,6 +35,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
             | DatabaseType::Yashandb
+            | DatabaseType::Oscar
             | DatabaseType::Databricks
             | DatabaseType::SapHana
             | DatabaseType::Teradata
@@ -72,6 +73,12 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
             TablePaginationStrategy::FetchFirst
         }
         Some(DatabaseType::Oracle) => TablePaginationStrategy::Unbounded,
+        Some(DatabaseType::Oscar)
+            if matches!(context, PaginationContext::TablePreview | PaginationContext::BoundedRead) =>
+        {
+            TablePaginationStrategy::Rownum
+        }
+        Some(DatabaseType::Oscar) => TablePaginationStrategy::Unbounded,
         Some(DatabaseType::Dameng) => TablePaginationStrategy::FetchFirst,
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,

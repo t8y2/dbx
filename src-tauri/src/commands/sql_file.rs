@@ -32,13 +32,16 @@ pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, Strin
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
     let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let preview = decode_sql_file_bytes(&bytes)?.chars().take(20_000).collect();
+    let content = decode_sql_file_bytes(&bytes)?;
+    let preview = content.chars().take(20_000).collect();
 
     Ok(SqlFilePreview {
         file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("script.sql").to_string(),
         file_path,
         size_bytes: metadata.len(),
         preview,
+        can_execute_without_selected_database:
+            dbx_core::sql_file_import::mysql_like_sql_file_can_execute_without_selected_database(&content),
     })
 }
 

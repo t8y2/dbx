@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
+use log::warn;
+use rusqlite::{params, params_from_iter, Connection, DatabaseName, OpenFlags, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiConfig, AiConversation};
+use crate::ai::{AiChatMessage, AiConfig, AiConversation, AiProvider};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
@@ -17,6 +18,80 @@ use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
+const STORAGE_DB_FILE_NAME: &str = "dbx.db";
+const USER_DATA_TABLES: &[&str] = &[
+    "connections",
+    "connection_secrets",
+    "history",
+    "ai_conversations",
+    "mq_token_records",
+    "saved_sql_folders",
+    "saved_sql_files",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataDbImportResult {
+    Imported,
+    SkippedNoSource,
+    SkippedInvalidSource,
+    SkippedInvalidTarget,
+    SkippedSourceEmpty,
+    SkippedTargetHasData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteDbFileState {
+    Missing,
+    Empty,
+    Valid,
+    Invalid,
+}
+
+pub fn maybe_import_user_data_db(
+    target_data_dir: &Path,
+    source_data_dir: Option<&Path>,
+) -> Result<DataDbImportResult, String> {
+    let Some(source_data_dir) = source_data_dir else {
+        return Ok(DataDbImportResult::SkippedNoSource);
+    };
+
+    let source_db_path = source_data_dir.join(STORAGE_DB_FILE_NAME);
+    if !source_db_path.is_file() {
+        return Ok(DataDbImportResult::SkippedNoSource);
+    }
+    if inspect_sqlite_db_file(&source_db_path)? != SqliteDbFileState::Valid {
+        return Ok(DataDbImportResult::SkippedInvalidSource);
+    }
+
+    let source_conn = open_read_only_sqlite(&source_db_path)?;
+    if !sqlite_db_has_user_data(&source_conn)? {
+        return Ok(DataDbImportResult::SkippedSourceEmpty);
+    }
+
+    let target_db_path = target_data_dir.join(STORAGE_DB_FILE_NAME);
+    match inspect_sqlite_db_file(&target_db_path)? {
+        SqliteDbFileState::Missing => {}
+        SqliteDbFileState::Empty => {
+            remove_sqlite_db_files(&target_db_path)?;
+        }
+        SqliteDbFileState::Valid => {
+            let target_conn = open_read_only_sqlite(&target_db_path)?;
+            if sqlite_db_has_user_data(&target_conn)? {
+                return Ok(DataDbImportResult::SkippedTargetHasData);
+            }
+            drop(target_conn);
+            remove_sqlite_db_files(&target_db_path)?;
+        }
+        SqliteDbFileState::Invalid => return Ok(DataDbImportResult::SkippedInvalidTarget),
+    }
+
+    std::fs::create_dir_all(target_data_dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
+    source_conn
+        .backup(DatabaseName::Main, &target_db_path, None)
+        .map_err(|e| format!("Failed to import user data db: {e}"))?;
+
+    Ok(DataDbImportResult::Imported)
+}
 
 pub struct Storage {
     db: SqliteHandle,
@@ -123,6 +198,10 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         id INTEGER PRIMARY KEY CHECK (id = 1),
         config_json TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS ai_provider_configs (
+        provider TEXT PRIMARY KEY,
+        config_json TEXT NOT NULL
+    )",
     "CREATE TABLE IF NOT EXISTS ai_conversations (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '',
@@ -222,6 +301,64 @@ impl Storage {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || db.with_connection(f)).await.map_err(|e| e.to_string())?
     }
+}
+
+fn inspect_sqlite_db_file(path: &Path) -> Result<SqliteDbFileState, String> {
+    if !path.exists() {
+        return Ok(SqliteDbFileState::Missing);
+    }
+
+    let metadata = path.metadata().map_err(|e| format!("Failed to inspect db file: {e}"))?;
+    if metadata.len() == 0 {
+        return Ok(SqliteDbFileState::Empty);
+    }
+
+    if crate::db::sqlite::path_has_sqlite_header(path)? {
+        Ok(SqliteDbFileState::Valid)
+    } else {
+        Ok(SqliteDbFileState::Invalid)
+    }
+}
+
+fn open_read_only_sqlite(path: &Path) -> Result<Connection, String> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Failed to open db read-only: {e}"))
+}
+
+fn sqlite_db_has_user_data(conn: &Connection) -> Result<bool, String> {
+    for table_name in USER_DATA_TABLES {
+        if sqlite_table_has_rows(conn, table_name)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn sqlite_table_has_rows(conn: &Connection, table_name: &str) -> Result<bool, String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table_name],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Ok(false);
+    }
+
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table_name} LIMIT 1)");
+    conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| e.to_string())
+}
+
+fn remove_sqlite_db_files(db_path: &Path) -> Result<(), String> {
+    for path in [db_path.to_path_buf(), db_path.with_extension("db-wal"), db_path.with_extension("db-shm")] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("Failed to remove empty target db file {}: {err}", path.display())),
+        }
+    }
+    Ok(())
 }
 
 fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
@@ -488,6 +625,15 @@ impl Storage {
 
 // AI Config
 
+fn ai_provider_key(provider: &AiProvider) -> String {
+    serde_json::to_value(provider).ok().and_then(|value| value.as_str().map(ToOwned::to_owned)).unwrap_or_default()
+}
+
+fn ai_provider_from_key(provider: &str) -> Result<AiProvider, String> {
+    serde_json::from_value(serde_json::Value::String(provider.to_string()))
+        .map_err(|_| format!("Invalid AI provider: {provider}"))
+}
+
 impl Storage {
     pub async fn save_ai_config(&self, config: &AiConfig) -> Result<(), String> {
         let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
@@ -508,6 +654,65 @@ impl Storage {
             })
             .await?;
         json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+    }
+
+    pub async fn save_ai_provider_config(&self, provider: &str, config: &AiConfig) -> Result<(), String> {
+        let parsed_provider = ai_provider_from_key(provider)?;
+        let mut config = config.clone();
+        let config_provider = ai_provider_key(&config.provider);
+        if config_provider != provider {
+            warn!(
+                "save_ai_provider_config: config.provider ({}) does not match provider key ({}), normalizing",
+                config_provider, provider
+            );
+            config.provider = parsed_provider;
+        }
+        let provider = provider.to_string();
+        let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO ai_provider_configs (provider, config_json) VALUES (?1, ?2)",
+                params![provider, json],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_ai_provider_configs(&self) -> Result<HashMap<String, AiConfig>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT provider, config_json FROM ai_provider_configs")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            let mut map = HashMap::new();
+            for row in rows {
+                let (provider, json) = row.map_err(|e| e.to_string())?;
+                match serde_json::from_str::<AiConfig>(&json) {
+                    Ok(mut config) => {
+                        if let Ok(parsed_provider) = ai_provider_from_key(&provider) {
+                            let config_provider = ai_provider_key(&config.provider);
+                            if config_provider != provider {
+                                warn!(
+                                    "load_ai_provider_configs: stored config.provider ({}) does not match provider key ({}), normalizing",
+                                    config_provider, provider
+                                );
+                                config.provider = parsed_provider;
+                            }
+                            map.insert(provider, config);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize AI config for provider '{}': {}", provider, e);
+                    }
+                }
+            }
+            Ok(map)
+        })
+        .await
     }
 }
 
@@ -1956,7 +2161,7 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopIconTheme, DesktopSettings, Storage};
+    use super::{maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, Storage};
     use crate::connection_secrets::{MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY};
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use crate::saved_sql::SavedSqlFile;
@@ -1965,6 +2170,11 @@ mod tests {
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}.db", std::process::id()))
+    }
+
+    fn temp_data_dir(name: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}", std::process::id()))
     }
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
@@ -2053,6 +2263,93 @@ mod tests {
 
     fn mq_token_signing_key(config: &ConnectionConfig) -> Option<&str> {
         config.external_config.as_ref()?.get("tokenSigning")?.get("key")?.as_str()
+    }
+
+    async fn create_data_dir_with_connection(name: &str, connection_id: &str, token: &str) -> std::path::PathBuf {
+        let data_dir = temp_data_dir(name);
+        let storage = Storage::open(&data_dir.join("dbx.db")).await.unwrap();
+        storage.save_connections(&[mq_connection(connection_id, token)]).await.unwrap();
+        drop(storage);
+        data_dir
+    }
+
+    #[tokio::test]
+    async fn import_user_data_db_copies_source_when_target_is_missing() {
+        let source_dir = create_data_dir_with_connection("import-source", "source-connection", "source-token").await;
+        let target_dir = temp_data_dir("import-target");
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::Imported);
+        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let connections = storage.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "source-connection");
+        assert_eq!(mq_token(&connections[0]), Some("source-token"));
+    }
+
+    #[tokio::test]
+    async fn import_user_data_db_does_not_overwrite_target_with_user_data() {
+        let source_dir =
+            create_data_dir_with_connection("import-source-existing", "source-connection", "source-token").await;
+        let target_dir =
+            create_data_dir_with_connection("import-target-existing", "target-connection", "target-token").await;
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::SkippedTargetHasData);
+        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let connections = storage.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "target-connection");
+        assert_eq!(mq_token(&connections[0]), Some("target-token"));
+    }
+
+    #[tokio::test]
+    async fn import_user_data_db_replaces_empty_target_schema() {
+        let source_dir =
+            create_data_dir_with_connection("import-source-empty-target", "source-connection", "source-token").await;
+        let target_dir = temp_data_dir("import-empty-target");
+        let target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        target_storage
+            .save_desktop_settings(&DesktopSettings { debug_logging_enabled: true, ..DesktopSettings::default() })
+            .await
+            .unwrap();
+        drop(target_storage);
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::Imported);
+        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        let connections = storage.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "source-connection");
+    }
+
+    #[tokio::test]
+    async fn import_user_data_db_skips_empty_source_schema() {
+        let source_dir = temp_data_dir("import-empty-source");
+        let source_storage = Storage::open(&source_dir.join("dbx.db")).await.unwrap();
+        drop(source_storage);
+        let target_dir = temp_data_dir("import-empty-source-target");
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::SkippedSourceEmpty);
+        assert!(!target_dir.join("dbx.db").exists());
+    }
+
+    #[test]
+    fn import_user_data_db_skips_invalid_source_file() {
+        let source_dir = temp_data_dir("import-invalid-source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("dbx.db"), b"not sqlite").unwrap();
+        let target_dir = temp_data_dir("import-invalid-source-target");
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::SkippedInvalidSource);
+        assert!(!target_dir.join("dbx.db").exists());
     }
 
     #[tokio::test]

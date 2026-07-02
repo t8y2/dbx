@@ -282,6 +282,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   starrocks: mysqlCapabilities,
   goldendb: mysqlCapabilities,
   sundb: mysqlCapabilities,
+  oscar: unsupportedCapabilities,
   databend: mysqlCapabilities,
   gbase: gbaseCapabilities,
   postgres: postgresCapabilities,

@@ -55,6 +55,10 @@ export function changelogUrl(lang: "en" | "cn") {
 }
 
 export async function fetchChangelog(lang: "en" | "cn"): Promise<ChangelogData> {
+  if (typeof window !== "undefined") {
+    return fetchGitHubChangelog();
+  }
+
   const url = changelogUrl(lang);
 
   try {

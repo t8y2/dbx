@@ -4,7 +4,7 @@ use crate::token_usage::TokenUsage;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Notify;
 
@@ -34,6 +34,7 @@ pub enum CliAgentJsonlDialect {
 pub struct CliAgentProcessSpec {
     pub command: CliAgentCommandSpec,
     pub env: Vec<(String, String)>,
+    pub stdin: Option<String>,
     pub dialect: CliAgentJsonlDialect,
     pub classify_spawn_error: fn(&str) -> String,
     pub classify_run_error: fn(&str) -> String,
@@ -361,10 +362,17 @@ pub async fn run_cli_jsonl_agent(
     let mut child = command
         .args(&spec.command.args)
         .envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+        .stdin(if spec.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| (spec.classify_spawn_error)(&e.to_string()))?;
+
+    if let Some(input) = spec.stdin {
+        let mut stdin = child.stdin.take().ok_or_else(|| "CLI agent stdin not available".to_string())?;
+        stdin.write_all(input.as_bytes()).await.map_err(|e| format!("Failed to write CLI agent stdin: {e}"))?;
+        stdin.shutdown().await.map_err(|e| format!("Failed to close CLI agent stdin: {e}"))?;
+    }
 
     let stdout = child.stdout.take().ok_or_else(|| "Failed to capture CLI agent stdout".to_string())?;
     let stderr = child.stderr.take().ok_or_else(|| "Failed to capture CLI agent stderr".to_string())?;
@@ -470,6 +478,7 @@ mod tests {
                 ],
             },
             env: vec![("DBX_TEST_ENV".to_string(), "from-env".to_string())],
+            stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error,
             classify_run_error,
@@ -478,6 +487,28 @@ mod tests {
         let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
 
         assert_eq!(result, "from-env");
+    }
+
+    #[tokio::test]
+    async fn jsonl_agent_writes_stdin_to_child() {
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "input=$(cat); printf '%s\n' \"{\\\"type\\\":\\\"item.completed\\\",\\\"item\\\":{\\\"type\\\":\\\"agent_message\\\",\\\"text\\\":\\\"$input\\\"}}\" \"{\\\"type\\\":\\\"turn.completed\\\"}\"".to_string(),
+                ],
+            },
+            env: Vec::new(),
+            stdin: Some("prompt from stdin".to_string()),
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+
+        let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
+
+        assert_eq!(result, "prompt from stdin");
     }
 
     #[tokio::test]
@@ -495,6 +526,7 @@ mod tests {
         let spec = CliAgentProcessSpec {
             command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
             env: Vec::new(),
+            stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error,
             classify_run_error,

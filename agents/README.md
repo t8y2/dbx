@@ -47,6 +47,15 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 
 Most Java agents target JRE 21. Native agents, such as `oracle` and `xugu`, do not require a JRE. DBX downloads and manages the JRE 21 installation automatically for Java agents.
 
+## Choosing a Driver Language
+
+For new agents, prefer a **native (Go or Rust) driver** over a Java/JDBC agent whenever a mature, license-compatible native driver is available. Native agents ship as a single self-contained executable with no JRE, which significantly reduces memory footprint and startup time — the JVM baseline that every Java agent pays even when idle is avoided entirely.
+
+- **Native (Go/Rust)** — preferred when a usable native driver exists. See `drivers/oracle-go` (go-ora) and `drivers/xugu` as reference implementations. No JRE download or management is needed.
+- **Java/JDBC** — the default fallback when only a JDBC driver exists for the database, or when the native driver is immature or unmaintained. Most agents still fall in this category.
+
+Native agents implement the same JSON-RPC contract and `versions.json` registration as Java agents; they ship an `agent` executable instead of `agent.jar`. If both a native and a Java path exist for the same database, default DBX to the native one and keep the Java variant only as a compatibility fallback — see how `oracle` (go-ora native) coexists with `oracle-legacy` / `oracle-10g`.
+
 ## Build
 
 Requires JDK 21 (Gradle toolchain auto-downloads if needed).

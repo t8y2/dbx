@@ -104,6 +104,44 @@ class AbstractJdbcAgentTest {
     }
 
     @Test
+    void executesTransactionControlSqlThroughStatements() {
+        TrackingConnection tracking = new TrackingConnection();
+        TestAgent agent = new TestAgent(tracking);
+        agent.connect(new ConnectParams());
+
+        // Dump files can contain explicit transaction SQL while the JDBC connection is in auto-commit mode.
+        agent.executeQuery("BEGIN;", null, new ExecuteQueryOptions());
+        agent.executeQuery("BEGIN TRANSACTION;", null, new ExecuteQueryOptions());
+        agent.executeQuery("COMMIT;", null, new ExecuteQueryOptions());
+        agent.executeQuery("ROLLBACK;", null, new ExecuteQueryOptions());
+
+        assertEquals(
+            Arrays.asList(
+                "setMaxRows:10001",
+                "execute:BEGIN",
+                "setMaxRows:10001",
+                "execute:BEGIN TRANSACTION",
+                "setMaxRows:10001",
+                "execute:COMMIT",
+                "setMaxRows:10001",
+                "execute:ROLLBACK"
+            ),
+            tracking.calls
+        );
+    }
+
+    @Test
+    void executesPagedTransactionControlSqlThroughStatements() {
+        TrackingConnection tracking = new TrackingConnection();
+        TestAgent agent = new TestAgent(tracking);
+        agent.connect(new ConnectParams());
+
+        agent.executeQueryPage("COMMIT;", null, new QueryPageOptions());
+
+        assertEquals(Collections.singletonList("execute:COMMIT"), tracking.calls);
+    }
+
+    @Test
     void delegatesTransactionsThroughSharedFoundation() {
         TrackingConnection tracking = new TrackingConnection();
         TestAgent agent = new TestAgent(tracking);

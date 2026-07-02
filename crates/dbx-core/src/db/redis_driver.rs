@@ -263,6 +263,38 @@ pub async fn connect_sentinel(config: &ConnectionConfig) -> Result<redis::aio::M
     connect_client(client).await
 }
 
+pub async fn discover_sentinel_master(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+) -> Result<RedisNodeEndpoint, String> {
+    let service_name = config.redis_sentinel_master.trim();
+    if service_name.is_empty() {
+        return Err("Redis Sentinel master name is required".to_string());
+    }
+
+    let client = redis::Client::open(connection_info(
+        host,
+        port,
+        config.redis_sentinel_tls,
+        config.redis_tls_insecure(),
+        &config.redis_sentinel_username,
+        &config.redis_sentinel_password,
+        0,
+    ))
+    .map_err(|e| format!("Redis Sentinel connect failed: {e}"))?;
+    let mut con = connect_client_with_timeout(client, super::connection_timeout(), "Redis Sentinel").await?;
+    let raw = tokio::time::timeout(
+        super::connection_timeout(),
+        redis::cmd("SENTINEL").arg("get-master-addr-by-name").arg(service_name).query_async::<RedisRawValue>(&mut con),
+    )
+    .await
+    .map_err(|_| format!("Redis Sentinel master lookup timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
+    .map_err(|e| format!("Redis Sentinel master lookup failed: {e}"))?;
+
+    redis_sentinel_master_endpoint(raw)
+}
+
 pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPool, String> {
     let seed_nodes = redis_cluster_seed_nodes(config)?;
     let mut last_error = None;
@@ -429,23 +461,30 @@ where
 }
 
 fn redis_sentinel_nodes(config: &ConnectionConfig) -> Result<Vec<ConnectionInfo>, String> {
-    let raw_nodes = config.redis_sentinel_nodes.trim();
-    let endpoints: Vec<String> = if raw_nodes.is_empty() {
-        vec![format!("{}:{}", config.host.trim(), config.port)]
-    } else {
-        raw_nodes
-            .split([',', ';', '\n', '\r'])
-            .map(str::trim)
-            .filter(|node| !node.is_empty())
-            .map(ToOwned::to_owned)
-            .collect()
-    };
+    redis_sentinel_node_endpoints(config)?
+        .iter()
+        .map(|endpoint| {
+            Ok(connection_info(
+                &endpoint.host,
+                endpoint.port,
+                config.redis_sentinel_tls,
+                config.redis_tls_insecure(),
+                &config.redis_sentinel_username,
+                &config.redis_sentinel_password,
+                0,
+            ))
+        })
+        .collect()
+}
 
-    if endpoints.is_empty() {
-        return Err("At least one Redis Sentinel node is required".to_string());
-    }
-
-    endpoints.iter().map(|endpoint| redis_sentinel_node_connection_info(config, endpoint)).collect()
+pub fn redis_sentinel_node_endpoints(config: &ConnectionConfig) -> Result<Vec<RedisNodeEndpoint>, String> {
+    redis_node_endpoints(
+        config.redis_sentinel_nodes.trim(),
+        config.host.trim(),
+        config.port,
+        "Redis Sentinel node",
+        26379,
+    )
 }
 
 pub fn redis_cluster_seed_nodes(config: &ConnectionConfig) -> Result<Vec<RedisNodeEndpoint>, String> {
@@ -456,19 +495,6 @@ pub fn redis_cluster_seed_nodes(config: &ConnectionConfig) -> Result<Vec<RedisNo
         "Redis cluster seed node",
         6379,
     )
-}
-
-fn redis_sentinel_node_connection_info(config: &ConnectionConfig, endpoint: &str) -> Result<ConnectionInfo, String> {
-    let (host, port) = parse_redis_endpoint(endpoint, 26379)?;
-    Ok(connection_info(
-        &host,
-        port,
-        config.redis_sentinel_tls,
-        config.redis_tls_insecure(),
-        &config.redis_sentinel_username,
-        &config.redis_sentinel_password,
-        0,
-    ))
 }
 
 fn redis_node_endpoints(
@@ -500,6 +526,23 @@ fn redis_node_endpoints(
             Ok(RedisNodeEndpoint { host, port })
         })
         .collect()
+}
+
+fn redis_sentinel_master_endpoint(value: RedisRawValue) -> Result<RedisNodeEndpoint, String> {
+    let RedisRawValue::Array(parts) = value else {
+        return Err("Redis Sentinel master lookup returned an invalid response".to_string());
+    };
+    if parts.len() != 2 {
+        return Err("Redis Sentinel master lookup returned an invalid endpoint".to_string());
+    }
+    let Some(host) = redis_value_to_string(parts[0].clone()) else {
+        return Err("Redis Sentinel master lookup returned an invalid host".to_string());
+    };
+    let Some(port_text) = redis_value_to_string(parts[1].clone()) else {
+        return Err("Redis Sentinel master lookup returned an invalid port".to_string());
+    };
+    let port = parse_redis_port(&port_text)?;
+    Ok(RedisNodeEndpoint { host, port })
 }
 
 fn connection_info(
@@ -2323,20 +2366,68 @@ fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<serde_json::Value>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
         parse_stream_entries, redis_auth_candidates, redis_cluster_slot, redis_command_raw_to_json,
         redis_database_index, redis_json_raw_to_json, redis_json_value_preview, redis_key_bytes_to_display,
         redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview,
-        redis_raw_to_json, redis_value_contains_binary, redis_value_matches_query, RedisAuthCandidate,
-        RedisClusterSlotRange, RedisCommandSafety, RedisNodeEndpoint, RedisRawValue,
+        redis_raw_to_json, redis_sentinel_master_endpoint, redis_value_contains_binary, redis_value_matches_query,
+        RedisAuthCandidate, RedisClusterSlotRange, RedisCommandSafety, RedisNodeEndpoint, RedisRawValue,
     };
     use crate::models::connection::ConnectionConfig;
-    use redis::ConnectionAddr;
+    use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
+
+    struct FakeRedisConnection {
+        responses: VecDeque<RedisRawValue>,
+        commands: Vec<String>,
+    }
+
+    impl FakeRedisConnection {
+        fn new(responses: Vec<RedisRawValue>) -> Self {
+            Self { responses: responses.into(), commands: Vec::new() }
+        }
+
+        fn command_count(&self, command: &str) -> usize {
+            let needle = format!("\r\n{command}\r\n");
+            self.commands.iter().filter(|packed| packed.contains(&needle)).count()
+        }
+    }
+
+    impl ConnectionLike for FakeRedisConnection {
+        fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
+            self.commands.push(String::from_utf8_lossy(&cmd.get_packed_command()).into_owned());
+            let response = self.responses.pop_front().unwrap_or(RedisRawValue::Nil);
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn req_packed_commands<'a>(
+            &'a mut self,
+            _cmd: &'a Pipeline,
+            _offset: usize,
+            _count: usize,
+        ) -> RedisFuture<'a, Vec<RedisRawValue>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn get_db(&self) -> i64 {
+            0
+        }
+    }
 
     fn bulk(value: &str) -> RedisRawValue {
         RedisRawValue::BulkString(value.as_bytes().to_vec())
+    }
+
+    fn scan_response(cursor: &str, keys: Vec<&str>) -> RedisRawValue {
+        RedisRawValue::Array(vec![
+            bulk(cursor),
+            RedisRawValue::Array(
+                keys.into_iter().map(|key| RedisRawValue::BulkString(key.as_bytes().to_vec())).collect(),
+            ),
+        ])
     }
 
     #[test]
@@ -2433,6 +2524,40 @@ mod tests {
 
         assert_eq!(cursor, 17);
         assert_eq!(keys, vec![vec![0xAC, 0xED, 0x00, 0x05, b't'], b"plain:key".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_respects_iteration_limit_on_empty_cursor_pages() {
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Int(3001),
+            scan_response("512", vec![]),
+            scan_response("0", vec!["user:room:snapshot:200063:1"]),
+        ]);
+
+        let result = super::scan_keys_batch(&mut con, 0, "user:room:snapshot:200063:*", 1000, 1, false).await.unwrap();
+
+        assert_eq!(result.cursor, 512);
+        assert!(result.keys.is_empty());
+        assert_eq!(con.command_count("SCAN"), 1);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_can_skip_empty_cursor_pages_for_sparse_match() {
+        let key = "user:room:snapshot:200063:1";
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Int(3001),
+            scan_response("512", vec![]),
+            scan_response("0", vec![key]),
+        ]);
+
+        let result = super::scan_keys_batch(&mut con, 0, "user:room:snapshot:200063:*", 1000, 2, false).await.unwrap();
+
+        assert_eq!(result.cursor, 0);
+        assert_eq!(result.total_keys, 3001);
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(result.keys[0].key_display, key);
+        assert_eq!(result.keys[0].key_raw, redis_key_bytes_to_raw(key.as_bytes()));
+        assert_eq!(con.command_count("SCAN"), 2);
     }
 
     #[test]
@@ -2577,6 +2702,26 @@ mod tests {
         assert_eq!(parse_redis_endpoint("sentinel.local", 26379).unwrap(), ("sentinel.local".to_string(), 26379));
         assert_eq!(parse_redis_endpoint("[::1]:26380", 26379).unwrap(), ("::1".to_string(), 26380));
         assert_eq!(parse_redis_endpoint("::1", 26379).unwrap(), ("::1".to_string(), 26379));
+    }
+
+    #[test]
+    fn parses_redis_sentinel_master_lookup_response() {
+        let raw = RedisRawValue::Array(vec![bulk("10.0.0.8"), bulk("6379")]);
+
+        assert_eq!(
+            redis_sentinel_master_endpoint(raw).unwrap(),
+            RedisNodeEndpoint { host: "10.0.0.8".to_string(), port: 6379 }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_redis_sentinel_master_lookup_response() {
+        let raw = RedisRawValue::Array(vec![bulk("10.0.0.8")]);
+
+        assert_eq!(
+            redis_sentinel_master_endpoint(raw).unwrap_err(),
+            "Redis Sentinel master lookup returned an invalid endpoint"
+        );
     }
 
     #[test]

@@ -319,6 +319,7 @@ mod tests {
         let state = Arc::new(WebState {
             app,
             data_dir: dir.clone(),
+            public_base_path: "/".to_string(),
             password_disabled: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),

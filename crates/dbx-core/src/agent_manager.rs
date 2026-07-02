@@ -1,4 +1,6 @@
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,23 @@ pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
 
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
+}
+
+fn is_valid_jar_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Some(file) = File::open(path).ok() else {
+        return false;
+    };
+    let Some(mut archive) = zip::ZipArchive::new(file).ok() else {
+        return false;
+    };
+    let Some(mut manifest) = archive.by_name("META-INF/MANIFEST.MF").ok() else {
+        return false;
+    };
+    let mut manifest_text = String::new();
+    manifest.read_to_string(&mut manifest_text).is_ok() && manifest_text.contains("Main-Class:")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +366,7 @@ pub struct AgentDriverInfo {
     pub installed: bool,
     pub installed_version: Option<String>,
     pub update_available: bool,
+    pub requires_java_runtime: bool,
     pub jre: String,
     pub jre_installed: bool,
 }
@@ -538,13 +558,17 @@ impl AgentManager {
     }
 
     pub fn is_driver_installed(&self, db_type: &str) -> bool {
-        self.driver_jar_path(db_type).exists()
+        self.is_driver_jar_valid(db_type)
             || self.driver_native_path(db_type).exists()
             || self.driver_launch_config_path(db_type).exists()
     }
 
+    pub fn is_driver_jar_valid(&self, db_type: &str) -> bool {
+        is_valid_jar_file(&self.driver_jar_path(db_type))
+    }
+
     pub fn driver_requires_java_runtime(&self, db_type: &str) -> bool {
-        self.driver_jar_path(db_type).exists()
+        self.is_driver_jar_valid(db_type)
             && !self.driver_native_path(db_type).exists()
             && !self.driver_launch_config_path(db_type).exists()
     }
@@ -569,6 +593,11 @@ impl AgentManager {
         let jar_path = self.driver_jar_path(driver_key);
         if jar_path.exists() {
             let java = self.resolve_java_runtime(state, jre_key)?;
+            if !is_valid_jar_file(&jar_path) {
+                return Err(format!(
+                    "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
+                ));
+            }
             return Ok(AgentLaunchSpec::java_jar(java, jar_path));
         }
 

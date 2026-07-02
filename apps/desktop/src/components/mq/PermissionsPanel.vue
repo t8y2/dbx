@@ -90,7 +90,14 @@ async function loadPermissions() {
   try {
     permissions.value = await mqListPermissions(props.connectionId, current);
   } catch (e: unknown) {
-    error.value = formatError(e);
+    const msg = formatError(e);
+    // Gracefully handle Kafka brokers without an authorizer configured.
+    if (msg.includes("SecurityDisabled") || msg.includes("No Authorizer") || msg.includes("authorizer")) {
+      error.value = undefined;
+      notice.value = "当前 Kafka 集群未启用权限管理（Authorizer 未配置）。如需 ACL 功能，请在 Broker 配置中添加 authorizer.class.name。";
+    } else {
+      error.value = msg;
+    }
   } finally {
     loading.value = false;
   }
@@ -128,7 +135,12 @@ async function grantPermission() {
     roleName.value = "";
     await loadPermissions();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    const msg = formatError(e);
+    if (msg.includes("SecurityDisabled") || msg.includes("No Authorizer") || msg.includes("authorizer")) {
+      error.value = "当前 Kafka 集群未启用权限管理，无法执行授权操作。请在 Broker 配置中启用 Authorizer。";
+    } else {
+      error.value = msg;
+    }
   } finally {
     loading.value = false;
   }

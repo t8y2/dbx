@@ -4,7 +4,6 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 const ConnectionDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionDialog.vue"));
-const EditorSettingsDialog = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const DangerConfirmDialog = defineAsyncComponent(() => import("@/components/editor/DangerConfirmDialog.vue"));
 const SqlParameterDialog = defineAsyncComponent(() => import("@/components/editor/SqlParameterDialog.vue"));
 const DataTransferDialog = defineAsyncComponent(() => import("@/components/transfer/DataTransferDialog.vue"));
@@ -21,14 +20,12 @@ const DataGenerateDialog = defineAsyncComponent(() => import("@/components/gener
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
+import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 
 const props = defineProps<{
   showConnectionDialog: boolean;
   connectionPrefill?: ConnectionDeepLinkDraft | null;
-  showSettingsDialog: boolean;
-  settingsInitialTab?: string;
-  settingsInitialSection?: string;
-  appVersion?: string;
+  connectionInitialTab?: ConfigTab;
   showDangerDialog: boolean;
   dangerSql: string;
   suppressDangerConfirm: boolean;
@@ -39,7 +36,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:showConnectionDialog": [value: boolean];
-  "update:showSettingsDialog": [value: boolean];
   "update:showDangerDialog": [value: boolean];
   "update:suppressDangerConfirm": [value: boolean];
   "update:showSqlParameterDialog": [value: boolean];
@@ -108,13 +104,13 @@ watch(
     :open="shouldShowConnectionDialog"
     :edit-config="editConfig"
     :prefill-config="connectionPrefill"
+    :initial-tab="connectionInitialTab"
     @update:open="emit('update:showConnectionDialog', $event)"
     @connect-started="emit('connectStarted', $event)"
     @connect-succeeded="emit('connectSucceeded', $event)"
     @connect-failed="emit('connectFailed', $event)"
     @open-driver-store="emit('openDriverStore')"
   />
-  <EditorSettingsDialog v-if="showSettingsDialog" :open="showSettingsDialog" :initial-tab="settingsInitialTab || 'editor'" :initial-section="settingsInitialSection" :app-version="appVersion" @update:open="emit('update:showSettingsDialog', $event)" />
   <DangerConfirmDialog
     v-if="showDangerDialog"
     :open="showDangerDialog"
@@ -187,6 +183,7 @@ watch(
     :prefill-schema="dialogs.databaseExportPrefillSchema.value"
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
+    :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
   />
   <ConfigPassphraseDialog
     v-if="dialogs.showConfigPassphraseDialog.value"

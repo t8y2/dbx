@@ -1,9 +1,20 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { appendColumnValueFilterCondition, buildColumnValueFilterCondition } from "../../apps/desktop/src/lib/dataGridColumnFilter.ts";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition } from "../../apps/desktop/src/lib/dataGridColumnFilter.ts";
 
 function installFilterFetchMock() {
   globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/query/build-data-grid-column-values-filter-condition") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const options = body.options;
+      const quote = options.databaseType === "mysql" ? (name: string) => `\`${name}\`` : options.databaseType === "sqlserver" ? (name: string) => `[${name}]` : (name: string) => `"${name}"`;
+      const values = options.values ?? [];
+      const nonNull = values.filter((value: unknown) => value !== null);
+      const nullClause = values.some((value: unknown) => value === null) ? `${quote(options.columnName)} IS NULL` : "";
+      const valueClause = nonNull.length ? `${quote(options.columnName)} IN (${nonNull.map((value: unknown) => (typeof value === "number" ? value : `'${value}'`)).join(", ")})` : "";
+      const result = [nullClause, valueClause].filter(Boolean).join(" OR ");
+      return new Response(JSON.stringify(result ? `(${result})` : null), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (String(input) !== "/api/query/build-data-grid-column-value-filter-condition") {
       return new Response("unexpected request", { status: 500 });
     }
@@ -50,4 +61,16 @@ test("builds IS NULL for typed NULL filters", async () => {
   });
 
   assert.equal(condition, "[archived_at] IS NULL");
+});
+
+test("builds multi-value server-side column filters", async () => {
+  installFilterFetchMock();
+  const condition = await buildColumnValuesFilterCondition({
+    databaseType: "postgres",
+    columnName: "status",
+    columnInfo: { name: "status", data_type: "varchar", is_nullable: true, is_primary_key: false },
+    values: ["active", "pending", null],
+  });
+
+  assert.equal(condition, `("status" IS NULL OR "status" IN ('active', 'pending'))`);
 });

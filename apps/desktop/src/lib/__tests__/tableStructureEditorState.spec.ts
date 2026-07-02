@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combineDataTypeForDatabase, dataTypeLengthInputValue, isDataTypeLengthDisabled, splitDataType } from "../tableStructureEditorState";
+import { combineDataTypeForDatabase, createColumnDrafts, dataTypeLengthInputValue, isDataTypeLengthDisabled, isSqlServerIdentityCompatibleDataType, splitDataType } from "../tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
   it("keeps mysql unsigned attributes in the editable base type", () => {
@@ -26,5 +26,57 @@ describe("tableStructureEditorState", () => {
     expect(isDataTypeLengthDisabled("mysql", "set")).toBe(true);
     expect(dataTypeLengthInputValue("mysql", dataType)).toBe("");
     expect(dataTypeLengthInputValue("mysql", "set('manual','auto')")).toBe("");
+  });
+
+  it("strips SQL Server metadata parentheses from editable defaults", () => {
+    const drafts = createColumnDrafts(
+      [
+        {
+          name: "name",
+          data_type: "nvarchar(100)",
+          is_nullable: true,
+          column_default: "('')",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "active",
+          data_type: "bit",
+          is_nullable: false,
+          column_default: "((1))",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "created_at",
+          data_type: "datetime2(7)",
+          is_nullable: false,
+          column_default: "((sysdatetime()))",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "label",
+          data_type: "nvarchar(100)",
+          is_nullable: true,
+          column_default: "('prefix (internal)')",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "sqlserver",
+    );
+
+    expect(drafts.map((draft) => draft.defaultValue)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
+    expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
+  });
+
+  it("limits SQL Server identity columns to supported data types", () => {
+    expect(isSqlServerIdentityCompatibleDataType("int")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("bigint")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("numeric(18, 0)")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("decimal(10)")).toBe(true);
+    expect(isSqlServerIdentityCompatibleDataType("varchar(255)")).toBe(false);
+    expect(isSqlServerIdentityCompatibleDataType("numeric(18, 2)")).toBe(false);
   });
 });

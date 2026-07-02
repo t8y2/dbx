@@ -34,6 +34,10 @@ function conn(id: string): ConnectionConfig {
   };
 }
 
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
 test("successful disconnect clears the connection error", async () => {
   const restoreStorage = installMemoryStorage();
   const originalFetch = globalThis.fetch;
@@ -157,6 +161,7 @@ test("known backend connection errors mark the connection disconnected", async (
     "ORA-02396: exceeded maximum idle time, please connect again",
     "Agent stdin not available",
     "Failed to write to agent stdin",
+    "MySQL connection failed: Input/output error: No route to host (os error 65)",
   ];
 
   try {
@@ -368,12 +373,137 @@ test("hanging database metadata load times out and clears loading state", async 
   }
 });
 
+test("utility-only connection cache is ignored and replaced with live metadata children", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  const utilityOnlyCache = {
+    version: 2,
+    cachedAt: new Date().toISOString(),
+    children: [
+      {
+        id: "conn-1:__user_admin",
+        label: "tree.userAdmin",
+        type: "user-admin",
+        connectionId: "conn-1",
+        database: "",
+      },
+    ],
+  };
+  let listDatabasesCalls = 0;
+  let savedPayload: any = null;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/schema/cache?")) {
+      return jsonResponse(utilityOnlyCache);
+    }
+    if (url.startsWith("/api/schema/databases?")) {
+      listDatabasesCalls++;
+      return jsonResponse([{ name: "app" }]);
+    }
+    if (url === "/api/schema/cache" && init?.method === "POST") {
+      savedPayload = JSON.parse(String(init.body ?? "{}")).payload;
+      return jsonResponse(null);
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection({ ...conn("conn-1"), db_type: "mysql", port: 3306 });
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      children: [],
+    });
+
+    await store.loadDatabases("conn-1");
+
+    assert.equal(listDatabasesCalls, 1);
+    assert.deepEqual(
+      store.treeNodes[0].children?.map((child) => child.type),
+      ["database", "user-admin"],
+    );
+    assert.deepEqual(
+      savedPayload?.children?.map((child: any) => child.type),
+      ["database"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("empty root metadata does not replace existing databases with only user admin", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  let savedPayload: any = null;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/schema/cache?")) {
+      return jsonResponse(null);
+    }
+    if (url.startsWith("/api/schema/databases?")) {
+      return jsonResponse([]);
+    }
+    if (url === "/api/schema/cache" && init?.method === "POST") {
+      savedPayload = JSON.parse(String(init.body ?? "{}")).payload;
+      return jsonResponse(null);
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection({ ...conn("conn-1"), db_type: "mysql", port: 3306 });
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      children: [
+        {
+          id: "conn-1:app",
+          label: "app",
+          type: "database",
+          connectionId: "conn-1",
+          database: "app",
+          children: [],
+        },
+      ],
+    });
+
+    await store.loadDatabases("conn-1");
+
+    assert.deepEqual(
+      store.treeNodes[0].children?.map((child) => child.type),
+      ["database", "user-admin"],
+    );
+    assert.deepEqual(
+      store.treeNodes[0].children?.map((child) => child.id),
+      ["conn-1:app", "conn-1:__user_admin"],
+    );
+    assert.deepEqual(
+      savedPayload?.children?.map((child: any) => child.id),
+      ["conn-1:app"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test.each([
   ["redis", "loadRedisDatabases", "/api/redis/list-databases", "Redis databases"],
   ["mq", "loadMqTenants", "/api/mq/tenants/list", "message queue tenants"],
-  ["mongodb", "loadMongoDatabases", "/api/mongo/list-databases", "MongoDB databases"],
-  ["elasticsearch", "loadElasticsearchIndices", "/api/mongo/list-collections", "Elasticsearch indices"],
-  ["qdrant", "loadVectorCollections", "/api/mongo/list-collections", "vector collections"],
+  ["mongodb", "loadMongoDatabases", "/api/document-store/list-databases", "MongoDB databases"],
+  ["elasticsearch", "loadElasticsearchIndices", "/api/document-store/list-collections", "Elasticsearch indices"],
+  ["qdrant", "loadVectorCollections", "/api/document-store/list-collections", "vector collections"],
 ] as const)("hanging %s root metadata load times out and clears loading state", async (dbType, loader, endpoint, label) => {
   vi.useFakeTimers();
   const restoreStorage = installMemoryStorage();
@@ -381,6 +511,10 @@ test.each([
   globalThis.fetch = (async (input) => {
     if (String(input) === endpoint) {
       return new Promise<Response>(() => {});
+    }
+    // Marking a connection lost also cleans up any query client sessions.
+    if (String(input) === "/api/query/close-client-session") {
+      return jsonResponse(true);
     }
     return new Response("unexpected request", { status: 500 });
   }) as typeof fetch;

@@ -67,23 +67,7 @@ public final class JdbcExecutor {
     ) {
         return unchecked(() -> {
             String trimmedSql = trimSql(sql);
-            String upperSql = trimmedSql.toUpperCase(Locale.ROOT).trim();
             long start = System.currentTimeMillis();
-
-            if ("BEGIN".equals(upperSql) || "BEGIN TRANSACTION".equals(upperSql)) {
-                conn.setAutoCommit(false);
-                return emptyQueryResult(start);
-            }
-            if ("COMMIT".equals(upperSql)) {
-                conn.commit();
-                conn.setAutoCommit(true);
-                return emptyQueryResult(start);
-            }
-            if ("ROLLBACK".equals(upperSql)) {
-                conn.rollback();
-                conn.setAutoCommit(true);
-                return emptyQueryResult(start);
-            }
 
             applySchema(conn, schema, setSchemaSql);
 
@@ -94,6 +78,8 @@ public final class JdbcExecutor {
                 if (fetchSize != null && fetchSize > 0) {
                     stmt.setFetchSize(fetchSize);
                 }
+                // SQL dumps often contain BEGIN/COMMIT/ROLLBACK as executable statements.
+                // Do not translate them to Connection.commit(), which requires autoCommit=false.
                 boolean hasResultSet = stmt.execute(trimmedSql);
                 long elapsed = System.currentTimeMillis() - start;
                 if (hasResultSet) {
@@ -204,23 +190,7 @@ public final class JdbcExecutor {
         return unchecked(() -> {
             expireIdleSessions(targetSessions, System.currentTimeMillis(), QUERY_SESSION_IDLE_TIMEOUT_MILLIS);
             String trimmedSql = trimSql(sql);
-            String upperSql = trimmedSql.toUpperCase(Locale.ROOT).trim();
             long start = System.currentTimeMillis();
-
-            if ("BEGIN".equals(upperSql) || "BEGIN TRANSACTION".equals(upperSql)) {
-                conn.setAutoCommit(false);
-                return emptyQueryPageResult(start);
-            }
-            if ("COMMIT".equals(upperSql)) {
-                conn.commit();
-                conn.setAutoCommit(true);
-                return emptyQueryPageResult(start);
-            }
-            if ("ROLLBACK".equals(upperSql)) {
-                conn.rollback();
-                conn.setAutoCommit(true);
-                return emptyQueryPageResult(start);
-            }
 
             applySchema(conn, schema, setSchemaSql);
 
@@ -230,6 +200,8 @@ public final class JdbcExecutor {
                 if (options.getFetchSize() != null && options.getFetchSize() > 0) {
                     stmt.setFetchSize(options.getFetchSize());
                 }
+                // Keep script transaction-control statements in the SQL stream.
+                // JDBC transaction APIs are reserved for executeTransaction.
                 boolean hasResultSet = stmt.execute(trimmedSql);
                 long elapsed = System.currentTimeMillis() - start;
                 if (!hasResultSet) {

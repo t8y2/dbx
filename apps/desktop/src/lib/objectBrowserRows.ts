@@ -5,8 +5,10 @@ import { parseSlashDelimitedRegexQuery } from "@/lib/searchPattern";
 export type ObjectBrowserRow = {
   id: string;
   name: string;
+  displayName: string;
   schema?: string;
   type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+  signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -42,15 +44,20 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
     const objectSchema = object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
     const schema = objectSchema || (options.needsSchema ? options.fallbackSchema : undefined);
     const type = normalizeObjectBrowserType(object.object_type);
-    const baseId = `${schema || options.fallbackSchema || options.database}:${name}:${type}`;
+    const signature = routineSignatureForDisplay(type, object.signature);
+    const displayName = signature === undefined ? name : `${name}(${signature})`;
+    const signatureIdPart = signature === undefined ? "" : `:${signature}`;
+    const baseId = `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
     const index = seen.get(baseId) ?? 0;
     seen.set(baseId, index + 1);
     return [
       {
         id: `${baseId}:${index}`,
         name,
+        displayName,
         schema,
         type,
+        signature,
         comment: object.comment,
         created_at: object.created_at,
         updated_at: object.updated_at,
@@ -62,6 +69,12 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
 
   markPartitionRows(rows, options.fallbackSchema || options.database);
   return rows;
+}
+
+function routineSignatureForDisplay(type: ObjectBrowserRow["type"], signature: string | null | undefined): string | undefined {
+  if (type !== "PROCEDURE" && type !== "FUNCTION") return undefined;
+  if (signature == null) return undefined;
+  return signature.trim();
 }
 
 function markPartitionRows(rows: ObjectBrowserRow[], fallbackSchema: string) {
@@ -102,18 +115,18 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
   if (!q) return rows;
   const regex = parseSlashDelimitedRegexQuery(query.trim());
   if (regex) {
-    return rows.filter((row) => [row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
+    return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) => [row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+  return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
 }
 
 export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrowserSortKey, direction: ObjectBrowserSortDirection): ObjectBrowserRow[] {
   const multiplier = direction === "asc" ? 1 : -1;
-  const compareNames = createDatabaseObjectNameComparator(rows.map((row) => row.name));
+  const compareNames = createDatabaseObjectNameComparator(rows.map((row) => row.displayName));
   return [...rows].sort((left, right) => {
-    const compared = key === "name" ? compareNames(left.name, right.name) : compareObjectBrowserValue(left[key], right[key], key, direction);
+    const compared = key === "name" ? compareNames(left.displayName, right.displayName) : compareObjectBrowserValue(left[key], right[key], key, direction);
     if (compared !== 0) return compared * multiplier;
-    return compareNames(left.name, right.name);
+    return compareNames(left.displayName, right.displayName);
   });
 }
 

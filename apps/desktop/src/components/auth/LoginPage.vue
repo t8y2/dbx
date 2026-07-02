@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Lock, Loader2, ShieldCheck } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
+import { apiUrl } from "@/lib/webPath";
 
 const props = withDefaults(
   defineProps<{
@@ -30,7 +31,7 @@ async function submit() {
   loading.value = true;
   error.value = "";
   try {
-    const url = props.setupMode ? "/api/auth/setup" : "/api/auth/login";
+    const url = apiUrl(props.setupMode ? "/api/auth/setup" : "/api/auth/login");
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

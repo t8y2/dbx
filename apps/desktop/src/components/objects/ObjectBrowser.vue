@@ -8,6 +8,7 @@ import {
   ArrowUp,
   Braces,
   CheckSquare,
+  Clipboard,
   Code2,
   Copy,
   CopyPlus,
@@ -40,7 +41,7 @@ import {
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
@@ -51,15 +52,17 @@ import { isSchemaAware } from "@/lib/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import { buildDropObjectSql, buildDuplicateTableStructureSql, buildEmptyTableSql, buildTruncateTableSql, type TableAdminSqlOptions } from "@/lib/dbAdminSql";
+import { buildDropObjectSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, type TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, objectSourceSaveExecutionMode, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/objectRenameSql";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/databaseExport";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/clipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/tableClipboard";
 import { formatSqlInsert } from "@/lib/exportFormats";
+import { buildSingleDdlExportFileContent } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -151,9 +154,14 @@ const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
 const batchDropPreviewSql = ref("");
+// Paste table dialog state
+const showPasteDialog = ref(false);
+const pasteTableMode = ref<PasteTableMode>("structure-and-data");
+const pasteTableEntries = ref<{ sourceName: string; targetName: string; schema?: string }[]>([]);
+const pasteTableDataCopySupported = computed(() => supportsWholeRowTableDataCopy(effectiveDatabaseType.value));
 const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   select: 34,
-  name: 360,
+  name: 260,
   type: 110,
   estimatedRows: 110,
   totalBytes: 100,
@@ -216,6 +224,9 @@ const gridTemplateColumns = computed(() => {
       return `${width}px`;
     })
     .join(" ");
+});
+const objectGridMinWidth = computed(() => {
+  return objectBrowserColumns.value.reduce((total, key) => total + objectColumnWidths.value[key], 0) + Math.max(0, objectBrowserColumns.value.length - 1) * 12 + 24;
 });
 const partitionRowsByParentId = computed(() => {
   const groups = new Map<string, ObjectBrowserRow[]>();
@@ -799,7 +810,7 @@ async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
     const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type));
-    await saveFileContent(ddl + "\n", `${row.name}.sql`, "SQL", "sql");
+    await saveFileContent(buildSingleDdlExportFileContent(ddl), `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
   }
@@ -961,6 +972,132 @@ async function confirmDuplicateStructure() {
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function copySelectedTablesToClipboard() {
+  const selectedRows = selectedTableRows.value;
+  if (selectedRows.length === 0) return;
+  connectionStore.treeClipboard = {
+    kind: "table-copy",
+    tables: selectedRows.map((row) => ({
+      connectionId: props.connection.id,
+      database: props.database,
+      schema: row.schema || selectedSchema.value,
+      tableName: row.name,
+    })),
+  };
+  toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+}
+
+function canPasteTableClipboard(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  return clipboard?.kind === "table-copy" && tableClipboardMatchesTarget(clipboard.tables, pasteTableTargetContext());
+}
+
+function pasteTableTargetContext(): TableClipboardContext {
+  return {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: selectedSchema.value,
+  };
+}
+
+function copySingleTableToClipboard(row: ObjectBrowserRow) {
+  connectionStore.treeClipboard = {
+    kind: "table-copy",
+    tables: [
+      {
+        connectionId: props.connection.id,
+        database: props.database,
+        schema: row.schema || selectedSchema.value,
+        tableName: row.name,
+      },
+    ],
+  };
+  toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+}
+
+function openPasteTableDialog() {
+  const clipboard = connectionStore.treeClipboard;
+  if (!canPasteTableClipboard() || !clipboard) {
+    toast(t("contextMenu.noTableToPaste"), 2000);
+    return;
+  }
+  pasteTableMode.value = defaultPasteTableMode(effectiveDatabaseType.value);
+  pasteTableEntries.value = clipboard.tables.map((entry) => ({
+    sourceName: entry.tableName,
+    targetName: `${entry.tableName}_copy`,
+    schema: entry.schema,
+  }));
+  showPasteDialog.value = true;
+}
+
+function onObjectBrowserKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented) return;
+  if (eventTargetAllowsAppClipboardShortcut(event, "c")) {
+    if (selectedTableCount.value === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    copySelectedTablesToClipboard();
+    return;
+  }
+  if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
+    if (!canPasteTableClipboard()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openPasteTableDialog();
+  }
+}
+
+async function confirmPasteTable() {
+  const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim());
+  if (entries.length === 0) return;
+  const mode = pasteTableMode.value;
+  const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
+  showPasteDialog.value = false;
+  let successCount = 0;
+  let failCount = 0;
+  for (const entry of entries) {
+    const targetName = entry.targetName.trim();
+    const schema = entry.schema || selectedSchema.value;
+    try {
+      if (mode === "structure-and-data" || mode === "structure-only") {
+        const structureSql = await buildDuplicateTableStructureSql({
+          databaseType: effectiveDatabaseType.value,
+          schema,
+          sourceName: entry.sourceName,
+          targetName,
+        });
+        await api.executeQuery(props.connection.id, props.database, structureSql, schema);
+      }
+      if (copyData) {
+        const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName);
+        const dataCopyColumnOptions = tableDataCopyColumnOptions(effectiveDatabaseType.value, sourceColumns);
+        if (dataCopyColumnOptions.columns.length === 0) {
+          throw new Error("No writable columns available for table data copy.");
+        }
+        const dataSql = await buildCopyTableDataSql({
+          databaseType: effectiveDatabaseType.value,
+          schema,
+          sourceName: entry.sourceName,
+          targetName,
+          ...dataCopyColumnOptions,
+        });
+        await api.executeQuery(props.connection.id, props.database, dataSql, schema);
+      }
+      successCount++;
+    } catch (e: any) {
+      failCount++;
+      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
+    }
+  }
+  if (failCount === 0) {
+    toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
+  } else {
+    toast(t("contextMenu.batchPastePartialFail", { success: successCount, failed: failCount }), 5000);
+  }
+  await reload();
+  await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
 }
 
 function tableAdminSqlOptions(row: ObjectBrowserRow): TableAdminSqlOptions {
@@ -1236,11 +1373,16 @@ onBeforeUnmount(() => {
 
 watch(
   () => [props.connection.id, props.database, props.schema] as const,
-  () => {
+  async () => {
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
     clearTableSelection();
+    try {
+      await connectionStore.ensureConnected(props.connection.id);
+    } catch (e) {
+      console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
+    }
     void reload();
   },
   { immediate: true },
@@ -1284,6 +1426,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
+    { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy },
     { label: "", separator: true },
     ...(supportsTruncateTable.value
       ? [
@@ -1372,7 +1515,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 </script>
 
 <template>
-  <div ref="rootRef" class="flex h-full min-h-0 flex-col bg-background">
+  <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
     <div class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <Table2 class="h-4 w-4 text-muted-foreground" />
@@ -1400,16 +1543,27 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </button>
         </div>
       </div>
-      <Select v-if="needsSchema" :model-value="selectedSchema" :disabled="loadingSchemas" @update:model-value="onSchemaChange">
-        <SelectTrigger class="h-7 w-36 text-xs">
-          <SelectValue :placeholder="loadingSchemas ? t('objects.loadingSchemas') : t('objects.schema')" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="schema in schemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-        </SelectContent>
-      </Select>
+      <SearchableSelect
+        v-if="needsSchema"
+        :model-value="selectedSchema || ''"
+        :options="schemas"
+        :placeholder="t('objects.schema')"
+        :search-placeholder="t('editor.searchSchema')"
+        :empty-text="t('grid.noSearchResults')"
+        :loading-text="t('objects.loadingSchemas')"
+        :loading="loadingSchemas"
+        :disabled="loadingSchemas"
+        trigger-variant="outline"
+        trigger-class="h-7 w-36 max-w-36 px-2 text-xs font-normal"
+        content-class="w-56"
+        @update:model-value="onSchemaChange"
+      />
       <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="loadingObjects" @click="reload">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects }" />
+      </Button>
+      <Button v-if="canPasteTableClipboard()" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openPasteTableDialog">
+        <Clipboard class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("objects.pasteTableSelected") }}
       </Button>
     </div>
     <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/30 px-3 text-xs">
@@ -1419,6 +1573,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Download class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
+      </Button>
+      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
+        <Clipboard class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("objects.copyTableSelected") }}
       </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
@@ -1440,152 +1598,154 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     <div v-else-if="filteredRows.length === 0" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
       {{ t("objects.empty") }}
     </div>
-    <div v-else class="flex min-h-0 flex-1 flex-col">
-      <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns }">
-        <div class="relative flex min-w-0 items-center">
-          <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
-            <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-            <Square v-else class="h-3.5 w-3.5" />
-          </button>
-          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div class="relative flex min-w-0 items-center">
-          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
-            <span class="truncate">{{ t("objects.name") }}</span>
-            <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 360, $event)">
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div class="relative flex min-w-0 items-center">
-          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
-            <span class="truncate">{{ t("objects.type") }}</span>
-            <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div class="relative flex min-w-0 items-center justify-end">
-          <button class="flex min-w-0 items-center justify-end gap-1 truncate pr-4 text-right" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-            <span class="truncate">{{ t("objects.rows") }}</span>
-            <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div
-            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-            @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
-            @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
-          >
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div class="relative flex min-w-0 items-center justify-end">
-          <button class="flex min-w-0 items-center justify-end gap-1 truncate pr-4 text-right" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-            <span class="truncate">{{ t("objects.size") }}</span>
-            <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div
-            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-            @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
-            @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
-          >
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
-          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
-            <span class="truncate">{{ t("objects.createdAt") }}</span>
-            <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div
-            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-            @mousedown="onObjectColumnResizeStart('created_at', $event)"
-            @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
-          >
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
-          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
-            <span class="truncate">{{ t("objects.updatedAt") }}</span>
-            <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div
-            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-            @mousedown="onObjectColumnResizeStart('updated_at', $event)"
-            @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
-          >
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-        <div class="relative flex min-w-0 items-center">
-          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
-            <span class="truncate">{{ t("objects.comment") }}</span>
-            <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-          </button>
-          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('comment', $event)" @dblclick="resetObjectColumnWidth('comment', 260, $event)">
-            <GripVertical class="h-3 w-3" />
-          </div>
-        </div>
-      </div>
-      <RecycleScroller class="object-browser-scroller min-h-0 flex-1" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
-        <template #default="{ item }">
-          <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
-            <div
-              class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
-              :class="{
-                'bg-accent/40': sourceRow?.id === item.id,
-                'bg-primary/5': selectedTableIds.has(item.id),
-              }"
-              :style="{ gridTemplateColumns }"
-              @click="onRowClick(item, $event)"
-              @contextmenu="onContextMenu"
-            >
-              <button class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
-                <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
-                <Square v-else class="h-3.5 w-3.5" />
-              </button>
-              <div class="flex min-w-0 items-center gap-2">
-                <button
-                  v-if="item.partitionCount"
-                  type="button"
-                  class="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-                  :aria-label="t('objects.partitions', { count: item.partitionCount })"
-                  @click.stop="togglePartitionParent(item)"
-                >
-                  <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
-                  <ChevronRight v-else class="h-3.5 w-3.5" />
-                </button>
-                <span v-else class="h-5 w-5 shrink-0" :class="{ 'ml-4': item.partitionParentId }" />
-                <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
-                <span class="truncate text-[13px] font-medium text-foreground">{{ item.name }}</span>
-                <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
-                  {{ t("objects.partitions", { count: item.partitionCount }) }}
-                </span>
-              </div>
-              <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item.type) }}</div>
-              <div class="truncate text-right text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
-                {{ formatObjectBrowserCount(item.estimatedRows) }}
-              </div>
-              <div class="truncate text-right text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserCount(item.totalBytes)">
-                {{ formatObjectBrowserBytes(item.totalBytes) }}
-              </div>
-              <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
-                {{ formatObjectBrowserTimestamp(item.created_at) }}
-              </div>
-              <div v-if="hasUpdatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
-                {{ formatObjectBrowserTimestamp(item.updated_at) }}
-              </div>
-              <div class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
-                {{ item.comment || "" }}
-              </div>
+    <div v-else class="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
+        <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
+          <div class="relative flex min-w-0 items-center">
+            <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+              <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+              <Square v-else class="h-3.5 w-3.5" />
+            </button>
+            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
+              <GripVertical class="h-3 w-3" />
             </div>
-          </CustomContextMenu>
-        </template>
-      </RecycleScroller>
+          </div>
+          <div class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+              <span class="truncate">{{ t("objects.name") }}</span>
+              <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 260, $event)">
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+          <div class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+              <span class="truncate">{{ t("objects.type") }}</span>
+              <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+          <div class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+              <span class="truncate">{{ t("objects.rows") }}</span>
+              <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div
+              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+              @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+              @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+            >
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+          <div class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+              <span class="truncate">{{ t("objects.size") }}</span>
+              <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div
+              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+              @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+              @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+            >
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+          <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+              <span class="truncate">{{ t("objects.createdAt") }}</span>
+              <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div
+              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+              @mousedown="onObjectColumnResizeStart('created_at', $event)"
+              @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+            >
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+          <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+              <span class="truncate">{{ t("objects.updatedAt") }}</span>
+              <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div
+              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+              @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+              @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+            >
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+          <div class="relative flex min-w-0 items-center">
+            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+              <span class="truncate">{{ t("objects.comment") }}</span>
+              <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+            </button>
+            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('comment', $event)" @dblclick="resetObjectColumnWidth('comment', 260, $event)">
+              <GripVertical class="h-3 w-3" />
+            </div>
+          </div>
+        </div>
+        <RecycleScroller class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+          <template #default="{ item }">
+            <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+              <div
+                class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
+                :class="{
+                  'bg-accent/40': sourceRow?.id === item.id,
+                  'bg-primary/5': selectedTableIds.has(item.id),
+                }"
+                :style="{ gridTemplateColumns }"
+                @click="onRowClick(item, $event)"
+                @contextmenu="onContextMenu"
+              >
+                <button class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
+                  <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
+                  <Square v-else class="h-3.5 w-3.5" />
+                </button>
+                <div class="flex min-w-0 items-center gap-2">
+                  <button
+                    v-if="item.partitionCount"
+                    type="button"
+                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+                    :aria-label="t('objects.partitions', { count: item.partitionCount })"
+                    @click.stop="togglePartitionParent(item)"
+                  >
+                    <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
+                    <ChevronRight v-else class="h-3.5 w-3.5" />
+                  </button>
+                  <span v-else-if="item.partitionParentId" class="ml-4 h-5 w-5 shrink-0" />
+                  <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
+                  <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
+                  <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
+                    {{ t("objects.partitions", { count: item.partitionCount }) }}
+                  </span>
+                </div>
+                <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item.type) }}</div>
+                <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
+                  {{ formatObjectBrowserCount(item.estimatedRows) }}
+                </div>
+                <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserCount(item.totalBytes)">
+                  {{ formatObjectBrowserBytes(item.totalBytes) }}
+                </div>
+                <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
+                  {{ formatObjectBrowserTimestamp(item.created_at) }}
+                </div>
+                <div v-if="hasUpdatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
+                  {{ formatObjectBrowserTimestamp(item.updated_at) }}
+                </div>
+                <div class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
+                  {{ item.comment || "" }}
+                </div>
+              </div>
+            </CustomContextMenu>
+          </template>
+        </RecycleScroller>
+      </div>
       <div v-if="sourceRow" class="flex h-[42%] min-h-44 shrink-0 flex-col border-t bg-background">
         <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
           <Code2 class="h-3.5 w-3.5 text-muted-foreground" />
@@ -1699,10 +1859,49 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
+  <Dialog v-model:open="showPasteDialog">
+    <DialogContent class="sm:max-w-[500px]">
+      <DialogHeader>
+        <DialogTitle>{{ pasteTableEntries.length > 1 ? t("contextMenu.batchPasteTitle") : t("contextMenu.pasteTableConfirmTitle") }}</DialogTitle>
+      </DialogHeader>
+      <div class="space-y-4">
+        <div class="flex gap-2">
+          <label class="flex items-center gap-1.5 text-sm cursor-pointer" :class="{ 'opacity-50 cursor-not-allowed': !pasteTableDataCopySupported }">
+            <input v-model="pasteTableMode" type="radio" value="structure-and-data" class="accent-primary" :disabled="!pasteTableDataCopySupported" />
+            {{ t("contextMenu.pasteOptionStructureAndData") }}
+          </label>
+          <label class="flex items-center gap-1.5 text-sm cursor-pointer">
+            <input v-model="pasteTableMode" type="radio" value="structure-only" class="accent-primary" />
+            {{ t("contextMenu.pasteOptionStructureOnly") }}
+          </label>
+          <label class="flex items-center gap-1.5 text-sm cursor-pointer" :class="{ 'opacity-50 cursor-not-allowed': !pasteTableDataCopySupported }">
+            <input v-model="pasteTableMode" type="radio" value="data-only" class="accent-primary" :disabled="!pasteTableDataCopySupported" />
+            {{ t("contextMenu.pasteOptionDataOnly") }}
+          </label>
+        </div>
+        <div class="space-y-2 max-h-64 overflow-y-auto">
+          <div v-for="(entry, idx) in pasteTableEntries" :key="idx" class="flex items-center gap-2">
+            <span class="text-sm text-muted-foreground truncate min-w-0 flex-shrink basis-1/3" :title="entry.sourceName">{{ entry.sourceName }}</span>
+            <span class="text-xs text-muted-foreground flex-shrink-0">&rarr;</span>
+            <Input v-model="entry.targetName" class="flex-1 h-8 text-sm" :placeholder="t('contextMenu.duplicateNamePlaceholder')" />
+          </div>
+        </div>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" @click="showPasteDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="pasteTableEntries.every((e) => !e.targetName.trim())" @click="confirmPasteTable">{{ t("dangerDialog.confirm") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
   <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" :format-dialect="sourceFormatDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style scoped>
+.object-browser-table {
+  scrollbar-width: thin;
+}
+
 .object-browser-scroller {
   will-change: scroll-position;
   contain: content;

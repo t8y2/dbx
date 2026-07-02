@@ -1,7 +1,8 @@
 import type { SqlFileProgress } from "./tauri";
+import { apiUrl } from "@/lib/webPath";
 
 export function listenSqlFileProgressById(executionId: string, handler: (progress: SqlFileProgress) => void): () => void {
-  const es = new EventSource(`/api/sql-file/progress/${executionId}`);
+  const es = new EventSource(apiUrl(`/api/sql-file/progress/${executionId}`));
   es.onmessage = (e) => {
     const progress: SqlFileProgress = JSON.parse(e.data);
     handler(progress);

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Database } from "@lucide/vue";
+import { webPath } from "@/lib/webPath";
 
 const props = defineProps<{
   dbType: string;
@@ -84,19 +85,22 @@ const assetIcons: Record<string, string> = {
   chromadb: "chromadb",
   mq: "pulsar",
   pulsar: "pulsar",
+  kafka: "kafka",
   nacos: "nacos.png",
   iris: "iris.png",
   influxdb: "influxdb",
   zookeeper: "zookeeper",
 };
 
-const letterIcons: Record<string, { letter: string; color: string }> = {};
+const letterIcons: Record<string, { letter: string; color: string }> = {
+  oscar: { letter: "O", color: "#2563eb" },
+};
 
 const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
-  return assetName.value.includes(".") ? `/icons/database/${assetName.value}` : `/icons/database/${assetName.value}.svg`;
+  return webPath(assetName.value.includes(".") ? `/icons/database/${assetName.value}` : `/icons/database/${assetName.value}.svg`);
 });
 const letter = computed(() => letterIcons[normalizedType.value]);
 </script>

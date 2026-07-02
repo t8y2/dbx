@@ -254,6 +254,13 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
   return merged;
 }
 
+export function filterSimpleSidebarSupplementalObjects(objects: readonly ObjectInfo[]): ObjectInfo[] {
+  return objects.filter((object) => {
+    const objectType = normalizeObjectType(object.object_type);
+    return objectType !== "TABLE" && objectType !== "VIEW" && objectType !== "MATERIALIZED_VIEW";
+  });
+}
+
 function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, database: string): TreeNode[] {
   const orderedEntries = sortDatabaseObjectsByName(entries, (entry) => entry.node.label);
   const byKey = new Map<string, TableTreeEntry>();

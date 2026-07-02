@@ -100,6 +100,59 @@ test("connecting a grouped connection updates it in place instead of adding a ro
   }
 });
 
+test("duplicating a grouped connection keeps the copy in the same group", async () => {
+  const originalFetch = globalThis.fetch;
+  const storage = installMemoryStorage();
+  const originalConnection = conn("conn-1", "Grouped MySQL");
+  let savedConnections: ConnectionConfig[] = [originalConnection];
+  let savedLayout: SidebarLayout | null = {
+    groups: [{ id: "group-1", name: "Group", collapsed: false }],
+    order: [{ type: "group", id: "group-1", connectionIds: ["conn-1"] }],
+  };
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/list") {
+      return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/layout/sidebar") {
+      if (init?.method === "POST") {
+        savedLayout = JSON.parse(String(init.body ?? "null"));
+        return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify(savedLayout), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/connection/save") {
+      savedConnections = JSON.parse(String(init?.body ?? "[]"));
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const copy = { ...originalConnection, id: "conn-copy", name: "Grouped MySQL (Copy)" };
+    await store.addConnection(copy, store.groupIdForConnection(originalConnection.id));
+
+    assert.deepEqual(
+      store.treeNodes.map((node) => node.id),
+      ["group-1"],
+    );
+    assert.equal(store.treeNodes[0].type, "connection-group");
+    assert.deepEqual(
+      store.treeNodes[0].children?.map((node) => node.id),
+      ["conn-1", "conn-copy"],
+    );
+    assert.equal(countConnectionNodes(store.treeNodes, "conn-copy"), 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
 test("importing grouped dbx connections remaps exported layout to new connection ids", async () => {
   const originalFetch = globalThis.fetch;
   const storage = installMemoryStorage();

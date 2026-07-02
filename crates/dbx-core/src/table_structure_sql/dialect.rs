@@ -92,6 +92,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             add_column: true,
             drop_column: true,
             rename_column: true,
+            reorder_column: true,
             ..base
         },
         Some(

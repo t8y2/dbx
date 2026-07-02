@@ -24,7 +24,8 @@ export function prestoSqlBuiltinDriverRow(bundles: JdbcMavenBundleInfo[]): Agent
     installed: Boolean(installedBundle),
     installed_version: installedBundle ? PRESTOSQL_JDBC_DRIVER_VERSION : null,
     update_available: false,
-    jre: "",
+    requires_java_runtime: true,
+    jre: "21",
     jre_installed: true,
   };
 }

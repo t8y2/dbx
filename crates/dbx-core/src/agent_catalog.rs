@@ -36,6 +36,8 @@ const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
     store_visible: false,
 }];
 
+const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[("kafka", "Apache Kafka")];
+
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Dameng,
@@ -222,6 +224,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Oscar,
+        key: "oscar",
+        label: "神通 OSCAR",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Yashandb,
         key: "yashandb",
         label: "崖山 YashanDB",
@@ -278,6 +287,9 @@ pub fn entries() -> &'static [AgentCatalogEntry] {
 }
 
 pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
+    if *db_type == DatabaseType::MessageQueue {
+        return (driver_profile == Some("kafka")).then_some("kafka");
+    }
     let entry = entry_for_db_type(db_type)?;
     if let Some(driver_profile) = driver_profile {
         if let Some(profile) = entry.profiles.iter().find(|profile| profile.profile == driver_profile) {
@@ -304,10 +316,14 @@ pub fn driver_store_entries() -> impl Iterator<Item = (&'static str, &'static st
                 .map(|profile| (profile.key, profile.label));
             base.into_iter().chain(profiles)
         })
+        .chain(EXTRA_DRIVER_STORE_ENTRIES.iter().copied())
         .filter(move |(key, _)| seen.insert(*key))
 }
 
 pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
+    if let Some((_, label)) = EXTRA_DRIVER_STORE_ENTRIES.iter().find(|(key, _)| *key == agent_key) {
+        return Some(label);
+    }
     for entry in entries() {
         if entry.key == agent_key {
             return Some(entry.label);

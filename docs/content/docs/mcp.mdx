@@ -44,6 +44,22 @@ AI Agent → MCP Server → Your Database → Results
     }
     ```
 
+    Windows portable builds need `DBX_DATA_DIR` set to the `data` directory next to `DBX.exe`:
+
+    ```json
+    {
+      "mcpServers": {
+        "dbx": {
+          "command": "npx",
+          "args": ["-y", "@dbx-app/mcp-server"],
+          "env": {
+            "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
+          }
+        }
+      }
+    }
+    ```
+
   </Step>
   <Step>
     ### Start Using
@@ -204,6 +220,8 @@ The MCP Server reads DBX's SQLite database:
 | macOS    | `~/Library/Application Support/com.dbx.app/dbx.db` |
 | Linux    | `~/.local/share/com.dbx.app/dbx.db`                |
 | Windows  | `%APPDATA%\com.dbx.app\dbx.db`                     |
+
+Windows portable builds usually store data in `data\dbx.db` next to `DBX.exe`. If MCP lists older connections than the running DBX app, set `DBX_DATA_DIR` in the MCP config to the `data` folder that contains `dbx.db`, for example `D:\DBX_x64-portable\data`. Do not copy `dbx.db` into the default directory, because that creates two diverging connection stores.
 
 ### UI Integration
 

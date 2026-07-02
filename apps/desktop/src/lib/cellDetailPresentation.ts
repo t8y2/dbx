@@ -82,7 +82,7 @@ export function canFormatCellDetailJson(value: unknown, columnType?: string): bo
   const text = cellDetailRawEditorText(value);
   if (text.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return false;
   if (isJsonColumnType(columnType)) return !!formatJsonText(text);
-  return typeof value === "string" && looksLikeJsonContainer(text) && !!formatJsonText(text);
+  return typeof value === "string" && looksLikeJsonContainerText(text) && !!formatJsonText(text);
 }
 
 export function formatJsonText(text: string): string | undefined {
@@ -96,7 +96,18 @@ export function formatJsonText(text: string): string | undefined {
   }
 }
 
-function looksLikeJsonContainer(text: string): boolean {
+export function compactJsonText(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return undefined;
+  try {
+    return JSON.stringify(JSON.parse(trimmed));
+  } catch {
+    return undefined;
+  }
+}
+
+export function looksLikeJsonContainerText(text: string): boolean {
   const trimmed = text.trim();
   return trimmed.startsWith("{") || trimmed.startsWith("[");
 }

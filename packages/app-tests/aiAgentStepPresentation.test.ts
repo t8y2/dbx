@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildAiAgentStepItems } from "../../apps/desktop/src/lib/aiAgentStepPresentation.ts";
+import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem } from "../../apps/desktop/src/lib/aiAgentStepPresentation.ts";
 import type { AiAgentPlan } from "../../apps/desktop/src/lib/aiAgentPlan.ts";
 
 test("presents auto-execute agent plans as completed generation, safety, and execution steps", () => {
@@ -134,5 +134,68 @@ test("presents no-sql and no-intent plans as muted skipped states", () => {
   assert.deepEqual(
     buildAiAgentStepItems(noIntent).map((item) => item.labelKey),
     ["ai.agentSteps.generated", "ai.agentSteps.notRequested"],
+  );
+});
+
+test("uses stable tool step keys only for trustworthy tool call ids", () => {
+  assert.equal(toolCallStepKey("call-1", 1, "tool_call_start"), "tool-call-1");
+  assert.equal(toolCallStepKey("call-1", 2, "tool_call_end"), "tool-call-1");
+  assert.equal(toolCallStepKey("", 1, "tool_call_start"), "tool-tool_call_start-1");
+  assert.equal(toolCallStepKey("cli-tool-call", 2, "tool_call_end"), "tool-tool_call_end-2");
+});
+
+test("upserts tool call steps and preserves start args when final result arrives", () => {
+  const steps: AiAgentStepItem[] = [
+    { key: "context", labelKey: "ai.agentSteps.contextCompacted", tone: "active" },
+    {
+      key: "tool-call-1",
+      labelKey: "ai.agentSteps.callingTool",
+      tone: "active",
+      toolName: "list_tables",
+      toolArgs: { schema: "public" },
+    },
+  ];
+
+  upsertAgentStep(steps, {
+    key: "tool-call-1",
+    labelKey: "ai.agentSteps.toolDone",
+    tone: "success",
+    toolName: "list_tables",
+    toolResult: "users\norders",
+    isError: false,
+  });
+
+  assert.deepEqual(steps, [
+    { key: "context", labelKey: "ai.agentSteps.contextCompacted", tone: "active" },
+    {
+      key: "tool-call-1",
+      labelKey: "ai.agentSteps.toolDone",
+      tone: "success",
+      toolName: "list_tables",
+      toolArgs: { schema: "public" },
+      toolResult: "users\norders",
+      isError: false,
+    },
+  ]);
+});
+
+test("upserts with splice so array identity and ordering are preserved", () => {
+  const steps: AiAgentStepItem[] = [
+    { key: "before", labelKey: "before", tone: "muted" },
+    { key: "tool-call-1", labelKey: "ai.agentSteps.callingTool", tone: "active" },
+    { key: "after", labelKey: "after", tone: "muted" },
+  ];
+  const sameArray = steps;
+
+  upsertAgentStep(steps, { key: "tool-call-1", labelKey: "ai.agentSteps.toolError", tone: "danger", isError: true });
+
+  assert.equal(steps, sameArray);
+  assert.deepEqual(
+    steps.map((step) => [step.key, step.labelKey, step.tone]),
+    [
+      ["before", "before", "muted"],
+      ["tool-call-1", "ai.agentSteps.toolError", "danger"],
+      ["after", "after", "muted"],
+    ],
   );
 });

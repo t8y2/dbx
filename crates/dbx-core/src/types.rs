@@ -33,6 +33,8 @@ pub struct ObjectInfo {
     pub name: String,
     pub object_type: String,
     pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     pub comment: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,

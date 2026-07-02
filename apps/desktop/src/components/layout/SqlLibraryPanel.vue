@@ -1092,8 +1092,8 @@ function showDropInside(targetId: string) {
                   "
                 >
                   <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                  <span class="dbx-sql-library-drag-label min-w-0 flex-1 truncate">{{ item.item.name }}</span>
-                  <span class="shrink-0 text-[13px] text-muted-foreground"> [{{ getConnectionLabel(item.item.connectionId) }}] </span>
+                  <span class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="item.item.name">{{ item.item.name }}</span>
+                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px] text-muted-foreground" :title="getConnectionLabel(item.item.connectionId)">[{{ getConnectionLabel(item.item.connectionId) }}]</span>
                 </div>
               </div>
             </div>
@@ -1167,8 +1167,8 @@ function showDropInside(targetId: string) {
                       @click.stop
                     />
                   </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate">{{ row.file.name }}</span>
-                  <span class="shrink-0 text-[13px] text-muted-foreground"> [{{ getConnectionLabel(row.file.connectionId) }}] </span>
+                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="row.file.name">{{ row.file.name }}</span>
+                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px] text-muted-foreground" :title="getConnectionLabel(row.file.connectionId)">[{{ getConnectionLabel(row.file.connectionId) }}]</span>
                 </div>
               </div>
 
@@ -1186,7 +1186,7 @@ function showDropInside(targetId: string) {
                   v-for="file in visibleFiles"
                   :key="file.id"
                   class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
-                  :class="[isDraggingItem(file.id) ? 'opacity-50' : isFileSelected(file.id) ? 'bg-primary/10' : 'hover:bg-accent']"
+                  :class="[isDraggingItem(file.id) ? 'opacity-50' : isFileSelected(file.id) ? 'bg-primary/10' : isFileActive(file.id) ? 'bg-accent' : 'hover:bg-accent']"
                   @mousedown="handleDragMouseDown($event, file.id, 'file')"
                   @mousemove="updateDropTarget($event, file.id, 'file')"
                   @mouseleave="clearDropTarget(file.id)"
@@ -1212,8 +1212,8 @@ function showDropInside(targetId: string) {
                       @click.stop
                     />
                   </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate">{{ file.name }}</span>
-                  <span class="shrink-0 text-[13px] text-muted-foreground"> [{{ getConnectionLabel(file.connectionId) }}] </span>
+                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="file.name">{{ file.name }}</span>
+                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px] text-muted-foreground" :title="getConnectionLabel(file.connectionId)">[{{ getConnectionLabel(file.connectionId) }}]</span>
                 </div>
               </div>
             </div>

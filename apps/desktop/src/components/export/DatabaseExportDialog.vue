@@ -9,9 +9,9 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
 import type { ExportProgress } from "@/lib/api";
-import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { isSchemaAware } from "@/lib/databaseFeatureSupport";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { generateDatabaseExportId } from "@/lib/databaseExport";
+import { buildAllDatabaseExportPlan, generateDatabaseExportId, type AllDatabaseExportPlanItem } from "@/lib/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useToast } from "@/composables/useToast";
@@ -31,12 +31,15 @@ const props = defineProps<{
   prefillSchema?: string;
   prefillTable?: string;
   prefillTables?: string[];
+  prefillAllDatabases?: boolean;
 }>();
 
 // Connection / Database / Schema selectors
 const connectionId = ref("");
 const database = ref("");
 const databases = ref<string[]>([]);
+const selectedDatabases = ref<string[]>([]);
+const databaseFilter = ref("");
 const schema = ref("");
 const schemas = ref<string[]>([]);
 const loadingMeta = ref(false);
@@ -66,16 +69,60 @@ const exportError = ref<string | null>(null);
 const exportCancelled = ref(false);
 const pendingPrefillTable = ref("");
 const pendingPrefillTables = ref<string[]>([]);
+const exportAllDatabases = ref(false);
+const batchDatabaseIndex = ref(0);
+const batchDatabaseTotal = ref(0);
+const activeDatabaseExportId = ref("");
 
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
 
-const canExport = computed(() => connectionId.value && database.value && schema.value && !loadingTables.value && !tableError.value && (tables.value.length === 0 || selectedTables.value.length > 0) && (includeStructure.value || includeData.value || includeObjects.value) && !isExporting.value);
+const canExport = computed(() => {
+  const hasContent = includeStructure.value || includeData.value || includeObjects.value;
+  if (!connectionId.value || !hasContent || isExporting.value) return false;
+  if (exportAllDatabases.value) return selectedDatabases.value.length > 0 && !loadingMeta.value;
+  return database.value && schema.value && !loadingTables.value && !tableError.value && (tables.value.length === 0 || selectedTables.value.length > 0);
+});
 
 const selectedTableSet = computed(() => new Set(selectedTables.value));
+const selectedDatabaseSet = computed(() => new Set(selectedDatabases.value));
+const filteredDatabases = computed(() => {
+  const q = databaseFilter.value.trim().toLowerCase();
+  if (!q) return databases.value;
+  return databases.value.filter((name) => name.toLowerCase().includes(q));
+});
 
 function connectionIconType(connId: string) {
   const config = store.getConfig(connId);
   return config?.driver_profile || config?.db_type || "mysql";
+}
+
+function sanitizeFileName(value: string): string {
+  return (value || "database").replace(/[\\/:*?"<>|]+/g, "_").trim() || "database";
+}
+
+function joinExportPath(directory: string, fileName: string): string {
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
+}
+
+function currentRowsExported(): number {
+  const progress: ExportProgress | null = exportProgress.value;
+  return progress?.rowsExported ?? 0;
+}
+
+async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    api
+      .exportDatabaseSql(request, (progress) => {
+        onProgress(progress);
+        if (progress.status === "Done" || progress.status === "Cancelled") {
+          resolve();
+        } else if (progress.status === "Error") {
+          reject(new Error(progress.error || "Export failed"));
+        }
+      })
+      .catch(reject);
+  });
 }
 
 async function loadDatabases(connId: string) {
@@ -90,6 +137,7 @@ async function loadDatabases(connId: string) {
     );
     databases.value = names;
     database.value = names.length === 1 ? names[0] : "";
+    selectedDatabases.value = exportAllDatabases.value ? [...names] : [];
     schemas.value = [];
     schema.value = "";
     tables.value = [];
@@ -156,8 +204,45 @@ function clearSelectedTables() {
   selectedTables.value = selectedTables.value.filter((name) => !removing.has(name));
 }
 
+function toggleDatabase(db: string) {
+  const selected = new Set(selectedDatabases.value);
+  if (selected.has(db)) {
+    selected.delete(db);
+  } else {
+    selected.add(db);
+  }
+  selectedDatabases.value = databases.value.filter((name) => selected.has(name));
+}
+
+function selectAllDatabases() {
+  const selected = new Set(selectedDatabases.value);
+  for (const name of filteredDatabases.value) selected.add(name);
+  selectedDatabases.value = databases.value.filter((name) => selected.has(name));
+}
+
+function clearSelectedDatabases() {
+  const removing = new Set(filteredDatabases.value);
+  selectedDatabases.value = selectedDatabases.value.filter((name) => !removing.has(name));
+}
+
+async function buildExportPlanForDatabases(dbs: string[]): Promise<AllDatabaseExportPlanItem[]> {
+  const config = store.getConfig(connectionId.value);
+  const schemaAware = isSchemaAware(config?.db_type);
+  const schemasByDatabase: Record<string, string[]> = {};
+  if (schemaAware) {
+    for (const db of dbs) {
+      schemasByDatabase[db] = await api.listSchemas(connectionId.value, db);
+    }
+  }
+  return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase });
+}
+
 async function startExport() {
   if (!canExport.value) return;
+  if (exportAllDatabases.value) {
+    await startAllDatabasesExport();
+    return;
+  }
   isExporting.value = true;
   exportDone.value = false;
   exportError.value = null;
@@ -171,7 +256,7 @@ async function startExport() {
   if (isTauriRuntime()) {
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const safeName = (database.value || "database").replace(/[\\/:*?"<>|]+/g, "_").trim();
+      const safeName = sanitizeFileName(database.value || "database");
       const path = await save({
         defaultPath: `${safeName}.sql`,
         filters: [{ name: "SQL", extensions: ["sql"] }],
@@ -241,9 +326,127 @@ async function startExport() {
   }
 }
 
+async function startAllDatabasesExport() {
+  if (!canExport.value) return;
+
+  let directoryPath = "";
+  if (isTauriRuntime()) {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const path = await openDialog({
+        directory: true,
+        multiple: false,
+        title: t("databaseExport.selectExportDirectory"),
+      });
+      if (!path || Array.isArray(path)) return;
+      directoryPath = path;
+    } catch (e: any) {
+      toast(e?.message || String(e), 5000);
+      return;
+    }
+  }
+
+  isExporting.value = true;
+  exportDone.value = false;
+  exportError.value = null;
+  exportCancelled.value = false;
+  exportProgress.value = null;
+  batchDatabaseIndex.value = 0;
+
+  const dbs = [...selectedDatabases.value];
+  const batchId = generateDatabaseExportId();
+  exportId.value = batchId;
+  addDatabaseExportTask(batchId, t("databaseExport.allDatabasesTask", { count: dbs.length }), directoryPath);
+  let exportPlan: AllDatabaseExportPlanItem[] = [];
+
+  try {
+    exportPlan = await buildExportPlanForDatabases(dbs);
+    batchDatabaseTotal.value = exportPlan.length;
+
+    for (let index = 0; index < exportPlan.length; index += 1) {
+      if (exportCancelled.value) break;
+      const item = exportPlan[index]!;
+      batchDatabaseIndex.value = index + 1;
+      const currentExportId = `${batchId}-${index + 1}`;
+      activeDatabaseExportId.value = currentExportId;
+      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.sql`) : `__web_export_${currentExportId}.sql`;
+      const request: api.DatabaseExportRequest = {
+        exportId: currentExportId,
+        connectionId: connectionId.value,
+        database: item.database,
+        schema: item.schema,
+        filePath,
+        includeStructure: includeStructure.value,
+        includeData: includeData.value,
+        includeObjects: includeObjects.value,
+        dropTableIfExists: dropTableIfExists.value,
+        batchSize: 1000,
+      };
+
+      await runDatabaseExportUntilTerminal(request, (progress) => {
+        exportProgress.value = { ...progress, exportId: batchId, currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}` };
+        updateDatabaseExportTask(batchId, {
+          ...progress,
+          exportId: batchId,
+          currentObject: item.displayName,
+          objectIndex: index,
+          totalObjects: exportPlan.length,
+        });
+        if (progress.status === "Error") {
+          exportError.value = progress.error;
+          isExporting.value = false;
+        } else if (progress.status === "Cancelled") {
+          exportCancelled.value = true;
+          isExporting.value = false;
+        }
+      });
+
+      if (exportError.value || exportCancelled.value) break;
+      activeDatabaseExportId.value = "";
+    }
+
+    if (!exportError.value && !exportCancelled.value) {
+      exportDone.value = true;
+      isExporting.value = false;
+      updateDatabaseExportTask(batchId, {
+        exportId: batchId,
+        currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
+        objectIndex: exportPlan.length,
+        totalObjects: exportPlan.length,
+        rowsExported: currentRowsExported(),
+        totalRows: null,
+        status: "Done",
+        error: null,
+      });
+      toast(t("databaseExport.exportAllSuccess", { count: dbs.length }), 3000);
+    }
+  } catch (e: any) {
+    exportError.value = e?.message || String(e);
+    updateDatabaseExportTask(batchId, {
+      exportId: batchId,
+      currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
+      objectIndex: Math.max(0, batchDatabaseIndex.value - 1),
+      totalObjects: batchDatabaseTotal.value || dbs.length,
+      rowsExported: currentRowsExported(),
+      totalRows: null,
+      status: "Error",
+      error: exportError.value,
+    });
+    isExporting.value = false;
+  }
+}
+
 async function cancelExport() {
   if (exportId.value) {
-    await api.cancelDatabaseExport(exportId.value);
+    if (exportAllDatabases.value) {
+      exportCancelled.value = true;
+      isExporting.value = false;
+      if (activeDatabaseExportId.value) {
+        await api.cancelDatabaseExport(activeDatabaseExportId.value);
+      }
+    } else {
+      await api.cancelDatabaseExport(exportId.value);
+    }
   }
 }
 
@@ -258,6 +461,9 @@ function resetState() {
   tableError.value = null;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];
+  exportAllDatabases.value = false;
+  selectedDatabases.value = [];
+  databaseFilter.value = "";
   includeStructure.value = true;
   includeData.value = true;
   includeObjects.value = true;
@@ -268,6 +474,9 @@ function resetState() {
   exportError.value = null;
   exportCancelled.value = false;
   exportId.value = "";
+  batchDatabaseIndex.value = 0;
+  batchDatabaseTotal.value = 0;
+  activeDatabaseExportId.value = "";
 }
 
 const progressPercent = computed(() => {
@@ -285,6 +494,7 @@ watch(connectionId, (id) => {
   }
   database.value = "";
   databases.value = [];
+  selectedDatabases.value = [];
   schemas.value = [];
   schema.value = "";
   tables.value = [];
@@ -294,6 +504,7 @@ watch(connectionId, (id) => {
 });
 
 watch(database, (db) => {
+  if (exportAllDatabases.value) return;
   schema.value = "";
   schemas.value = [];
   tables.value = [];
@@ -303,6 +514,7 @@ watch(database, (db) => {
 });
 
 watch(schema, (value) => {
+  if (exportAllDatabases.value) return;
   tables.value = [];
   selectedTables.value = [];
   tableError.value = null;
@@ -318,6 +530,7 @@ watch(
   async (val) => {
     if (val) {
       resetState();
+      exportAllDatabases.value = props.prefillAllDatabases ?? false;
       pendingPrefillTable.value = props.prefillTable ?? "";
       pendingPrefillTables.value = props.prefillTables ?? [];
       if (props.prefillConnectionId) {
@@ -368,7 +581,37 @@ watch(
             </Select>
           </div>
 
-          <div v-if="databases.length" class="space-y-1.5">
+          <div v-if="exportAllDatabases && databases.length" class="space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <Label class="text-xs">{{ t("databaseExport.databaseSelection") }}</Label>
+              <div class="text-[11px] text-muted-foreground">
+                {{ t("databaseExport.selectedDatabases", { selected: selectedDatabases.length, total: databases.length }) }}
+              </div>
+            </div>
+            <div class="space-y-2 rounded border border-border/60 p-2">
+              <div class="relative">
+                <Search class="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="databaseFilter" class="h-7 pl-7 text-xs" :placeholder="t('databaseExport.filterDatabases')" />
+              </div>
+              <div class="flex items-center gap-2">
+                <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="selectAllDatabases">
+                  {{ t("databaseExport.selectAllDatabases") }}
+                </Button>
+                <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="clearSelectedDatabases">
+                  {{ t("databaseExport.clearDatabases") }}
+                </Button>
+              </div>
+              <div class="max-h-44 overflow-auto space-y-1 pr-1">
+                <button v-for="db in filteredDatabases" :key="db" type="button" class="flex w-full min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-muted" @click="toggleDatabase(db)">
+                  <CheckSquare v-if="selectedDatabaseSet.has(db)" class="w-3.5 h-3.5 text-primary shrink-0" />
+                  <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+                  <span class="truncate">{{ db }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="databases.length" class="space-y-1.5">
             <Label class="text-xs">{{ t("transfer.sourceDatabase") }}</Label>
             <Select :model-value="database" @update:model-value="(v: any) => (database = String(v))">
               <SelectTrigger class="h-8 text-xs">
@@ -380,7 +623,7 @@ watch(
             </Select>
           </div>
 
-          <div v-if="schemas.length" class="space-y-1.5">
+          <div v-if="!exportAllDatabases && schemas.length" class="space-y-1.5">
             <Label class="text-xs">{{ t("diff.selectSchema") }}</Label>
             <Select :model-value="schema" @update:model-value="(v: any) => (schema = String(v))">
               <SelectTrigger class="h-8 text-xs">
@@ -392,7 +635,7 @@ watch(
             </Select>
           </div>
 
-          <div v-if="schema" class="space-y-2">
+          <div v-if="!exportAllDatabases && schema" class="space-y-2">
             <div class="flex items-center justify-between gap-2">
               <Label class="text-xs">{{ t("databaseExport.tableSelection") }}</Label>
               <div v-if="tables.length" class="text-[11px] text-muted-foreground">
@@ -462,6 +705,9 @@ watch(
 
         <!-- Progress View -->
         <div v-if="isExporting || exportDone || exportError || exportCancelled" class="py-3 space-y-3">
+          <div v-if="exportAllDatabases && batchDatabaseTotal" class="text-xs text-muted-foreground">
+            {{ t("databaseExport.currentDatabase", { current: batchDatabaseIndex, total: batchDatabaseTotal }) }}
+          </div>
           <div v-if="exportProgress" class="space-y-2">
             <div class="text-xs text-muted-foreground">
               {{
@@ -502,7 +748,7 @@ watch(
           </Button>
           <Button size="sm" :disabled="!canExport" @click="startExport">
             <Download class="w-3.5 h-3.5 mr-1.5" />
-            {{ t("databaseExport.export") }}
+            {{ exportAllDatabases ? t("databaseExport.exportAllDatabases") : t("databaseExport.export") }}
           </Button>
         </template>
         <template v-else-if="isExporting">

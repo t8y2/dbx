@@ -256,7 +256,13 @@ public final class DbxJdbcPlugin {
             case "closeQuerySession", "close_query_session" -> closeQuerySessionResult(requireText(params, "sessionId"));
             case "listDatabases" -> listDatabases(connection);
             case "listSchemas" -> listSchemas(connection, optionalText(params, "database"));
-            case "listTables" -> listTables(connection, optionalText(params, "database"), optionalText(params, "schema"));
+            case "listTables" -> listTables(
+                connection,
+                optionalText(params, "database"),
+                optionalText(params, "schema"),
+                optionalText(params, "filter"),
+                nonNegativeInt(params, "limit", 0)
+            );
             case "listObjects", "list_objects" -> listObjects(
                 connection,
                 optionalText(params, "database"),
@@ -361,9 +367,27 @@ public final class DbxJdbcPlugin {
     private static void applyConnectTimeout(JsonNode connection, Properties properties) {
         int connectTimeoutSecs = positiveInt(connection, "connect_timeout_secs", 30);
         DriverManager.setLoginTimeout(connectTimeoutSecs);
+        if (isPrestoOrTrinoConnection(connection)) {
+            return;
+        }
         String value = Integer.toString(connectTimeoutSecs);
         properties.putIfAbsent("loginTimeout", value);
         properties.putIfAbsent("connectTimeout", value);
+    }
+
+    private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        if (urlMatchesPrefix(url, "jdbc:presto:") || urlMatchesPrefix(url, "jdbc:trino:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.equals("io.prestosql.jdbc.prestodriver") ||
+            normalized.equals("com.facebook.presto.jdbc.prestodriver") ||
+            normalized.equals("io.trino.jdbc.trinodriver");
     }
 
     private static void applyOracleProperties(JsonNode connection, Properties properties) {
@@ -1087,7 +1111,7 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static JsonNode listTables(JsonNode connection, String database, String schema) throws SQLException {
+    private static JsonNode listTables(JsonNode connection, String database, String schema, String filter, int limit) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
         Connection conn = openConnection(connection);
         JdbcDriverQuirks quirks = driverQuirks(connection);
@@ -1095,7 +1119,7 @@ public final class DbxJdbcPlugin {
             return oracleListTables(conn, oracleEffectiveSchema(conn, schema));
         }
         if (usePrestoInformationSchemaTables(connection)) {
-            return prestoListTables(conn, database, schema);
+            return prestoListTables(conn, database, schema, filter, limit);
         }
         DatabaseMetaData meta = conn.getMetaData();
         String[] types = jdbcTableTypes(meta);
@@ -1199,6 +1223,9 @@ public final class DbxJdbcPlugin {
         }
         if (isKingbaseUrl(optionalText(connection, "connection_string"))) {
             return kingbaseGetColumns(conn, schema, table);
+        }
+        if (usePrestoInformationSchemaTables(connection)) {
+            return prestoGetColumns(conn, database, schema, table);
         }
         DatabaseMetaData meta = conn.getMetaData();
         JdbcDriverQuirks quirks = driverQuirks(connection);
@@ -1366,10 +1393,13 @@ public final class DbxJdbcPlugin {
         return urlMatchesPrefix(url, "jdbc:presto:") || urlMatchesPrefix(url, "jdbc:trino:");
     }
 
-    private static JsonNode prestoListTables(Connection conn, String database, String schema) throws SQLException {
+    private static JsonNode prestoListTables(Connection conn, String database, String schema, String filter, int limit) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
-        try (PreparedStatement ps = conn.prepareStatement(prestoInformationSchemaTablesSql(database))) {
+        try (PreparedStatement ps = conn.prepareStatement(prestoInformationSchemaTablesSql(database, filter, limit))) {
             ps.setString(1, schema);
+            if (emptyToNull(filter) != null) {
+                ps.setString(2, escapeLikePattern(filter.toLowerCase(Locale.ROOT)) + "%");
+            }
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     ObjectNode item = MAPPER.createObjectNode();
@@ -1385,7 +1415,7 @@ public final class DbxJdbcPlugin {
 
     private static JsonNode prestoListObjects(Connection conn, String database, String schema) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
-        try (PreparedStatement ps = conn.prepareStatement(prestoInformationSchemaTablesSql(database))) {
+        try (PreparedStatement ps = conn.prepareStatement(prestoInformationSchemaTablesSql(database, null, 0))) {
             ps.setString(1, schema);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -1401,13 +1431,95 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    static String prestoInformationSchemaTablesSql(String database) {
+    private static JsonNode prestoGetColumns(Connection conn, String database, String schema, String table) throws SQLException {
+        ArrayNode result = MAPPER.createArrayNode();
+        try (PreparedStatement ps = conn.prepareStatement(prestoInformationSchemaColumnsSql(database))) {
+            ps.setString(1, schema);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String dataType = rs.getString(2);
+                    ObjectNode item = columnNode(result, rs.getString(1));
+                    item.put("data_type", dataType);
+                    item.put("is_nullable", !"NO".equalsIgnoreCase(rs.getString(3)));
+                    putNullablePreferValue(item, "column_default", rs.getString(4));
+                    item.put("is_primary_key", false);
+                    item.putNull("extra");
+                    putNullablePreferValue(item, "comment", rs.getString(5));
+                    // Presto/Trino information_schema.columns does not expose precision/length fields.
+                    putNullableInt(item, "numeric_precision", prestoNumericPrecision(dataType));
+                    putNullableInt(item, "numeric_scale", prestoNumericScale(dataType));
+                    putNullableInt(item, "character_maximum_length", prestoCharacterMaximumLength(dataType));
+                }
+            }
+        }
+        return result;
+    }
+
+    static String prestoInformationSchemaTablesSql(String database, String filter, int limit) {
         String source = emptyToNull(database) == null
             ? "information_schema.tables"
             : quoteAnsiIdentifier(database) + ".information_schema.tables";
-        return "SELECT table_name, table_type FROM " + source +
+        StringBuilder sql = new StringBuilder("SELECT table_name, table_type FROM " + source +
             " WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW')" +
-            " ORDER BY table_type, table_name";
+            (emptyToNull(filter) == null ? "" : " AND lower(table_name) LIKE ? ESCAPE '\\'") +
+            " ORDER BY table_type, table_name");
+        if (limit > 0) {
+            sql.append(" LIMIT ").append(limit);
+        }
+        return sql.toString();
+    }
+
+    static String prestoInformationSchemaColumnsSql(String database) {
+        String source = emptyToNull(database) == null
+            ? "information_schema.columns"
+            : quoteAnsiIdentifier(database) + ".information_schema.columns";
+        return "SELECT column_name, data_type, is_nullable, column_default, comment FROM " + source +
+            " WHERE table_schema = ? AND table_name = ?" +
+            " ORDER BY ordinal_position";
+    }
+
+    private static Integer prestoNumericPrecision(String dataType) {
+        return prestoTypeArgument(dataType, 0, "decimal", "numeric");
+    }
+
+    private static Integer prestoNumericScale(String dataType) {
+        return prestoTypeArgument(dataType, 1, "decimal", "numeric");
+    }
+
+    private static Integer prestoCharacterMaximumLength(String dataType) {
+        return prestoTypeArgument(dataType, 0, "char", "varchar");
+    }
+
+    private static Integer prestoTypeArgument(String dataType, int argumentIndex, String... typeNames) {
+        if (dataType == null) {
+            return null;
+        }
+        int open = dataType.indexOf('(');
+        int close = open < 0 ? -1 : dataType.indexOf(')', open + 1);
+        if (open <= 0 || close <= open) {
+            return null;
+        }
+        String name = dataType.substring(0, open).trim().toLowerCase(Locale.ROOT);
+        boolean matches = false;
+        for (String typeName : typeNames) {
+            if (typeName.equals(name)) {
+                matches = true;
+                break;
+            }
+        }
+        if (!matches) {
+            return null;
+        }
+        String[] arguments = dataType.substring(open + 1, close).split(",");
+        if (argumentIndex >= arguments.length) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(arguments[argumentIndex].trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     static String normalizeInformationSchemaTableType(String tableType) {
@@ -2127,6 +2239,10 @@ public final class DbxJdbcPlugin {
 
     private static String emptyToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    private static String escapeLikePattern(String value) {
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     private static Path expandHome(String path) {

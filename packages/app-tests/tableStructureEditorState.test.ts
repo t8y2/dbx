@@ -12,8 +12,10 @@ import {
   getColumnEditorControls,
   getDataTypeOptions,
   isProtectedManticoreIdColumn,
+  isSqlServerIdentityCompatibleDataType,
   normalizeDataTypeParams,
   parseExtraToColumnExtra,
+  rehydrateColumnDraftsFromMetadata,
   toColumnNames,
 } from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
 import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
@@ -90,6 +92,73 @@ test("creates editable column drafts from column metadata", () => {
       },
     ],
   );
+});
+
+test("rehydrates restored existing column drafts from live metadata", () => {
+  const drafts = rehydrateColumnDraftsFromMetadata(
+    [
+      {
+        id: "existing:id",
+        name: "id",
+        dataType: "varchar(10)",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+      {
+        id: "existing:data",
+        name: "data",
+        dataType: "timestamp",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+      {
+        id: "new:note",
+        name: "note",
+        dataType: "varchar2(100)",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+    ],
+    [
+      {
+        name: "id",
+        data_type: "varchar(10)",
+        is_nullable: true,
+        column_default: null,
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+      {
+        name: "data",
+        data_type: "timestamp",
+        is_nullable: true,
+        column_default: null,
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+    ],
+    "oracle",
+  );
+
+  assert.equal(drafts[0].original?.name, "id");
+  assert.equal(drafts[0].originalPosition, 0);
+  assert.equal(drafts[1].original?.name, "data");
+  assert.equal(drafts[1].originalPosition, 1);
+  assert.equal(drafts[2].original, undefined);
 });
 
 test("normalizes PostgreSQL string default casts in editable column drafts", () => {
@@ -198,6 +267,18 @@ test("parses SQL Server identity extra string to ColumnExtra", () => {
     autoIncrement: true,
     identity: { seed: 100, increment: 5 },
   });
+});
+
+test("recognizes SQL Server identity-compatible data types", () => {
+  assert.equal(isSqlServerIdentityCompatibleDataType("tinyint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("smallint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("int"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("integer"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("bigint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("decimal(18,0)"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("numeric(10)"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("varchar(255)"), false);
+  assert.equal(isSqlServerIdentityCompatibleDataType("numeric(18,2)"), false);
 });
 
 test("parses Manticore Search text properties to ColumnExtra", () => {

@@ -48,6 +48,7 @@ pub async fn execute_query(
             client_session_id,
             timeout_secs,
             execution_id,
+            ..Default::default()
         },
     )
     .await
@@ -68,6 +69,7 @@ pub async fn execute_multi(
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
+    use_transaction: Option<bool>,
 ) -> Result<Vec<db::QueryResult>, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -103,6 +105,7 @@ pub async fn execute_multi(
             client_session_id,
             timeout_secs,
             execution_id,
+            use_transaction,
         },
     )
     .await;
@@ -209,6 +212,52 @@ pub async fn execute_in_transaction(
         schema.as_deref(),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn begin_manual_transaction(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+) -> Result<String, String> {
+    dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn execute_in_manual_transaction(
+    state: State<'_, Arc<AppState>>,
+    txn_session_id: String,
+    sql: String,
+    database: String,
+    schema: Option<String>,
+    max_rows: Option<usize>,
+) -> Result<Vec<db::QueryResult>, String> {
+    dbx_core::query::execute_in_manual_transaction(
+        &state,
+        &txn_session_id,
+        &sql,
+        &database,
+        schema.as_deref(),
+        max_rows,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn commit_manual_transaction(
+    state: State<'_, Arc<AppState>>,
+    txn_session_id: String,
+) -> Result<db::QueryResult, String> {
+    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await
+}
+
+#[tauri::command]
+pub async fn rollback_manual_transaction(
+    state: State<'_, Arc<AppState>>,
+    txn_session_id: String,
+) -> Result<db::QueryResult, String> {
+    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id).await
 }
 
 #[tauri::command]
@@ -345,6 +394,11 @@ pub fn build_duplicate_table_structure_sql(
 }
 
 #[tauri::command]
+pub fn build_copy_table_data_sql(options: dbx_core::db_admin_sql::CopyTableDataSqlOptions) -> Result<String, String> {
+    Ok(dbx_core::db_admin_sql::build_copy_table_data_sql(options))
+}
+
+#[tauri::command]
 pub fn build_executable_object_source_statements(
     input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
 ) -> Result<Vec<String>, String> {
@@ -436,6 +490,20 @@ pub fn build_data_grid_column_value_filter_condition(
     options: dbx_core::data_grid_sql::DataGridColumnValueFilterConditionOptions,
 ) -> Result<Option<String>, String> {
     Ok(dbx_core::data_grid_sql::build_data_grid_column_value_filter_condition(options))
+}
+
+#[tauri::command]
+pub fn build_data_grid_column_values_filter_condition(
+    options: dbx_core::data_grid_sql::DataGridColumnValuesFilterConditionOptions,
+) -> Result<Option<String>, String> {
+    Ok(dbx_core::data_grid_sql::build_data_grid_column_values_filter_condition(options))
+}
+
+#[tauri::command]
+pub fn build_data_grid_column_distinct_values_sql(
+    options: dbx_core::data_grid_sql::DataGridColumnDistinctValuesSqlOptions,
+) -> Result<String, String> {
+    Ok(dbx_core::data_grid_sql::build_data_grid_column_distinct_values_sql(options))
 }
 
 #[tauri::command]

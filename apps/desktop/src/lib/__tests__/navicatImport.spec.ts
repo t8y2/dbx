@@ -84,4 +84,17 @@ describe("parseNavicatConnections", () => {
     expect(connection?.database).toBe("appdb");
     expect(connection?.port).toBe(15432);
   });
+
+  it("prefers Navicat ConnType over Redis deployment Type", async () => {
+    const [connection] = await parseNavicatConnections(`<Connections>
+  <Connection ConnectionName="redis-standalone" ConnType="REDIS" ServiceProvider="Default" Type="Standalone" Host="redis.example.test" Port="16379" AuthenticationMode="UsernamePassword" UserName="default" />
+</Connections>`);
+
+    expect(connection?.db_type).toBe("redis");
+    expect(connection?.driver_profile).toBe("redis");
+    expect(connection?.name).toBe("redis-standalone");
+    expect(connection?.host).toBe("redis.example.test");
+    expect(connection?.port).toBe(16379);
+    expect(connection?.username).toBe("default");
+  });
 });

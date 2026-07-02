@@ -142,6 +142,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "tdengine":
       return "tdengine://user:password@host:6041/database";
 
+    case "oscar":
+      return "oscar://user:password@host:2003/database";
+
     case "xugu":
       return "xugu://user:password@host:5138/database";
 

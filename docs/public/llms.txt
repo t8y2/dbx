@@ -33,6 +33,7 @@ Configure `.mcp.json` to let AI agents query databases through DBX connections:
   }
 }
 ```
+For Windows portable builds, set DBX_DATA_DIR to the portable data directory that contains dbx.db, for example D:\DBX_x64-portable\data.
 
 ## Key Links
 - Documentation: https://dbxio.com/en/docs/what-is-dbx

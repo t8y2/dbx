@@ -27,6 +27,9 @@ const ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
+const ELASTICSEARCH_QUERY_VALUE_ENCODE_SET: &AsciiSet =
+    &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'%').add(b'&').add(b'+').add(b'/').add(b'=').add(b'?');
+
 pub struct EsClient {
     http: HttpClient,
     base_url: String,
@@ -187,6 +190,19 @@ fn elasticsearch_index_path(index: &str, endpoint: &str) -> String {
 
 fn elasticsearch_path_segment(value: &str) -> String {
     utf8_percent_encode(value, ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET).to_string()
+}
+
+fn elasticsearch_query_value(value: &str) -> String {
+    utf8_percent_encode(value, ELASTICSEARCH_QUERY_VALUE_ENCODE_SET).to_string()
+}
+
+fn elasticsearch_document_path(index: &str, id: &str, routing: Option<&str>) -> String {
+    let base = format!("/{}/_doc/{}", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
+    if let Some(routing) = routing.map(str::trim).filter(|value| !value.is_empty()) {
+        format!("{base}?routing={}&refresh=true", elasticsearch_query_value(routing))
+    } else {
+        format!("{base}?refresh=true")
+    }
 }
 
 fn redact_elasticsearch_url(url: &str) -> String {
@@ -364,6 +380,8 @@ impl<'de> Deserialize<'de> for HitsTotal {
 struct SearchHit {
     #[serde(rename = "_id")]
     id: String,
+    #[serde(rename = "_routing")]
+    routing: Option<String>,
     #[serde(rename = "_source")]
     source: serde_json::Value,
 }
@@ -398,6 +416,9 @@ pub async fn find_documents(
                 _ => serde_json::Map::new(),
             };
             doc.insert("_id".to_string(), serde_json::Value::String(hit.id));
+            if let Some(routing) = hit.routing {
+                doc.insert("_routing".to_string(), serde_json::Value::String(routing));
+            }
             serde_json::Value::Object(doc)
         })
         .collect();
@@ -634,10 +655,16 @@ pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> 
     Ok(result["_id"].as_str().unwrap_or("").to_string())
 }
 
-pub async fn update_document(client: &EsClient, index: &str, id: &str, doc_json: &str) -> Result<u64, String> {
-    let doc = elasticsearch_document_body_from_json(doc_json)?;
+pub async fn update_document(
+    client: &EsClient,
+    index: &str,
+    id: &str,
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<u64, String> {
+    let (doc, routing) = elasticsearch_document_body_and_routing_from_json(doc_json, routing)?;
 
-    let path = format!("/{}/_doc/{}?refresh=true", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
+    let path = elasticsearch_document_path(index, id, routing.as_deref());
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -649,15 +676,37 @@ pub async fn update_document(client: &EsClient, index: &str, id: &str, doc_json:
 }
 
 fn elasticsearch_document_body_from_json(doc_json: &str) -> Result<serde_json::Value, String> {
-    let mut doc: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
-    if let serde_json::Value::Object(map) = &mut doc {
-        map.remove("_id");
-    }
-    Ok(doc)
+    elasticsearch_document_body_and_routing_from_json(doc_json, None).map(|(doc, _)| doc)
 }
 
-pub async fn delete_document(client: &EsClient, index: &str, id: &str) -> Result<u64, String> {
-    let path = format!("/{}/_doc/{}?refresh=true", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
+fn elasticsearch_document_body_and_routing_from_json(
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<(serde_json::Value, Option<String>), String> {
+    let mut doc: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let mut routing = routing.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+    if let serde_json::Value::Object(map) = &mut doc {
+        map.remove("_id");
+        if routing.is_none() {
+            routing = map.get("_routing").and_then(elasticsearch_routing_from_value);
+        }
+        map.remove("_routing");
+    }
+    Ok((doc, routing))
+}
+
+fn elasticsearch_routing_from_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        _ => None,
+    }
+}
+
+pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: Option<&str>) -> Result<u64, String> {
+    let path = elasticsearch_document_path(index, id, routing);
     let resp = client.delete(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -807,11 +856,14 @@ fn parse_elasticsearch_response(
             .iter()
             .map(|hit| {
                 let mut row = serde_json::Map::new();
-                row.insert("_id".to_string(), hit.get("_id").cloned().unwrap_or(serde_json::Value::Null));
                 if let Some(source) = hit.get("_source").and_then(|s| s.as_object()) {
                     for (k, v) in source {
                         row.insert(k.clone(), v.clone());
                     }
+                }
+                row.insert("_id".to_string(), hit.get("_id").cloned().unwrap_or(serde_json::Value::Null));
+                if let Some(routing) = hit.get("_routing") {
+                    row.insert("_routing".to_string(), routing.clone());
                 }
                 for k in row.keys() {
                     if !all_keys.contains(k) {
@@ -1476,6 +1528,15 @@ mod tests {
     }
 
     #[test]
+    fn builds_elasticsearch_document_path_with_routing() {
+        assert_eq!(
+            super::elasticsearch_document_path("orders/2026", "a%b/c", Some("tenant/a&b")),
+            "/orders%2F2026/_doc/a%25b%2Fc?routing=tenant%2Fa%26b&refresh=true"
+        );
+        assert_eq!(super::elasticsearch_document_path("orders", "1", None), "/orders/_doc/1?refresh=true");
+    }
+
+    #[test]
     fn elasticsearch_sql_detection_does_not_treat_rest_methods_as_sql() {
         assert!(super::is_elasticsearch_sql_query("SELECT * FROM index_task_v1"));
         assert!(super::is_elasticsearch_sql_query(" select count(*) from index_task_v1"));
@@ -1595,10 +1656,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_elasticsearch_hit_routing_metadata() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "hits": {
+                "total": { "value": 1, "relation": "eq" },
+                "hits": [
+                    { "_id": "doc-1", "_routing": "tenant-1", "_source": { "name": "Alice" } }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.hits.hits[0].routing.as_deref(), Some("tenant-1"));
+    }
+
+    #[test]
+    fn parses_search_response_rows_with_routing_metadata() {
+        let result = super::parse_elasticsearch_response(
+            200,
+            json!({
+                "hits": {
+                    "hits": [
+                        { "_id": "doc-1", "_routing": "tenant-1", "_source": { "name": "Alice" } }
+                    ]
+                }
+            }),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let routing_idx = result.columns.iter().position(|column| column == "_routing").unwrap();
+        assert_eq!(result.rows[0][routing_idx], json!("tenant-1"));
+    }
+
+    #[test]
     fn document_body_removes_elasticsearch_id_metadata() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"_id":"abc","name":"Alice"}"#).unwrap();
+        let doc = super::elasticsearch_document_body_from_json(r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#)
+            .unwrap();
 
         assert_eq!(doc, json!({ "name": "Alice" }));
+    }
+
+    #[test]
+    fn document_body_extracts_elasticsearch_routing_metadata() {
+        let (doc, routing) = super::elasticsearch_document_body_and_routing_from_json(
+            r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(doc, json!({ "name": "Alice" }));
+        assert_eq!(routing.as_deref(), Some("tenant-1"));
+    }
+
+    #[test]
+    fn explicit_elasticsearch_routing_overrides_document_metadata() {
+        let (doc, routing) = super::elasticsearch_document_body_and_routing_from_json(
+            r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#,
+            Some("tenant-2"),
+        )
+        .unwrap();
+
+        assert_eq!(doc, json!({ "name": "Alice" }));
+        assert_eq!(routing.as_deref(), Some("tenant-2"));
     }
 
     #[test]

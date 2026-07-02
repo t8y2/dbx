@@ -44,6 +44,22 @@ AI 助手 → MCP Server → 你的数据库 → 返回结果
     }
     ```
 
+    Windows 便携版需要额外设置 `DBX_DATA_DIR`，指向 `DBX.exe` 同级的 `data` 目录：
+
+    ```json
+    {
+      "mcpServers": {
+        "dbx": {
+          "command": "npx",
+          "args": ["-y", "@dbx-app/mcp-server"],
+          "env": {
+            "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
+          }
+        }
+      }
+    }
+    ```
+
   </Step>
   <Step>
     ### 开始使用
@@ -204,6 +220,8 @@ MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
 | macOS   | `~/Library/Application Support/com.dbx.app/dbx.db` |
 | Linux   | `~/.local/share/com.dbx.app/dbx.db`                |
 | Windows | `%APPDATA%\com.dbx.app\dbx.db`                     |
+
+Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。如果 MCP 列出的连接不是当前 DBX 中的最新连接，请在 MCP 配置中设置 `DBX_DATA_DIR`，值为包含 `dbx.db` 的 `data` 文件夹，例如 `D:\DBX_x64-portable\data`。不要手工复制 `dbx.db` 到默认目录，否则两个连接库会分叉。
 
 ### UI 联动
 

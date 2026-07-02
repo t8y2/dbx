@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   MqClusterInfo,
+  ClusterInfo,
   TenantInfo,
   TenantConfig,
   NamespaceRef,
@@ -29,8 +30,11 @@ import type {
   MqIssuedToken,
   BacklogStats,
   PeekedMessage,
+  PeekMessagesOptions,
   MqRawRequest,
   MqRawResponse,
+  SendMessageRequest,
+  SendMessageResponse,
 } from "@/types/mq";
 
 // Connectivity
@@ -126,8 +130,8 @@ export async function mqClearBacklog(connectionId: string, topic: TopicRef, sub:
   return invoke("mq_clear_backlog", { connectionId, topic, sub });
 }
 
-export async function mqPeekMessages(connectionId: string, topic: TopicRef, sub: string, count: number): Promise<PeekedMessage[]> {
-  return invoke("mq_peek_messages", { connectionId, topic, sub, count });
+export async function mqPeekMessages(connectionId: string, topic: TopicRef, sub: string, count: number, options?: PeekMessagesOptions): Promise<PeekedMessage[]> {
+  return invoke("mq_peek_messages", { connectionId, topic, sub, count, options });
 }
 
 export async function mqExpireMessages(connectionId: string, topic: TopicRef, sub: string, expireSeconds: number): Promise<void> {
@@ -198,7 +202,15 @@ export async function mqGetBacklog(connectionId: string, topic: TopicRef, sub?: 
   return invoke("mq_get_backlog", { connectionId, topic, sub });
 }
 
+export async function mqGetClusterInfo(connectionId: string): Promise<ClusterInfo> {
+  return invoke("mq_get_cluster_info", { connectionId });
+}
+
 // Raw request
 export async function mqRawRequest(connectionId: string, req: MqRawRequest): Promise<MqRawResponse> {
   return invoke("mq_raw_request", { connectionId, req });
+}
+
+export async function mqSendMessage(connectionId: string, req: SendMessageRequest): Promise<SendMessageResponse> {
+  return invoke("mq_send_message", { connectionId, req });
 }

@@ -9,11 +9,18 @@ export interface FlatTreeNode {
   depth: number;
   id: string;
   type: TreeNodeType;
+  poolType: string;
 }
 
 function walk(children: TreeNode[], depth: number, result: FlatTreeNode[]) {
   for (const node of children) {
-    result.push({ node, depth, id: node.id, type: node.type });
+    result.push({
+      node,
+      depth,
+      id: node.id,
+      type: node.type,
+      poolType: node.type === "connection-group" ? `${node.type}:${node.id}` : node.type,
+    });
     if (node.isExpanded && node.children) {
       walk(node.children, depth + 1, result);
     }

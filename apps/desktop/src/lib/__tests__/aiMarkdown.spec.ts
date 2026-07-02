@@ -26,6 +26,62 @@ describe("formatAiInlineMarkdown", () => {
   });
 });
 
+describe("markdown table overflow wrapping", () => {
+  it("wraps tables in scroll container", () => {
+    const html = formatAiInlineMarkdown("| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |");
+
+    expect(html).toContain('<div class="ai-markdown-table-wrap">');
+    expect(html).toContain("<table>");
+    expect(html).toContain("<th");
+    expect(html).toContain("<td");
+    expect(html).toContain("<tbody>");
+  });
+
+  it("does not inject table wrapper when no table is present", () => {
+    const html = formatAiInlineMarkdown("Hello **world**.");
+
+    expect(html).not.toContain("ai-markdown-table-wrap");
+    expect(html).not.toContain("<table>");
+  });
+
+  it("preserves table column alignment", () => {
+    const html = formatAiInlineMarkdown("| a | b | c |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |");
+
+    expect(html).toContain('align="left"');
+    expect(html).toContain('align="center"');
+    expect(html).toContain('align="right"');
+  });
+
+  it("handles tables with only headers", () => {
+    const html = formatAiInlineMarkdown("| a | b |\n| --- | --- |");
+
+    expect(html).toContain('<div class="ai-markdown-table-wrap">');
+    expect(html).toContain("<thead>");
+    expect(html).toContain("<tbody>");
+    expect(html).not.toContain("<td");
+  });
+
+  it("handles inline formatting inside table cells", () => {
+    const html = formatAiInlineMarkdown("| a | b |\n| --- | --- |\n| **bold** | `code` |");
+
+    expect(html).toContain("<strong>bold</strong>");
+    expect(html).toContain("<code");
+    expect(html).toContain("code</code>");
+  });
+
+  it("handles multi-column, multi-row tables", () => {
+    const html = formatAiInlineMarkdown(["| a | b | c |", "| -- | -- | -- |", "| 1 | 2 | 3 |", "| 4 | 5 | 6 |"].join("\n"));
+
+    expect(html).toContain('<div class="ai-markdown-table-wrap">');
+    expect(html).toContain("<td>1</td>");
+    expect(html).toContain("<td>2</td>");
+    expect(html).toContain("<td>3</td>");
+    expect(html).toContain("<td>4</td>");
+    expect(html).toContain("<td>5</td>");
+    expect(html).toContain("<td>6</td>");
+  });
+});
+
 describe("normalizeAiMarkdownLink", () => {
   it("accepts absolute http and https urls", () => {
     expect(normalizeAiMarkdownLink("https://example.com/docs")).toBe("https://example.com/docs");

@@ -5,6 +5,7 @@ import {
   DBX_ROWID_COLUMN,
   DBX_TDENGINE_TBNAME_COLUMN,
   canEditExistingTableRows,
+  canInsertTableRows,
   editablePrimaryKeys,
   hiveTablePropertiesIndicateTransactional,
   isHiddenGridColumn,
@@ -65,6 +66,15 @@ test("does not use transactional grid saves for non-transactional engines", () =
   assert.equal(supportsDataGridTransaction("jdbc"), false);
   assert.equal(supportsDataGridTransaction("yashandb"), true);
   assert.equal(supportsDataGridTransaction("postgres"), true);
+});
+
+test("detects whether table data supports inserted rows", () => {
+  assert.equal(canInsertTableRows("postgres"), true);
+  assert.equal(canInsertTableRows("mysql"), true);
+  assert.equal(canInsertTableRows("hive"), true);
+  assert.equal(canInsertTableRows("jdbc"), false);
+  assert.equal(canInsertTableRows("clickhouse"), true);
+  assert.equal(canInsertTableRows("influxdb"), false);
 });
 
 test("allows existing row edits according to database-specific key requirements", () => {

@@ -409,7 +409,7 @@ fn codex_mcp_config_overrides(options: &CodexRunOptions) -> Vec<String> {
     overrides
 }
 
-pub fn build_codex_exec_command(config: &AiConfig, prompt: &str, options: &CodexRunOptions) -> CodexCommandSpec {
+pub fn build_codex_exec_command(config: &AiConfig, _prompt: &str, options: &CodexRunOptions) -> CodexCommandSpec {
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
@@ -429,7 +429,7 @@ pub fn build_codex_exec_command(config: &AiConfig, prompt: &str, options: &Codex
         args.push(model.to_string());
     }
 
-    args.push(prompt.to_string());
+    args.push("-".to_string());
 
     CodexCommandSpec { program: codex_program(config), args }
 }
@@ -519,9 +519,20 @@ fn classify_codex_spawn_error(message: &str) -> String {
     if message.contains("No such file") || message.contains("not found") {
         "[codexNotInstalled] Codex CLI was not found. Install Codex CLI or set the Codex CLI path in DBX AI settings."
             .to_string()
+    } else if is_command_line_too_long_error(message) {
+        "[codexCommandLineTooLong] Codex CLI command line is too long. Update DBX so Codex prompts are sent through stdin instead of process arguments."
+            .to_string()
     } else {
         format!("[codexRunFailed] Failed to start Codex CLI: {message}")
     }
+}
+
+fn is_command_line_too_long_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    message.contains("os error 206")
+        || message.contains("文件名或扩展名太长")
+        || lower.contains("filename or extension is too long")
+        || lower.contains("the filename or extension is too long")
 }
 
 fn classify_codex_run_error(stderr: &str) -> String {
@@ -558,6 +569,7 @@ pub async fn run_codex_agent(
         CliAgentProcessSpec {
             command,
             env,
+            stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error: classify_codex_spawn_error,
             classify_run_error: classify_codex_run_error,
@@ -573,8 +585,8 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        build_codex_exec_command, codex_cli_env, codex_enabled_tools, is_path_like_program, parse_codex_jsonl_event,
-        parse_codex_models, validate_codex_program, CodexRunOptions, DEFAULT_CODEX_MODELS,
+        build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools, is_path_like_program,
+        parse_codex_jsonl_event, parse_codex_models, validate_codex_program, CodexRunOptions, DEFAULT_CODEX_MODELS,
     };
     #[cfg(not(windows))]
     use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
@@ -621,6 +633,8 @@ mod tests {
 
         assert_eq!(spec.program, "codex");
         assert!(spec.args.contains(&"--json".to_string()));
+        assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+        assert!(!spec.args.contains(&"hello".to_string()));
         assert!(!spec.args.contains(&"--model".to_string()));
         assert!(!spec.args.contains(&"--ask-for-approval".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.command=\"dbx-mcp-server\"".to_string()));
@@ -937,6 +951,13 @@ mod tests {
         );
         assert_eq!(models[1].display_name.as_deref(), Some("GPT-5.5"));
         assert!(!models.iter().any(|model| model.id == "priority" || model.id == "Priority"));
+    }
+
+    #[test]
+    fn classifies_windows_command_line_too_long_spawn_error() {
+        let err = classify_codex_spawn_error("文件名或扩展名太长。 (os error 206)");
+
+        assert!(err.contains("[codexCommandLineTooLong]"));
     }
 
     #[test]

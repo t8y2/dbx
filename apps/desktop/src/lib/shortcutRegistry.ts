@@ -21,6 +21,17 @@ export type ShortcutActionId =
   | "closeTab"
   | "focusSearch"
   | "quickOpen"
+  | "switchToPreviousTab"
+  | "switchToNextTab"
+  | "switchToTab1"
+  | "switchToTab2"
+  | "switchToTab3"
+  | "switchToTab4"
+  | "switchToTab5"
+  | "switchToTab6"
+  | "switchToTab7"
+  | "switchToTab8"
+  | "switchToTab9"
   | "zoomInUi"
   | "zoomOutUi"
   | "resetUiZoom"
@@ -174,6 +185,72 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutQuickOpen",
     scope: "global",
     defaultShortcut: "Mod+P",
+  },
+  {
+    id: "switchToPreviousTab",
+    labelKey: "settings.shortcutSwitchToPreviousTab",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+[",
+  },
+  {
+    id: "switchToNextTab",
+    labelKey: "settings.shortcutSwitchToNextTab",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+]",
+  },
+  {
+    id: "switchToTab1",
+    labelKey: "settings.shortcutSwitchToTab1",
+    scope: "global",
+    defaultShortcut: "Mod+1",
+  },
+  {
+    id: "switchToTab2",
+    labelKey: "settings.shortcutSwitchToTab2",
+    scope: "global",
+    defaultShortcut: "Mod+2",
+  },
+  {
+    id: "switchToTab3",
+    labelKey: "settings.shortcutSwitchToTab3",
+    scope: "global",
+    defaultShortcut: "Mod+3",
+  },
+  {
+    id: "switchToTab4",
+    labelKey: "settings.shortcutSwitchToTab4",
+    scope: "global",
+    defaultShortcut: "Mod+4",
+  },
+  {
+    id: "switchToTab5",
+    labelKey: "settings.shortcutSwitchToTab5",
+    scope: "global",
+    defaultShortcut: "Mod+5",
+  },
+  {
+    id: "switchToTab6",
+    labelKey: "settings.shortcutSwitchToTab6",
+    scope: "global",
+    defaultShortcut: "Mod+6",
+  },
+  {
+    id: "switchToTab7",
+    labelKey: "settings.shortcutSwitchToTab7",
+    scope: "global",
+    defaultShortcut: "Mod+7",
+  },
+  {
+    id: "switchToTab8",
+    labelKey: "settings.shortcutSwitchToTab8",
+    scope: "global",
+    defaultShortcut: "Mod+8",
+  },
+  {
+    id: "switchToTab9",
+    labelKey: "settings.shortcutSwitchToTab9",
+    scope: "global",
+    defaultShortcut: "Mod+9",
   },
   {
     id: "zoomInUi",

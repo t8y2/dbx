@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { ChevronDown, ChevronRight, FolderClosed, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Search, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -84,6 +85,7 @@ const props = withDefaults(
 
 const { t } = useI18n();
 const { toast } = useToast();
+const connectionStore = useConnectionStore();
 const searchInputRef = ref<HTMLInputElement>();
 const prefix = ref("");
 const keys = ref<KvKeySummary[]>([]);
@@ -539,7 +541,14 @@ function refresh(): boolean {
 
 watch(
   () => props.connectionId,
-  () => void loadKeys(true),
+  async () => {
+    try {
+      await connectionStore.ensureConnected(props.connectionId);
+    } catch {
+      // Connection failed — loadKeys will show the error state
+    }
+    void loadKeys(true);
+  },
 );
 
 watch(
@@ -552,7 +561,14 @@ watch(
   { immediate: true },
 );
 
-onMounted(() => void loadKeys(true));
+onMounted(async () => {
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
+  void loadKeys(true);
+});
 defineExpose({ focusSearch, refresh });
 </script>
 

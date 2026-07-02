@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, defineAsyncComponent } from "vue";
-import { Play, RefreshCcw, RotateCcw, Save, Trash2 } from "@lucide/vue";
+import { Play, RefreshCcw, RotateCcw, Save, Search, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
@@ -12,7 +12,7 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 const DataGrid = defineAsyncComponent(() => import("@/components/grid/DataGrid.vue"));
 const { t } = useI18n();
 
-type VectorOperationMode = "browse" | "upsert" | "delete";
+type VectorOperationMode = "browse" | "upsert" | "delete" | "search";
 
 const props = defineProps<{
   connectionId: string;
@@ -32,8 +32,14 @@ const statusMessage = ref("");
 const result = ref<QueryResult>(emptyResult());
 const operationMode = ref<VectorOperationMode>("browse");
 const requestText = ref(defaultRequestText(props.databaseType, props.database, props.collection, operationMode.value));
+const searchVector = ref("");
+const searchTopK = ref(10);
 let loadingTimer: ReturnType<typeof setInterval> | undefined;
 
+const dim = computed(() => props.dimension || 4);
+function sampleVector(): number[] {
+  return Array.from({ length: dim.value }, (_, i) => parseFloat(((i + 1) / 10).toFixed(1)));
+}
 const productLabel = computed(() => {
   switch (props.databaseType) {
     case "milvus":
@@ -47,8 +53,28 @@ const productLabel = computed(() => {
   }
 });
 const collectionLabel = computed(() => props.collectionLabel || props.collection || t("vector.collectionFallback"));
-const executeLabel = computed(() => (operationMode.value === "browse" ? t("vector.run") : t("vector.apply")));
-const operationIcon = computed(() => (operationMode.value === "delete" ? Trash2 : operationMode.value === "upsert" ? Save : Play));
+const executeLabel = computed(() => {
+  switch (operationMode.value) {
+    case "browse":
+      return t("vector.run");
+    case "search":
+      return t("vector.search");
+    default:
+      return t("vector.apply");
+  }
+});
+const operationIcon = computed(() => {
+  switch (operationMode.value) {
+    case "delete":
+      return Trash2;
+    case "upsert":
+      return Save;
+    case "search":
+      return Search;
+    default:
+      return Play;
+  }
+});
 
 watch(
   () => [props.databaseType, props.database, props.collection] as const,
@@ -57,6 +83,15 @@ watch(
     result.value = emptyResult();
     error.value = "";
     statusMessage.value = "";
+  },
+);
+
+watch(
+  () => [operationMode.value, searchVector.value, searchTopK.value] as const,
+  () => {
+    if (operationMode.value === "search") {
+      requestText.value = defaultRequestText(props.databaseType, props.database, props.collection, operationMode.value);
+    }
   },
 );
 
@@ -91,20 +126,28 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
               data: [
                 {
                   id: 1,
-                  vector: [0.1, 0.2, 0.3, 0.4],
+                  vector: sampleVector(),
                   title: "updated vector",
                   kind: "demo",
                 },
               ],
             }
-          : {
-              dbName: database || "default",
-              collectionName: collection,
-              filter: "",
-              limit: 100,
-              outputFields: ["*"],
-            };
-    const endpoint = mode === "delete" ? "delete" : mode === "upsert" ? "upsert" : "query";
+          : mode === "search"
+            ? {
+                dbName: database || "default",
+                collectionName: collection,
+                data: [tryParseVector(searchVector.value)],
+                limit: searchTopK.value,
+                outputFields: ["*"],
+              }
+            : {
+                dbName: database || "default",
+                collectionName: collection,
+                filter: "",
+                limit: 100,
+                outputFields: ["*"],
+              };
+    const endpoint = mode === "delete" ? "delete" : mode === "upsert" ? "upsert" : mode === "search" ? "search" : "query";
     return `POST /v2/vectordb/entities/${endpoint}\n${JSON.stringify(body, null, 2)}`;
   }
   if (databaseType === "weaviate") {
@@ -125,6 +168,11 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
         2,
       )}`;
     }
+    if (mode === "search") {
+      const vec = tryParseVector(searchVector.value);
+      const gql = `{ Get { ${collectionName}(limit: ${searchTopK.value}, nearVector: {vector: [${vec.join(",")}]}) { _additional { distance id } } } }`;
+      return `POST /v1/graphql\n${JSON.stringify({ query: gql }, null, 2)}`;
+    }
     return `GET /v1/objects?class=${encodeURIComponent(collectionName)}&limit=100`;
   }
   if (databaseType === "chromadb") {
@@ -133,9 +181,10 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
       return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/delete\n${JSON.stringify({ ids: ["id1"] }, null, 2)}`;
     }
     if (mode === "upsert") {
-      const dim = props.dimension || 4;
-      const emb = Array.from({ length: dim }, (_, i) => +(i * 0.1 + 0.1).toFixed(1));
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [emb], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
+      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [sampleVector()], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
+    }
+    if (mode === "search") {
+      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/query\n${JSON.stringify({ query_embeddings: [tryParseVector(searchVector.value)], n_results: searchTopK.value, include: ["documents", "metadatas", "distances"] }, null, 2)}`;
     }
     return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/get\n${JSON.stringify({ limit: 100, include: ["documents", "metadatas"] }, null, 2)}`;
   }
@@ -149,7 +198,7 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
         points: [
           {
             id: 1,
-            vector: [0.1, 0.2, 0.3, 0.4],
+            vector: sampleVector(),
             payload: {
               title: "updated vector",
               kind: "demo",
@@ -161,7 +210,18 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
       2,
     )}`;
   }
+  if (mode === "search") {
+    return `POST /collections/${collectionPath}/points/search\n${JSON.stringify({ vector: tryParseVector(searchVector.value), limit: searchTopK.value, with_payload: true, with_vector: false }, null, 2)}`;
+  }
   return `POST /collections/${collectionPath}/points/scroll\n${JSON.stringify({ limit: 100, with_payload: true, with_vector: false }, null, 2)}`;
+}
+
+function tryParseVector(input: string): number[] {
+  try {
+    const parsed = JSON.parse(input);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+  return sampleVector();
 }
 
 function startTimer() {
@@ -222,7 +282,7 @@ async function runRequest() {
   try {
     const nextResult = await executeRequestText(requestText.value);
     if (executionId.value !== id) return;
-    if (operationMode.value === "browse") {
+    if (operationMode.value === "browse" || operationMode.value === "search") {
       result.value = nextResult;
     } else {
       const browseText = defaultRequestText(props.databaseType, props.database, props.collection, "browse");
@@ -271,6 +331,7 @@ function setOperationMode(mode: VectorOperationMode) {
       <div class="flex shrink-0 items-center gap-1.5">
         <div class="mr-1 flex h-7 overflow-hidden rounded-md border bg-muted/30 p-0.5">
           <button type="button" class="h-6 px-2 text-xs transition-colors" :class="operationMode === 'browse' ? 'rounded bg-background font-medium shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="loading" @click="setOperationMode('browse')">{{ t("vector.browse") }}</button>
+          <button type="button" class="h-6 px-2 text-xs transition-colors" :class="operationMode === 'search' ? 'rounded bg-background font-medium shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="loading" @click="setOperationMode('search')">{{ t("vector.search") }}</button>
           <button type="button" class="h-6 px-2 text-xs transition-colors" :class="operationMode === 'upsert' ? 'rounded bg-background font-medium shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="loading" @click="setOperationMode('upsert')">{{ t("vector.upsert") }}</button>
           <button type="button" class="h-6 px-2 text-xs transition-colors" :class="operationMode === 'delete' ? 'rounded bg-background font-medium shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="loading" @click="setOperationMode('delete')">{{ t("vector.delete") }}</button>
         </div>
@@ -289,6 +350,16 @@ function setOperationMode(mode: VectorOperationMode) {
       </div>
     </div>
 
+    <div v-if="operationMode === 'search'" class="flex shrink-0 flex-wrap items-center gap-3 border-b px-3 py-2">
+      <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span>{{ t("vector.vectorLabel") }}</span>
+        <input v-model="searchVector" class="h-7 w-80 rounded border bg-muted/30 px-2 font-mono text-xs outline-none focus:border-primary" placeholder="[0.1, 0.2, ...]" spellcheck="false" />
+      </div>
+      <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span>topK</span>
+        <input v-model.number="searchTopK" type="number" min="1" max="1000" class="h-7 w-16 rounded border bg-muted/30 px-2 text-xs outline-none focus:border-primary" />
+      </div>
+    </div>
     <div class="grid min-h-0 flex-1 grid-rows-[minmax(9rem,15rem)_1fr]">
       <div class="min-h-0 border-b">
         <textarea v-model="requestText" class="dbx-editor-font-family h-full w-full resize-none bg-background px-3 py-2 text-xs leading-5 outline-none" :aria-label="t('vector.requestEditor')" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" />

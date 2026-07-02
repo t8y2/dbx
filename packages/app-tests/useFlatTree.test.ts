@@ -36,6 +36,21 @@ test("flattenTree preserves depth and node type for virtualized sidebar rows", (
   );
 });
 
+test("connection groups use per-node pool types to avoid recycled row state", () => {
+  const nodes: TreeNode[] = [
+    { id: "g1", label: "Group 1", type: "connection-group", isExpanded: false },
+    { id: "g2", label: "Group 2", type: "connection-group", isExpanded: false },
+    { id: "c1", label: "Connection", type: "connection", isExpanded: false },
+  ];
+
+  const flat = flattenTree(nodes);
+
+  assert.equal(flat[0].type, "connection-group");
+  assert.equal(flat[1].type, "connection-group");
+  assert.notEqual(flat[0].poolType, flat[1].poolType);
+  assert.equal(flat[2].poolType, "connection");
+});
+
 test("shouldVirtualizeFlatTree virtualizes every non-empty sidebar tree", () => {
   assert.equal(shouldVirtualizeFlatTree(0), false);
   assert.equal(shouldVirtualizeFlatTree(1), true);

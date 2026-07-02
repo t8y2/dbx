@@ -862,7 +862,11 @@ fn add_standard_limit(
         return format!("{statement};");
     }
     let offset_sql = if offset > 0 { format!(" OFFSET {offset}") } else { String::new() };
-    append_sql_suffix(statement, &format!("{order_sql} LIMIT {limit}{offset_sql};"))
+    let limit_sql = format!("{order_sql} LIMIT {limit}{offset_sql}");
+    if database_type == Some(DatabaseType::ClickHouse) {
+        return add_clickhouse_limit(statement, &limit_sql);
+    }
+    append_sql_suffix(statement, &format!("{limit_sql};"))
 }
 
 fn add_outer_standard_limit(
@@ -874,6 +878,20 @@ fn add_outer_standard_limit(
 ) -> String {
     let alias = quote_table_identifier(database_type, "dbx_page");
     derived_table_sql("SELECT * FROM", statement, &format!("{alias}{order_sql} LIMIT {limit} OFFSET {offset};"))
+}
+
+fn add_clickhouse_limit(statement: &str, limit_sql: &str) -> String {
+    let limit_sql = limit_sql.trim();
+    let settings_index =
+        top_level_sql_tokens(statement).iter().find(|token| token.text == "SETTINGS").map(|token| token.start);
+
+    if let Some(index) = settings_index {
+        let statement_before_settings = statement[..index].trim_end();
+        let settings_clause = statement[index..].trim_start();
+        return format!("{statement_before_settings} {limit_sql} {settings_clause};");
+    }
+
+    append_sql_suffix(statement, &format!("{limit_sql};"))
 }
 
 fn derived_table_sql(prefix: &str, statement: &str, suffix: &str) -> String {
@@ -1508,6 +1526,43 @@ WHERE u.id = picked.id;
             result.sql.unwrap(),
             "WITH 1 AS min_id SELECT dept, COUNT(*) FROM employees WHERE id >= min_id GROUP BY dept LIMIT 50 OFFSET 100;"
         );
+    }
+
+    #[test]
+    fn clickhouse_settings_clause_is_paginated_before_settings() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM system.clusters SETTINGS max_execution_time = 0".to_string(),
+            database_type: Some(DatabaseType::ClickHouse),
+            limit: 50,
+            offset: 100,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM system.clusters LIMIT 50 OFFSET 100 SETTINGS max_execution_time = 0;"
+        );
+    }
+
+    #[test]
+    fn clickhouse_query_plan_places_limit_before_settings() {
+        let sql = "SELECT * FROM system.clusters SETTINGS max_execution_time = 0";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::ClickHouse),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM system.clusters LIMIT 100 SETTINGS max_execution_time = 0;");
+        assert_eq!(
+            plan.page_sql,
+            Some("SELECT * FROM system.clusters LIMIT 100 SETTINGS max_execution_time = 0;".to_string())
+        );
+        assert_eq!(plan.page_limit, Some(100));
+        assert_eq!(plan.page_offset, Some(0));
     }
 
     #[test]

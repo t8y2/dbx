@@ -255,6 +255,11 @@ watch(autoRefreshInterval, () => {
 // Lifecycle
 // ---------------------------------------------------------------------------
 onMounted(async () => {
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
   await fetchClusterNodes();
   await fetchInfo();
 });

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, Loader2, Maximize2, Plus, RefreshCw, Save, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -22,11 +22,13 @@ import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sqlHighlig
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/tableColumnTemplates";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -41,8 +43,10 @@ import {
   getDataTypeOptions,
   getDefaultLengthForType,
   isDataTypeLengthDisabled,
+  isSqlServerIdentityCompatibleDataType,
   isProtectedManticoreIdColumn,
   parseExtraToColumnExtra,
+  rehydrateColumnDraftsFromMetadata,
   splitDataType,
   toColumnNames,
   applyManticoreDdlColumnExtras,
@@ -79,15 +83,19 @@ const props = defineProps<{
   database: string;
   schema?: string;
   tableName: string;
+  initialTab?: TableInfoTab;
+  initialTabRequestId?: number;
+  draft?: TableStructureEditorDraft;
 }>();
 
 const emit = defineEmits<{
+  "update:draft": [draft: TableStructureEditorDraft | undefined];
   saved: [commentChanged: boolean];
   close: [];
   openSettings: [initialTab?: string, initialSection?: string];
 }>();
 
-const activeTab = ref("columns");
+const activeTab = ref<TableInfoTab>("columns");
 const loading = ref(false);
 const saving = ref(false);
 const postSaveRefreshing = ref(false);
@@ -214,6 +222,12 @@ function isPlainModShortcut(event: KeyboardEvent, key: string): boolean {
 }
 
 const structureDensityValues: StructureEditorDensity[] = ["compact", "standard", "comfortable"];
+const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths";
+const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
+const STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY = "dbx-structure-editor-sql-preview-collapsed";
+const STRUCTURE_COLUMN_WIDTH_COUNT = 10;
+const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 8;
+const PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS = new Set([0, 1, 6]);
 const structureDensityMetrics: Record<
   StructureEditorDensity,
   {
@@ -221,6 +235,7 @@ const structureDensityMetrics: Record<
     indexes: number[];
     minColumnWidth: number;
     minIndexColumnWidth: number;
+    actionButtonWidth: number;
     fontSize: number;
     shellPadding: number;
     cellPaddingX: number;
@@ -234,10 +249,11 @@ const structureDensityMetrics: Record<
   }
 > = {
   compact: {
-    columns: [28, 120, 136, 82, 60, 52, 108, 124, 144, 108],
+    columns: [28, 168, 136, 82, 60, 52, 108, 220, 144, 108],
     indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
     minIndexColumnWidth: 48,
+    actionButtonWidth: 24,
     fontSize: 11,
     shellPadding: 10,
     cellPaddingX: 6,
@@ -250,10 +266,11 @@ const structureDensityMetrics: Record<
     lineHeight: 1.35,
   },
   standard: {
-    columns: [32, 144, 160, 104, 72, 64, 128, 152, 160, 136],
+    columns: [32, 200, 160, 104, 72, 64, 128, 260, 160, 136],
     indexes: [148, 224, 72, 108, 148, 180, 148, 84],
     minColumnWidth: 28,
     minIndexColumnWidth: 60,
+    actionButtonWidth: 28,
     fontSize: 12,
     shellPadding: 12,
     cellPaddingX: 8,
@@ -266,10 +283,11 @@ const structureDensityMetrics: Record<
     lineHeight: 1.4,
   },
   comfortable: {
-    columns: [36, 168, 188, 116, 84, 76, 152, 188, 188, 148],
+    columns: [36, 232, 188, 116, 84, 76, 152, 300, 188, 148],
     indexes: [176, 260, 84, 124, 176, 216, 176, 104],
     minColumnWidth: 32,
     minIndexColumnWidth: 64,
+    actionButtonWidth: 32,
     fontSize: 13,
     shellPadding: 16,
     cellPaddingX: 10,
@@ -289,6 +307,79 @@ function isStructureEditorDensity(value: unknown): value is StructureEditorDensi
 
 function metricsForDensity(density: StructureEditorDensity) {
   return structureDensityMetrics[density];
+}
+
+function normalizeStructureColumnWidths(value: unknown, density: StructureEditorDensity): number[] | null {
+  if (!Array.isArray(value) || value.length !== STRUCTURE_COLUMN_WIDTH_COUNT) return null;
+  const minWidth = metricsForDensity(density).minColumnWidth;
+  const widths = value.map((item) => Number(item));
+  if (widths.some((item) => !Number.isFinite(item))) return null;
+  return widths.map((item) => Math.max(minWidth, item));
+}
+
+function normalizeStructureIndexColumnWidths(value: unknown, density: StructureEditorDensity): number[] | null {
+  if (!Array.isArray(value) || value.length !== STRUCTURE_INDEX_COLUMN_WIDTH_COUNT) return null;
+  const minWidth = metricsForDensity(density).minIndexColumnWidth;
+  const widths = value.map((item) => Number(item));
+  if (widths.some((item) => !Number.isFinite(item))) return null;
+  return widths.map((item) => Math.max(minWidth, item));
+}
+
+function loadStructureWidthsByDensity(storageKey: string, density: StructureEditorDensity): unknown {
+  const raw = safeLocalStorageGet(storageKey);
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<Record<StructureEditorDensity, unknown>>;
+    return parsed?.[density];
+  } catch {
+    return undefined;
+  }
+}
+
+function loadStructureColumnWidths(density: StructureEditorDensity): number[] {
+  const fallback = [...metricsForDensity(density).columns];
+  const stored = loadStructureWidthsByDensity(STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY, density);
+  return normalizeStructureColumnWidths(stored, density) ?? fallback;
+}
+
+function loadStructureIndexColumnWidths(density: StructureEditorDensity): number[] {
+  const fallback = [...metricsForDensity(density).indexes];
+  const stored = normalizeStructureIndexColumnWidths(loadStructureWidthsByDensity(STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY, density), density);
+  if (!stored) return fallback;
+  return fallback.map((width, index) => (PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS.has(index) ? stored[index] : width));
+}
+
+function saveStructureWidthsByDensity(storageKey: string, density: StructureEditorDensity, widths: readonly number[]) {
+  let payload: Partial<Record<StructureEditorDensity, number[]>> = {};
+  const raw = safeLocalStorageGet(storageKey);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") payload = parsed;
+    } catch {
+      payload = {};
+    }
+  }
+  payload[density] = [...widths];
+  safeLocalStorageSet(storageKey, JSON.stringify(payload));
+}
+
+function saveStructureColumnWidths(density: StructureEditorDensity, widths: readonly number[]) {
+  const normalized = normalizeStructureColumnWidths([...widths], density);
+  if (!normalized) return;
+  saveStructureWidthsByDensity(STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY, density, normalized);
+}
+
+function saveStructureIndexColumnWidths(density: StructureEditorDensity, widths: readonly number[]) {
+  const normalized = normalizeStructureIndexColumnWidths([...widths], density);
+  if (!normalized) return;
+  const fallback = metricsForDensity(density).indexes;
+  const stored = fallback.map((width, index) => (PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS.has(index) ? normalized[index] : width));
+  saveStructureWidthsByDensity(STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY, density, stored);
+}
+
+function loadSqlPreviewCollapsed(): boolean {
+  return safeLocalStorageGet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY) === "true";
 }
 
 const structureDensity = computed(() => settingsStore.editorSettings.structureEditorDensity);
@@ -330,9 +421,8 @@ const structureDensityMenuOpen = ref(false);
 const structureDensityMenuRef = ref<HTMLElement>();
 
 function applyStructureDensityWidths(density: StructureEditorDensity) {
-  const metric = metricsForDensity(density);
-  colWidths.value = [...metric.columns];
-  indexColWidths.value = [...metric.indexes];
+  colWidths.value = loadStructureColumnWidths(density);
+  indexColWidths.value = loadStructureIndexColumnWidths(density);
 }
 
 function setStructureDensity(value: unknown) {
@@ -397,11 +487,15 @@ function persistStructureDensity(density = localStructureDensity.value) {
   settingsStore.updateEditorSettings({ structureEditorDensity: density });
 }
 
-const initialDensityMetric = metricsForDensity(structureDensity.value);
-const colWidths = ref([...initialDensityMetric.columns]);
+const colWidths = ref(loadStructureColumnWidths(structureDensity.value));
 const colResizing = ref<{ col: number; startX: number; startW: number } | null>(null);
-const indexColWidths = ref([...initialDensityMetric.indexes]);
+const indexColWidths = ref(loadStructureIndexColumnWidths(structureDensity.value));
 const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
+const columnSearchInputRef = ref<InstanceType<typeof Input>>();
+const columnSearchText = ref("");
+const highlightedColumnId = ref<string | null>(null);
+const sqlPreviewCollapsed = ref(loadSqlPreviewCollapsed());
+let columnHighlightTimer: ReturnType<typeof window.setTimeout> | undefined;
 
 watch(
   structureDensity,
@@ -415,6 +509,7 @@ watch(
 watch(localStructureDensity, (density, previousDensity) => {
   if (density === previousDensity) return;
   applyStructureDensityWidths(density);
+  persistStructureDensity(density);
 });
 
 function onColResize(e: MouseEvent, col: number) {
@@ -428,6 +523,7 @@ function onColResize(e: MouseEvent, col: number) {
   };
   const onUp = () => {
     colResizing.value = null;
+    saveStructureColumnWidths(localStructureDensity.value, colWidths.value);
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
   };
@@ -445,6 +541,9 @@ function onIndexColResize(e: MouseEvent, col: number) {
   };
   const onUp = () => {
     resizing.value = null;
+    if (PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS.has(col)) {
+      saveStructureIndexColumnWidths(localStructureDensity.value, indexColWidths.value);
+    }
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
   };
@@ -542,8 +641,15 @@ const showExtendedProperties = computed(() => {
   return dt === "mysql" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
 });
 const extendedPropertiesColumnIndex = 8;
+const actionButtonGap = 2;
+const columnActionButtonCount = computed(() => (canShowColumnDragControls.value ? 2 : 1));
+const columnActionsWidth = computed(() => {
+  const metric = structureDensityMetric.value;
+  const count = columnActionButtonCount.value;
+  return metric.actionButtonWidth * count + actionButtonGap * Math.max(0, count - 1) + metric.cellPaddingX * 2;
+});
 const visibleColumnIndexes = computed(() => colLabels.value.map((column) => column.widthIndex));
-const visibleColWidths = computed(() => visibleColumnIndexes.value.map((index) => colWidths.value[index] ?? structureDensityMetric.value.minColumnWidth));
+const visibleColWidths = computed(() => colLabels.value.map((column) => (column.key === "actions" ? columnActionsWidth.value : (colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth))));
 
 function columnWidthIndex(visibleIndex: number) {
   return visibleColumnIndexes.value[visibleIndex] ?? visibleIndex;
@@ -567,6 +673,22 @@ const colLabels = computed(() => {
   return labels;
 });
 const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
+const filteredColumnRowIds = computed(() => {
+  const query = columnSearchText.value.trim().toLowerCase();
+  if (!query) return new Set<string>();
+  return new Set(
+    columns.value
+      .filter((column) =>
+        [column.name, column.comment].some((value) =>
+          String(value ?? "")
+            .toLowerCase()
+            .includes(query),
+        ),
+      )
+      .map((column) => column.id),
+  );
+});
+const columnSearchMatchCount = computed(() => (columnSearchText.value.trim() ? filteredColumnRowIds.value.size : 0));
 const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
 const triggerTimingOptions = ["BEFORE", "AFTER"];
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
@@ -597,6 +719,94 @@ let sqlPreviewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let deferredSqlPreviewRefresh = false;
 let keydownListenerRegistered = false;
 let skipNextRefreshVersion = false;
+let restoringDraft = false;
+let syncingDraft = false;
+let draftHydrated = false;
+let hydratingRestoredDraft = false;
+
+function cloneDraftValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createCurrentDraft(initialized = true): TableStructureEditorDraft {
+  return {
+    activeTab: activeTab.value as TableStructureEditorDraft["activeTab"],
+    newTableName: newTableName.value,
+    tableComment: tableComment.value,
+    originalTableComment: originalTableComment.value,
+    columns: cloneDraftValue(columns.value),
+    indexes: cloneDraftValue(indexes.value),
+    foreignKeys: cloneDraftValue(foreignKeys.value),
+    triggers: cloneDraftValue(triggers.value),
+    initialized,
+  };
+}
+
+function syncDraftToParent() {
+  if (!draftHydrated) return;
+  if (restoringDraft || syncingDraft) return;
+  syncingDraft = true;
+  emit("update:draft", createCurrentDraft());
+  syncingDraft = false;
+}
+
+function restoreDraft(draft: TableStructureEditorDraft) {
+  restoringDraft = true;
+  draftHydrated = false;
+  activeTab.value = draft.activeTab || "columns";
+  newTableName.value = draft.newTableName || "";
+  tableComment.value = draft.tableComment || "";
+  originalTableComment.value = draft.originalTableComment || "";
+  columns.value = cloneDraftValue(draft.columns || []);
+  indexes.value = cloneDraftValue(draft.indexes || []);
+  foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
+  triggers.value = cloneDraftValue(draft.triggers || []);
+  restoringDraft = false;
+  draftHydrated = !needsColumnDraftMetadataHydration();
+}
+
+function needsColumnDraftMetadataHydration() {
+  return !isCreateMode.value && columns.value.some((column) => !column.original && !column.id.startsWith("new:") && !!column.name.trim());
+}
+
+async function hydrateRestoredDraftFromDatabase() {
+  if (!needsColumnDraftMetadataHydration() || hydratingRestoredDraft) return;
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = metadataSchema.value;
+  const tableName = props.tableName;
+  if (!connectionId || !database || !tableName) return;
+
+  hydratingRestoredDraft = true;
+  let shouldRefreshPreview = false;
+  try {
+    await store.ensureConnected(connectionId);
+    let nextColumns = await api.getColumns(connectionId, database, schema, tableName);
+    if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
+      try {
+        const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
+        ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
+        ddlFetched.value = true;
+        nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
+      } catch {
+        /* ignore — Manticore column properties can still come from SHOW COLUMNS when available */
+      }
+    }
+    columns.value = rehydrateColumnDraftsFromMetadata(columns.value, nextColumns, databaseType.value);
+    markDraftHydratedAndSync();
+    shouldRefreshPreview = true;
+  } catch (e: any) {
+    console.warn("[DBX][structure-editor:draft-hydration-failed]", e);
+  } finally {
+    hydratingRestoredDraft = false;
+    if (shouldRefreshPreview) scheduleSqlPreviewRefresh();
+  }
+}
+
+function markDraftHydratedAndSync() {
+  draftHydrated = true;
+  syncDraftToParent();
+}
 
 function hasPendingStructureChanges(): boolean {
   if (isCreateMode.value) {
@@ -670,6 +880,18 @@ async function loadDynamicDataTypeOptions() {
 }
 
 function scheduleSqlPreviewRefresh() {
+  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) {
+    if (sqlPreviewDebounceTimer) {
+      clearTimeout(sqlPreviewDebounceTimer);
+      sqlPreviewDebounceTimer = undefined;
+    }
+    sqlPreviewRequestId++;
+    deferredSqlPreviewRefresh = false;
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqlPreviewLoading.value = true;
+    return;
+  }
   if (!hasPendingStructureChanges()) {
     clearSqlPreviewState();
     return;
@@ -729,6 +951,11 @@ const canApply = computed(
   () => !loading.value && !saving.value && !postSaveRefreshing.value && !secondaryMetadataLoading.value && !sqlPreviewLoading.value && pendingStatements.value.length > 0 && warnings.value.length === 0 && !!props.connectionId && (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
 );
 
+function clearDraft() {
+  draftHydrated = false;
+  emit("update:draft", undefined);
+}
+
 function resetState() {
   activeTab.value = "columns";
   loading.value = false;
@@ -752,6 +979,12 @@ function resetState() {
   originalTableComment.value = "";
 }
 
+async function reloadStructureFromDatabase() {
+  if (isCreateMode.value) return;
+  draftHydrated = false;
+  await loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+}
+
 function setSecondaryMetadataLoading(scope: StructureRefreshScope, value: boolean) {
   if (scope.indexes && tableMetadataCapabilities.value.indexes) indexesLoading.value = value;
   if (scope.foreignKeys && tableMetadataCapabilities.value.foreignKeys) foreignKeysLoading.value = value;
@@ -772,7 +1005,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean } = {}) {
+async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean } = {}) {
   const connectionId = props.connectionId;
   const database = props.database;
   const schema = metadataSchema.value;
@@ -783,6 +1016,7 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   setSecondaryMetadataLoading(scope, true);
   errorMessage.value = "";
   let secondaryMetadataScheduled = false;
+  let loadedSuccessfully = false;
   try {
     await store.ensureConnected(connectionId);
 
@@ -831,6 +1065,7 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
     if (options.blockSecondaryMetadata) {
       await secondaryMetadataPromise;
     }
+    loadedSuccessfully = true;
   } catch (e: any) {
     if (showErrors) {
       errorMessage.value = e?.message || String(e);
@@ -842,6 +1077,9 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       setSecondaryMetadataLoading(scope, false);
     }
     if (!silent) loading.value = false;
+    if (!options.preserveDraft && loadedSuccessfully && requestId === structureLoadRequestId) {
+      markDraftHydratedAndSync();
+    }
   }
 }
 
@@ -899,28 +1137,315 @@ function removeNewColumn(column: EditableStructureColumn) {
   columns.value = columns.value.filter((item) => item.id !== column.id);
 }
 
-function canMoveColumn(index: number, direction: -1 | 1): boolean {
+type ColumnDragState = {
+  columnId: string;
+  sourceIndex: number;
+  insertionIndex: number | null;
+};
+
+const columnDragState = ref<ColumnDragState | null>(null);
+let columnDragPreviousBodyUserSelect = "";
+let columnDragPreviousBodyCursor = "";
+let columnDragTracking = false;
+
+function canDragColumn(index: number): boolean {
   if (loading.value || saving.value) return false;
-  if (!Number.isInteger(index) || (direction !== -1 && direction !== 1)) return false;
-  const targetIndex = index + direction;
-  if (targetIndex < 0 || targetIndex >= columns.value.length) return false;
-  if (columns.value[index]?.markedForDrop || columns.value[targetIndex]?.markedForDrop) return false;
-  // Draft columns can always swap order among themselves —
-  // ADD COLUMN statement order determines their final physical placement.
-  if (!columns.value[index]?.original && !columns.value[targetIndex]?.original) return true;
-  return canShowColumnMoveControls.value;
+  if (!Number.isInteger(index) || index < 0 || index >= columns.value.length) return false;
+  const column = columns.value[index];
+  if (!column || column.markedForDrop) return false;
+  return canShowColumnDragControls.value;
 }
 
-const canShowColumnMoveControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn);
+function canDropColumnAt(sourceIndex: number, insertionIndex: number): boolean {
+  if (!canDragColumn(sourceIndex)) return false;
+  if (!Number.isInteger(insertionIndex) || insertionIndex < 0 || insertionIndex > columns.value.length) return false;
+  if (insertionIndex === sourceIndex || insertionIndex === sourceIndex + 1) return false;
+  const sourceColumn = columns.value[sourceIndex];
+  if (!sourceColumn) return false;
+  const crossedColumns = insertionIndex < sourceIndex ? columns.value.slice(insertionIndex, sourceIndex) : columns.value.slice(sourceIndex + 1, insertionIndex);
+  if (crossedColumns.some((column) => column.markedForDrop)) return false;
+  if (canShowColumnDragControls.value) return true;
+  if (sourceColumn.original) return false;
+  return crossedColumns.every((column) => !column.original);
+}
 
-function moveColumn(index: number, direction: -1 | 1) {
-  if (!canMoveColumn(index, direction)) return;
-  const targetIndex = index + direction;
+const canShowColumnDragControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn);
+
+function isSqlServerIdentityChecked(column: EditableStructureColumn): boolean {
+  return !!column.extra.autoIncrement || !!column.extra.identity;
+}
+
+function canEditSqlServerIdentity(column: EditableStructureColumn): boolean {
+  return !column.original && !column.markedForDrop && isSqlServerIdentityCompatibleDataType(column.dataType);
+}
+
+function clearSqlServerIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = false;
+  column.extra.identity = undefined;
+}
+
+function syncSqlServerIdentityForDataType(column: EditableStructureColumn) {
+  if (databaseType.value !== "sqlserver") return;
+  if (!isSqlServerIdentityChecked(column)) return;
+  if (isSqlServerIdentityCompatibleDataType(column.dataType)) return;
+  clearSqlServerIdentity(column);
+}
+
+function ensureSqlServerIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = true;
+  column.extra.identity = {
+    seed: column.extra.identity?.seed ?? 1,
+    increment: column.extra.identity?.increment ?? 1,
+  };
+}
+
+function setSqlServerIdentity(column: EditableStructureColumn, checked: boolean) {
+  if (!canEditSqlServerIdentity(column)) return;
+  if (checked) {
+    ensureSqlServerIdentity(column);
+    column.isNullable = false;
+  } else {
+    clearSqlServerIdentity(column);
+  }
+}
+
+function parseOptionalNumberInput(value: string | number): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function updateSqlServerIdentitySeed(column: EditableStructureColumn, value: string | number) {
+  if (!canEditSqlServerIdentity(column)) return;
+  ensureSqlServerIdentity(column);
+  column.extra.identity!.seed = parseOptionalNumberInput(value);
+}
+
+function updateSqlServerIdentityIncrement(column: EditableStructureColumn, value: string | number) {
+  if (!canEditSqlServerIdentity(column)) return;
+  ensureSqlServerIdentity(column);
+  column.extra.identity!.increment = parseOptionalNumberInput(value);
+}
+
+function updateColumnDataType(column: EditableStructureColumn, baseType: string) {
+  column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
+  syncSqlServerIdentityForDataType(column);
+}
+
+function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
+  column.dataType = combineDataTypeForDatabase(databaseType.value, splitDataType(column.dataType).baseType, String(value));
+  syncSqlServerIdentityForDataType(column);
+}
+
+function moveColumnTo(index: number, insertionIndex: number) {
+  if (!canDropColumnAt(index, insertionIndex)) return;
   const nextColumns = [...columns.value];
   const [column] = nextColumns.splice(index, 1);
   if (!column) return;
-  nextColumns.splice(targetIndex, 0, column);
+  const adjustedInsertionIndex = insertionIndex > index ? insertionIndex - 1 : insertionIndex;
+  nextColumns.splice(adjustedInsertionIndex, 0, column);
   columns.value = nextColumns;
+}
+
+function onColumnDragPointerDown(index: number, event: PointerEvent) {
+  if (event.button !== 0 || !canDragColumn(index)) return;
+  const column = columns.value[index];
+  if (!column) return;
+  event.preventDefault();
+  event.stopPropagation();
+  columnDragState.value = {
+    columnId: column.id,
+    sourceIndex: index,
+    insertionIndex: null,
+  };
+  columnDragPreviousBodyUserSelect = document.body.style.userSelect;
+  columnDragPreviousBodyCursor = document.body.style.cursor;
+  columnDragTracking = true;
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "grabbing";
+  updateColumnDragInsertion(event.clientY);
+  window.addEventListener("pointermove", onColumnDragPointerMove, true);
+  window.addEventListener("pointerup", onColumnDragPointerUp, true);
+  window.addEventListener("pointercancel", onColumnDragPointerCancel, true);
+}
+
+function onColumnDragPointerMove(event: PointerEvent) {
+  if (!columnDragState.value) return;
+  event.preventDefault();
+  updateColumnDragInsertion(event.clientY);
+}
+
+function onColumnDragPointerUp(event: PointerEvent) {
+  event.preventDefault();
+  const state = columnDragState.value;
+  stopColumnDragTracking();
+  if (state && state.insertionIndex !== null && canDropColumnAt(state.sourceIndex, state.insertionIndex)) {
+    moveColumnTo(state.sourceIndex, state.insertionIndex);
+  }
+  columnDragState.value = null;
+}
+
+function onColumnDragPointerCancel() {
+  stopColumnDragTracking();
+  columnDragState.value = null;
+}
+
+function stopColumnDragTracking() {
+  if (!columnDragTracking) return;
+  columnDragTracking = false;
+  window.removeEventListener("pointermove", onColumnDragPointerMove, true);
+  window.removeEventListener("pointerup", onColumnDragPointerUp, true);
+  window.removeEventListener("pointercancel", onColumnDragPointerCancel, true);
+  document.body.style.userSelect = columnDragPreviousBodyUserSelect;
+  document.body.style.cursor = columnDragPreviousBodyCursor;
+}
+
+function updateColumnDragInsertion(clientY: number) {
+  const state = columnDragState.value;
+  if (!state) return;
+  const insertionIndex = columnDragInsertionIndexFromPoint(clientY);
+  state.insertionIndex = insertionIndex !== null && canDropColumnAt(state.sourceIndex, insertionIndex) ? insertionIndex : null;
+}
+
+function columnDragInsertionIndexFromPoint(clientY: number): number | null {
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []);
+  if (!rows.length) return null;
+  const firstRect = rows[0].getBoundingClientRect();
+  if (clientY < firstRect.top) return 0;
+  for (const row of rows) {
+    const rowIndex = Number(row.dataset.columnRowIndex);
+    if (!Number.isInteger(rowIndex)) continue;
+    const rect = row.getBoundingClientRect();
+    if (clientY <= rect.bottom) {
+      return clientY > rect.top + rect.height / 2 ? rowIndex + 1 : rowIndex;
+    }
+  }
+  return rows.length;
+}
+
+function onColumnDragStart(index: number, event: DragEvent) {
+  if (!canDragColumn(index)) {
+    event.preventDefault();
+    return;
+  }
+  const column = columns.value[index];
+  if (!column) return;
+  columnDragState.value = {
+    columnId: column.id,
+    sourceIndex: index,
+    insertionIndex: null,
+  };
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", column.name || column.id);
+  }
+}
+
+function onColumnDragOver(index: number, event: DragEvent) {
+  const state = columnDragState.value;
+  if (!state || columns.value[index]?.markedForDrop) return;
+  const insertionIndex = columnDragInsertionIndex(index, event);
+  if (!canDropColumnAt(state.sourceIndex, insertionIndex)) return;
+  event.preventDefault();
+  state.insertionIndex = insertionIndex;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function onColumnDrop(index: number, event: DragEvent) {
+  const state = columnDragState.value;
+  if (!state) return;
+  event.preventDefault();
+  moveColumnTo(state.sourceIndex, columnDragInsertionIndex(index, event));
+  columnDragState.value = null;
+}
+
+function onColumnDragEnd() {
+  columnDragState.value = null;
+}
+
+function columnRowClass(column: EditableStructureColumn, index: number) {
+  const dragState = columnDragState.value;
+  const isSearchMatch = filteredColumnRowIds.value.has(column.id);
+  return {
+    "bg-destructive/5 opacity-60": column.markedForDrop,
+    "structure-column-search-match": isSearchMatch,
+    "structure-column-search-current": highlightedColumnId.value === column.id,
+    "opacity-55": dragState?.columnId === column.id,
+    "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
+    "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
+    "[&>td]:border-b-2 [&>td]:border-b-primary": dragState?.insertionIndex === index + 1,
+  };
+}
+
+function columnMatchesSearch(column: EditableStructureColumn): boolean {
+  const query = columnSearchText.value.trim().toLowerCase();
+  if (!query) return false;
+  return [column.name, column.comment].some((value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .includes(query),
+  );
+}
+
+function columnFieldMatchesSearch(value: string | null | undefined): boolean {
+  const query = columnSearchText.value.trim().toLowerCase();
+  return (
+    !!query &&
+    String(value ?? "")
+      .toLowerCase()
+      .includes(query)
+  );
+}
+
+function columnSearchFieldClass(column: EditableStructureColumn, value: string | null | undefined) {
+  const matches = columnFieldMatchesSearch(value);
+  return {
+    "!border-primary/60 !bg-primary/10": matches,
+    "!border-primary !ring-2 !ring-primary/30": matches && highlightedColumnId.value === column.id,
+  };
+}
+
+function focusColumnSearch() {
+  activeTab.value = "columns";
+  void nextTick(() => {
+    const input = columnSearchInputRef.value?.$el as HTMLInputElement | undefined;
+    input?.focus();
+    input?.select();
+  });
+}
+
+function scrollToColumnSearchMatch(direction: 1 | -1 = 1) {
+  const query = columnSearchText.value.trim();
+  if (!query) {
+    focusColumnSearch();
+    return;
+  }
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []);
+  const matches = columns.value.map((column, index) => ({ column, index })).filter(({ column }) => columnMatchesSearch(column));
+  if (!matches.length) return;
+  const currentIndex = highlightedColumnId.value ? matches.findIndex(({ column }) => column.id === highlightedColumnId.value) : -1;
+  const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
+  highlightedColumnId.value = nextMatch.column.id;
+  rows[nextMatch.index]?.scrollIntoView({ block: "center", inline: "nearest" });
+  if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
+  columnHighlightTimer = window.setTimeout(() => {
+    highlightedColumnId.value = null;
+  }, 1800);
+}
+
+function onColumnSearchKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  scrollToColumnSearchMatch(event.shiftKey ? -1 : 1);
+}
+
+function columnDragInsertionIndex(index: number, event: DragEvent): number {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return index;
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2 ? index + 1 : index;
 }
 
 function toggleDropColumn(column: EditableStructureColumn) {
@@ -1193,6 +1718,11 @@ async function copyPreviewSql() {
   }
 }
 
+function toggleSqlPreviewCollapsed() {
+  sqlPreviewCollapsed.value = !sqlPreviewCollapsed.value;
+  safeLocalStorageSet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY, String(sqlPreviewCollapsed.value));
+}
+
 async function applyChanges() {
   if (!canApply.value || !props.connectionId || !props.database) return;
   saving.value = true;
@@ -1211,6 +1741,7 @@ async function applyChanges() {
     ddlFetched.value = false;
     ddlContent.value = "";
     if (isCreateMode.value) {
+      clearDraft();
       emit("saved", tableComment.value !== originalTableComment.value);
       emit("close");
     } else {
@@ -1249,6 +1780,12 @@ function addItemForActiveTab(): boolean {
 }
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
+  if (isPlainModShortcut(event, "f")) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (activeTab.value === "columns") focusColumnSearch();
+    return;
+  }
   if (isPlainModShortcut(event, "s")) {
     event.preventDefault();
     event.stopPropagation();
@@ -1278,20 +1815,34 @@ function unregisterStructureEditorShortcuts() {
 
 onMounted(() => {
   resetState();
+  applyInitialStructureTab();
   registerStructureEditorShortcuts();
   void loadDynamicDataTypeOptions();
-  void loadStructure();
+  if (props.draft?.initialized) {
+    restoreDraft(props.draft);
+    applyInitialStructureTab();
+    void hydrateRestoredDraftFromDatabase();
+  } else if (isCreateMode.value) {
+    markDraftHydratedAndSync();
+  } else {
+    void loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+  }
 });
 
 onActivated(() => {
   registerStructureEditorShortcuts();
   void loadDynamicDataTypeOptions();
-  if (!isCreateMode.value) void loadStructure(true);
+  if (props.draft?.initialized && !draftHydrated) {
+    restoreDraft(props.draft);
+    void hydrateRestoredDraftFromDatabase();
+  }
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
+  stopColumnDragTracking();
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
+  if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
   persistStructureDensity();
 });
 
@@ -1304,14 +1855,27 @@ function firstStructureMetadataTab(capabilities = tableMetadataCapabilities.valu
   return "columns";
 }
 
+function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities = tableMetadataCapabilities.value) {
+  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode.value);
+}
+
+function resolveStructureMetadataTab(tab: TableInfoTab | undefined, capabilities = tableMetadataCapabilities.value): TableInfoTab {
+  if (tab && isStructureMetadataTabSupported(tab, capabilities)) return tab;
+  return firstStructureMetadataTab(capabilities);
+}
+
+function applyInitialStructureTab() {
+  if (!props.initialTab) return;
+  activeTab.value = resolveStructureMetadataTab(props.initialTab);
+}
+
 watch(tableMetadataCapabilities, (capabilities) => {
-  const supported =
-    (activeTab.value === "columns" && capabilities.columns) ||
-    (activeTab.value === "indexes" && capabilities.indexes) ||
-    (activeTab.value === "foreignKeys" && capabilities.foreignKeys) ||
-    (activeTab.value === "triggers" && capabilities.triggers) ||
-    (activeTab.value === "ddl" && capabilities.ddl && !isCreateMode.value);
-  if (!supported) activeTab.value = firstStructureMetadataTab(capabilities);
+  if (!isStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = firstStructureMetadataTab(capabilities);
+});
+
+watch([() => props.initialTab, () => props.initialTabRequestId], () => {
+  if (!props.initialTab) return;
+  applyInitialStructureTab();
 });
 
 watch([() => props.connectionId, () => props.database, databaseType], () => {
@@ -1322,9 +1886,15 @@ watch(
   [isCreateMode, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
   () => {
     scheduleSqlPreviewRefresh();
+    syncDraftToParent();
   },
   { deep: true, immediate: true },
 );
+
+watch(activeTab, () => {
+  highlightedColumnId.value = null;
+  syncDraftToParent();
+});
 
 watch(secondaryMetadataLoading, (value) => {
   if (value || !deferredSqlPreviewRefresh) return;
@@ -1359,7 +1929,7 @@ watch(activeTab, (tab) => {
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
       <Badge variant="outline">{{ connection?.driver_label || databaseType }}</Badge>
-      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving" @click="loadStructure()">
+      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving" @click="reloadStructureFromDatabase">
         <RefreshCw :class="structureIconClass" />
         {{ t("structureEditor.refresh") }}
       </Button>
@@ -1431,6 +2001,25 @@ watch(activeTab, (tab) => {
                   </div>
                 </div>
               </div>
+              <div v-if="activeTab === 'columns'" class="relative flex w-40 shrink-0 items-center">
+                <Search :class="[structureIconClass, 'pointer-events-none absolute left-2 text-muted-foreground']" />
+                <Input
+                  ref="columnSearchInputRef"
+                  v-model="columnSearchText"
+                  :placeholder="t('structureEditor.searchColumns')"
+                  :class="[structureControlClass, 'pl-7 pr-14 text-[length:var(--structure-font-size)] placeholder:text-[length:var(--structure-font-size)]']"
+                  @keydown="onColumnSearchKeydown"
+                />
+                <button
+                  v-if="columnSearchText"
+                  type="button"
+                  class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded px-1 text-[length:var(--structure-font-size)] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  :title="t('structureEditor.nextColumnMatch')"
+                  @click="scrollToColumnSearchMatch(1)"
+                >
+                  {{ columnSearchMatchCount }}
+                </button>
+              </div>
               <Button v-if="activeTab === 'columns'" size="sm" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="addColumn">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addColumn") }}
@@ -1481,7 +2070,7 @@ watch(activeTab, (tab) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(column, index) in columns" :key="column.id" :class="column.markedForDrop ? 'bg-destructive/5 opacity-60' : ''" :data-new-column-row="!column.original ? 'true' : undefined">
+                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" :data-column-row-index="index" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
                   <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
@@ -1489,7 +2078,7 @@ watch(activeTab, (tab) => {
                     </div>
                   </td>
                   <td :class="structureCellClass">
-                    <Input v-model="column.name" :class="structureControlClass" :disabled="isColumnNameDisabled(column)" data-column-name-input />
+                    <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :disabled="isColumnNameDisabled(column)" data-column-name-input />
                   </td>
                   <td :class="structureCellClass">
                     <SearchableSelect
@@ -1502,17 +2091,12 @@ watch(activeTab, (tab) => {
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
                       :trigger-class="[structureMonoControlClass, 'w-full']"
-                      @update:model-value="(v: string) => (column.dataType = combineDataTypeForDatabase(databaseType, v, getDefaultLengthForType(databaseType, v)))"
+                      @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
                     <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
-                    <Input
-                      :model-value="dataTypeLengthInputValue(databaseType, column.dataType)"
-                      :class="structureMonoControlClass"
-                      :disabled="isColumnLengthDisabled(column)"
-                      @update:model-value="column.dataType = combineDataTypeForDatabase(databaseType, splitDataType(column.dataType).baseType, String($event))"
-                    />
+                    <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
@@ -1552,7 +2136,7 @@ watch(activeTab, (tab) => {
                   </td>
                   <td v-if="columnEditorControls.comment" :class="structureCellClass">
                     <div class="flex min-w-0 items-center gap-1">
-                      <Input v-model="column.comment" :class="[structureControlClass, 'flex-1']" :disabled="isColumnCommentDisabled(column)" />
+                      <Input v-model="column.comment" :class="[structureControlClass, 'flex-1', columnSearchFieldClass(column, column.comment)]" :disabled="isColumnCommentDisabled(column)" />
                       <Popover>
                         <PopoverTrigger as-child>
                           <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'shrink-0']" :disabled="isColumnCommentDisabled(column)" :aria-label="t('structureEditor.editComment')" :title="t('structureEditor.editComment')">
@@ -1672,49 +2256,49 @@ watch(activeTab, (tab) => {
                       </template>
                       <!-- SQL Server: IDENTITY -->
                       <template v-else-if="structureDialect === 'sqlserver'">
-                        <label :class="structurePropertyLabelClass" :title="t('structureEditor.identity')">
-                          <input v-model="column.extra.autoIncrement" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" />
-                          <span class="min-w-0 truncate">{{ t("structureEditor.identity") }}</span>
+                        <label :class="structurePropertyLabelClass" :title="canEditSqlServerIdentity(column) || isSqlServerIdentityChecked(column) ? t('structureEditor.identity') : t('structureEditor.sqlServerIdentityTypeHint')">
+                          <input :checked="isSqlServerIdentityChecked(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="!canEditSqlServerIdentity(column)" @change="setSqlServerIdentity(column, ($event.target as HTMLInputElement).checked)" />
+                          <span class="min-w-0 truncate">{{ t("structureEditor.autoIncrement") }}</span>
                         </label>
-                        <template v-if="column.extra.autoIncrement">
+                        <template v-if="isSqlServerIdentityChecked(column)">
                           <Input
                             :model-value="column.extra.identity?.seed?.toString() ?? '1'"
                             type="number"
                             :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identitySeed')"
-                            @update:model-value="
-                              (v) => {
-                                if (!column.extra.identity) column.extra.identity = {};
-                                column.extra.identity.seed = v ? Number(v) : undefined;
-                              }
-                            "
+                            :disabled="!canEditSqlServerIdentity(column)"
+                            @update:model-value="(v) => updateSqlServerIdentitySeed(column, v)"
                           />
                           <Input
                             :model-value="column.extra.identity?.increment?.toString() ?? '1'"
                             type="number"
                             :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identityIncrement')"
-                            @update:model-value="
-                              (v) => {
-                                if (!column.extra.identity) column.extra.identity = {};
-                                column.extra.identity.increment = v ? Number(v) : undefined;
-                              }
-                            "
+                            :disabled="!canEditSqlServerIdentity(column)"
+                            @update:model-value="(v) => updateSqlServerIdentityIncrement(column, v)"
                           />
                         </template>
                       </template>
                     </div>
                   </td>
                   <td :class="structureLastCellClass">
-                    <div class="flex min-w-0 items-center justify-start gap-0.5 overflow-hidden">
-                      <template v-if="canShowColumnMoveControls || !column.original">
-                        <Button type="button" variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canMoveColumn(index, -1)" :title="t('structureEditor.moveColumnUp')" :aria-label="t('structureEditor.moveColumnUp')" @click.stop.prevent="moveColumn(index, -1)">
-                          <ChevronUp :class="structureIconClass" />
-                        </Button>
-                        <Button type="button" variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canMoveColumn(index, 1)" :title="t('structureEditor.moveColumnDown')" :aria-label="t('structureEditor.moveColumnDown')" @click.stop.prevent="moveColumn(index, 1)">
-                          <ChevronDown :class="structureIconClass" />
-                        </Button>
-                      </template>
+                    <div class="flex min-w-0 items-center justify-start gap-0.5">
+                      <Button
+                        v-if="canShowColumnDragControls"
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        :class="[structureActionButtonClass, canDragColumn(index) ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed']"
+                        :disabled="!canDragColumn(index)"
+                        :title="t('structureEditor.dragColumn')"
+                        :aria-label="t('structureEditor.dragColumn')"
+                        :draggable="canDragColumn(index)"
+                        @pointerdown="onColumnDragPointerDown(index, $event)"
+                        @dragstart="onColumnDragStart(index, $event)"
+                        @dragend="onColumnDragEnd"
+                      >
+                        <ListChevronsUpDown :class="structureIconClass" />
+                      </Button>
                       <Button
                         v-if="column.original"
                         variant="ghost"
@@ -1951,7 +2535,7 @@ watch(activeTab, (tab) => {
         </Tabs>
       </div>
 
-      <div class="flex h-[28%] min-h-40 min-w-0 max-h-64 shrink-0 flex-col overflow-hidden rounded-md border">
+      <div :class="['flex min-w-0 shrink-0 flex-col overflow-hidden rounded-md border', sqlPreviewCollapsed ? '' : 'h-[28%] min-h-40 max-h-64']">
         <div class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium">
           <div class="flex items-center gap-1.5">
             <span>{{ t("structureEditor.sqlPreview") }}</span>
@@ -1961,6 +2545,16 @@ watch(activeTab, (tab) => {
             </Badge>
           </div>
           <div class="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              :class="structureIconButtonClass"
+              :aria-label="sqlPreviewCollapsed ? t('structureEditor.expandSqlPreview') : t('structureEditor.collapseSqlPreview')"
+              :title="sqlPreviewCollapsed ? t('structureEditor.expandSqlPreview') : t('structureEditor.collapseSqlPreview')"
+              @click="toggleSqlPreviewCollapsed"
+            >
+              <ChevronUp v-if="sqlPreviewCollapsed" :class="structureIconClass" />
+              <ChevronDown v-else :class="structureIconClass" />
+            </Button>
             <Button variant="ghost" :class="structureToolbarButtonClass" :disabled="!previewSqlText.trim()" @click="copyPreviewSql">
               <Copy :class="[structureIconClass, 'mr-1']" />
               {{ t("structureEditor.copySql") }}
@@ -1971,7 +2565,7 @@ watch(activeTab, (tab) => {
             </Badge>
           </div>
         </div>
-        <div class="min-h-0 flex-1 overflow-auto p-2.5">
+        <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5">
           <div v-if="warnings.length" class="mb-2 space-y-1">
             <div v-for="warning in warnings" :key="warning" class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-yellow-700 dark:text-yellow-300">
               <AlertTriangle :class="[structureIconClass, 'mt-0.5 shrink-0']" />
@@ -1999,3 +2593,22 @@ watch(activeTab, (tab) => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.structure-column-search-match > td:first-child {
+  box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.55);
+}
+
+.structure-column-search-current > td {
+  box-shadow:
+    inset 0 1px 0 hsl(var(--primary) / 0.55),
+    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+}
+
+.structure-column-search-current > td:first-child {
+  box-shadow:
+    inset 3px 0 0 hsl(var(--primary)),
+    inset 0 1px 0 hsl(var(--primary) / 0.55),
+    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+}
+</style>

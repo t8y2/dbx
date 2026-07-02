@@ -1,6 +1,7 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { isMacOS } from "@/lib/platform";
+import * as api from "@/lib/api";
 
 export function shouldReserveMacTrafficLightInset(isMac: boolean, isFullscreen: boolean, isDesktop = true): boolean {
   return isDesktop && isMac && !isFullscreen;
@@ -40,8 +41,8 @@ export function useWindowControls() {
   }
 
   async function close() {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().close();
+    if (!isDesktop) return;
+    await api.requestAppClose();
   }
 
   onMounted(async () => {

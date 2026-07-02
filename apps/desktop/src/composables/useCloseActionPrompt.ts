@@ -1,41 +1,67 @@
 import { ref } from "vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
+import * as api from "@/lib/api";
 
-export function useCloseActionPrompt() {
+export type AppCloseAction = "quit" | "hide";
+type AppCloseRequestTarget = "settings" | "quit";
+
+export interface AppCloseRequestOptions {
+  requireCloseActionChoice?: boolean;
+}
+
+interface AppCloseRequestPayload {
+  payload?: AppCloseRequestTarget;
+}
+
+export function useCloseActionPrompt(options: { requestClose: (action: AppCloseAction, requestOptions?: AppCloseRequestOptions) => void }) {
   const settingsStore = useSettingsStore();
   const showCloseActionPrompt = ref(false);
   const unlistenHandles: Array<() => void> = [];
 
-  async function applyCloseChoice(quitOnClose: boolean) {
+  function actionForRequest(target: AppCloseRequestTarget): AppCloseAction {
+    if (target === "quit") return "quit";
+    return settingsStore.desktopSettings.quit_on_close ? "quit" : "hide";
+  }
+
+  async function performCloseAction(action: AppCloseAction) {
+    if (!isTauriRuntime()) return;
+    await api.completeAppClose(action);
+  }
+
+  function handleCloseRequest(target: AppCloseRequestTarget = "settings") {
+    const action = actionForRequest(target);
+    options.requestClose(action, {
+      requireCloseActionChoice: target === "settings" && !settingsStore.desktopSettings.close_action_prompted,
+    });
+  }
+
+  async function applyCloseChoice(action: AppCloseAction) {
     showCloseActionPrompt.value = false;
     await settingsStore.updateDesktopSettings({
-      quit_on_close: quitOnClose,
+      quit_on_close: action === "quit",
       close_action_prompted: true,
     });
-    if (!isTauriRuntime()) return;
-    if (quitOnClose) {
-      const { exit } = await import("@tauri-apps/plugin-process");
-      await exit(0);
-      return;
-    }
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().hide();
+    options.requestClose(action, { requireCloseActionChoice: false });
   }
 
   function chooseQuit() {
-    void applyCloseChoice(true);
+    void applyCloseChoice("quit");
   }
 
   function chooseMinimize() {
-    void applyCloseChoice(false);
+    void applyCloseChoice("hide");
+  }
+
+  function cancelCloseActionPrompt() {
+    showCloseActionPrompt.value = false;
   }
 
   function setupCloseActionPromptListener() {
     if (!isTauriRuntime()) return;
     void import("@tauri-apps/api/event").then(({ listen }) => {
-      listen("dbx-close-action-prompt", () => {
-        showCloseActionPrompt.value = true;
+      listen<AppCloseRequestTarget>("dbx-app-close-requested", (event: AppCloseRequestPayload) => {
+        handleCloseRequest(event.payload === "quit" ? "quit" : "settings");
       }).then((unlisten) => unlistenHandles.push(unlisten));
     });
   }
@@ -49,6 +75,8 @@ export function useCloseActionPrompt() {
     showCloseActionPrompt,
     chooseQuit,
     chooseMinimize,
+    cancelCloseActionPrompt,
+    performCloseAction,
     setupCloseActionPromptListener,
     cleanupCloseActionPromptListener,
   };

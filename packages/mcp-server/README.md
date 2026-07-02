@@ -41,6 +41,21 @@ Add to your project's `.mcp.json`:
 }
 ```
 
+For Windows portable builds, set `DBX_DATA_DIR` to the portable data directory that contains `dbx.db`:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
+      }
+    }
+  }
+}
+```
+
 Or for development (from source):
 
 ```json
@@ -123,6 +138,8 @@ The MCP server reads your database connections from DBX's SQLite database:
 - **Linux**: `~/.local/share/com.dbx.app/dbx.db`
 - **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
 
+Windows portable builds store data next to `DBX.exe`, usually in `data\dbx.db`. Set `DBX_DATA_DIR` to that `data` folder instead of copying `dbx.db` into the default directory.
+
 ## DBX UI Integration
 
 The `dbx_open_table` tool communicates with the running DBX app to open tables directly in the UI. This requires DBX to be running. If DBX is not running, the tool will return an error message.
@@ -176,6 +193,21 @@ npx @dbx-app/mcp-server
   "mcpServers": {
     "dbx": {
       "command": "dbx-mcp-server"
+    }
+  }
+}
+```
+
+Windows 便携版需要在 MCP 配置中设置 `DBX_DATA_DIR`，指向包含 `dbx.db` 的便携版数据目录：
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
+      }
     }
   }
 }
@@ -242,6 +274,8 @@ MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
 - **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
 - **Linux**: `~/.local/share/com.dbx.app/dbx.db`
 - **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
+
+Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。请把 `DBX_DATA_DIR` 设置为这个 `data` 文件夹，不要手工复制 `dbx.db` 到默认目录。
 
 ### DBX UI 联动
 

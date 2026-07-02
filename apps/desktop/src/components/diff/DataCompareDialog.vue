@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -889,31 +890,46 @@ watch(
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.source") }}</Label>
-            <Select :model-value="sourceConnectionId" @update:model-value="(v: any) => (sourceConnectionId = String(v))">
-              <SelectTrigger class="h-8 text-xs">
+            <SearchableSelect
+              v-model="sourceConnectionId"
+              :options="sqlConnections.map((c) => c.id)"
+              :placeholder="t('diff.selectConnection')"
+              :search-placeholder="t('diff.searchConnection')"
+              :empty-text="t('common.noResults')"
+              :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
+              trigger-variant="outline"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            >
+              <template #option-label="{ option, label }">
                 <div class="flex items-center gap-2">
-                  <DatabaseIcon v-if="sourceConnectionId" :db-type="connectionIconType(sourceConnectionId)" class="w-3.5 h-3.5" />
-                  <SelectValue :placeholder="t('diff.selectConnection')" />
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5" />
+                  {{ label }}
                 </div>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="connection in sqlConnections" :key="connection.id" :value="connection.id">
-                  {{ connection.name }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Select :model-value="sourceDatabase" @update:model-value="(v: any) => (sourceDatabase = String(v))">
-              <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectDatabase')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="database in sourceDatabases" :key="database" :value="database">{{ database }}</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select v-if="sourceSchemas.length" :model-value="sourceSchema" @update:model-value="(v: any) => (sourceSchema = String(v))">
-              <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectSchema')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="schema in sourceSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-              </SelectContent>
-            </Select>
+              </template>
+            </SearchableSelect>
+            <SearchableSelect
+              v-model="sourceDatabase"
+              :options="sourceDatabases"
+              :placeholder="t('diff.selectDatabase')"
+              :search-placeholder="t('diff.searchDatabase')"
+              :empty-text="t('common.noResults')"
+              :disabled="!sourceDatabases.length"
+              trigger-variant="outline"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            />
+            <SearchableSelect
+              v-if="sourceSchemas.length"
+              v-model="sourceSchema"
+              :options="sourceSchemas"
+              :placeholder="t('diff.selectSchema')"
+              :search-placeholder="t('diff.searchSchema')"
+              :empty-text="t('common.noResults')"
+              trigger-variant="outline"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            />
 
             <div class="space-y-2 rounded-lg border p-2">
               <div class="flex items-center justify-between gap-2">
@@ -960,42 +976,59 @@ watch(
 
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.target") }}</Label>
-            <Select :model-value="targetConnectionId" @update:model-value="(v: any) => (targetConnectionId = String(v))">
-              <SelectTrigger class="h-8 text-xs">
+            <SearchableSelect
+              v-model="targetConnectionId"
+              :options="sqlConnections.map((c) => c.id)"
+              :placeholder="t('diff.selectConnection')"
+              :search-placeholder="t('diff.searchConnection')"
+              :empty-text="t('common.noResults')"
+              :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
+              trigger-variant="outline"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            >
+              <template #option-label="{ option, label }">
                 <div class="flex items-center gap-2">
-                  <DatabaseIcon v-if="targetConnectionId" :db-type="connectionIconType(targetConnectionId)" class="w-3.5 h-3.5" />
-                  <SelectValue :placeholder="t('diff.selectConnection')" />
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5" />
+                  {{ label }}
                 </div>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="connection in sqlConnections" :key="connection.id" :value="connection.id">
-                  {{ connection.name }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Select :model-value="targetDatabase" @update:model-value="(v: any) => (targetDatabase = String(v))">
-              <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectDatabase')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="database in targetDatabases" :key="database" :value="database">{{ database }}</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select v-if="targetSchemas.length" :model-value="targetSchema" @update:model-value="(v: any) => (targetSchema = String(v))">
-              <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('diff.selectSchema')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="schema in targetSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-              </SelectContent>
-            </Select>
+              </template>
+            </SearchableSelect>
+            <SearchableSelect
+              v-model="targetDatabase"
+              :options="targetDatabases"
+              :placeholder="t('diff.selectDatabase')"
+              :search-placeholder="t('diff.searchDatabase')"
+              :empty-text="t('common.noResults')"
+              :disabled="!targetDatabases.length"
+              trigger-variant="outline"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            />
+            <SearchableSelect
+              v-if="targetSchemas.length"
+              v-model="targetSchema"
+              :options="targetSchemas"
+              :placeholder="t('diff.selectSchema')"
+              :search-placeholder="t('diff.searchSchema')"
+              :empty-text="t('common.noResults')"
+              trigger-variant="outline"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            />
 
             <div v-if="!isBatchCompare" class="space-y-1">
               <Label class="text-xs font-medium">{{ t("dataCompare.targetTable") }}</Label>
-              <Select :model-value="targetTable" @update:model-value="(v: any) => (targetTable = String(v))">
-                <SelectTrigger class="h-8 text-xs">
-                  <SelectValue :placeholder="t('dataCompare.selectTable')" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="table in targetTables" :key="table" :value="table">{{ table }}</SelectItem>
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                v-model="targetTable"
+                :options="targetTables"
+                :placeholder="t('dataCompare.selectTable')"
+                :search-placeholder="t('dataCompare.searchTable')"
+                :empty-text="t('common.noResults')"
+                trigger-variant="outline"
+                trigger-class="h-8 w-full justify-between text-xs"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+              />
             </div>
             <div v-else class="space-y-2 rounded-lg border p-3 text-xs">
               <div class="font-medium">{{ t("dataCompare.autoMatchHint") }}</div>

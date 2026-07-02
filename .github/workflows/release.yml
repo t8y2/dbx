@@ -223,6 +223,37 @@ jobs:
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $zipName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
+      - name: Upload Windows WebView2 offline installer
+        if: matrix.arch == 'x64' || matrix.arch == 'arm64'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
+          $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
+          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
+          $before = @{}
+
+          if (Test-Path $bundleDir) {
+            Get-ChildItem $bundleDir -Filter "*.exe" | ForEach-Object { $before[$_.FullName] = $_.LastWriteTimeUtc }
+          }
+
+          pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} --config src-tauri/tauri.webview2-offline.conf.json
+
+          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
+            Where-Object { !$before.ContainsKey($_.FullName) -or $_.LastWriteTimeUtc -gt $before[$_.FullName] } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+
+          if (!$installer) {
+            Write-Error "Missing WebView2 offline installer in ${bundleDir}"
+            exit 1
+          }
+
+          Copy-Item $installer.FullName $offlineName -Force
+          gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
+
   cleanup-release-signatures:
     needs: build
     runs-on: ubuntu-latest

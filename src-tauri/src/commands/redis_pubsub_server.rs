@@ -10,6 +10,8 @@ use serde::Deserialize;
 
 use dbx_core::connection::AppState;
 
+const DEFAULT_PUBSUB_PORT: u16 = 4224;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PubSubWsParams {
@@ -18,6 +20,15 @@ struct PubSubWsParams {
 
 pub fn build_pubsub_router(state: Arc<AppState>) -> Router {
     Router::new().route("/api/redis/pubsub/ws", get(ws_handler)).with_state(state)
+}
+
+fn pubsub_server_port() -> u16 {
+    std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PUBSUB_PORT)
+}
+
+#[tauri::command]
+pub fn redis_pubsub_server_port() -> u16 {
+    pubsub_server_port()
 }
 
 async fn ws_handler(
@@ -136,7 +147,7 @@ async fn handle_command(sink: &mut redis::aio::PubSubSink, text: &str) -> Result
 pub fn start_pubsub_server(state: Arc<AppState>) {
     let router = build_pubsub_router(state);
     tauri::async_runtime::spawn(async move {
-        let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
+        let port = pubsub_server_port();
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => listener,

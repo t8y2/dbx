@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "windows": {
+      "webviewInstallMode": {
+        "silent": true,
+        "type": "offlineInstaller"
+      }
+    }
+  }
+}

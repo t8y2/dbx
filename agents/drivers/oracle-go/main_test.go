@@ -141,6 +141,33 @@ func TestNormalizeDDLObjectType(t *testing.T) {
 	}
 }
 
+func TestIsQuerySQLSkipsLeadingComments(t *testing.T) {
+	tests := []string{
+		"-- 测试\nSELECT * FROM (SELECT * FROM \"DBX_TEST\".\"ORDERS_10K\") WHERE ROWNUM <= 100",
+		"/* explain */\nSELECT * FROM dual",
+		"-- comment\r\nWITH rows AS (SELECT 1 FROM dual) SELECT * FROM rows",
+	}
+	for _, sqlText := range tests {
+		if !isQuerySQL(sqlText) {
+			t.Fatalf("expected SQL to be treated as query: %s", sqlText)
+		}
+	}
+}
+
+func TestIsQuerySQLRequiresKeywordBoundary(t *testing.T) {
+	tests := []string{
+		"-- comment only",
+		"selectivity FROM stats",
+		"withdraw FROM account",
+		"/* unterminated comment",
+	}
+	for _, sqlText := range tests {
+		if isQuerySQL(sqlText) {
+			t.Fatalf("expected SQL not to be treated as query: %s", sqlText)
+		}
+	}
+}
+
 func protocolContract(t *testing.T) struct {
 	ProtocolVersion int      `json:"protocolVersion"`
 	AllCapabilities []string `json:"allCapabilities"`
@@ -351,6 +378,86 @@ func TestIsOraclePGALimitError(t *testing.T) {
 	}
 	if isOraclePGALimitError(errors.New("ORA-00942: table or view does not exist")) {
 		t.Fatal("unexpected ORA-00942 match")
+	}
+}
+
+func TestRewriteOracleXMLTypeSelectStar(t *testing.T) {
+	sqlText, err := rewriteOracleXMLTypeSelectSQL(
+		`SELECT * FROM TEST_LOBS`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "XML_CONTENT", DataType: "XMLTYPE"},
+			{Name: "TEST_NAME", DataType: "VARCHAR2"},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT "ID", XMLSERIALIZE(CONTENT "XML_CONTENT" AS CLOB) AS "XML_CONTENT", "TEST_NAME" FROM TEST_LOBS`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleXMLTypeSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleXMLTypeExplicitColumn(t *testing.T) {
+	sqlText, err := rewriteOracleXMLTypeSelectSQL(
+		`SELECT t.ID, t.XML_CONTENT AS xml_doc FROM TEST_LOBS t WHERE t.ID = 1`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "XML_CONTENT", DataType: "SYS.XMLTYPE"},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, XMLSERIALIZE(CONTENT t."XML_CONTENT" AS CLOB) AS xml_doc FROM TEST_LOBS t WHERE t.ID = 1`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleXMLTypeSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleXMLTypeNestedRownumQuery(t *testing.T) {
+	sqlText, err := rewriteOracleXMLTypeSelectSQL(
+		`SELECT * FROM (SELECT "ID", "XML_CONTENT" FROM "DBX"."TEST_LOBS") WHERE ROWNUM <= 100`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "XML_CONTENT", DataType: "XMLTYPE"},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sqlText, `XMLSERIALIZE(CONTENT "XML_CONTENT" AS CLOB) AS "XML_CONTENT"`) {
+		t.Fatalf("expected nested XMLTYPE column to be serialized, got: %s", sqlText)
+	}
+}
+
+func TestRewriteOracleXMLTypeSkipsJoins(t *testing.T) {
+	called := false
+	sqlText, err := rewriteOracleXMLTypeSelectSQL(
+		`SELECT * FROM TEST_LOBS l JOIN OTHER_TABLE o ON o.ID = l.ID`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			called = true
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("join query should not load table metadata")
+	}
+	if sqlText != `SELECT * FROM TEST_LOBS l JOIN OTHER_TABLE o ON o.ID = l.ID` {
+		t.Fatalf("join query should not be rewritten, got: %s", sqlText)
+	}
+}
+
+func fakeOracleColumnLoader(columns []oracleColumnMeta) oracleColumnMetaLoader {
+	return func(schema, table string) ([]oracleColumnMeta, error) {
+		if strings.ToUpper(table) != "TEST_LOBS" {
+			return nil, nil
+		}
+		return columns, nil
 	}
 }
 

@@ -17,11 +17,13 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub struct McpServerStatus {
     pub installed: bool,
     pub npm_available: bool,
+    pub node_path: Option<String>,
     pub node_version: Option<String>,
     pub current_version: Option<String>,
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub bin_path: Option<String>,
+    pub script_path: Option<String>,
     pub install_command: String,
     pub update_command: String,
     pub error: Option<String>,
@@ -36,14 +38,18 @@ struct NpmLatestPackage {
 pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     let local_status = tauri::async_runtime::spawn_blocking(|| {
         let npm_available = command_success("npm", &["--version"]);
-        let node_version = command_stdout("node", &["--version"]).ok().and_then(first_non_empty_line);
+        let node_path = locate_command("node");
+        let node_command = node_path.as_deref().unwrap_or("node");
+        let node_version = command_stdout(node_command, &["--version"]).ok().and_then(first_non_empty_line);
         let current_version = if npm_available { installed_mcp_version() } else { None };
         let bin_path = locate_mcp_bin();
-        (npm_available, node_version, current_version, bin_path)
+        let script_path = if npm_available { installed_mcp_bin_script() } else { None };
+        (npm_available, node_path, node_version, current_version, bin_path, script_path)
     });
     let latest_version = fetch_latest_mcp_version();
     let (local_status, latest_version) = tokio::join!(local_status, latest_version);
-    let (npm_available, node_version, current_version, bin_path) = local_status.map_err(|err| err.to_string())?;
+    let (npm_available, node_path, node_version, current_version, bin_path, script_path) =
+        local_status.map_err(|err| err.to_string())?;
     let latest_version = latest_version.ok();
     let update_available = current_version
         .as_deref()
@@ -52,13 +58,15 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     let error = if npm_available { None } else { Some("npm is not available in PATH.".to_string()) };
 
     Ok(McpServerStatus {
-        installed: current_version.is_some() || bin_path.is_some(),
+        installed: current_version.is_some() || bin_path.is_some() || script_path.is_some(),
         npm_available,
+        node_path,
         node_version,
         current_version,
         latest_version,
         update_available,
         bin_path,
+        script_path,
         install_command: MCP_INSTALL_COMMAND.to_string(),
         update_command: MCP_INSTALL_COMMAND.to_string(),
         error,
@@ -115,9 +123,21 @@ fn installed_mcp_version() -> Option<String> {
 }
 
 pub(crate) fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
-    locate_mcp_bin()
-        .map(|path| (path, Vec::new()))
-        .or_else(|| installed_mcp_bin_script().map(|script| ("node".to_string(), vec![script])))
+    #[cfg(windows)]
+    {
+        // Node.js 18.20.2+ rejects direct spawn of .cmd/.bat files without a shell
+        // on Windows. Prefer the package's real JS entry point for Codex CLI.
+        return installed_mcp_bin_script()
+            .map(|script| (locate_command("node").unwrap_or_else(|| "node".to_string()), vec![script]))
+            .or_else(|| locate_mcp_bin().map(|path| (path, Vec::new())));
+    }
+
+    #[cfg(not(windows))]
+    {
+        locate_mcp_bin()
+            .map(|path| (path, Vec::new()))
+            .or_else(|| installed_mcp_bin_script().map(|script| ("node".to_string(), vec![script])))
+    }
 }
 
 pub(crate) fn locate_command(command: &str) -> Option<String> {

@@ -91,6 +91,12 @@ article {
   color: color-mix(in srgb, var(--color-fd-foreground) 92%, var(--color-fd-muted-foreground));
 }
 
+article,
+article :where(h1, h2, h3, h4, h5, h6, p, li, blockquote, table, th, td, pre, code, span, strong, em) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 article h1 {
   letter-spacing: 0;
   line-height: 1.08;

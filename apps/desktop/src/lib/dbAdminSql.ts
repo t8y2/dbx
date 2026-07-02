@@ -45,6 +45,16 @@ export interface DuplicateTableStructureSqlOptions {
   targetName: string;
 }
 
+export interface CopyTableDataSqlOptions {
+  databaseType?: DatabaseType;
+  schema?: string | null;
+  sourceName: string;
+  targetName: string;
+  columns?: string[];
+  postgresOverridingSystemValue?: boolean;
+  sqlserverIdentityInsert?: boolean;
+}
+
 export function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
   return api.buildDropObjectSql(options);
 }
@@ -99,6 +109,10 @@ export function buildSetSchemaCommentSql(options: SchemaCommentSqlOptions): stri
 
 export function buildDuplicateTableStructureSql(options: DuplicateTableStructureSqlOptions): Promise<string> {
   return api.buildDuplicateTableStructureSql(options);
+}
+
+export function buildCopyTableDataSql(options: CopyTableDataSqlOptions): Promise<string> {
+  return api.buildCopyTableDataSql(options);
 }
 
 function quotePostgresIdentifier(value: string): string {

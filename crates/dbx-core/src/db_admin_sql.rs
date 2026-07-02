@@ -116,6 +116,23 @@ pub struct DuplicateTableStructureSqlOptions {
     pub target_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyTableDataSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub source_name: String,
+    pub target_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub postgres_overriding_system_value: bool,
+    #[serde(default)]
+    pub sqlserver_identity_insert: bool,
+}
+
 const MYSQL_COMPATIBLE_PROFILES: &[&str] =
     &["mysql", "mariadb", "tidb", "oceanbase", "doris", "starrocks", "custom_mysql"];
 
@@ -307,6 +324,32 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         return format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0");
     }
     format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+}
+
+pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
+    let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
+    let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
+    let Some(columns) = options.columns.filter(|columns| !columns.is_empty()) else {
+        return format!("INSERT INTO {target} SELECT * FROM {source};");
+    };
+    let column_list = columns
+        .iter()
+        .map(|column| quote_table_identifier(options.database_type, column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let postgres_override = if options.postgres_overriding_system_value
+        && matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb))
+    {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+    let insert_sql =
+        format!("INSERT INTO {target} ({column_list}){postgres_override} SELECT {column_list} FROM {source};");
+    if options.sqlserver_identity_insert && options.database_type == Some(DatabaseType::SqlServer) {
+        return format!("SET IDENTITY_INSERT {target} ON;\n{insert_sql}\nSET IDENTITY_INSERT {target} OFF;");
+    }
+    insert_sql
 }
 
 pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: DatabaseObjectType) -> bool {
@@ -506,6 +549,20 @@ mod tests {
     }
 
     #[test]
+    fn builds_goldendb_create_database_sql_with_mysql_charset_options() {
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Goldendb),
+                driver_profile: Some("goldendb".to_string()),
+                name: "app_db".to_string(),
+                charset: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+            }),
+            "CREATE DATABASE `app_db` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        );
+    }
+
+    #[test]
     fn omits_create_database_charset_for_non_mysql_types() {
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
@@ -520,9 +577,24 @@ mod tests {
     }
 
     #[test]
+    fn builds_vastbase_create_database_sql_without_mysql_charset_options() {
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Vastbase),
+                driver_profile: Some("vastbase".to_string()),
+                name: "app_db".to_string(),
+                charset: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+            }),
+            "CREATE DATABASE \"app_db\";"
+        );
+    }
+
+    #[test]
     fn recognizes_mysql_compatible_create_database_profiles() {
         assert!(supports_create_database_charset(Some(DatabaseType::Mysql), Some("oceanbase")));
         assert!(supports_create_database_charset(Some(DatabaseType::Mysql), Some("doris")));
+        assert!(supports_create_database_charset(Some(DatabaseType::Goldendb), Some("goldendb")));
         assert!(!supports_create_database_charset(Some(DatabaseType::Postgres), None));
     }
 
@@ -768,6 +840,15 @@ mod tests {
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("public".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+            }),
+            "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
                 database_type: Some(DatabaseType::Kwdb),
                 schema: Some("public".to_string()),
                 source_name: "users".to_string(),
@@ -810,6 +891,58 @@ mod tests {
                 target_name: "users_copy".to_string(),
             }),
             "CREATE TABLE `users_copy` (LIKE `users`);"
+        );
+    }
+
+    #[test]
+    fn builds_copy_table_data_sql() {
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Sqlite),
+                schema: None,
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: None,
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+            }),
+            "INSERT INTO \"users_copy\" SELECT * FROM \"users\";"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                schema: None,
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: Some(vec!["id".to_string(), "name".to_string()]),
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+            }),
+            "INSERT INTO `users_copy` (`id`, `name`) SELECT `id`, `name` FROM `users`;"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("public".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: Some(vec!["id".to_string(), "name".to_string()]),
+                postgres_overriding_system_value: true,
+                sqlserver_identity_insert: false,
+            }),
+            "INSERT INTO \"public\".\"users_copy\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE SELECT \"id\", \"name\" FROM \"public\".\"users\";"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                schema: Some("dbo".to_string()),
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                columns: Some(vec!["id".to_string(), "name".to_string()]),
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: true,
+            }),
+            "SET IDENTITY_INSERT [dbo].[users_copy] ON;\nINSERT INTO [dbo].[users_copy] ([id], [name]) SELECT [id], [name] FROM [dbo].[users];\nSET IDENTITY_INSERT [dbo].[users_copy] OFF;"
         );
     }
 

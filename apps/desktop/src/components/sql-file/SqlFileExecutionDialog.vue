@@ -13,6 +13,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, listDatabases, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/api";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
@@ -55,7 +56,11 @@ const sqlConnections = computed(() => store.connections.filter((c) => !["redis",
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
 
-const canStart = computed(() => Boolean(preview.value && selectedConnection.value && database.value.trim() && !running.value && !loadingPreview.value && !loadingDatabases.value));
+const canStart = computed(() => {
+  const connection = selectedConnection.value;
+  if (!preview.value || !connection || running.value || loadingPreview.value || loadingDatabases.value) return false;
+  return !!database.value.trim() || !requiresSqlFileTargetDatabaseSelection(connection, preview.value.canExecuteWithoutSelectedDatabase);
+});
 
 const statusTone = computed(() => {
   if (terminalStatus.value === "done") return "text-green-600";

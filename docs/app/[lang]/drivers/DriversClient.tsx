@@ -3,15 +3,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
-import { buildDriverEntries, buildJreEntries, fetchAgentRegistry, formatSize, type AgentRegistry, type JreDisplayEntry } from "@/lib/agentRegistry";
-import { AlertTriangle, Cpu, Database, Download, Loader2, Search, X } from "lucide-react";
+import { fetchAgentDownloadCatalog, formatSize, type AgentDownloadCatalog, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
+import { AlertTriangle, Archive, Cpu, Database, Download, Loader2, Search, Terminal, X } from "lucide-react";
 
 const i18n = {
   en: {
     title: "Offline Driver Downloads",
     subtitle: "Download database drivers and JRE packages for offline use. Search for the exact resource your air-gapped environment needs.",
+    bundles: "Offline Bundles",
+    bundlesDesc: "Platform-specific ZIP packages that include the agent registry, database drivers, native agents, and the matching JRE.",
     drivers: "Database Drivers",
     driversDesc: "JDBC driver JAR files for each supported database type.",
+    nativeAgents: "Native Agents",
+    nativeAgentsDesc: "Go-based native agents for Oracle and XuguDB. Download the executable that matches the offline machine.",
     jre: "Java Runtime (JRE)",
     jreDesc: "JRE packages used by agent-based database drivers. Required for Oracle, SQL Server, and other agent-managed connections.",
     loading: "Loading driver catalog...",
@@ -22,18 +26,23 @@ const i18n = {
     size: "Size",
     requiresJre: "Requires JRE",
     platform: "Platform",
+    filename: "File",
     search: "Search drivers, platforms, versions...",
     noResults: "No matching downloads.",
     showing: "Showing",
     of: "of",
     clearSearch: "Clear search",
-    downloadHint: "For air-gapped environments: download these files on an internet-connected machine, then transfer them to the offline machine and import them in DBX from Settings > Driver Manager.",
+    downloadHint: "For air-gapped environments: download the bundle for your platform on an internet-connected machine, then transfer it to the offline machine and import it in DBX from Settings > Driver Manager. Use the driver and JRE tabs only when you need individual artifacts.",
   },
   cn: {
     title: "离线驱动下载",
     subtitle: "下载数据库驱动和 JRE 离线包。搜索内网环境需要的资源，在有网机器下载后传输。",
+    bundles: "整包下载",
+    bundlesDesc: "按平台提供的 ZIP 离线包，包含 Agent registry、数据库驱动、原生 Agent 和匹配的 JRE。",
     drivers: "数据库驱动",
     driversDesc: "每种支持的数据库类型对应的 JDBC 驱动 JAR 文件。",
+    nativeAgents: "原生 Agent",
+    nativeAgentsDesc: "Oracle 和虚谷使用 Go 原生 Agent，请下载与内网机器平台匹配的可执行文件。",
     jre: "Java 运行时 (JRE)",
     jreDesc: "Agent 驱动所需的 JRE 环境，Oracle、SQL Server 等数据库通过 Agent 连接时需要。",
     loading: "正在加载驱动列表...",
@@ -44,20 +53,36 @@ const i18n = {
     size: "大小",
     requiresJre: "依赖 JRE",
     platform: "平台",
+    filename: "文件",
     search: "搜索驱动、平台、版本...",
     noResults: "没有匹配的下载项。",
     showing: "显示",
     of: "/",
     clearSearch: "清空搜索",
-    downloadHint: "内网环境使用说明：在有网的电脑上下载这些文件，然后传输到内网机器，在 DBX 的“设置 > 驱动管理”中导入。",
+    downloadHint: "内网环境使用说明：在有网的电脑上下载对应平台的整包，然后传输到内网机器，在 DBX 的“设置 > 驱动管理”中导入。只有需要单个产物时再使用驱动和 JRE 标签页。",
   },
 };
 
-type ActiveTab = "drivers" | "jre";
+type ActiveTab = "bundles" | "drivers" | "native" | "jre";
 
 function platformKey(j: JreDisplayEntry): string {
   return `${j.jreKey}-${j.platformKey}`;
 }
+
+function bundleKey(bundle: OfflineBundleEntry): string {
+  return `${bundle.platformKey}-${bundle.filename}`;
+}
+
+function nativeKey(agent: NativeAgentDisplayEntry): string {
+  return `${agent.key}-${agent.platformKey}`;
+}
+
+type NativeAgentGroup = {
+  key: string;
+  label: string;
+  version: string;
+  options: NativeAgentDisplayEntry[];
+};
 
 function matchesSearch(values: Array<string | number | undefined>, query: string): boolean {
   if (!query) return true;
@@ -70,19 +95,20 @@ export function DriversClient() {
   const lang: "en" | "cn" = rawLang === "cn" ? "cn" : "en";
   const t = i18n[lang];
 
-  const [registry, setRegistry] = useState<AgentRegistry | null>(null);
+  const [catalog, setCatalog] = useState<AgentDownloadCatalog | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<ActiveTab>("drivers");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("bundles");
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedNativePlatforms, setSelectedNativePlatforms] = useState<Record<string, string>>({});
 
-  const loadRegistry = useCallback(async () => {
+  const loadCatalog = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchAgentRegistry();
+      const data = await fetchAgentDownloadCatalog();
       if (data) {
-        setRegistry(data);
+        setCatalog(data);
       } else {
         setError("Unable to load driver catalog");
       }
@@ -94,19 +120,68 @@ export function DriversClient() {
   }, []);
 
   useEffect(() => {
-    loadRegistry();
-  }, [loadRegistry]);
+    loadCatalog();
+  }, [loadCatalog]);
 
-  const drivers = useMemo(() => (registry ? buildDriverEntries(registry) : []), [registry]);
-  const jres = useMemo(() => (registry ? buildJreEntries(registry) : []), [registry]);
+  const bundles = catalog?.bundles ?? [];
+  const drivers = catalog?.drivers ?? [];
+  const nativeAgents = catalog?.nativeAgents ?? [];
+  const jres = catalog?.jres ?? [];
   const normalizedSearch = searchQuery.trim().toLowerCase();
+
+  const filteredBundles = useMemo(() => bundles.filter((bundle) => matchesSearch([bundle.platformLabel, bundle.platformKey, bundle.filename, formatSize(bundle.size)], normalizedSearch)), [bundles, normalizedSearch]);
 
   const filteredDrivers = useMemo(() => drivers.filter((d) => matchesSearch([d.label, d.key, d.version, d.jre, formatSize(d.jar.size)], normalizedSearch)), [drivers, normalizedSearch]);
 
+  const nativeGroups = useMemo(() => {
+    const groups = new Map<string, NativeAgentGroup>();
+    for (const agent of nativeAgents) {
+      const group = groups.get(agent.key);
+      if (group) {
+        group.options.push(agent);
+      } else {
+        groups.set(agent.key, { key: agent.key, label: agent.label, version: agent.version, options: [agent] });
+      }
+    }
+    return Array.from(groups.values());
+  }, [nativeAgents]);
+
+  useEffect(() => {
+    if (nativeGroups.length === 0) return;
+    setSelectedNativePlatforms((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const group of nativeGroups) {
+        if (group.options.length === 0) continue;
+        if (!next[group.key] || !group.options.some((option) => option.platformKey === next[group.key])) {
+          next[group.key] = group.options[0].platformKey;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [nativeGroups]);
+
+  const filteredNativeGroups = useMemo(
+    () =>
+      nativeGroups.filter((group) =>
+        matchesSearch(
+          [
+            group.label,
+            group.key,
+            group.version,
+            ...group.options.flatMap((option) => [option.platformLabel, option.platformKey, option.filename, formatSize(option.info.size)]),
+          ],
+          normalizedSearch,
+        ),
+      ),
+    [nativeGroups, normalizedSearch],
+  );
+
   const filteredJres = useMemo(() => jres.filter((j) => matchesSearch([j.platformLabel, j.platformKey, j.jreVersion, j.jreKey, formatSize(j.info.size)], normalizedSearch)), [jres, normalizedSearch]);
 
-  const activeCount = activeTab === "drivers" ? filteredDrivers.length : filteredJres.length;
-  const activeTotal = activeTab === "drivers" ? drivers.length : jres.length;
+  const activeCount = activeTab === "bundles" ? filteredBundles.length : activeTab === "drivers" ? filteredDrivers.length : activeTab === "native" ? filteredNativeGroups.length : filteredJres.length;
+  const activeTotal = activeTab === "bundles" ? bundles.length : activeTab === "drivers" ? drivers.length : activeTab === "native" ? nativeGroups.length : jres.length;
 
   return (
     <main className="landing">
@@ -132,26 +207,38 @@ export function DriversClient() {
           <div className="flex flex-col items-center gap-4 py-20">
             <AlertTriangle size={28} className="text-yellow-500" />
             <span className="text-landing-muted text-sm">{t.error}</span>
-            <button type="button" onClick={loadRegistry} className="landing-nav-link rounded-[7px] px-4 py-2 text-sm font-medium border border-landing-line">
+            <button type="button" onClick={loadCatalog} className="landing-nav-link rounded-[7px] px-4 py-2 text-sm font-medium border border-landing-line">
               {t.retry}
             </button>
           </div>
         )}
 
-        {registry && !loading && (
+        {catalog && !loading && (
           <>
             <div className="landing-glass-card mb-12 overflow-hidden rounded-[10px]">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-landing-line bg-landing-panel/70 p-3">
-                <div className="inline-flex shrink-0 rounded-[8px] border border-landing-line bg-black/10 p-1">
+                <div className="inline-flex shrink-0 rounded-[8px] border border-landing-line bg-black/10 p-1 max-[760px]:grid max-[760px]:w-full max-[760px]:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("bundles")}
+                    className={`inline-flex h-8 cursor-pointer items-center justify-center gap-2 rounded-[6px] px-3 text-xs font-[650] transition-colors ${activeTab === "bundles" ? "bg-landing-blue text-white" : "text-landing-muted hover:text-landing-ink"}`}
+                  >
+                    <Archive size={14} />
+                    {t.bundles}
+                  </button>
                   <button
                     type="button"
                     onClick={() => setActiveTab("drivers")}
-                    className={`inline-flex h-8 cursor-pointer items-center gap-2 rounded-[6px] px-3 text-xs font-[650] transition-colors ${activeTab === "drivers" ? "bg-landing-blue text-white" : "text-landing-muted hover:text-landing-ink"}`}
+                    className={`inline-flex h-8 cursor-pointer items-center justify-center gap-2 rounded-[6px] px-3 text-xs font-[650] transition-colors ${activeTab === "drivers" ? "bg-landing-blue text-white" : "text-landing-muted hover:text-landing-ink"}`}
                   >
                     <Database size={14} />
                     {t.drivers}
                   </button>
-                  <button type="button" onClick={() => setActiveTab("jre")} className={`inline-flex h-8 cursor-pointer items-center gap-2 rounded-[6px] px-3 text-xs font-[650] transition-colors ${activeTab === "jre" ? "bg-landing-blue text-white" : "text-landing-muted hover:text-landing-ink"}`}>
+                  <button type="button" onClick={() => setActiveTab("native")} className={`inline-flex h-8 cursor-pointer items-center justify-center gap-2 rounded-[6px] px-3 text-xs font-[650] transition-colors ${activeTab === "native" ? "bg-landing-blue text-white" : "text-landing-muted hover:text-landing-ink"}`}>
+                    <Terminal size={14} />
+                    {t.nativeAgents}
+                  </button>
+                  <button type="button" onClick={() => setActiveTab("jre")} className={`inline-flex h-8 cursor-pointer items-center justify-center gap-2 rounded-[6px] px-3 text-xs font-[650] transition-colors ${activeTab === "jre" ? "bg-landing-blue text-white" : "text-landing-muted hover:text-landing-ink"}`}>
                     <Cpu size={14} />
                     {t.jre}
                   </button>
@@ -177,6 +264,43 @@ export function DriversClient() {
                   </span>
                 </div>
               </div>
+
+              {activeTab === "bundles" && (
+                <>
+                  <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.bundlesDesc}</p>
+                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                    <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
+                      <tr className="border-b border-landing-line">
+                        <th className="px-5 py-2.5 text-left font-medium">{t.platform}</th>
+                        <th className="px-5 py-2.5 text-left font-medium">{t.filename}</th>
+                        <th className="px-5 py-2.5 text-right font-medium">{t.size}</th>
+                        <th className="w-24 px-5 py-2.5" />
+                      </tr>
+                    </thead>
+                    <tbody className="max-[760px]:block">
+                      {filteredBundles.map((bundle) => (
+                        <tr key={bundleKey(bundle)} className="border-b border-landing-line transition-colors last:border-b-0 hover:bg-landing-panel max-[760px]:grid max-[760px]:grid-cols-[1fr_auto] max-[760px]:items-center max-[760px]:gap-3 max-[760px]:px-4">
+                          <td className="min-w-0 px-5 py-3 font-medium text-landing-ink max-[760px]:px-0">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className="min-w-0 truncate">{bundle.platformLabel}</span>
+                              <span className="hidden shrink-0 rounded-[5px] border border-landing-blue/35 bg-landing-blue/10 px-1.5 py-0.5 font-mono text-[11px] text-landing-sky max-[760px]:inline">ZIP</span>
+                            </div>
+                          </td>
+                          <td className="px-5 py-3 font-mono text-[11px] text-landing-muted max-[760px]:hidden">{bundle.filename}</td>
+                          <td className="px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(bundle.size)}</td>
+                          <td className="px-5 py-3 text-right max-[760px]:px-0">
+                            <a href={bundle.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
+                              <Download size={13} />
+                              {t.download}
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {filteredBundles.length === 0 && <div className="px-5 py-12 text-center text-sm text-landing-muted">{t.noResults}</div>}
+                </>
+              )}
 
               {activeTab === "drivers" && (
                 <>
@@ -218,6 +342,62 @@ export function DriversClient() {
                     </tbody>
                   </table>
                   {filteredDrivers.length === 0 && <div className="px-5 py-12 text-center text-sm text-landing-muted">{t.noResults}</div>}
+                </>
+              )}
+
+              {activeTab === "native" && (
+                <>
+                  <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.nativeAgentsDesc}</p>
+                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                    <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
+                      <tr className="border-b border-landing-line">
+                        <th className="px-5 py-2.5 text-left font-medium">Agent</th>
+                        <th className="px-5 py-2.5 text-left font-medium">{t.platform}</th>
+                        <th className="px-5 py-2.5 text-left font-medium">{t.version}</th>
+                        <th className="px-5 py-2.5 text-right font-medium">{t.size}</th>
+                        <th className="w-24 px-5 py-2.5" />
+                      </tr>
+                    </thead>
+                    <tbody className="max-[760px]:block">
+                      {filteredNativeGroups.map((group) => {
+                        const selectedPlatform = selectedNativePlatforms[group.key] ?? group.options[0]?.platformKey;
+                        const selectedAgent = group.options.find((option) => option.platformKey === selectedPlatform) ?? group.options[0];
+                        if (!selectedAgent) return null;
+                        return (
+                          <tr key={group.key} className="border-b border-landing-line transition-colors last:border-b-0 hover:bg-landing-panel max-[760px]:grid max-[760px]:grid-cols-[1fr_auto] max-[760px]:items-center max-[760px]:gap-3 max-[760px]:px-4">
+                            <td className="min-w-0 px-5 py-3 font-medium text-landing-ink max-[760px]:px-0">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className="min-w-0 truncate">{group.label}</span>
+                                <span className="hidden shrink-0 rounded-[5px] border border-landing-blue/35 bg-landing-blue/10 px-1.5 py-0.5 font-mono text-[11px] text-landing-sky max-[760px]:inline">{selectedAgent.platformKey}</span>
+                              </div>
+                            </td>
+                            <td className="px-5 py-3 max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
+                              <select
+                                value={selectedAgent.platformKey}
+                                onChange={(event) => setSelectedNativePlatforms((current) => ({ ...current, [group.key]: event.target.value }))}
+                                className="h-8 min-w-[190px] rounded-[6px] border border-landing-line bg-black/10 px-2.5 text-xs text-landing-ink outline-none transition-colors focus:border-landing-blue max-[760px]:w-full"
+                              >
+                                {group.options.map((option) => (
+                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#10151d] text-landing-ink">
+                                    {option.platformLabel}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{group.version}</td>
+                            <td className="px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(selectedAgent.info.size)}</td>
+                            <td className="px-5 py-3 text-right max-[760px]:px-0">
+                              <a href={selectedAgent.info.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
+                                <Download size={13} />
+                                {t.download}
+                              </a>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {filteredNativeGroups.length === 0 && <div className="px-5 py-12 text-center text-sm text-landing-muted">{t.noResults}</div>}
                 </>
               )}
 

@@ -51,6 +51,7 @@ export type DatabaseType =
   | "bigquery"
   | "kylin"
   | "sundb"
+  | "oscar"
   | "tdengine"
   | "xugu"
   | "iotdb"
@@ -281,6 +282,7 @@ export interface ObjectInfo {
   name: string;
   object_type: DatabaseObjectType | string;
   schema?: string | null;
+  signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -430,6 +432,7 @@ export interface QueryResultRun {
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
+  mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
 }
 
@@ -445,17 +448,25 @@ export interface SqlTableReference {
   schema?: string | null;
   alias?: string | null;
   span: SqlTextSpan;
+  scope_id?: number;
 }
 
 export interface SqlColumnReference {
   name: string;
   qualifier?: string | null;
   span: SqlTextSpan;
+  scope_id?: number;
+}
+
+export interface SqlReferenceScope {
+  id: number;
+  parent_id?: number | null;
 }
 
 export interface SqlReferenceAnalysis {
   tables: SqlTableReference[];
   columns: SqlColumnReference[];
+  scopes?: SqlReferenceScope[];
 }
 
 export type TreeNodeType =
@@ -534,6 +545,7 @@ export interface TreeNode {
   linkedCatalog?: string;
   linkedSchema?: string;
   mqTenant?: string;
+  mqInitialTab?: "topics";
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   schema?: string;
@@ -557,6 +569,18 @@ export interface TreeNode {
 }
 
 export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
+
+export interface TableStructureEditorDraft {
+  activeTab: TableInfoTab;
+  newTableName: string;
+  tableComment: string;
+  originalTableComment: string;
+  columns: import("@/lib/tableStructureEditorSql").EditableStructureColumn[];
+  indexes: import("@/lib/tableStructureEditorSql").EditableStructureIndex[];
+  foreignKeys: import("@/lib/tableStructureEditorSql").EditableStructureForeignKey[];
+  triggers: import("@/lib/tableStructureEditorSql").EditableStructureTrigger[];
+  initialized: boolean;
+}
 
 export interface QueryTab {
   id: string;
@@ -615,9 +639,13 @@ export interface QueryTab {
   explainExecutionId?: string;
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
   mqTenant?: string;
+  mqInitialTab?: "topics";
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureInitialTab?: TableInfoTab;
+  structureInitialTabRequestId?: number;
+  structureDraft?: TableStructureEditorDraft;
   objectBrowser?: {
     schema?: string;
     objectType?: "tables";
@@ -652,9 +680,20 @@ export interface QueryTab {
   };
   querySourceColumns?: Array<string | undefined>;
   queryEditabilityReason?: "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
+  mongoEditTarget?: {
+    collection: string;
+    idColumn: "_id";
+  };
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;
+  /** Whether to use auto-commit mode (default true). When false, multiple statements are
+   *  wrapped in a single transaction. */
+  autoCommit?: boolean;
+  /** Session ID for an active manual transaction, set after beginManualTransaction */
+  txnSessionId?: string;
+  /** Set to true when a manual transaction was auto-rolled back due to inactivity */
+  txnAutoRolledBack?: boolean;
 }
 
 export interface SavedSqlFolder {

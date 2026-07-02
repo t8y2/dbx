@@ -6,6 +6,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import VChart from "vue-echarts";
+import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
 import type { TopicRef, TopicInfo, TopicStats, BacklogStats } from "@/types/mq";
 import { mqGetTopicStats, mqGetBacklog } from "@/lib/api";
 
@@ -42,6 +43,16 @@ interface PartitionStatsRow {
   raw: Record<string, unknown>;
 }
 
+interface KafkaPartitionStatsRow {
+  partition: number;
+  beginOffset: number;
+  endOffset: number;
+  messageCount: number;
+  leader: number;
+  replicas: number[];
+  isr: number[];
+}
+
 const props = defineProps<Props>();
 
 const stats = ref<TopicStats>();
@@ -57,6 +68,29 @@ const history = ref<MetricPoint[]>([]);
 const MAX_HISTORY_POINTS = 60;
 
 const partitionRows = computed(() => extractPartitionRows(stats.value?.raw));
+const kafkaPartitionRows = computed(() => extractKafkaPartitionRows(stats.value?.raw));
+const isKafkaStats = computed(() => isKafkaStatsPayload(stats.value?.raw));
+const kafkaOverview = computed(() => {
+  const raw = objectRecord(stats.value?.raw);
+  const rows = kafkaPartitionRows.value;
+  const totalMessages = numberField(raw.totalMessages) ?? rows.reduce((sum, row) => sum + row.messageCount, 0);
+  const totalBeginOffset = rows.reduce((sum, row) => sum + row.beginOffset, 0);
+  const totalEndOffset = rows.reduce((sum, row) => sum + row.endOffset, 0);
+  const underReplicatedPartitions = rows.filter((row) => row.replicas.length > 0 && row.isr.length < row.replicas.length).length;
+  const offlinePartitions = rows.filter((row) => row.leader < 0).length;
+  const healthyPartitions = rows.filter((row) => row.leader >= 0 && (row.replicas.length === 0 || row.isr.length === row.replicas.length)).length;
+  return {
+    partitionCount: numberField(raw.partitions) ?? rows.length,
+    replicationFactor: numberField(raw.replicationFactor) ?? Math.max(0, ...rows.map((row) => row.replicas.length)),
+    totalMessages,
+    totalBeginOffset,
+    totalEndOffset,
+    leaderCount: new Set(rows.map((row) => row.leader).filter((leader) => leader >= 0)).size,
+    underReplicatedPartitions,
+    offlinePartitions,
+    healthyPartitions,
+  };
+});
 const selectedPartition = computed(() => partitionRows.value.find((row) => row.name === selectedPartitionName.value) ?? partitionRows.value[0]);
 const selectedPartitionPublishers = computed(() => arrayObjects(selectedPartition.value?.raw.publishers));
 const selectedPartitionSubscriptions = computed(() => {
@@ -136,7 +170,16 @@ async function loadStats(options: { skipWhenHidden?: boolean } = {}) {
   loading.value = true;
   error.value = undefined;
   try {
-    const [statsData, backlogData] = await Promise.all([mqGetTopicStats(props.connectionId, topicRef), mqGetBacklog(props.connectionId, topicRef, undefined)]);
+    const statsData = await mqGetTopicStats(props.connectionId, topicRef);
+
+    if (isKafkaStatsPayload(statsData.raw)) {
+      stats.value = statsData;
+      backlog.value = undefined;
+      appendHistoryPoint(statsData);
+      return;
+    }
+
+    const backlogData = await mqGetBacklog(props.connectionId, topicRef, undefined);
     stats.value = statsData;
     backlog.value = backlogData;
     appendHistoryPoint(statsData, backlogData);
@@ -151,13 +194,13 @@ function refreshNow() {
   void loadStats();
 }
 
-function appendHistoryPoint(statsData: TopicStats, backlogData: BacklogStats) {
+function appendHistoryPoint(statsData: TopicStats, backlogData?: BacklogStats) {
   const point: MetricPoint = {
     time: new Date().toLocaleTimeString(),
     msgRateIn: statsData.msgRateIn,
     msgRateOut: statsData.msgRateOut,
     backlogSize: statsData.backlogSize,
-    msgBacklog: backlogData.msgBacklog,
+    msgBacklog: backlogData?.msgBacklog ?? 0,
     consumerLagMs: extractConsumerLagMs(statsData.raw),
   };
   history.value = [...history.value.slice(-(MAX_HISTORY_POINTS - 1)), point];
@@ -202,6 +245,35 @@ function extractPartitionRows(raw: unknown): PartitionStatsRow[] {
   });
 }
 
+function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
+  return arrayObjects(objectRecord(raw).partitionStats)
+    .map((body) => ({
+      partition: numberField(body.partition) ?? 0,
+      beginOffset: numberField(body.beginOffset) ?? 0,
+      endOffset: numberField(body.endOffset) ?? 0,
+      messageCount: numberField(body.messageCount) ?? 0,
+      leader: numberField(body.leader) ?? -1,
+      replicas: numberArrayField(body.replicas),
+      isr: numberArrayField(body.isr),
+    }))
+    .sort((a, b) => a.partition - b.partition);
+}
+
+function isKafkaStatsPayload(raw: unknown): boolean {
+  const root = objectRecord(raw);
+  return Array.isArray(root.partitionStats) || (numberField(root.partitions) !== undefined && numberField(root.replicationFactor) !== undefined && numberField(root.totalMessages) !== undefined);
+}
+
+function isKafkaPartitionHealthy(row: KafkaPartitionStatsRow): boolean {
+  return row.leader >= 0 && (row.replicas.length === 0 || row.isr.length >= row.replicas.length);
+}
+
+function kafkaPartitionStatusLabel(row: KafkaPartitionStatsRow): string {
+  if (row.leader < 0) return "无 leader";
+  if (row.replicas.length > 0 && row.isr.length < row.replicas.length) return "ISR 不完整";
+  return "正常";
+}
+
 function partitionBacklogMessages(body: Record<string, unknown>): number {
   const direct = numberField(body.msgBacklog);
   if (direct !== undefined) return direct;
@@ -225,6 +297,10 @@ function arrayObjects(value: unknown): Record<string, unknown>[] {
 
 function numberField(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function numberArrayField(value: unknown): number[] {
+  return Array.isArray(value) ? value.map(numberField).filter((item): item is number => item !== undefined) : [];
 }
 
 function stringField(value: unknown): string {
@@ -317,7 +393,7 @@ onUnmounted(() => {
       <div class="toolbar-actions">
         <label class="checkbox-label">
           <input type="checkbox" v-model="autoRefresh" />
-          自动刷新
+          <span>自动刷新</span>
         </label>
         <select v-model.number="refreshInterval" :disabled="!autoRefresh" class="refresh-interval">
           <option :value="5">5秒</option>
@@ -326,16 +402,139 @@ onUnmounted(() => {
           <option :value="60">60秒</option>
         </select>
         <button @click="refreshNow" :disabled="loading" class="btn-sm">
-          {{ loading ? "刷新中..." : "立即刷新" }}
+          <Loader2 v-if="loading" class="btn-icon spinning" :size="14" />
+          <RefreshCw v-else class="btn-icon" :size="14" />
+          <span>{{ loading ? "刷新中..." : "立即刷新" }}</span>
         </button>
       </div>
     </div>
 
-    <div v-if="!topic" class="panel-placeholder">请先选择一个主题</div>
+    <div v-if="!topic" class="panel-placeholder">
+      <Table2 :size="24" />
+      <span>请先选择一个主题</span>
+    </div>
 
-    <div v-else-if="error" class="panel-error">{{ error }}</div>
+    <div v-else-if="error" class="panel-error">
+      <AlertTriangle :size="18" />
+      <span>{{ error }}</span>
+    </div>
 
-    <div v-else-if="loading && !stats" class="panel-loading">加载中...</div>
+    <div v-else-if="loading && !stats" class="panel-loading">
+      <Loader2 class="loading-icon spinning" :size="22" />
+      <span>加载监控数据...</span>
+      <div class="loading-skeleton-grid" aria-hidden="true">
+        <div v-for="item in 4" :key="item" class="loading-skeleton-card"></div>
+      </div>
+    </div>
+
+    <div v-else-if="stats && isKafkaStats" class="stats-container">
+      <div class="stats-section">
+        <h4>Kafka Topic 概览</h4>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon"><Layers3 :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">分区数</div>
+              <div class="stat-value">{{ kafkaOverview.partitionCount }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><Boxes :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">副本因子</div>
+              <div class="stat-value">{{ kafkaOverview.replicationFactor }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><Hash :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">消息数</div>
+              <div class="stat-value">{{ formatNumber(kafkaOverview.totalMessages) }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><BarChart3 :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">Log end offset</div>
+              <div class="stat-value">{{ formatNumber(kafkaOverview.totalEndOffset) }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <h4>Offset 与副本状态</h4>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon"><Gauge :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">起始 offset</div>
+              <div class="stat-value">{{ formatNumber(kafkaOverview.totalBeginOffset) }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><RadioTower :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">Leader 数</div>
+              <div class="stat-value">{{ kafkaOverview.leaderCount }}</div>
+            </div>
+          </div>
+          <div class="stat-card" :class="{ warning: kafkaOverview.underReplicatedPartitions > 0 }">
+            <div class="stat-icon"><ShieldCheck :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">ISR 健康分区</div>
+              <div class="stat-value">{{ kafkaOverview.healthyPartitions }} / {{ kafkaOverview.partitionCount }}</div>
+            </div>
+          </div>
+          <div class="stat-card" :class="{ warning: kafkaOverview.offlinePartitions > 0 }">
+            <div class="stat-icon"><AlertTriangle :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">无 leader 分区</div>
+              <div class="stat-value">{{ kafkaOverview.offlinePartitions }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <h4>Kafka 分区明细</h4>
+        <div v-if="kafkaPartitionRows.length" class="partition-layout">
+          <div class="partition-table-wrap">
+            <table class="partition-table">
+              <thead>
+                <tr>
+                  <th>分区</th>
+                  <th>起始 offset</th>
+                  <th>Log end offset</th>
+                  <th>消息数</th>
+                  <th>Leader</th>
+                  <th>Replicas</th>
+                  <th>ISR</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="partition in kafkaPartitionRows" :key="partition.partition" :class="{ warning: partition.leader < 0 || (partition.replicas.length > 0 && partition.isr.length < partition.replicas.length) }">
+                  <td>{{ partition.partition }}</td>
+                  <td>{{ formatNumber(partition.beginOffset) }}</td>
+                  <td>{{ formatNumber(partition.endOffset) }}</td>
+                  <td>{{ formatNumber(partition.messageCount) }}</td>
+                  <td>{{ partition.leader >= 0 ? partition.leader : "-" }}</td>
+                  <td>{{ partition.replicas.join(", ") || "-" }}</td>
+                  <td>{{ partition.isr.join(", ") || "-" }}</td>
+                  <td>
+                    <span :class="['table-status', isKafkaPartitionHealthy(partition) ? 'healthy' : 'warning']">
+                      {{ kafkaPartitionStatusLabel(partition) }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div v-else class="empty-state compact">当前 Kafka 响应未返回分区指标</div>
+      </div>
+    </div>
 
     <div v-else-if="stats" class="stats-container">
       <!-- Overview Section -->
@@ -343,28 +542,28 @@ onUnmounted(() => {
         <h4>消息速率</h4>
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="stat-icon">📥</div>
+            <div class="stat-icon"><Download :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">入站速率</div>
               <div class="stat-value">{{ stats.msgRateIn.toFixed(2) }} msg/s</div>
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon">📤</div>
+            <div class="stat-icon"><Upload :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">出站速率</div>
               <div class="stat-value">{{ stats.msgRateOut.toFixed(2) }} msg/s</div>
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon">⬇️</div>
+            <div class="stat-icon"><Activity :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">入站吞吐量</div>
               <div class="stat-value">{{ formatBytes(stats.msgThroughputIn) }}/s</div>
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon">⬆️</div>
+            <div class="stat-icon"><BarChart3 :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">出站吞吐量</div>
               <div class="stat-value">{{ formatBytes(stats.msgThroughputOut) }}/s</div>
@@ -393,21 +592,21 @@ onUnmounted(() => {
         <h4>存储与积压</h4>
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="stat-icon">💾</div>
+            <div class="stat-icon"><Database :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">存储大小</div>
               <div class="stat-value">{{ formatBytes(stats.storageSize) }}</div>
             </div>
           </div>
           <div class="stat-card" :class="{ warning: stats.backlogSize > 10 * 1024 * 1024 }">
-            <div class="stat-icon">📦</div>
+            <div class="stat-icon"><Package :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">积压大小</div>
               <div class="stat-value">{{ formatBytes(stats.backlogSize) }}</div>
             </div>
           </div>
           <div class="stat-card" v-if="backlog">
-            <div class="stat-icon">📊</div>
+            <div class="stat-icon"><HardDrive :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">积压消息数</div>
               <div class="stat-value">{{ formatNumber(backlog.msgBacklog) }}</div>
@@ -421,14 +620,14 @@ onUnmounted(() => {
         <h4>消息计数器</h4>
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="stat-icon">📨</div>
+            <div class="stat-icon"><Send :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">已发布消息</div>
               <div class="stat-value">{{ formatNumber(stats.msgInCounter) }}</div>
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon">📬</div>
+            <div class="stat-icon"><CheckCircle2 :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">已消费消息</div>
               <div class="stat-value">{{ formatNumber(stats.msgOutCounter) }}</div>
@@ -442,14 +641,14 @@ onUnmounted(() => {
         <h4>连接统计</h4>
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="stat-icon">👥</div>
+            <div class="stat-icon"><Users :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">订阅数量</div>
               <div class="stat-value">{{ stats.subscriptionCount }}</div>
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon">🚀</div>
+            <div class="stat-icon"><RadioTower :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">生产者数量</div>
               <div class="stat-value">{{ stats.producerCount }}</div>
@@ -462,7 +661,7 @@ onUnmounted(() => {
         <h4>分区明细</h4>
         <div v-if="partitionRows.length" class="partition-layout">
           <div class="partition-table-wrap">
-            <table class="partition-table">
+            <table class="partition-table interactive-table">
               <thead>
                 <tr>
                   <th>分区</th>
@@ -581,46 +780,138 @@ onUnmounted(() => {
 
 <style scoped>
 .monitoring-panel {
+  --monitor-panel-bg: color-mix(in srgb, var(--color-background, #ffffff) 94%, var(--color-muted, #f5f5f5));
+  --monitor-surface: var(--color-background-secondary, var(--color-card, #ffffff));
+  --monitor-surface-raised: color-mix(in srgb, var(--monitor-surface) 96%, var(--monitor-accent) 4%);
+  --monitor-border: color-mix(in srgb, var(--color-border, #e5e7eb) 76%, transparent);
+  --monitor-border-strong: color-mix(in srgb, var(--color-border, #d4d4d8) 88%, var(--monitor-accent) 12%);
+  --monitor-text: var(--color-text, var(--color-foreground, #18181b));
+  --monitor-muted: var(--color-text-secondary, var(--color-muted-foreground, #64748b));
+  --monitor-faint: var(--color-text-tertiary, color-mix(in srgb, var(--monitor-muted) 72%, transparent));
+  --monitor-hover: color-mix(in srgb, var(--color-hover, var(--color-muted, #f4f4f5)) 72%, var(--monitor-accent) 7%);
+  --monitor-accent: #0f766e;
+  --monitor-accent-soft: rgb(15 118 110 / 0.1);
+  --monitor-accent-border: rgb(15 118 110 / 0.22);
+  --monitor-success: #15803d;
+  --monitor-success-soft: rgb(21 128 61 / 0.1);
+  --monitor-warning: #b45309;
+  --monitor-warning-soft: rgb(180 83 9 / 0.12);
+  --monitor-danger: #b91c1c;
+  --monitor-danger-soft: rgb(185 28 28 / 0.1);
+  --monitor-shadow: 0 18px 38px -28px rgb(15 23 42 / 0.42);
   height: 100%;
   display: flex;
   flex-direction: column;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--monitor-panel-bg) 88%, var(--monitor-accent-soft)) 0%, var(--monitor-panel-bg) 38%), var(--monitor-panel-bg);
+  color: var(--monitor-text);
+  font-family: var(--font-sans, "Geist Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif);
+}
+
+:global(.dark) .monitoring-panel {
+  --monitor-panel-bg: color-mix(in srgb, var(--color-background, #131416) 90%, #0f766e 4%);
+  --monitor-surface: color-mix(in srgb, var(--color-card, #1b1b1e) 94%, #ffffff 2%);
+  --monitor-surface-raised: color-mix(in srgb, var(--monitor-surface) 92%, #0f766e 8%);
+  --monitor-border: color-mix(in srgb, var(--color-border, rgb(110 110 114 / 0.28)) 82%, transparent);
+  --monitor-border-strong: color-mix(in srgb, var(--monitor-border) 76%, #2dd4bf 24%);
+  --monitor-accent: #2dd4bf;
+  --monitor-accent-soft: rgb(45 212 191 / 0.12);
+  --monitor-accent-border: rgb(45 212 191 / 0.24);
+  --monitor-success: #4ade80;
+  --monitor-success-soft: rgb(74 222 128 / 0.12);
+  --monitor-warning: #f59e0b;
+  --monitor-warning-soft: rgb(245 158 11 / 0.14);
+  --monitor-danger: #f87171;
+  --monitor-danger-soft: rgb(248 113 113 / 0.12);
+  --monitor-shadow: 0 18px 42px -28px rgb(0 0 0 / 0.72);
 }
 
 .panel-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border);
+  gap: 16px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--monitor-border);
+  background: color-mix(in srgb, var(--monitor-surface) 92%, transparent);
+  backdrop-filter: blur(10px);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .panel-toolbar h3 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 650;
+  color: var(--monitor-text);
+  text-wrap: balance;
 }
 
 .toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .checkbox-label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   font-size: 13px;
+  font-weight: 500;
+  color: var(--monitor-muted);
   cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.checkbox-label:hover {
+  border-color: var(--monitor-border);
+  background: var(--monitor-hover);
+  color: var(--monitor-text);
+}
+
+.checkbox-label input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--monitor-accent);
 }
 
 .refresh-interval {
-  padding: 4px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
+  min-height: 34px;
+  padding: 5px 30px 5px 10px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
   font-size: 13px;
-  background: var(--color-background);
+  font-weight: 500;
+  background: var(--monitor-surface);
+  color: var(--monitor-text);
   cursor: pointer;
+  outline: none;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background 0.2s ease;
+}
+
+.refresh-interval:hover:not(:disabled) {
+  border-color: var(--monitor-border-strong);
+}
+
+.refresh-interval:focus-visible {
+  border-color: var(--monitor-accent);
+  box-shadow: 0 0 0 3px var(--monitor-accent-soft);
 }
 
 .refresh-interval:disabled {
@@ -629,75 +920,167 @@ onUnmounted(() => {
 }
 
 .btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--color-background);
-  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
+  background: var(--monitor-surface);
+  color: var(--monitor-text);
   cursor: pointer;
   font-size: 13px;
-  transition: all 0.2s;
+  font-weight: 560;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.55) inset;
+  transition:
+    transform 0.16s ease,
+    background 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .btn-sm:hover:not(:disabled) {
-  background: var(--color-hover);
+  border-color: var(--monitor-border-strong);
+  background: var(--monitor-hover);
+  box-shadow: var(--monitor-shadow);
+  transform: translateY(-1px);
+}
+
+.btn-sm:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.btn-sm:focus-visible {
+  outline: none;
+  border-color: var(--monitor-accent);
+  box-shadow: 0 0 0 3px var(--monitor-accent-soft);
 }
 
 .btn-sm:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-icon {
+  flex: 0 0 auto;
+  color: var(--monitor-accent);
 }
 
 .panel-placeholder,
 .panel-error,
 .panel-loading,
 .empty-state {
-  padding: 24px;
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 32px;
   text-align: center;
-  color: var(--color-text-secondary);
+  color: var(--monitor-muted);
+  line-height: 1.5;
 }
 
 .panel-error {
-  color: var(--color-error);
+  display: flex;
+  justify-content: center;
+  color: var(--monitor-danger);
+  background: var(--monitor-danger-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--monitor-danger) 18%, transparent);
+}
+
+.panel-loading {
+  align-content: start;
+  padding-top: 48px;
+}
+
+.loading-icon {
+  color: var(--monitor-accent);
+}
+
+.spinning {
+  animation: monitor-spin 0.9s linear infinite;
+}
+
+.loading-skeleton-grid {
+  width: min(100%, 920px);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.loading-skeleton-card {
+  height: 96px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.45), transparent), var(--monitor-surface);
+  background-size: 220% 100%;
+  border: 1px solid var(--monitor-border);
+  animation: monitor-skeleton 1.3s ease-in-out infinite;
 }
 
 .stats-container {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  width: min(100%, 1480px);
+  margin: 0 auto;
+  padding: 22px 24px 32px;
+  box-sizing: border-box;
 }
 
 .stats-section {
-  margin-bottom: 24px;
+  margin-bottom: 28px;
+}
+
+.stats-section:last-child {
+  margin-bottom: 0;
 }
 
 .stats-section h4 {
-  margin: 0 0 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 14px;
   font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
+  line-height: 1.35;
+  font-weight: 680;
+  color: var(--monitor-text);
+}
+
+.stats-section h4::before {
+  content: "";
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--monitor-accent);
+  box-shadow: 0 0 0 4px var(--monitor-accent-soft);
 }
 
 .charts-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: 14px;
+  margin-bottom: 28px;
 }
 
 .chart-panel {
   min-height: 260px;
-  padding: 12px;
-  border: 1px solid var(--color-border);
+  padding: 14px;
+  border: 1px solid var(--monitor-border);
   border-radius: 8px;
-  background: var(--color-background-secondary);
+  background: var(--monitor-surface);
+  box-shadow: var(--monitor-shadow);
 }
 
 .chart-panel h4 {
   margin: 0 0 8px 0;
   font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
+  line-height: 1.35;
+  font-weight: 650;
+  color: var(--monitor-muted);
 }
 
 .trend-chart {
@@ -707,50 +1090,110 @@ onUnmounted(() => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px;
 }
 
 .stat-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 16px;
-  background: var(--color-background-secondary);
-  border: 1px solid var(--color-border);
+  min-height: 96px;
+  gap: 14px;
+  padding: 17px 18px;
+  background: var(--monitor-surface);
+  border: 1px solid var(--monitor-border);
   border-radius: 8px;
-  transition: all 0.2s;
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.52) inset;
+  transition:
+    transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.22s ease,
+    box-shadow 0.22s ease,
+    background 0.22s ease;
+}
+
+.stat-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--monitor-accent);
+  opacity: 0.75;
+  z-index: 0;
+}
+
+.stat-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, var(--monitor-accent-soft), transparent 42%);
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .stat-card:hover {
-  border-color: var(--color-primary);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+  border-color: var(--monitor-accent-border);
+  background: var(--monitor-surface-raised);
+  box-shadow: var(--monitor-shadow);
 }
 
 .stat-card.warning {
-  border-color: var(--color-warning);
-  background: var(--color-warning-alpha);
+  border-color: color-mix(in srgb, var(--monitor-warning) 34%, transparent);
+  background: color-mix(in srgb, var(--monitor-surface) 86%, var(--monitor-warning-soft));
+}
+
+.stat-card.warning::before {
+  background: var(--monitor-warning);
+}
+
+.stat-card.warning .stat-icon {
+  color: var(--monitor-warning);
+  background: var(--monitor-warning-soft);
+  border-color: color-mix(in srgb, var(--monitor-warning) 24%, transparent);
 }
 
 .stat-icon {
-  font-size: 32px;
-  line-height: 1;
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border: 1px solid var(--monitor-accent-border);
+  border-radius: 8px;
+  background: var(--monitor-accent-soft);
+  color: var(--monitor-accent);
 }
 
 .stat-content {
+  position: relative;
+  z-index: 1;
   flex: 1;
+  min-width: 0;
 }
 
 .stat-label {
+  margin-bottom: 6px;
   font-size: 12px;
-  color: var(--color-text-tertiary);
-  margin-bottom: 4px;
+  line-height: 1.3;
+  font-weight: 560;
+  color: var(--monitor-muted);
+  text-wrap: pretty;
 }
 
 .stat-value {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--color-text);
+  font-family: "Geist Variable Tabular", var(--font-sans, system-ui, sans-serif);
+  font-size: 23px;
+  line-height: 1.1;
+  font-weight: 720;
+  color: var(--monitor-text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
 }
 
 .health-indicators {
@@ -761,59 +1204,120 @@ onUnmounted(() => {
 
 .partition-layout {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .partition-table-wrap {
   overflow-x: auto;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--monitor-border);
   border-radius: 8px;
-  background: var(--color-background-secondary);
+  background: var(--monitor-surface);
+  box-shadow: var(--monitor-shadow);
 }
 
 .partition-table,
 .detail-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.partition-table {
+  min-width: 860px;
+}
+
+.detail-table {
+  min-width: 0;
 }
 
 .partition-table th,
 .partition-table td,
 .detail-table th,
 .detail-table td {
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--color-border-light);
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--monitor-border);
   text-align: left;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--monitor-text);
+  font-variant-numeric: tabular-nums;
 }
 
 .partition-table th,
 .detail-table th {
-  color: var(--color-text-secondary);
-  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--monitor-surface) 86%, var(--monitor-panel-bg));
+  color: var(--monitor-muted);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.partition-table tbody tr:last-child td,
+.detail-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .partition-table tbody tr {
+  transition:
+    background 0.18s ease,
+    color 0.18s ease;
+}
+
+.partition-table.interactive-table tbody tr {
   cursor: pointer;
 }
 
 .partition-table tbody tr:hover,
 .partition-table tbody tr.selected {
-  background: var(--color-hover);
+  background: var(--monitor-hover);
+}
+
+.partition-table tbody tr:nth-child(even):not(.selected):not(.warning) {
+  background: color-mix(in srgb, var(--monitor-surface) 90%, var(--monitor-panel-bg));
+}
+
+.partition-table tbody tr.warning {
+  background: var(--monitor-warning-soft);
+}
+
+.table-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.table-status.healthy {
+  color: var(--monitor-success);
+  background: var(--monitor-success-soft);
+}
+
+.table-status.warning {
+  color: var(--monitor-warning);
+  background: var(--monitor-warning-soft);
 }
 
 .partition-detail {
-  padding: 12px;
-  border: 1px solid var(--color-border);
+  padding: 14px;
+  border: 1px solid var(--monitor-border);
   border-radius: 8px;
-  background: var(--color-background-secondary);
+  background: var(--monitor-surface);
+  box-shadow: var(--monitor-shadow);
 }
 
 .partition-detail h5 {
   margin: 0 0 12px;
   font-size: 13px;
-  font-weight: 600;
+  line-height: 1.4;
+  font-weight: 680;
+  color: var(--monitor-text);
 }
 
 .detail-grid {
@@ -824,50 +1328,108 @@ onUnmounted(() => {
 
 .detail-title {
   margin-bottom: 8px;
-  color: var(--color-text-secondary);
+  color: var(--monitor-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .empty-state.compact {
-  padding: 12px;
+  padding: 16px;
+  border: 1px dashed var(--monitor-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--monitor-surface) 74%, transparent);
 }
 
 .health-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  background: var(--color-background-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+  gap: 12px;
+  padding: 13px 15px;
+  background: var(--monitor-surface);
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.48) inset;
 }
 
 .health-label {
   font-size: 13px;
-  color: var(--color-text-secondary);
-  font-weight: 500;
+  line-height: 1.35;
+  color: var(--monitor-muted);
+  font-weight: 560;
 }
 
 .health-badge {
-  padding: 4px 12px;
-  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 4px 10px;
+  border-radius: 7px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 .health-badge.healthy {
-  background: var(--color-success-alpha);
-  color: var(--color-success);
+  background: var(--monitor-success-soft);
+  color: var(--monitor-success);
 }
 
 .health-badge.warning {
-  background: var(--color-warning-alpha);
-  color: var(--color-warning);
+  background: var(--monitor-warning-soft);
+  color: var(--monitor-warning);
 }
 
 .health-badge.idle {
-  background: var(--color-background-tertiary);
-  color: var(--color-text-tertiary);
+  background: color-mix(in srgb, var(--monitor-muted) 12%, transparent);
+  color: var(--monitor-muted);
+}
+
+@keyframes monitor-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes monitor-skeleton {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .panel-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .toolbar-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .stats-container {
+    padding: 18px 16px 26px;
+  }
+
+  .loading-skeleton-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .stats-grid,
+  .charts-grid,
+  .health-indicators,
+  .loading-skeleton-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-card {
+    min-height: 84px;
+  }
 }
 </style>

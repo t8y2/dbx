@@ -28,6 +28,43 @@ function candidateSummaries(candidates: Array<{ kind: string; sql: string }>): s
   return candidates.map((candidate) => `${candidate.kind}:${candidate.sql.trim()}`);
 }
 
+const oraclePlSqlFixture = `DECLARE
+  v_order_count NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_order_count
+  FROM "DBX_TEST"."ORDERS_10K";
+
+  IF v_order_count = 0 THEN
+    INSERT INTO "DBX_TEST"."STORES"
+      ("ID", "STORE_CODE", "STORE_NAME", "CITY", "OPENED_AT")
+    SELECT 10001, 'TEST_STORE_001', '测试门店', '上海', SYSDATE
+    FROM DUAL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "DBX_TEST"."STORES" WHERE "ID" = 10001
+    );
+
+    INSERT INTO "DBX_TEST"."PRODUCTS"
+      ("ID", "SKU", "PRODUCT_NAME", "CATEGORY", "PRICE")
+    SELECT 10001, 'TEST_SKU_001', '测试商品', '测试分类', 99.90
+    FROM DUAL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "DBX_TEST"."PRODUCTS" WHERE "ID" = 10001
+    );
+
+    INSERT INTO "DBX_TEST"."ORDERS_10K"
+      ("ID", "ORDER_NO", "STORE_ID", "PRODUCT_ID", "CUSTOMER_NAME", "QUANTITY", "AMOUNT", "ORDER_STATUS", "CREATED_AT")
+    SELECT 10001, 'TEST_ORDER_001', 10001, 10001, '测试客户', 2, 199.80, 'PAID', SYSDATE
+    FROM DUAL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "DBX_TEST"."ORDERS_10K" WHERE "ORDER_NO" = 'TEST_ORDER_001'
+    );
+
+    COMMIT;
+  END IF;
+END;
+/
+SELECT 1;`;
+
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
     const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
@@ -88,6 +125,14 @@ describe("splitSqlStatementRanges", () => {
   it("skips MySQL delimiter commands and empty custom delimiter statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["select COUNT(1) FROM your_table", "select COUNT(1) FROM your_table;"]);
+  });
+
+  it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
+    const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
+    expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
+    expect(ranges[0].sql).toContain("v_order_count NUMBER;");
+    expect(ranges[0].sql).toContain("END;");
+    expect(ranges[0].sql).not.toContain("\n/");
   });
 });
 
@@ -171,6 +216,31 @@ describe("statementRangeAtCursor", () => {
     expect(range?.sql.trim()).toBe("UPDATE users\nSET name = 'a'\nWHERE id = 1");
   });
 
+  it("keeps MySQL ALTER TABLE column comments with the column definition", () => {
+    const sql =
+      "ALTER TABLE `yb_course_order`\n  ADD COLUMN `audit_status` tinyint(4) DEFAULT NULL\n    COMMENT '审核状态：0-待审核，1-已通过，2-已拒绝',\n  ADD COLUMN `close_reason` varchar(30) DEFAULT NULL\n    COMMENT '关闭原因：timeout-超时关闭，cancel-取消关闭，refund-退款关闭',\n  ADD COLUMN `paid_completion_time` datetime DEFAULT NULL\n    COMMENT '订单完成支付(付清)时间 首次全额支付完成时记录，全部退款后不重置';";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "close_reason"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL ALTER TABLE drop column clauses with the statement", () => {
+    const sql = "ALTER TABLE t\n  DROP COLUMN a,\n  DROP COLUMN b;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "DROP COLUMN b"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL ALTER TABLE alter column clauses with the statement", () => {
+    const sql = "ALTER TABLE t\n  ALTER COLUMN name SET NOT NULL;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER COLUMN"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
   it("keeps insert-select with the INSERT statement", () => {
     const sql = "INSERT INTO archived_users (id, name)\nSELECT id, name FROM users\nUPDATE users SET archived = 1;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "archived_users"));
@@ -181,6 +251,26 @@ describe("statementRangeAtCursor", () => {
     const sql = "EXPLAIN\nSELECT * FROM users\nSELECT * FROM logs;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"));
     expect(range?.sql.trim()).toBe("EXPLAIN\nSELECT * FROM users");
+  });
+
+  it("keeps MySQL DESC UPDATE joins as one statement", () => {
+    const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "desc"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "set"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL EXPLAIN UPDATE assignments as one statement", () => {
+    const sql = "EXPLAIN UPDATE test_orders a\nJOIN test_users b ON a.id=b.id\nSET a.name = '张三'\nWHERE b.id > 10;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SET"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("does not merge a plain MySQL DESC table statement with the next query", () => {
+    const sql = "DESC users\nSELECT * FROM users;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "DESC"), "mysql")?.sql.trim()).toBe("DESC users");
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "mysql")?.sql.trim()).toBe("SELECT * FROM users");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["DESC users", "SELECT * FROM users"]);
   });
 
   it("does not include comments between soft statement blocks", () => {
@@ -230,6 +320,11 @@ describe("statementRangeAtCursor", () => {
     expect(statementRangeAtCursor(sql, indexOf(sql, "COUNT", 2), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
     expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")).toBeNull();
   });
+
+  it("returns the full Oracle PL/SQL block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
+    expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -245,6 +340,18 @@ describe("executableStatementRanges", () => {
     const ranges = executableStatementRanges(sql, "redis");
     expect(rangeSqlTexts(ranges)).toEqual(["GET user:1", "DEL user:2"]);
     expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL")]);
+  });
+
+  it("returns MongoDB command ranges for newline-separated shell commands", () => {
+    const sql = 'use archive\ndb.users.find({ status: "open" })\n  .limit(5)';
+    const ranges = executableStatementRanges(sql, "mongodb");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["use archive", 'db.users.find({ status: "open" })\n  .limit(5)']);
+    expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("db.users.find")]);
+  });
+
+  it("does not split executable Oracle PL/SQL ranges at inner statement starts", () => {
+    expect(rangeSqlTexts(executableStatementRanges(oraclePlSqlFixture, "oracle"))).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
   });
 });
 
@@ -354,6 +461,11 @@ describe("hasMultipleExecutionTargets", () => {
   it("counts MySQL delimiter scripts by executable statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(true);
+  });
+
+  it("does not show multiple targets for MySQL DESC UPDATE joins", () => {
+    const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
+    expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
   });
 });
 

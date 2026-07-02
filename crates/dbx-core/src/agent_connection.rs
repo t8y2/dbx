@@ -11,6 +11,8 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         oracle_agent_database(config, database)
+    } else if matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Vastbase) {
+        postgres_like_agent_database(config, database).to_string()
     } else if is_h2_file_connection(config) {
         h2_agent_database(config)
     } else {
@@ -395,8 +397,18 @@ fn postgres_like_agent_jdbc_connection_string(
         DatabaseType::Vastbase => "vastbase",
         _ => unreachable!("postgres-like agent JDBC URL requested for {:?}", config.db_type),
     };
-    let base = format!("jdbc:{scheme}://{host}:{port}/{}", database.trim());
+    let database = postgres_like_agent_database(config, database);
+    let base = format!("jdbc:{scheme}://{host}:{port}/{database}");
     append_agent_url_params(base, config.url_params.as_deref())
+}
+
+fn postgres_like_agent_database<'a>(config: &'a ConnectionConfig, database: &'a str) -> &'a str {
+    let database = database.trim();
+    if !database.is_empty() {
+        return database;
+    }
+    // Vastbase/PostgreSQL-compatible JDBC drivers can reject an empty catalog path.
+    config.effective_database().unwrap_or("")
 }
 
 pub fn oracle_alternate_connect_config(config: &ConnectionConfig, err: &str) -> Option<ConnectionConfig> {
@@ -684,6 +696,16 @@ mod tests {
         assert_eq!(params["port"], 9092);
         assert_eq!(params["database"], "test");
         assert_eq!(params["connection_string"], "");
+    }
+
+    #[test]
+    fn vastbase_agent_url_defaults_to_postgres_database_when_empty() {
+        let cfg = config(DatabaseType::Vastbase, Some(""));
+
+        let params = agent_connect_params(&cfg, "vastbase.example.com", 5432, "");
+
+        assert_eq!(params["database"], "postgres");
+        assert_eq!(params["connection_string"], "jdbc:vastbase://vastbase.example.com:5432/postgres");
     }
 
     #[test]

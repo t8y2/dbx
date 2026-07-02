@@ -399,6 +399,7 @@ async fn export_query_result_core_inner(
                 timeout_secs: request.timeout_secs,
                 client_session_id: request.client_session_id.clone(),
                 execution_id: request.execution_id.clone(),
+                ..Default::default()
             }
         } else {
             QueryExecutionOptions {

@@ -5,6 +5,7 @@ import {
   getSqlFunctionSignatureHelp,
   getSqlCompletionResultValidFor,
   isSqlCommentContext,
+  isSqlStringLiteralContext,
   shouldAutoOpenSqlCompletion,
   extractCteDefinitions,
   getSqlCompletionContext,
@@ -310,9 +311,10 @@ test("suggests only matching columns for an explicit alias qualifier prefix", ()
     tables,
     columnsByTable,
   });
+  const columnItems = items.filter((item) => item.type === "column");
 
   assert.deepEqual(
-    items.map((item) => [item.label, item.type, item.detail]),
+    columnItems.map((item) => [item.label, item.type, item.detail]),
     [["name", "column", "public.users  [varchar]"]],
   );
 });
@@ -448,6 +450,87 @@ test("suggests columns from referenced tables in select list", () => {
 
   assert.equal(items[0]?.label, "name");
   assert.equal(items[0]?.type, "column");
+});
+
+test("suggests all columns expansion in select list when typing a column prefix", () => {
+  const sql = "select id from public.users";
+  const cursor = "select id".length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, name, email");
+});
+
+test("qualifies all columns expansion with table aliases", () => {
+  const sql = "select id from public.users u";
+  const cursor = "select id".length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "u.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "u.id, u.name, u.email");
+});
+
+test("suggests all columns expansion for each joined table", () => {
+  const sql = "select id from public.users u join public.orders o on u.id = o.user_id";
+  const cursor = "select id".length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.equal(items.find((item) => item.type === "snippet" && item.label === "u.*")?.apply, "u.id, u.name, u.email");
+  assert.equal(items.find((item) => item.type === "snippet" && item.label === "o.*")?.apply, "o.id, o.user_id, o.status");
+});
+
+test("suggests all columns expansion after an alias qualifier in select list", () => {
+  const sql = "select u. from public.users u join public.orders o on u.id = o.user_id";
+  const cursor = "select u.".length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "u.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, u.name, u.email");
+  assert.equal(
+    items.some((item) => item.type === "snippet" && item.label === "o.*"),
+    false,
+  );
+});
+
+test("keeps all columns expansion available after an alias-qualified column prefix", () => {
+  const sql = "select u.i from public.users u join public.orders o on u.id = o.user_id";
+  const cursor = "select u.i".length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "u.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, u.name, u.email");
+});
+
+test("does not suggest all columns expansion outside select list", () => {
+  const sql = "select * from public.users u where id";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.equal(
+    items.some((item) => item.type === "snippet" && item.label === "u.*"),
+    false,
+  );
 });
 
 test("suggests tables after LEFT JOIN", () => {
@@ -650,6 +733,38 @@ test("suggests SQL Server IIF and CHOOSE scalar functions", () => {
   );
 });
 
+test("suggests SQL Server IDENTITY_INSERT after SET", () => {
+  const sql = "set  iden";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "sqlserver",
+  });
+
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "IDENTITY_INSERT"));
+});
+
+test("suggests common SQL Server SET options", () => {
+  for (const [sql, expected] of [
+    ["set noc", "NOCOUNT"],
+    ["set xact", "XACT_ABORT"],
+    ["set ansi", "ANSI_NULLS"],
+    ["set stat", "STATISTICS IO"],
+    ["set transaction iso", "TRANSACTION ISOLATION LEVEL"],
+  ] as const) {
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables,
+      columnsByTable,
+      databaseType: "sqlserver",
+    });
+
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === expected),
+      `${expected} should appear for ${sql}`,
+    );
+  }
+});
+
 test("suggests SQL Server data types in CREATE TABLE column definitions", () => {
   const sql = "CREATE TABLE dbo.jobs (id ";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -682,6 +797,29 @@ test("does not auto-open completion inside SQL comments", () => {
   assert.equal(isSqlCommentContext("select /* comment */ val", "select /* comment */ val".length), false);
   assert.equal(shouldAutoOpenSqlCompletion("select '-- not comment' as value", "select '-- not comment' as value".length), true);
   assert.equal(shouldAutoOpenSqlCompletion("select /* comment */ val", "select /* comment */ val".length), true);
+});
+
+test("does not auto-open or build metadata completion inside SQL string literals", () => {
+  const likeSql = "select * from orders where status like '%9250%'";
+  const likeCursor = "select * from orders where status like '%9250%".length;
+  assert.equal(isSqlStringLiteralContext(likeSql, likeCursor), true);
+  assert.equal(shouldAutoOpenSqlCompletion(likeSql, likeCursor), false);
+  assert.deepEqual(
+    buildSqlCompletionItems(likeSql, likeCursor, {
+      tables,
+      columnsByTable,
+    }),
+    [],
+  );
+
+  const escapedQuoteSql = "select * from orders where status = 'it''s 9250'";
+  const escapedQuoteCursor = "select * from orders where status = 'it''s 9250".length;
+  assert.equal(isSqlStringLiteralContext(escapedQuoteSql, escapedQuoteCursor), true);
+  assert.equal(shouldAutoOpenSqlCompletion(escapedQuoteSql, escapedQuoteCursor), false);
+
+  const afterLiteralSql = "select '-- not comment' as value";
+  assert.equal(isSqlStringLiteralContext(afterLiteralSql, afterLiteralSql.length), false);
+  assert.equal(shouldAutoOpenSqlCompletion(afterLiteralSql, afterLiteralSql.length), true);
 });
 
 test("auto-opens completion after word characters and explicit dot qualifiers", () => {
@@ -792,6 +930,61 @@ test("suggests SQL snippets for common abbreviations", () => {
   assert.equal(snippet.apply, "SELECT *\nFROM ${table}\nLIMIT 100;");
 });
 
+test("prioritizes FROM after SELECT star when typing the keyword", () => {
+  const sql = "SELECT * f";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "FROM");
+});
+
+test("prioritizes referenced columns in WHERE conditions", () => {
+  const sql = "SELECT * FROM public.users WHERE i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "id");
+});
+
+test("prioritizes LIMIT after SELECT WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 l";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "LIMIT");
+});
+
+test("prioritizes AND after a completed WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 a";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "AND");
+});
+
+test("prioritizes OR after a completed WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 o";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "OR");
+});
+
 test("applies keyword case to built-in SQL snippets", () => {
   const items = buildSqlCompletionItems("sel", 3, {
     tables,
@@ -832,6 +1025,63 @@ test("suggests stored procedures after CALL", () => {
   assert.equal(procedure.apply, "app.refresh_user_stats()");
   assert.equal(
     items.some((item) => item.label === "format_user_name"),
+    false,
+  );
+});
+
+test("prioritizes referenced table columns in WHERE field input", () => {
+  const sql = "select * from A1User WHERE userc";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "A1User", schema: "dbo", type: "table" }],
+    objects: [
+      { name: "P1UserCodeGenerate", schema: "dbo", type: "procedure" },
+      { name: "F22UserAccUnit", schema: "dbo", type: "function" },
+    ],
+    columnsByTable: new Map([
+      [
+        "dbo.A1User",
+        [
+          { name: "UserCode", table: "A1User", schema: "dbo", dataType: "varchar" },
+          { name: "UserName", table: "A1User", schema: "dbo", dataType: "varchar" },
+        ],
+      ],
+      ["dbo.OtherUserTable", [{ name: "UserCheck", table: "OtherUserTable", schema: "dbo", dataType: "varchar" }]],
+    ]),
+    databaseType: "sqlserver",
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type]),
+    [["UserCode", "column"]],
+  );
+});
+
+test("keeps snippets below matching WHERE field columns", () => {
+  const sql = "select * from demo_2000_tables.t_0001 WHERE i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "t_0001", schema: "demo_2000_tables", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "demo_2000_tables.t_0001",
+        [
+          { name: "id", table: "t_0001", schema: "demo_2000_tables", dataType: "int", comment: "注释test" },
+          { name: "image_url", table: "t_0001", schema: "demo_2000_tables", dataType: "varchar(512)", comment: "xixixi" },
+          { name: "image_mime", table: "t_0001", schema: "demo_2000_tables", dataType: "varchar(64)", comment: "hahaha" },
+        ],
+      ],
+    ]),
+  });
+
+  assert.deepEqual(
+    items.slice(0, 3).map((item) => [item.label, item.type]),
+    [
+      ["id", "column"],
+      ["image_url", "column"],
+      ["image_mime", "column"],
+    ],
+  );
+  assert.equal(
+    items.some((item) => item.type === "snippet" && item.label === "insert into"),
     false,
   );
 });

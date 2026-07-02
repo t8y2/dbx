@@ -12,7 +12,7 @@ interface FormatState {
   stack: Array<{ char: string; expanded: boolean; chainCall?: boolean }>;
 }
 
-const CHAIN_METHODS = new Set(["find", "findOne", "aggregate", "countDocuments", "distinct", "insertOne", "insertMany", "updateOne", "updateMany", "deleteOne", "deleteMany", "getIndexes", "createIndex", "sort", "limit", "skip"]);
+const CHAIN_METHODS = new Set(["find", "findOne", "aggregate", "countDocuments", "distinct", "insertOne", "insertMany", "updateOne", "updateMany", "deleteOne", "deleteMany", "getIndexes", "createIndex", "dropIndex", "dropIndexes", "sort", "limit", "skip"]);
 
 export function formatMongoShellText(text: string, settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): string {
   if (!text.trim()) return text;

@@ -9,6 +9,7 @@ export interface CanvasDataGridRow {
   displayIndex: number;
   data: CellValue[];
   isNew: boolean;
+  isDraft?: boolean;
   isDeleted: boolean;
   isDirtyCol: boolean[];
   status: RowStatus;
@@ -50,6 +51,7 @@ export interface DrawCanvasDataGridOptions {
   searchMatchKeys: ReadonlySet<string>;
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number) => string;
+  draftCellPlaceholder?: string;
   isRowActive: (rowIndex: number) => boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
@@ -222,6 +224,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     searchMatchKeys,
     currentSearchMatch,
     formatCell,
+    draftCellPlaceholder,
     isRowActive,
     rowCellsUseSelectionVisual,
     cellIsSelected,
@@ -275,13 +278,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     const y = rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop;
     const rowIsActive = isRowActive(item.displayIndex);
 
-    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.isDraft && !rowIsActive ? theme.rowMuted : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
     const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
     ctx.fillStyle = rowIsActive && !item.isDeleted ? theme.cellSelectedSingle : rowBase;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
-    const rowNumberFill = item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
+    const rowNumberFill = item.status === "draft" ? theme.rowNumberDefault : item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.strokeStyle = theme.border;
@@ -292,10 +295,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
     const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : theme.rowNumberTextClean;
     ctx.fillStyle = rowNumberText;
-    ctx.font = item.status === "new" || item.status === "edited" ? semiboldFont : normalFont;
+    ctx.font = item.status === "new" || item.status === "edited" || item.status === "draft" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
     const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
-    if (infiniteScrollEnabled) {
+    if (item.isDraft) {
+      ctx.fillText("*", rowNumberTextX, textY);
+    } else if (infiniteScrollEnabled) {
       ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
     } else {
       ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
@@ -367,10 +372,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         ctx.font = value === null ? italicFont : tabularFont;
         setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
         const textLeft = alignCanvasPixel(x + 12, dpr);
-        const textMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
+        const paddedMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
         const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
-        const displayText = isEditingThisCell ? "" : formatCell(value, actualColIdx);
-        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth);
+        const displayText = isEditingThisCell ? "" : item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
+        const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
+        const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
+        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
         ctx.fillText(text, textLeft, textY);
         if (item.isDeleted && text) {
           const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);

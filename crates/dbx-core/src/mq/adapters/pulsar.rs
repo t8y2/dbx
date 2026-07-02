@@ -439,7 +439,13 @@ impl MessageQueueAdmin for PulsarAdmin {
         self.send_empty(reqwest::Method::POST, &path, None, None).await
     }
 
-    async fn peek_messages(&self, topic: &TopicRef, sub: &str, count: u32) -> Result<Vec<PeekedMessage>, String> {
+    async fn peek_messages(
+        &self,
+        topic: &TopicRef,
+        sub: &str,
+        count: u32,
+        _options: PeekMessagesOptions,
+    ) -> Result<Vec<PeekedMessage>, String> {
         if count == 0 {
             return Ok(Vec::new());
         }

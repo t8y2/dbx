@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -9,6 +10,7 @@ use super::connection::AppState;
 use super::connection::ensure_connection_writable;
 
 const BIND_ADDR: &str = "127.0.0.1:0";
+const MCP_BRIDGE_PORT_FILE: &str = "mcp-bridge-port";
 
 #[derive(Deserialize)]
 struct OpenTableRequest {
@@ -51,7 +53,14 @@ struct MongoFindDocumentsRequest {
     skip: Option<u64>,
     limit: Option<i64>,
     filter: Option<String>,
+    projection: Option<String>,
     sort: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MongoServerVersionRequest {
+    connection_name: String,
+    database: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +70,24 @@ struct MongoAggregateDocumentsRequest {
     collection: String,
     pipeline_json: String,
     max_rows: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct MongoCreateIndexRequest {
+    connection_name: String,
+    database: Option<String>,
+    collection: String,
+    keys_json: String,
+    options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MongoDropIndexesRequest {
+    connection_name: String,
+    database: Option<String>,
+    collection: String,
+    indexes_json: Option<String>,
+    single: bool,
 }
 
 #[derive(Deserialize)]
@@ -115,7 +142,7 @@ pub struct McpExecuteQueryEvent {
     pub allow_dangerous: bool,
 }
 
-pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
+pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
     tauri::async_runtime::spawn(async move {
         let listener = match TcpListener::bind(BIND_ADDR).await {
             Ok(l) => l,
@@ -127,8 +154,9 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
         log::info!("MCP bridge listening on {BIND_ADDR}");
         let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
         log::info!("MCP bridge assigned port {actual_port}");
-        if let Ok(dir) = app_handle.path().app_data_dir() {
-            let _ = std::fs::write(dir.join("mcp-bridge-port"), actual_port.to_string());
+        // Publish into DBX's resolved data dir so DBX_DATA_DIR and portable mode share the same discovery file.
+        if let Err(err) = write_port_file(&data_dir, actual_port) {
+            log::warn!("MCP bridge failed to write port file in {}: {err}", data_dir.display());
         }
         loop {
             let (mut stream, _) = match listener.accept().await {
@@ -157,8 +185,14 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
                     handle_mongo_list_collections_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/find-documents") {
                     handle_mongo_find_documents_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/mongo/server-version") {
+                    handle_mongo_server_version_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/aggregate-documents") {
                     handle_mongo_aggregate_documents_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/mongo/create-index") {
+                    handle_mongo_create_index_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/mongo/drop-indexes") {
+                    handle_mongo_drop_indexes_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/insert-documents") {
                     handle_mongo_insert_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/update-documents") {
@@ -182,11 +216,43 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>) {
     });
 }
 
+fn write_port_file(data_dir: &Path, actual_port: u16) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join(MCP_BRIDGE_PORT_FILE);
+    std::fs::write(&path, actual_port.to_string())?;
+    Ok(path)
+}
+
 fn find_config_by_name<'a>(
     configs: &'a [crate::models::connection::ConnectionConfig],
     name: &str,
 ) -> Option<&'a crate::models::connection::ConnectionConfig> {
     configs.iter().find(|c| c.name.eq_ignore_ascii_case(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_port_file;
+
+    #[test]
+    fn writes_bridge_port_file_to_resolved_data_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "dbx-mcp-bridge-port-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let default_data_dir = root.join("default-app-data");
+        let resolved_data_dir = root.join("resolved-data");
+        std::fs::create_dir_all(&default_data_dir).unwrap();
+
+        let port_file = write_port_file(&resolved_data_dir, 49152).unwrap();
+
+        assert_eq!(port_file, resolved_data_dir.join("mcp-bridge-port"));
+        assert_eq!(std::fs::read_to_string(port_file).unwrap(), "49152");
+        assert!(!default_data_dir.join("mcp-bridge-port").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
@@ -410,11 +476,31 @@ async fn handle_mongo_find_documents_data(state: &Arc<AppState>, body: &str, str
         req.skip.unwrap_or(0),
         req.limit.unwrap_or(100),
         req.filter.as_deref(),
+        req.projection.as_deref(),
         req.sort.as_deref(),
     )
     .await
     {
         Ok(result) => respond_json(stream, &result).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_mongo_server_version_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: MongoServerVersionRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some((pool_key, database, _connection_id)) =
+        resolve_mongo_pool_key(state, &req.connection_name, req.database, stream).await
+    else {
+        return;
+    };
+    match dbx_core::mongo_ops::mongo_server_version_core(state, &pool_key, &database).await {
+        Ok(version) => respond_json(stream, &version).await,
         Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
     }
 }
@@ -439,6 +525,70 @@ async fn handle_mongo_aggregate_documents_data(state: &Arc<AppState>, body: &str
         &req.collection,
         &req.pipeline_json,
         req.max_rows,
+    )
+    .await
+    {
+        Ok(result) => respond_json(stream, &result).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_mongo_create_index_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: MongoCreateIndexRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some((pool_key, database, connection_id)) =
+        resolve_mongo_pool_key(state, &req.connection_name, req.database, stream).await
+    else {
+        return;
+    };
+    if let Err(e) = ensure_connection_writable(state, &connection_id, "Create index").await {
+        respond_error(stream, "403 Forbidden", &e).await;
+        return;
+    }
+    match dbx_core::mongo_ops::mongo_create_index_core(
+        state,
+        &pool_key,
+        &database,
+        &req.collection,
+        &req.keys_json,
+        req.options_json.as_deref(),
+    )
+    .await
+    {
+        Ok(name) => respond_json(stream, &serde_json::json!({ "name": name })).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_mongo_drop_indexes_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: MongoDropIndexesRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some((pool_key, database, connection_id)) =
+        resolve_mongo_pool_key(state, &req.connection_name, req.database, stream).await
+    else {
+        return;
+    };
+    if let Err(e) = ensure_connection_writable(state, &connection_id, "Drop indexes").await {
+        respond_error(stream, "403 Forbidden", &e).await;
+        return;
+    }
+    match dbx_core::mongo_ops::mongo_drop_indexes_core(
+        state,
+        &pool_key,
+        &database,
+        &req.collection,
+        req.indexes_json.as_deref(),
+        req.single,
     )
     .await
     {

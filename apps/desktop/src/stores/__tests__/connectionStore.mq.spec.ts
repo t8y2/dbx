@@ -33,6 +33,28 @@ function mqConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function kafkaConnection(): ConnectionConfig {
+  return {
+    ...mqConnection(),
+    name: "Apache Kafka",
+    driver_profile: "kafka",
+    driver_label: "Apache Kafka",
+    external_config: {
+      systemKind: "kafka",
+      adminUrl: "",
+      auth: { kind: "none" },
+      extra: { bootstrapServers: "127.0.0.1:9092" },
+    },
+  } as ConnectionConfig;
+}
+
+function kafkaExternalConfigOnlyConnection(): ConnectionConfig {
+  const connection = kafkaConnection();
+  delete connection.driver_profile;
+  delete connection.driver_label;
+  return connection;
+}
+
 describe("connectionStore MQ sidebar tree", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -83,6 +105,72 @@ describe("connectionStore MQ sidebar tree", () => {
     expect(node.isExpanded).toBe(true);
   });
 
+  it("adds a Kafka topics child with a topics initial tab", async () => {
+    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      mqListTenants: vi.fn(),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = kafkaConnection();
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    await store.refreshTreeNode(node);
+
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_kafka", initialTab: "topics" }]);
+  });
+
+  it("detects Kafka from external config when driver profile is missing", async () => {
+    const mqListTenants = vi.fn();
+    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      mqListTenants,
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = kafkaExternalConfigOnlyConnection();
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    await store.refreshTreeNode(node);
+
+    expect(mqListTenants).not.toHaveBeenCalled();
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_kafka", initialTab: "topics" }]);
+  });
+
   it("reuses an in-flight connection attempt instead of recording stale superseded errors", async () => {
     let resolveConnect: ((value: string) => void) | undefined;
     const connectDb = vi.fn(
@@ -124,10 +212,12 @@ describe("connectionStore MQ sidebar tree", () => {
 
     const firstTabId = queryStore.openMqAdmin("mq-1", { tenant: "public" });
     expect(queryStore.tabs.find((tab) => tab.id === firstTabId)?.mqTenant).toBe("public");
+    expect(queryStore.tabs.find((tab) => tab.id === firstTabId)?.mqInitialTab).toBeUndefined();
 
-    const secondTabId = queryStore.openMqAdmin("mq-1", { tenant: "tenant-a" });
+    const secondTabId = queryStore.openMqAdmin("mq-1", { tenant: "tenant-a", initialTab: "topics" });
     expect(secondTabId).toBe(firstTabId);
     expect(queryStore.tabs.find((tab) => tab.id === firstTabId)?.mqTenant).toBe("tenant-a");
+    expect(queryStore.tabs.find((tab) => tab.id === firstTabId)?.mqInitialTab).toBe("topics");
   });
 
   it("preserves the selected tenant when duplicating an MQ admin tab", async () => {

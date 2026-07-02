@@ -63,6 +63,8 @@ function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<Shortcut
   return normalizeShortcutSettings(shortcuts)[actionId];
 }
 
+const SWITCH_TO_TAB_ACTIONS: ShortcutActionId[] = ["switchToTab1", "switchToTab2", "switchToTab3", "switchToTab4", "switchToTab5", "switchToTab6", "switchToTab7", "switchToTab8", "switchToTab9"];
+
 export function isExecuteSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("executeSql", shortcuts));
 }
@@ -146,6 +148,20 @@ export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Pa
 
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
+}
+
+export function isSwitchToPreviousTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("switchToPreviousTab", shortcuts));
+}
+
+export function isSwitchToNextTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("switchToNextTab", shortcuts));
+}
+
+export function switchToTabIndexFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): number | null {
+  const normalized = normalizeShortcutSettings(shortcuts);
+  const index = SWITCH_TO_TAB_ACTIONS.findIndex((actionId) => matchesShortcut(event, normalized[actionId]));
+  return index >= 0 ? index : null;
 }
 
 export function isBrowserReloadShortcut(event: ShortcutLikeEvent): boolean {

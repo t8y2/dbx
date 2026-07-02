@@ -37,6 +37,7 @@ fn qualifies_schema_only_for_schema_aware_databases() {
         qualified_table_name(Some(DatabaseType::Xugu), Some("DBX_TEST"), "PRODUCTS"),
         "\"DBX_TEST\".\"PRODUCTS\""
     );
+    assert_eq!(qualified_table_name(Some(DatabaseType::Oscar), Some("SYSDBA"), "EMPLOYEE"), "\"SYSDBA\".\"EMPLOYEE\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");
     assert_eq!(qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "device2"), "root.test.device2");
     assert_eq!(
@@ -64,9 +65,18 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::OceanbaseOracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
         TablePaginationStrategy::FetchFirst
+    );
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Oscar), PaginationContext::BoundedRead),
+        TablePaginationStrategy::Rownum
+    );
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Oscar), PaginationContext::UserQuery),
+        TablePaginationStrategy::Unbounded
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::UserQuery),

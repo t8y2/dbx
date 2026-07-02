@@ -31,9 +31,7 @@ jobs:
           PREV_TAG=$(git tag --sort=-creatordate | grep '^agents-v' | sed -n '2p')
           SKIP_BUMP=false
           MIGRATED_FIRST_RELEASE=false
-
-          VERSIONS=$(cat agents/versions.json)
-          PREV_VERSIONS="$VERSIONS"
+          PREV_VERSIONS_FILE=""
 
           if [ -z "$PREV_TAG" ]; then
             echo "No previous agents-v tag found; treating this as the first migrated agents release"
@@ -41,7 +39,8 @@ jobs:
 
             TMP_LEGACY="$(mktemp -d)"
             git clone --depth 1 --branch "$LEGACY_BASE_TAG" "$LEGACY_REPO" "$TMP_LEGACY"
-            PREV_VERSIONS=$(cat "$TMP_LEGACY/versions.json")
+            PREV_VERSIONS_FILE="$(mktemp)"
+            cp "$TMP_LEGACY/versions.json" "$PREV_VERSIONS_FILE"
             rm -rf "$TMP_LEGACY"
 
             SKIP_BUMP=true
@@ -49,63 +48,17 @@ jobs:
           fi
           echo "Comparing $PREV_TAG..HEAD"
 
-          if [ "$SKIP_BUMP" != "true" ] && ! git diff --quiet "$PREV_TAG"..HEAD -- agents/versions.json 2>/dev/null; then
-            echo "Manual agents/versions.json bump detected; using it as the release version source."
-            PREV_VERSIONS=$(git show "$PREV_TAG:agents/versions.json")
-            SKIP_BUMP=true
-          fi
-
-          CHANGED=false
-
+          ARGS=(--prev-tag "$PREV_TAG" --migrated-first-release "$MIGRATED_FIRST_RELEASE" --write)
           if [ "$SKIP_BUMP" = "true" ]; then
-            echo "Skipping automatic module version bump for migrated first release; versions.json was carried over from dbx-agents."
-          else
-            for dir in $(echo "$VERSIONS" | python3 -c "import sys,json; [print(k) for k in json.load(sys.stdin)]"); do
-              if [ "$dir" = "oracle" ] && [ -d "agents/drivers/oracle-go" ]; then
-                CHECK_DIR="drivers/oracle-go"
-              elif [ -d "agents/drivers/$dir" ]; then
-                CHECK_DIR="drivers/$dir"
-              elif [ -d "agents/$dir" ] || [ "$dir" = "common" ]; then
-                CHECK_DIR="$dir"
-              else
-                continue
-              fi
-              DIFF_PATHS=("agents/$CHECK_DIR/")
-                # common changes affect all modules
-                if git diff --quiet "$PREV_TAG"..HEAD -- agents/common/ 2>/dev/null; then
-                  COMMON_CHANGED=false
-                else
-                  COMMON_CHANGED=true
-                fi
-
-                if git diff --quiet "$PREV_TAG"..HEAD -- "${DIFF_PATHS[@]}" 2>/dev/null && [ "$COMMON_CHANGED" = "false" ]; then
-                  echo "  $dir: no changes"
-                else
-                  echo "  $dir: CHANGED"
-                  OLD_VER=$(echo "$VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$dir','0.1.0'))")
-                  IFS='.' read -r major minor patch <<< "$OLD_VER"
-                  NEW_VER="$major.$minor.$((patch + 1))"
-                  VERSIONS=$(echo "$VERSIONS" | python3 -c "
-          import sys, json
-          d = json.load(sys.stdin)
-          d['$dir'] = '$NEW_VER'
-          json.dump(d, sys.stdout, indent=2)
-          print()
-          ")
-                  CHANGED=true
-                  echo "  $dir: $OLD_VER -> $NEW_VER"
-                fi
-            done
+            ARGS+=(--skip-bump)
+          fi
+          if [ -n "$PREV_VERSIONS_FILE" ]; then
+            ARGS+=(--prev-versions-file "$PREV_VERSIONS_FILE")
           fi
 
-          echo "$VERSIONS" > agents/versions.json
-          cat agents/versions.json
-          echo "versions=$(cat agents/versions.json | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
-          echo "prev_versions=$(echo "$PREV_VERSIONS" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
-          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
-          echo "migrated_first_release=$MIGRATED_FIRST_RELEASE" >> "$GITHUB_OUTPUT"
+          node .github/scripts/bump-agent-versions.mjs "${ARGS[@]}"
 
-          if [ "$CHANGED" = "true" ]; then
+          if ! git diff --quiet -- agents/versions.json; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add agents/versions.json

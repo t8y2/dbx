@@ -1,5 +1,8 @@
 import type { QueryTab } from "@/types/database";
 
+export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
+export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
+
 export interface SavedQueryResultRun {
   id: string;
   title: string;
@@ -35,12 +38,14 @@ export interface SavedOpenTab {
   pinned?: boolean;
   mode?: QueryTab["mode"];
   mqTenant?: string;
+  mqInitialTab?: QueryTab["mqInitialTab"];
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   tableMeta?: QueryTab["tableMeta"];
+  mongoEditTarget?: QueryTab["mongoEditTarget"];
   resultEvicted?: boolean;
   resultCacheKey?: string;
   resultRuns?: SavedQueryResultRun[];
@@ -53,9 +58,18 @@ export interface RestoredOpenTabs {
   activeTabId: string | null;
 }
 
+export type OpenTabsRestoreFilter = "all" | "pinned";
+
 function shouldPersistTabSql(tab: QueryTab) {
   if (!tab.savedSqlId) return true;
   return tab.originalSql !== undefined && tab.sql !== tab.originalSql;
+}
+
+function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
+  if (mode !== "query") return undefined;
+  if (tab.externalSqlPath) return sql;
+  if (tab.savedSqlId) return sql ? "" : undefined;
+  return "";
 }
 
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
@@ -83,12 +97,14 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     pinned: tab.pinned,
     mode: tab.mode,
     ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
+    ...(tab.mqInitialTab !== undefined ? { mqInitialTab: tab.mqInitialTab } : {}),
     ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
     ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     tableMeta: tab.tableMeta,
+    ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
     ...(tab.mode === "query" && tab.resultRuns?.length
@@ -116,7 +132,7 @@ function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");
 }
 
-export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean } = {}): RestoredOpenTabs {
+export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
   if (!rawTabs) return { tabs: [], activeTabId: null };
 
   try {
@@ -124,7 +140,11 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
     if (!Array.isArray(parsed)) return { tabs: [], activeTabId: null };
 
     const saved = parsed.filter(isSavedOpenTab);
-    const filtered = options.queryOnly ? saved.filter((tab) => (tab.mode ?? "query") === "query") : saved;
+    const filtered = saved.filter((tab) => {
+      if (options.queryOnly && (tab.mode ?? "query") !== "query") return false;
+      if (options.filter === "pinned" && !tab.pinned) return false;
+      return true;
+    });
     const tabs: QueryTab[] = filtered.map((tab) => {
       const mode = tab.mode ?? "query";
       const resultRuns =
@@ -146,7 +166,7 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
         editorViewport: undefined,
         editorSelection: undefined,
         isExplaining: false,
-        originalSql: mode === "query" && tab.externalSqlPath ? tab.sql : mode === "query" && tab.savedSqlId && tab.sql ? "" : undefined,
+        originalSql: restoredOriginalSql(tab, mode, typeof tab.sql === "string" ? tab.sql : ""),
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,
         resultCacheKey: mode === "data" ? undefined : tab.resultCacheKey,
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,

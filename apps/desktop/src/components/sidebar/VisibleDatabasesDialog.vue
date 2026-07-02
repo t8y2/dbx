@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
 import * as api from "@/lib/api";
 
 const props = defineProps<{
@@ -43,7 +43,7 @@ const loadFailedKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas
 const listedObjectNames = computed(() => {
   if (isSchemaFilterMode.value) return objectNames.value;
   if (showSystemDatabases.value) return objectNames.value;
-  return filterDatabaseNamesForConnection(objectNames.value, connection.value);
+  return filterDatabaseNamesForVisiblePicker(objectNames.value, connection.value);
 });
 const filteredObjectNames = computed(() => {
   const query = searchText.value.trim().toLowerCase();

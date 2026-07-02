@@ -13,6 +13,16 @@ interface SavedSqlState {
   files: SavedSqlFile[];
 }
 
+interface SaveFileInput {
+  id?: string;
+  connectionId: string;
+  folderId?: string;
+  name: string;
+  database: string;
+  schema?: string;
+  sql: string;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -206,13 +216,16 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     await syncToLocalDirectory();
   }
 
-  async function saveFile(input: { id?: string; connectionId: string; folderId?: string; name: string; database: string; schema?: string; sql: string }) {
+  async function saveFile(input: SaveFileInput) {
     const timestamp = nowIso();
     const existing = input.id ? getFile(input.id) : undefined;
+    const hasFolderIdInput = Object.prototype.hasOwnProperty.call(input, "folderId");
     const file: SavedSqlFile = existing
       ? {
           ...existing,
-          folderId: input.folderId || undefined,
+          // Partial metadata updates should not move files out of their folder.
+          // Callers that intentionally move to root pass `folderId: undefined`.
+          folderId: hasFolderIdInput ? input.folderId || undefined : existing.folderId,
           name: input.name,
           database: input.database,
           schema: input.schema,

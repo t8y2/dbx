@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { matchesRowStatusFilter, rowStatusFilterAfterAddingRow, type RowStatus } from "../../apps/desktop/src/lib/gridRowStatus.ts";
+import { canApplyGridSelectionValue, matchesRowStatusFilter, rowStatusFilterAfterAddingRow, type RowStatus } from "../../apps/desktop/src/lib/gridRowStatus.ts";
 
 const statuses: RowStatus[] = ["clean", "edited", "new", "deleted"];
 
@@ -34,4 +34,10 @@ test("adding a row switches filters that would hide new rows back to all", () =>
   assert.equal(rowStatusFilterAfterAddingRow("edited"), "all");
   assert.equal(rowStatusFilterAfterAddingRow("changed"), "changed");
   assert.equal(rowStatusFilterAfterAddingRow("new"), "new");
+});
+
+test("selection value fill skips quick entry draft rows", () => {
+  assert.equal(canApplyGridSelectionValue({ isDraft: false }), true);
+  assert.equal(canApplyGridSelectionValue({ isDraft: true }), false);
+  assert.equal(canApplyGridSelectionValue({ isDraft: true, allowDraft: true }), true);
 });

@@ -1,7 +1,9 @@
 import * as api from "@/lib/api";
-import { connectionObjectTreeQuerySchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
+import { isNoSnapshotErrorResult } from "@/lib/queryResultError";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
+import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -20,7 +22,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
-  const pageLimit = settingsStore.editorSettings.pageSize;
+  const pageLimit = tableOpenPageLimit();
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
@@ -52,7 +54,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     await connectionStore.ensureConnected(target.connectionId);
     if (!config) throw new Error("Connection config not found");
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-    const querySchema = connectionObjectTreeQuerySchema(config, target.database, target.schema);
+    const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
     if (config.db_type === "neo4j") {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
       const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns);
@@ -73,7 +75,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         columns,
         primaryKeys,
       });
-      await queryStore.executeTabSql(tabId, sql);
+      await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
       return;
     }
     const sql = await buildTableSelectSql({
@@ -91,7 +93,25 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       columns: [],
       primaryKeys: [],
     });
-    await queryStore.executeTabSql(tabId, sql);
+    await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
+    // executeTabSql surfaces query failures as an "Error" result instead of throwing.
+    // A snapshot-less lake table fails the data preview above but its metadata still
+    // reads fine — retry with LIMIT 0 so the user sees the table structure (columns +
+    // empty grid) rather than a cryptic server error. The flag also skips the
+    // synthetic-row-id re-query below, which is another data read that would fail
+    // the same way on a snapshot-less table.
+    const fellBackToLimitZero = isNoSnapshotErrorResult(queryStore.tabs.find((tab) => tab.id === tabId)?.result);
+    if (fellBackToLimitZero) {
+      const emptySql = await buildTableSelectSql({
+        databaseType: effectiveDbType,
+        schema: target.schema,
+        tableName: target.tableName,
+        whereInput: target.whereInput,
+        limit: 0,
+      });
+      queryStore.updateSql(tabId, emptySql);
+      await queryStore.executeTabSql(tabId, emptySql, { pagination: { limit: pageLimit, offset: 0 } });
+    }
     try {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
       const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName).catch(() => []);
@@ -104,7 +124,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         columns,
         primaryKeys,
       });
-      if (useRowId || config.db_type === "tdengine") {
+      if (!fellBackToLimitZero && (useRowId || config.db_type === "tdengine")) {
         const newSql = await buildTableSelectSql({
           databaseType: effectiveDbType,
           schema: target.schema,
@@ -116,7 +136,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
           limit: pageLimit,
         });
         queryStore.updateSql(tabId, newSql);
-        await queryStore.executeTabSql(tabId, newSql);
+        await queryStore.executeTabSql(tabId, newSql, { pagination: { limit: pageLimit, offset: 0 } });
       }
     } catch (reason) {
       console.error("[DBX] ERROR fetching table metadata:", reason);
@@ -157,7 +177,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     for (const tab of matchingDataTabs) {
       try {
         const connection = connectionStore.getConfig(tab.connectionId);
-        const metadataSchema = connectionObjectTreeQuerySchema(connection, tab.database, tab.tableMeta?.schema);
+        const metadataSchema = metadataSchemaForConnection(connection, tab.database, tab.tableMeta?.schema);
         const columns = await api.getColumns(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName);
         const indexes = await api.listIndexes(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName).catch(() => []);
         queryStore.setTableMeta(tab.id, {

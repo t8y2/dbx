@@ -1,4 +1,5 @@
 import type { ConnectionConfig, ProxyTunnelConfig } from "./connections.js";
+import type { SslOptions } from "mysql2";
 import { createServer, connect as netConnect, type Server, type Socket } from "node:net";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -148,12 +149,15 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
 
   const mysql = await import("mysql2/promise");
   const endpoint = await connectionEndpoint(config);
-  const pool = mysql.default.createPool({
+  const poolOptions: import("mysql2/promise").PoolOptions = {
     uri: buildConnectionUrl(config, endpoint),
     connectionLimit: 3,
     idleTimeout: 30_000,
     connectTimeout: 10_000,
-  });
+  };
+  const tls = await mysqlTlsOptions(config);
+  if (tls) poolOptions.ssl = tls;
+  const pool = mysql.default.createPool(poolOptions);
   const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
   pools.set(key, entry);
   resetIdleTimer(key, entry);
@@ -209,7 +213,7 @@ async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: str
 export function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
   const db = config.database || "";
   if (isMysqlType(config.db_type)) {
-    const params = config.url_params || "";
+    const params = buildMysqlUrlParams(config);
     const suffix = params ? `?${params}` : "";
     return `mysql://${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@${endpoint.host}:${endpoint.port}/${db}${suffix}`;
   }
@@ -394,6 +398,158 @@ function portBytes(port: number): Buffer {
 
 function isMysqlType(dbType: string): boolean {
   return dbType === "mysql" || dbType === "doris" || dbType === "starrocks" || dbType === "manticoresearch";
+}
+
+function isStarrocksConnection(config: ConnectionConfig): boolean {
+  return config.db_type === "starrocks" || config.driver_profile?.toLowerCase() === "starrocks";
+}
+
+function needsBareMysql(config: ConnectionConfig): boolean {
+  const profile = config.driver_profile?.toLowerCase();
+  return (
+    config.db_type === "doris" ||
+    config.db_type === "starrocks" ||
+    config.db_type === "manticoresearch" ||
+    profile === "doris" ||
+    profile === "starrocks" ||
+    profile === "manticoresearch" ||
+    profile === "selectdb" ||
+    profile === "oceanbase"
+  );
+}
+
+function mysqlTlsFileParamIs(key: string, target: "cert" | "key"): boolean {
+  return key.toLowerCase().replace(/[-_]/g, "") === `ssl${target}`;
+}
+
+function mysqlUrlParamsRequireTls(params: string): boolean {
+  for (const part of params.trim().replace(/^\?/, "").split("&")) {
+    if (!part) continue;
+    const [rawKey, rawValue = ""] = splitUrlParam(part);
+    const key = decodeUrlParamPart(rawKey);
+    const value = decodeUrlParamPart(rawValue);
+    if (key.toLowerCase() === "require_ssl" && value.toLowerCase() === "true") return true;
+    if (mysqlTlsFileParamIs(key, "cert") || mysqlTlsFileParamIs(key, "key")) return true;
+    if (key.toLowerCase() === "ssl-mode" || key.toLowerCase() === "sslmode") {
+      const mode = value.toLowerCase().replace(/-/g, "_");
+      if (mode === "required" || mode === "require" || mode === "verify_ca" || mode === "verify_identity") return true;
+    }
+  }
+  return false;
+}
+
+function mysqlUrlParamsTlsDisabled(params: string): boolean {
+  for (const part of params.trim().replace(/^\?/, "").split("&")) {
+    if (!part) continue;
+    const [rawKey, rawValue = ""] = splitUrlParam(part);
+    const key = decodeUrlParamPart(rawKey).toLowerCase();
+    const value = decodeUrlParamPart(rawValue).toLowerCase();
+    if (key === "require_ssl" && value === "false") return true;
+    if ((key === "ssl-mode" || key === "sslmode") && (value === "disabled" || value === "disable")) return true;
+  }
+  return false;
+}
+
+function mysqlUsesTls(config: ConnectionConfig): boolean {
+  return !!config.ssl || mysqlUrlParamsRequireTls(config.url_params || "");
+}
+
+function bareMysqlUsesTls(config: ConnectionConfig): boolean {
+  if (!isStarrocksConnection(config)) {
+    return false;
+  }
+  if (mysqlUrlParamsTlsDisabled(config.url_params || "")) {
+    return false;
+  }
+  return mysqlUsesTls(config);
+}
+
+function normalizeBareMysqlUrlParams(value: string): string {
+  return value
+    .trim()
+    .replace(/^\?/, "")
+    .split("&")
+    .filter((part) => {
+      if (!part) return false;
+      const key = decodeUrlParamPart(splitUrlParam(part)[0]).toLowerCase();
+      return (
+        key !== "charset" &&
+        key !== "ssl-mode" &&
+        key !== "sslmode" &&
+        key !== "require_ssl" &&
+        key !== "verify_ca" &&
+        key !== "verify_identity"
+      );
+    })
+    .join("&");
+}
+
+function normalizeMysqlUrlParams(value: string, forceTls: boolean, acceptInvalidCerts: boolean): string {
+  const parts = value
+    .trim()
+    .replace(/^\?/, "")
+    .split("&")
+    .filter((part) => part.length > 0);
+
+  if (forceTls) {
+    const filtered = parts.filter((part) => {
+      const key = decodeUrlParamPart(splitUrlParam(part)[0]).toLowerCase();
+      return key !== "ssl-mode" && key !== "sslmode" && key !== "require_ssl";
+    });
+    filtered.unshift("require_ssl=true");
+    if (acceptInvalidCerts && !filtered.some((part) => urlParamKeyIs(part, "verify_ca"))) {
+      filtered.push("verify_ca=false");
+    }
+    if (!filtered.some((part) => urlParamKeyIs(part, "verify_identity"))) {
+      filtered.push("verify_identity=false");
+    }
+    if (!filtered.some((part) => urlParamKeyIs(part, "charset"))) {
+      filtered.push("charset=utf8mb4");
+    }
+    return filtered.join("&");
+  }
+
+  if (
+    !parts.some(
+      (part) =>
+        urlParamKeyIs(part, "ssl-mode") || urlParamKeyIs(part, "sslmode") || urlParamKeyIs(part, "require_ssl"),
+    )
+  ) {
+    parts.unshift("ssl-mode=preferred");
+  }
+  if (!parts.some((part) => urlParamKeyIs(part, "charset"))) {
+    parts.push("charset=utf8mb4");
+  }
+  return parts.join("&");
+}
+
+function buildMysqlUrlParams(config: ConnectionConfig): string {
+  const raw = config.url_params || "";
+  if (needsBareMysql(config)) {
+    if (bareMysqlUsesTls(config)) {
+      return normalizeMysqlUrlParams(raw, true, !config.ca_cert_path?.trim());
+    }
+    return normalizeBareMysqlUrlParams(raw);
+  }
+  return raw;
+}
+
+async function mysqlTlsOptions(config: ConnectionConfig): Promise<SslOptions | undefined> {
+  if (!bareMysqlUsesTls(config)) return undefined;
+
+  const params = urlParams(config);
+  const tls: SslOptions = {};
+  const verifyCa = (params.get("verify_ca") || "").toLowerCase() === "true";
+  const verifyIdentity = (params.get("verify_identity") || "").toLowerCase() === "true";
+  if (!verifyCa && !verifyIdentity) {
+    tls.rejectUnauthorized = false;
+  }
+  if (config.ca_cert_path) tls.ca = await readFile(config.ca_cert_path);
+  const certPath = params.get("ssl-cert") || params.get("sslcert");
+  const keyPath = params.get("ssl-key") || params.get("sslkey");
+  if (certPath) tls.cert = await readFile(certPath);
+  if (keyPath) tls.key = await readFile(keyPath);
+  return tls;
 }
 
 function isPostgresType(dbType: string): boolean {
@@ -626,8 +782,13 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
   if (config.db_type === "mongodb") {
     const find = parseMongoFindCommand(sql);
     if (find) {
-      const result = await withTimeout(mongoFindDocuments(config, find.collection, find.skip, find.limit, find.filter, find.sort), resolveTimeoutMs(options));
+      const result = await withTimeout(mongoFindDocuments(config, find.collection, find.skip, find.limit, find.filter, find.projection, find.sort), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
+    }
+    const version = parseMongoVersionCommand(sql);
+    if (version) {
+      const result = await withTimeout(mongoServerVersion(config), resolveTimeoutMs(options));
+      return { columns: ["version"], rows: [{ version: result }], row_count: 1 };
     }
     const count = parseMongoCountDocumentsCommand(sql);
     if (count) {
@@ -650,10 +811,26 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     if (write) {
       const safety = evaluateMongoWriteSafety(write, sqlSafetyFromEnv());
       if (!safety.allowed) throw new Error(safety.reason);
-      const affected = await withTimeout(executeMongoWrite(config, write), resolveTimeoutMs(options));
-      return { columns: [], rows: [], row_count: affected };
+      const result = await withTimeout(executeMongoWrite(config, write), resolveTimeoutMs(options));
+      if (write.kind === "createIndex") {
+        return {
+          columns: ["name"],
+          rows: [{ name: result.indexName ?? "" }],
+          row_count: 1,
+        };
+      }
+      if (write.kind === "dropIndex" || write.kind === "dropIndexes") {
+        return {
+          columns: ["name"],
+          rows: (result.droppedNames ?? []).map((name) => ({ name })),
+          row_count: result.affectedRows,
+        };
+      }
+      return { columns: [], rows: [], row_count: result.affectedRows };
     }
-    throw new Error("Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})");
+    throw new Error(
+      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
+    );
   }
   if (isDirectQueryType(config.db_type)) {
     return query(config, sql, undefined, options);
@@ -848,7 +1025,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
   }));
 }
 
-async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, sort?: string): Promise<MongoDocumentResult> {
+async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, projection?: string, sort?: string): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/find-documents", {
     connection_name: config.name,
     database: config.database || "",
@@ -856,11 +1033,22 @@ async function mongoFindDocuments(config: ConnectionConfig, collection: string, 
     skip,
     limit,
     filter,
+    projection,
     sort,
   });
 }
 
-async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCommand): Promise<number> {
+async function mongoServerVersion(config: ConnectionConfig): Promise<string> {
+  return bridgeDataRequest<string>("/data/mongo/server-version", {
+    connection_name: config.name,
+    database: config.database || "",
+  });
+}
+
+async function executeMongoWrite(
+  config: ConnectionConfig,
+  command: MongoWriteCommand,
+): Promise<{ affectedRows: number; indexName?: string; droppedNames?: string[] }> {
   if (command.kind === "insert") {
     const result = await bridgeDataRequest<{ affected_rows: number }>("/data/mongo/insert-documents", {
       connection_name: config.name,
@@ -868,7 +1056,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
       collection: command.collection,
       docs_json: command.docsJson,
     });
-    return result.affected_rows;
+    return { affectedRows: result.affected_rows };
   }
   if (command.kind === "update") {
     const result = await bridgeDataRequest<{ affected_rows: number }>("/data/mongo/update-documents", {
@@ -879,7 +1067,27 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
       update_json: command.update,
       many: command.many,
     });
-    return result.affected_rows;
+    return { affectedRows: result.affected_rows };
+  }
+  if (command.kind === "createIndex") {
+    const result = await bridgeDataRequest<{ name: string }>("/data/mongo/create-index", {
+      connection_name: config.name,
+      database: config.database || "",
+      collection: command.collection,
+      keys_json: command.keys,
+      options_json: command.options,
+    });
+    return { affectedRows: 1, indexName: result.name };
+  }
+  if (command.kind === "dropIndex" || command.kind === "dropIndexes") {
+    const result = await bridgeDataRequest<{ dropped_names: string[]; affected_rows: number }>("/data/mongo/drop-indexes", {
+      connection_name: config.name,
+      database: config.database || "",
+      collection: command.collection,
+      indexes_json: command.kind === "dropIndex" ? command.index : command.indexes,
+      single: command.kind === "dropIndex",
+    });
+    return { affectedRows: result.affected_rows, droppedNames: result.dropped_names };
   }
   const result = await bridgeDataRequest<{ affected_rows: number }>("/data/mongo/delete-documents", {
     connection_name: config.name,
@@ -888,7 +1096,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
     filter_json: command.filter,
     many: command.many,
   });
-  return result.affected_rows;
+  return { affectedRows: result.affected_rows };
 }
 
 async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number): Promise<MongoDocumentResult> {
@@ -901,7 +1109,7 @@ async function mongoAggregateDocuments(config: ConnectionConfig, collection: str
   });
 }
 
-export function mongoDocumentsToQueryResult(documents: unknown[], total: number): QueryResult {
+export function mongoDocumentsToQueryResult(documents: unknown[], _total: number): QueryResult {
   const columns: string[] = [];
   for (const doc of documents) {
     if (isRecord(doc)) {
@@ -951,6 +1159,7 @@ export function inferMongoColumns(documents: unknown[]): ColumnInfo[] {
 interface MongoFindCommand {
   collection: string;
   filter: string;
+  projection?: string;
   skip: number;
   limit: number;
   sort?: string;
@@ -970,7 +1179,13 @@ interface MongoGetIndexesCommand {
   collection: string;
 }
 
-export type MongoWriteCommand = { kind: "insert"; collection: string; docsJson: string } | { kind: "update"; collection: string; filter: string; update: string; many: boolean } | { kind: "delete"; collection: string; filter: string; many: boolean };
+export type MongoWriteCommand =
+  | { kind: "insert"; collection: string; docsJson: string }
+  | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
+  | { kind: "delete"; collection: string; filter: string; many: boolean }
+  | { kind: "createIndex"; collection: string; keys: string; options?: string }
+  | { kind: "dropIndex"; collection: string; index: string }
+  | { kind: "dropIndexes"; collection: string; indexes?: string };
 
 export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
@@ -980,8 +1195,15 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const findCloseIndex = findMatchingParen(source, findOpenIndex);
   if (findCloseIndex < 0) return null;
   const findArgs = splitTopLevel(source.slice(findOpenIndex + 1, findCloseIndex));
+  if (findArgs.length > 2 && findArgs.slice(2).some((arg) => arg.trim())) return null;
   const filter = normalizeJsonArgument(findArgs[0] || "{}");
   if (!filter) return null;
+  let projection: string | undefined;
+  if (findArgs[1]?.trim()) {
+    const parsedProjection = normalizeJsonArgument(findArgs[1]);
+    if (!parsedProjection) return null;
+    projection = parsedProjection;
+  }
   const chain = source.slice(findCloseIndex + 1).trim();
   if (chain && !chain.startsWith(".")) return null;
   const sortArg = readChainedCallArgument(chain, "sort");
@@ -994,7 +1216,12 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const skip = readChainedIntegerArgument(chain, "skip", 0);
   const limit = readChainedIntegerArgument(chain, "limit", MAX_ROWS);
   if (skip === null || limit === null) return null;
-  return { collection: target.collection, filter, skip, limit, sort };
+  return { collection: target.collection, filter, ...(projection ? { projection } : {}), skip, limit, sort };
+}
+
+export function parseMongoVersionCommand(input: string): boolean {
+  const source = input.trim().replace(/;$/, "").trim();
+  return /^db\s*\.\s*version\s*\(\s*\)$/i.test(source);
 }
 
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
@@ -1085,6 +1312,37 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return { kind: "delete", collection: target.collection, filter, many: method === "deleteMany" };
   }
 
+  const createIndex = parseCollectionMethodTarget(source, "createIndex");
+  if (createIndex) {
+    const args = parseMethodArgs(source, createIndex.methodCallIndex);
+    if (!args || args.length < 1 || args.length > 2) return null;
+    const keys = normalizeJsonArgument(args[0]);
+    if (!keys) return null;
+    let options: string | undefined;
+    if (args[1]?.trim()) {
+      const parsedOptions = normalizeJsonArgument(args[1]);
+      if (!parsedOptions) return null;
+      options = parsedOptions;
+    }
+    return { kind: "createIndex", collection: createIndex.collection, keys, ...(options ? { options } : {}) };
+  }
+
+  const dropIndex = parseCollectionMethodTarget(source, "dropIndex");
+  if (dropIndex) {
+    const args = parseMethodArgs(source, dropIndex.methodCallIndex);
+    if (!args) return null;
+    const index = parseMongoDropIndexArgument(args);
+    return index ? { kind: "dropIndex", collection: dropIndex.collection, index } : null;
+  }
+
+  const dropIndexes = parseCollectionMethodTarget(source, "dropIndexes");
+  if (dropIndexes) {
+    const args = parseMethodArgs(source, dropIndexes.methodCallIndex);
+    if (!args) return null;
+    const indexes = parseMongoDropIndexesArgument(args);
+    return indexes !== null ? { kind: "dropIndexes", collection: dropIndexes.collection, ...(indexes ? { indexes } : {}) } : null;
+  }
+
   return null;
 }
 
@@ -1099,6 +1357,12 @@ export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: { 
     return {
       allowed: false,
       reason: "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
+    };
+  }
+  if (!options.allowDangerous && mongoDropIndexesRequiresDangerous(command)) {
+    return {
+      allowed: false,
+      reason: "MongoDB dropIndexes() without a specific single index requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
     };
   }
   return { allowed: true };
@@ -1173,6 +1437,26 @@ function normalizeJsonArgument(arg: string): string | null {
   } catch {
     return null;
   }
+}
+
+function parseMongoDropIndexArgument(args: string[]): string | null {
+  if (args.length !== 1 || !args[0]?.trim()) return null;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return parsed === "*" ? null : normalized;
+  return isNonEmptyRecord(parsed) ? normalized : null;
+}
+
+function parseMongoDropIndexesArgument(args: string[]): string | undefined | null {
+  if (args.length !== 1) return null;
+  if (!args[0]?.trim()) return undefined;
+  const normalized = normalizeJsonArgument(args[0]);
+  if (!normalized) return null;
+  const parsed = parseNormalizedJson(normalized);
+  if (typeof parsed === "string") return normalized;
+  if (isNonEmptyRecord(parsed)) return normalized;
+  return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string") ? normalized : null;
 }
 
 function convertSingleQuotedStrings(source: string): string {
@@ -1267,6 +1551,18 @@ function shouldQuoteObjectKey(source: string, index: number): boolean {
   return source[after] === ":";
 }
 
+function parseNormalizedJson(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
 function isEmptyJsonObject(json: string): boolean {
   try {
     const parsed = JSON.parse(json);
@@ -1274,6 +1570,14 @@ function isEmptyJsonObject(json: string): boolean {
   } catch {
     return false;
   }
+}
+
+function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean {
+  if (command.kind !== "dropIndexes") return false;
+  if (!command.indexes) return true;
+  const parsed = parseNormalizedJson(command.indexes);
+  if (parsed === "*") return true;
+  return Array.isArray(parsed) && parsed.length > 1;
 }
 
 function splitTopLevel(source: string): string[] {

@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Upload, Download, FolderPlus, RefreshCw, ChevronsLeft } from "@lucide/vue";
+import { Upload, Download, FolderPlus, RefreshCw, ChevronsLeft, ChevronsUp } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -43,6 +43,10 @@ async function refreshTree() {
 
 function createNewGroup() {
   void connectionTreeRef.value?.createNewGroup();
+}
+
+function collapseAllTreeNodes() {
+  connectionTreeRef.value?.collapseAllTreeNodes();
 }
 
 function focusSearch(): boolean {
@@ -87,6 +91,14 @@ defineExpose({ focusSearch });
             </Button>
           </TooltipTrigger>
           <TooltipContent>{{ t("sidebar.export") }}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
+              <ChevronsUp class="h-3 w-3" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t("sidebar.collapseAll") }}</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger as-child>

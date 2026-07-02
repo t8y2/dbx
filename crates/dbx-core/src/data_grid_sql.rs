@@ -11,12 +11,14 @@ mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::quote_table_identifier;
+use crate::sql_dialect::{quote_table_identifier, table_pagination_strategy, TablePaginationStrategy};
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub(crate) const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
 pub(crate) const DBX_TDENGINE_TBNAME_COLUMN: &str = "tbname";
+const DATA_GRID_COLUMN_DISTINCT_VALUES_DEFAULT_LIMIT: usize = 1000;
+const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +129,39 @@ pub struct DataGridColumnValueFilterConditionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_info: Option<DataGridColumnInfo>,
     pub raw_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridColumnValuesFilterConditionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    pub column_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_info: Option<DataGridColumnInfo>,
+    #[serde(default)]
+    pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridColumnDistinctValuesSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub column_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_info: Option<DataGridColumnInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_counts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +422,96 @@ pub fn build_data_grid_column_value_filter_condition(
     Some(format!("{column} = {}", format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())))
 }
 
+pub fn build_data_grid_column_values_filter_condition(
+    options: DataGridColumnValuesFilterConditionOptions,
+) -> Option<String> {
+    if options.values.is_empty() {
+        return None;
+    }
+
+    let column = column_filter_ref(options.database_type, &options.column_name);
+    let mut has_null = false;
+    let mut literals = Vec::new();
+    for value in &options.values {
+        if value.is_null() {
+            has_null = true;
+            continue;
+        }
+        let literal = format_grid_sql_literal(value, options.database_type, options.column_info.as_ref());
+        if !literals.contains(&literal) {
+            literals.push(literal);
+        }
+    }
+
+    let mut predicates = Vec::new();
+    if has_null {
+        predicates.push(format!("{column} IS NULL"));
+    }
+    if !literals.is_empty() {
+        let list = literals.join(", ");
+        if literals.len() == 1 {
+            predicates.push(format!("{column} = {list}"));
+        } else if options.database_type == Some(DatabaseType::Neo4j) {
+            predicates.push(format!("{column} IN [{list}]"));
+        } else {
+            predicates.push(format!("{column} IN ({list})"));
+        }
+    }
+
+    match predicates.len() {
+        0 => None,
+        1 => predicates.into_iter().next(),
+        _ => Some(format!("({})", predicates.join(" OR "))),
+    }
+}
+
+pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinctValuesSqlOptions) -> String {
+    if options.database_type == Some(DatabaseType::Neo4j) {
+        return build_neo4j_data_grid_column_distinct_values_sql(&options);
+    }
+
+    let limit = data_grid_column_distinct_values_limit(options.limit);
+    let table = qualified_table_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let column = column_filter_ref(options.database_type, &options.column_name);
+    let mut predicates = Vec::new();
+    let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
+    if !predicate.is_empty() {
+        predicates.push(format!("({predicate})"));
+    }
+    if let Some(search_predicate) = data_grid_column_distinct_values_search_predicate(&options) {
+        predicates.push(search_predicate);
+    }
+    let where_clause =
+        if predicates.is_empty() { String::new() } else { format!(" WHERE {}", predicates.join(" AND ")) };
+    let select_list = if options.include_counts {
+        format!("{column} AS dbx_value, COUNT(*) AS dbx_count")
+    } else {
+        format!("{column} AS dbx_value")
+    };
+    let group_by = format!(" GROUP BY {column}");
+    let order_by = if options.include_counts { " ORDER BY dbx_count DESC, dbx_value" } else { " ORDER BY dbx_value" };
+    let from_clause = format!(" FROM {table}{where_clause}{group_by}{order_by}");
+
+    match table_pagination_strategy(options.database_type) {
+        TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
+        TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
+        TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
+        TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
+            format!("SELECT {select_list}{from_clause} FETCH FIRST {limit} ROWS ONLY")
+        }
+        TablePaginationStrategy::Rownum => {
+            let inner = format!("SELECT {select_list}{from_clause}");
+            format!("SELECT * FROM ({inner}) WHERE ROWNUM <= {limit}")
+        }
+        TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => {
+            format!("SELECT {select_list}{from_clause}")
+        }
+        TablePaginationStrategy::QuestDbLimit | TablePaginationStrategy::LimitOffset => {
+            format!("SELECT {select_list}{from_clause} LIMIT {limit}")
+        }
+    }
+}
+
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
     let table = qualified_table_name(options.database_type, options.schema.as_deref(), &options.table_name);
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
@@ -398,6 +523,60 @@ pub fn build_hive_table_properties_sql(options: HiveTablePropertiesSqlOptions) -
     let table = qualified_table_name(Some(DatabaseType::Hive), options.schema.as_deref(), &options.table_name);
     let property = options.property_name.replace('\'', "''");
     format!("SHOW TBLPROPERTIES {table} ('{property}')")
+}
+
+fn data_grid_column_distinct_values_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DATA_GRID_COLUMN_DISTINCT_VALUES_DEFAULT_LIMIT).clamp(1, DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT)
+}
+
+fn data_grid_column_distinct_values_search_predicate(
+    options: &DataGridColumnDistinctValuesSqlOptions,
+) -> Option<String> {
+    let search = options.search_value.as_deref()?.trim();
+    if search.is_empty() {
+        return None;
+    }
+    if !options.column_info.as_ref().map(|column| is_textual_column_type(&column.data_type)).unwrap_or(true)
+        && !is_postgres_like_pattern_database(options.database_type)
+    {
+        let column = column_filter_ref(options.database_type, &options.column_name);
+        let value = parse_typed_filter_value(search, options.column_info.as_ref());
+        return Some(format!(
+            "{column} = {}",
+            format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())
+        ));
+    }
+    let column = column_like_filter_ref(options.database_type, &options.column_name, options.column_info.as_ref());
+    let pattern = Value::String(format!("%{search}%"));
+    Some(format!("{column} LIKE {}", format_grid_sql_literal(&pattern, options.database_type, None)))
+}
+
+fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDistinctValuesSqlOptions) -> String {
+    let limit = data_grid_column_distinct_values_limit(options.limit);
+    let label = quote_ident(Some(DatabaseType::Neo4j), &options.table_name);
+    let column = column_filter_ref(Some(DatabaseType::Neo4j), &options.column_name);
+    let mut predicates = Vec::new();
+    let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
+    if !predicate.is_empty() {
+        predicates.push(predicate);
+    }
+    if let Some(search) = options.search_value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        predicates.push(format!(
+            "toString({column}) CONTAINS {}",
+            format_grid_sql_literal(&Value::String(search.to_string()), Some(DatabaseType::Neo4j), None)
+        ));
+    }
+    let where_clause =
+        if predicates.is_empty() { String::new() } else { format!(" WHERE {}", predicates.join(" AND ")) };
+    if options.include_counts {
+        format!(
+            "MATCH (n:{label}){where_clause} RETURN {column} AS dbx_value, count(*) AS dbx_count ORDER BY dbx_count DESC, dbx_value LIMIT {limit}"
+        )
+    } else {
+        format!(
+            "MATCH (n:{label}){where_clause} RETURN DISTINCT {column} AS dbx_value ORDER BY dbx_value LIMIT {limit}"
+        )
+    }
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
@@ -874,6 +1053,12 @@ pub fn format_grid_sql_literal(
     }
     let literal_text = if database_type == Some(DatabaseType::Tdengine) {
         format_tdengine_timestamp_literal_text(&text)
+    } else if database_type == Some(DatabaseType::SqlServer) {
+        crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(
+            &text,
+            column_info.map(|column| column.data_type.as_str()),
+        )
+        .unwrap_or(text)
     } else if is_mysql_datetime_literal_database(database_type)
         && column_info.map(|column| is_temporal_column_type(&column.data_type)).unwrap_or(true)
     {
@@ -919,7 +1104,7 @@ fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> b
 
 fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
-    let parts = regex_like_rfc3339(text)?;
+    let parts = regex_like_oracle_temporal(text)?;
     let fraction = parts.fraction.unwrap_or_default();
     let datetime = format!("{} {}{}", parts.date, parts.time, fraction);
     match kind {
@@ -929,6 +1114,10 @@ fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option
             Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"))
         }
         OracleTemporalKind::TimestampWithTimeZone => {
+            if parts.zone.is_empty() {
+                let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+                return Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"));
+            }
             let zone = oracle_timezone_suffix(&parts.zone);
             let mask = oracle_timestamp_format_mask(datetime.contains('.'));
             Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"))
@@ -965,6 +1154,50 @@ fn oracle_timezone_suffix(zone: &str) -> String {
     }
 }
 
+fn regex_like_oracle_temporal(text: &str) -> Option<Rfc3339Parts> {
+    if let Some(parts) = regex_like_rfc3339(text) {
+        return Some(parts);
+    }
+    regex_like_local_datetime(text)
+}
+
+fn regex_like_local_datetime(text: &str) -> Option<Rfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let date = &text[0..10];
+    if bytes.len() == 10 {
+        return Some(Rfc3339Parts {
+            date: date.to_string(),
+            time: "00:00:00".to_string(),
+            fraction: None,
+            zone: String::new(),
+        });
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let time = &text[11..19];
+    let rest = &text[19..];
+    let fraction = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 || digit_count != rest.len() {
+            return None;
+        }
+        Some(format!(".{}", &rest[..digit_count]))
+    } else if rest.is_empty() {
+        None
+    } else {
+        return None;
+    };
+    Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: String::new() })
+}
+
 fn is_mysql_bit_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
     is_mysql_datetime_literal_database(database_type)
         && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
@@ -976,7 +1209,11 @@ fn is_bit_literal_column(column_info: Option<&DataGridColumnInfo>) -> bool {
 
 fn is_bit_column_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
-    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == "bit")
+    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| {
+        // SQL Server/tiberius reports nullable BIT result columns as `bitn`.
+        // They still need numeric 0/1 literals in generated UPDATE SQL.
+        matches!(token, "bit" | "bitn")
+    })
 }
 
 fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bool {
@@ -1660,7 +1897,9 @@ fn is_numeric_type(data_type: &str) -> bool {
 
 fn is_boolean_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
-    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| matches!(token, "bool" | "boolean" | "bit"))
+    lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| matches!(token, "bool" | "boolean" | "bit" | "bitn"))
 }
 
 fn is_numeric_literal(text: &str) -> bool {
@@ -1696,6 +1935,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Vastbase
                 | DatabaseType::Goldendb
                 | DatabaseType::Yashandb
+                | DatabaseType::Oscar
                 | DatabaseType::Databricks
                 | DatabaseType::SapHana
                 | DatabaseType::Teradata
@@ -1854,6 +2094,100 @@ mod tests {
             .as_deref(),
             Some("\"created_at\"::text NOT LIKE '%2026%'")
         );
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                column_name: "active".to_string(),
+                column_info: Some(column("active", "bitn", false, None)),
+                raw_value: "false".to_string(),
+            })
+            .as_deref(),
+            Some("[active] = 0")
+        );
+    }
+
+    #[test]
+    fn builds_multi_value_filter_conditions() {
+        assert_eq!(
+            build_data_grid_column_values_filter_condition(DataGridColumnValuesFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                values: vec![json!("active"), json!("pending"), Value::Null, json!("active")],
+            })
+            .as_deref(),
+            Some("(\"status\" IS NULL OR \"status\" IN ('active', 'pending'))")
+        );
+        assert_eq!(
+            build_data_grid_column_values_filter_condition(DataGridColumnValuesFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                column_name: "id".to_string(),
+                column_info: Some(column("id", "int", false, None)),
+                values: vec![json!(42)],
+            })
+            .as_deref(),
+            Some("`id` = 42")
+        );
+    }
+
+    #[test]
+    fn builds_column_distinct_values_sql() {
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: Some("WHERE deleted_at IS NULL;".to_string()),
+                search_value: Some("act".to_string()),
+                limit: None,
+                include_counts: true,
+            }),
+            "SELECT \"status\" AS dbx_value, COUNT(*) AS dbx_count FROM \"public\".\"users\" WHERE (deleted_at IS NULL) AND \"status\" LIKE '%act%' GROUP BY \"status\" ORDER BY dbx_count DESC, dbx_value LIMIT 1000"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                schema: None,
+                table_name: "users".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "nvarchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(25),
+                include_counts: false,
+            }),
+            "SELECT TOP (25) [status] AS dbx_value FROM [users] GROUP BY [status] ORDER BY dbx_value"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                schema: None,
+                table_name: "users".to_string(),
+                column_name: "id".to_string(),
+                column_info: Some(column("id", "int", false, None)),
+                where_input: None,
+                search_value: Some("42".to_string()),
+                limit: Some(25),
+                include_counts: true,
+            }),
+            "SELECT TOP (25) [id] AS dbx_value, COUNT(*) AS dbx_count FROM [users] WHERE [id] = 42 GROUP BY [id] ORDER BY dbx_count DESC, dbx_value"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Oracle),
+                schema: Some("APP".to_string()),
+                table_name: "EVENTS".to_string(),
+                column_name: "KIND".to_string(),
+                column_info: Some(column("KIND", "VARCHAR2", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: true,
+            }),
+            "SELECT * FROM (SELECT \"KIND\" AS dbx_value, COUNT(*) AS dbx_count FROM \"APP\".\"EVENTS\" GROUP BY \"KIND\" ORDER BY dbx_count DESC, dbx_value) WHERE ROWNUM <= 10"
+        );
     }
 
     #[test]
@@ -1894,6 +2228,38 @@ mod tests {
     }
 
     #[test]
+    fn formats_sqlserver_datetime_copy_literals_with_supported_precision() {
+        let datetime = column("date1", "datetime", true, None);
+        let datetime2 = column("date2", "datetime2(7)", true, None);
+        let raw_text = column("note", "nvarchar(64)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime)
+            ),
+            "N'2026-06-29 10:11:12.897'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.8966666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime2)
+            ),
+            "N'2026-06-29 10:11:12.8966666'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&raw_text)
+            ),
+            "N'2026-06-29 10:11:12.896666666'"
+        );
+    }
+
+    #[test]
     fn formats_oracle_temporal_literals_without_nls_parsing() {
         let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
         let timestamp_tz = column("recorded_at", "TIMESTAMP(6) WITH TIME ZONE", true, None);
@@ -1924,6 +2290,25 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&text)),
             "'2022-08-25T09:58:43Z'"
+        );
+    }
+
+    #[test]
+    fn formats_oracle_temporal_literals_from_editor_values_without_nls_parsing() {
+        let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
+        let date = column("event_day", "DATE", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43.123456"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43.123456', 'YYYY-MM-DD HH24:MI:SS.FF')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&date)),
+            "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
         );
     }
 
@@ -1970,6 +2355,36 @@ mod tests {
             "b'10101010'"
         );
         assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+    }
+
+    #[test]
+    fn prepares_sqlserver_bitn_updates_with_numeric_literals() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            table_meta: DataGridTableMeta {
+                schema: Some("dbo".to_string()),
+                table_name: "flags".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "int", false, None), column("active", "bitn", false, None)]),
+            },
+            columns: vec!["id".to_string(), "active".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(false)]],
+            dirty_rows: vec![(0, vec![(1, json!(true))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE [dbo].[flags] SET [active] = 1 WHERE [id] = 1 AND [active] = 0;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE [dbo].[flags] SET [active] = 0 WHERE [id] = 1 AND [active] = 1 AND [active] = 1;"]
+        );
+        for sql in result.statements.iter().chain(result.rollback_statements.iter()) {
+            assert!(!sql.contains("TRUE"));
+            assert!(!sql.contains("FALSE"));
+        }
     }
 
     #[test]
@@ -2243,6 +2658,33 @@ mod tests {
             vec![
                 "UPDATE `default`.`people` SET `name` = 'Linus' WHERE `id` = 1 AND `name` = 'Ada';",
                 "DELETE FROM `default`.`people` WHERE `id` = 1 AND `name` = 'Ada';",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oscar_keyless_save_statements_with_schema_qualified_row_predicate() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oscar),
+            table_meta: DataGridTableMeta {
+                schema: Some("SYSDBA".to_string()),
+                table_name: "PEOPLE".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("ID", "INTEGER", true, None), column("NAME", "VARCHAR", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"SYSDBA\".\"PEOPLE\" SET \"NAME\" = 'Linus' WHERE \"ID\" = 1 AND \"NAME\" = 'Ada';",
+                "DELETE FROM \"SYSDBA\".\"PEOPLE\" WHERE \"ID\" = 1 AND \"NAME\" = 'Ada';",
             ]
         );
     }

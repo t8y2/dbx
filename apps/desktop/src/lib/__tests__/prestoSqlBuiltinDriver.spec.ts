@@ -35,7 +35,7 @@ describe("prestoSqlBuiltinDriver", () => {
     expect(row.version).toBe("350");
     expect(row.installed).toBe(false);
     expect(row.installed_version).toBeNull();
-    expect(row.jre).toBe("");
+    expect(row.jre).toBe("21");
   });
 
   it("marks PrestoSQL installed when its Maven coordinate is present", () => {

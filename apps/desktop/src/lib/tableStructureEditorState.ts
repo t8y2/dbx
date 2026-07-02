@@ -276,6 +276,7 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
+  oscar: "oracle",
   gbase: "mysql",
   gaussdb: "postgres",
   kwdb: "postgres",
@@ -532,9 +533,58 @@ function stripPostgresStringDefaultCast(defaultValue: string, dataType: string):
   return match?.[1] ?? defaultValue;
 }
 
+function isWrappedByOuterParens(value: string): boolean {
+  if (value.length < 2 || value[0] !== "(" || value[value.length - 1] !== ")") return false;
+
+  let depth = 0;
+  let inString = false;
+  let inBracketIdentifier = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (char === "'" && value[index + 1] === "'") {
+        index += 1;
+      } else if (char === "'") {
+        inString = false;
+      }
+      continue;
+    }
+    if (inBracketIdentifier) {
+      if (char === "]") inBracketIdentifier = false;
+      continue;
+    }
+    if (char === "'") {
+      inString = true;
+      continue;
+    }
+    if (char === "[") {
+      inBracketIdentifier = true;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth < 0) return false;
+      if (depth === 0 && index < value.length - 1) return false;
+    }
+  }
+  return depth === 0;
+}
+
+function stripSqlServerDefaultOuterParens(defaultValue: string): string {
+  let value = defaultValue.trim();
+  while (isWrappedByOuterParens(value)) {
+    value = value.slice(1, -1).trim();
+  }
+  return value;
+}
+
 function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
   const defaultValue = column.column_default ?? "";
-  return databaseType === "postgres" ? stripPostgresStringDefaultCast(defaultValue, column.data_type) : defaultValue;
+  if (databaseType === "postgres") return stripPostgresStringDefaultCast(defaultValue, column.data_type);
+  if (databaseType === "sqlserver") return stripSqlServerDefaultOuterParens(defaultValue);
+  return defaultValue;
 }
 
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {
@@ -554,6 +604,74 @@ export function createColumnDrafts(columns: ColumnInfo[], databaseType?: Databas
       markedForDrop: false,
     };
   });
+}
+
+function existingColumnIdName(id: string): string | undefined {
+  const prefix = "existing:";
+  return id.startsWith(prefix) ? id.slice(prefix.length) : undefined;
+}
+
+function isNewColumnDraftId(id: string): boolean {
+  return id.startsWith("new:");
+}
+
+function uniqueNames(names: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const name of names) {
+    if (!name) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    result.push(name);
+  }
+  return result;
+}
+
+function findColumnDraftByName(columns: EditableStructureColumn[], names: string[], usedIndexes: Set<number>): number | undefined {
+  for (const name of names) {
+    const exactIndex = columns.findIndex((column, index) => !usedIndexes.has(index) && column.name === name);
+    if (exactIndex >= 0) return exactIndex;
+  }
+
+  for (const name of names) {
+    const lowerName = name.toLowerCase();
+    const matches = columns.map((column, index) => ({ column, index })).filter(({ column, index }) => !usedIndexes.has(index) && column.name.toLowerCase() === lowerName);
+    if (matches.length === 1) return matches[0]!.index;
+  }
+
+  return undefined;
+}
+
+export function rehydrateColumnDraftsFromMetadata(draftColumns: EditableStructureColumn[], columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {
+  const metadataDrafts = createColumnDrafts(columns, databaseType);
+  if (!metadataDrafts.length) return draftColumns;
+  if (!draftColumns.length) return metadataDrafts;
+
+  const usedMetadataIndexes = new Set<number>();
+  const nextColumns = draftColumns.map((column) => {
+    if (!column.original && isNewColumnDraftId(column.id)) return column;
+
+    const needsHydration = !column.original || column.originalPosition === undefined;
+    const candidates = uniqueNames([column.original?.name, existingColumnIdName(column.id), column.name]);
+    const metadataIndex = findColumnDraftByName(metadataDrafts, candidates, usedMetadataIndexes);
+    if (metadataIndex === undefined) return column;
+    usedMetadataIndexes.add(metadataIndex);
+    if (!needsHydration) return column;
+
+    const metadataDraft = metadataDrafts[metadataIndex]!;
+    return {
+      ...column,
+      original: column.original ?? metadataDraft.original,
+      originalPosition: column.originalPosition ?? metadataDraft.originalPosition,
+    };
+  });
+
+  if (usedMetadataIndexes.size === 0) {
+    return [...metadataDrafts, ...draftColumns];
+  }
+
+  const missingMetadataDrafts = metadataDrafts.filter((_, index) => !usedMetadataIndexes.has(index));
+  return [...nextColumns, ...missingMetadataDrafts];
 }
 
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
@@ -673,6 +791,20 @@ export function splitDataType(raw: string): { baseType: string; params: string }
     .replace(/\s+/g, " ");
   const baseType = /^(?:signed|unsigned|zerofill)(?:\s+(?:signed|unsigned|zerofill))*$/i.test(suffix) ? `${baseTypePrefix} ${suffix}`.trim() : baseTypePrefix;
   return { baseType, params };
+}
+
+export function isSqlServerIdentityCompatibleDataType(rawDataType: string): boolean {
+  const { baseType, params } = splitDataType(rawDataType);
+  const normalized = baseType.trim().replace(/\s+/g, " ").toLowerCase();
+  if (["tinyint", "smallint", "int", "integer", "bigint"].includes(normalized)) return true;
+  if (normalized !== "decimal" && normalized !== "numeric") return false;
+  const normalizedParams = params.replace(/\s+/g, "");
+  if (!normalizedParams) return true;
+  const parts = normalizedParams.split(",");
+  if (parts.length === 1) return /^\d+$/.test(parts[0] ?? "");
+  if (parts.length !== 2) return false;
+  const [precision, scale] = parts;
+  return /^\d+$/.test(precision ?? "") && scale === "0";
 }
 
 export function combineDataType(baseType: string, params: string): string {

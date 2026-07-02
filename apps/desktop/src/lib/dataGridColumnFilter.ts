@@ -1,6 +1,6 @@
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import type { DataGridColumnInfo, DataGridContextFilterMode, GridCellValue } from "@/lib/dataGridSql";
-import { buildDataGridColumnValueFilterCondition } from "@/lib/dataGridSql";
+import { buildDataGridColumnValueFilterCondition, buildDataGridColumnValuesFilterCondition } from "@/lib/dataGridSql";
 import { normalizeWhereInput } from "@/lib/tableSelectSql";
 
 export function buildColumnValueFilterCondition(options: { databaseType?: DatabaseType; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; rawValue: string }): Promise<string | undefined> {
@@ -15,6 +15,21 @@ export function buildColumnValueFilterCondition(options: { databaseType?: Databa
         }
       : undefined,
     rawValue: options.rawValue,
+  });
+}
+
+export function buildColumnValuesFilterCondition(options: { databaseType?: DatabaseType; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; values: GridCellValue[] }): Promise<string | undefined> {
+  return buildDataGridColumnValuesFilterCondition({
+    databaseType: options.databaseType,
+    columnName: options.columnName,
+    columnInfo: options.columnInfo
+      ? {
+          name: options.columnName,
+          data_type: options.columnInfo.data_type,
+          is_nullable: true,
+        }
+      : undefined,
+    values: options.values,
   });
 }
 

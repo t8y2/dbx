@@ -177,7 +177,6 @@ pub struct AiCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_contract: Option<AiTaskContract>,
     pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +366,17 @@ pub fn stream_data_payload(line: &str) -> Option<&str> {
     None
 }
 
+fn drain_next_stream_line(buffer: &mut Vec<u8>) -> Result<Option<String>, String> {
+    let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    let mut line = buffer.drain(..=pos).collect::<Vec<u8>>();
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    String::from_utf8(line).map(Some).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))
+}
+
 pub fn claude_stream_text(event: &serde_json::Value) -> Option<&str> {
     if event["type"] == "content_block_delta" {
         return event["delta"]["text"].as_str();
@@ -436,6 +446,11 @@ pub fn openai_stream_reasoning(event: &serde_json::Value) -> Option<&str> {
 }
 
 pub fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
+    let event_type = event["type"].as_str().unwrap_or_default();
+    if !event_type.is_empty() && event_type != "response.output_text.delta" {
+        return None;
+    }
+
     event["delta"].as_str().filter(|s| !s.is_empty())
 }
 
@@ -443,8 +458,23 @@ fn responses_max_output_tokens(max_tokens: Option<u32>) -> u32 {
     max_tokens.unwrap_or(2048).max(16)
 }
 
+fn responses_token_usage(event: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = event.get("usage").or_else(|| event.get("response").and_then(|response| response.get("usage")))?;
+    let input = usage.get("input_tokens").and_then(|v| v.as_u64())?;
+    let output = usage.get("output_tokens").and_then(|v| v.as_u64())?;
+    Some(TokenUsage { input_tokens: input as u32, output_tokens: output as u32 })
+}
+
+fn is_openai_api_endpoint(endpoint: &str) -> bool {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("api.openai.com")))
+        .unwrap_or(false)
+}
+
 fn is_openai_api_config(config: &AiConfig) -> bool {
-    matches!(config.provider, AiProvider::Openai) || config.endpoint.to_ascii_lowercase().contains("api.openai.com")
+    // OpenAI provider can be routed through a custom proxy while still requiring OpenAI request semantics.
+    matches!(config.provider, AiProvider::Openai) || is_openai_api_endpoint(&config.endpoint)
 }
 
 fn is_openai_reasoning_model(model: &str) -> bool {
@@ -452,8 +482,20 @@ fn is_openai_reasoning_model(model: &str) -> bool {
     model.starts_with("gpt-5") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
 }
 
-/// Kimi K2.5+ models (including K2.7-Code) require fixed sampling parameters:
-/// temperature=1.0, top_p=0.95, n=1. Any other value returns an error.
+fn uses_openai_max_completion_tokens(config: &AiConfig) -> bool {
+    is_openai_api_config(config) && is_openai_reasoning_model(&config.model)
+}
+
+fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+    if uses_openai_max_completion_tokens(config) {
+        body["max_completion_tokens"] = json!(max_tokens);
+    } else {
+        body["max_tokens"] = json!(max_tokens);
+    }
+}
+
+/// Kimi K2.5+ models (including K2.7-Code) handle thinking flags differently
+/// and reject the OpenAI-compatible `extra_body.chat_template_kwargs` toggle.
 ///
 /// Matches `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`, K3+, and future versions,
 /// while excluding older K2 variants (`kimi-k2`, `kimi-k2-thinking`, etc.).
@@ -471,25 +513,6 @@ fn is_kimi_model(model: &str) -> bool {
     } else {
         false
     }
-}
-
-pub fn supports_temperature(config: &AiConfig) -> bool {
-    !(is_kimi_model(&config.model) || is_openai_api_config(config) && is_openai_reasoning_model(&config.model))
-}
-
-fn add_temperature_if_supported_for_config(body: &mut serde_json::Value, config: &AiConfig, temperature: Option<f32>) {
-    if supports_temperature(config) {
-        body["temperature"] = temperature_value(temperature);
-    }
-}
-
-pub fn add_temperature_if_supported(body: &mut serde_json::Value, request: &AiCompletionRequest) {
-    add_temperature_if_supported_for_config(body, &request.config, request.temperature);
-}
-
-fn temperature_value(temperature: Option<f32>) -> serde_json::Value {
-    let value = ((temperature.unwrap_or(0.2) as f64) * 100.0).round() / 100.0;
-    json!(value)
 }
 
 fn responses_text(data: &serde_json::Value) -> String {
@@ -535,6 +558,111 @@ pub fn build_responses_input(system_prompt: &str, messages: &[AiMessage]) -> ser
         }));
     }
     json!(input)
+}
+
+fn build_responses_input_with_tools(system_prompt: &str, messages: &[AiMessage]) -> serde_json::Value {
+    let mut input = Vec::new();
+    if !system_prompt.is_empty() {
+        input.push(json!({
+            "role": "developer",
+            "content": system_prompt,
+        }));
+    }
+
+    for message in messages {
+        if message.role == "tool" {
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id.as_deref().unwrap_or_default(),
+                "output": message.content,
+            }));
+            continue;
+        }
+
+        if message.role == "assistant" && !message.tool_calls.is_empty() {
+            if !message.content.is_empty() {
+                input.push(json!({
+                    "role": "assistant",
+                    "content": message.content,
+                }));
+            }
+            for tool_call in &message.tool_calls {
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments.to_string(),
+                }));
+            }
+            continue;
+        }
+
+        input.push(json!({
+            "role": message.role,
+            "content": message.content,
+        }));
+    }
+
+    json!(input)
+}
+
+fn responses_function_tool(tool: &crate::agent_events::ToolDefinition) -> serde_json::Value {
+    json!({
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.parameters,
+    })
+}
+
+fn responses_tool_index(
+    event: &serde_json::Value,
+    item_indices: &mut HashMap<String, u32>,
+    next_index: &mut u32,
+) -> (String, u32) {
+    let item = &event["item"];
+    let item_id = item["id"]
+        .as_str()
+        .or_else(|| event["item_id"].as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("responses-tool-{next_index}"));
+    let index = item_indices.get(&item_id).copied().unwrap_or_else(|| {
+        let index = event["output_index"].as_u64().map(|i| i as u32).unwrap_or(*next_index);
+        *next_index = (*next_index).max(index + 1);
+        item_indices.insert(item_id.clone(), index);
+        index
+    });
+    (item_id, index)
+}
+
+fn emit_responses_function_call_item(
+    event: &serde_json::Value,
+    item_indices: &mut HashMap<String, u32>,
+    started_indices: &mut HashSet<u32>,
+    argument_indices: &mut HashSet<u32>,
+    next_index: &mut u32,
+    on_event: &impl Fn(StreamToolEvent),
+) -> Option<u32> {
+    let item = &event["item"];
+    if item["type"].as_str() != Some("function_call") {
+        return None;
+    }
+
+    let (_item_id, index) = responses_tool_index(event, item_indices, next_index);
+    if started_indices.insert(index) {
+        let id = item["call_id"].as_str().or_else(|| item["id"].as_str()).unwrap_or_default().to_string();
+        let name = item["name"].as_str().unwrap_or_default().to_string();
+        on_event(StreamToolEvent::ToolCallStart { index, id, name });
+    }
+
+    if !argument_indices.contains(&index) {
+        if let Some(arguments) = item["arguments"].as_str().filter(|s| !s.is_empty()) {
+            argument_indices.insert(index);
+            on_event(StreamToolEvent::ToolCallDelta { index, fragment: arguments.to_string() });
+        }
+    }
+
+    Some(index)
 }
 
 // ---------------------------------------------------------------------------
@@ -730,7 +858,6 @@ pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest)
     let body = json!({
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(2048),
-        "temperature": temperature_value(request.temperature),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
     });
@@ -765,9 +892,8 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
     let mut body_obj = json!({
         "model": request.config.model,
         "messages": messages,
-        "max_tokens": request.max_tokens.unwrap_or(2048),
     });
-    add_temperature_if_supported(&mut body_obj, &request);
+    set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
     if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
@@ -794,12 +920,11 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
 pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let mut body = json!({
+    let body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
     });
-    add_temperature_if_supported(&mut body, &request);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -835,7 +960,6 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         "contents": contents,
         "generationConfig": {
             "maxOutputTokens": request.max_tokens.unwrap_or(2048),
-            "temperature": temperature_value(request.temperature),
         },
     });
 
@@ -870,15 +994,12 @@ async fn measure_first_stream_chunk(
     is_claude: bool,
     is_gemini: bool,
 ) -> Result<(u64, String), String> {
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
 
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].to_string();
-            buf = buf[pos + 1..].to_string();
-
+        while let Some(line) = drain_next_stream_line(&mut buf)? {
             let Some(data) = stream_data_payload(&line) else { continue };
             if data == "[DONE]" {
                 // stream finished without content — not a real failure but rare
@@ -955,7 +1076,6 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
             let body = json!({
                 "model": &model,
                 "max_tokens": 16,
-                "temperature": temperature_value(Some(0.0)),
                 "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
                 "stream": true,
@@ -981,7 +1101,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 .query(&[("key", config.api_key.as_str()), ("alt", "sse")])
                 .json(&json!({
                     "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
-                    "generationConfig": { "maxOutputTokens": 16, "temperature": temperature_value(Some(0.0)) },
+                    "generationConfig": { "maxOutputTokens": 16 },
                 }))
                 .send()
                 .await
@@ -996,7 +1116,6 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
             let body = json!({
                 "model": &model,
                 "max_tokens": 16,
-                "temperature": temperature_value(Some(0.0)),
                 "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
                 "stream": true,
@@ -1016,15 +1135,24 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
         }
         _ => {
             // OpenAI-compatible providers
-            let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
-            let mut body_obj = json!({
-                "model": &model,
-                "messages": messages,
-                "max_tokens": 16,
-                "stream": true,
-            });
-            add_temperature_if_supported_for_config(&mut body_obj, config, Some(0.0));
-            if !config.enable_thinking && !is_kimi_model(&config.model) {
+            let mut body_obj = if config.api_style == AiApiStyle::Responses {
+                json!({
+                    "model": &model,
+                    "input": [{ "role": "user", "content": TEST_PROMPT }],
+                    "max_output_tokens": 16,
+                    "stream": true,
+                })
+            } else {
+                let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
+                let mut body = json!({
+                    "model": &model,
+                    "messages": messages,
+                    "stream": true,
+                });
+                set_chat_completion_token_limit(&mut body, config, 16);
+                body
+            };
+            if config.api_style != AiApiStyle::Responses && !config.enable_thinking && !is_kimi_model(&config.model) {
                 body_obj["extra_body"] = json!({
                     "chat_template_kwargs": { "enable_thinking": false }
                 });
@@ -1197,7 +1325,6 @@ async fn stream_claude(
     let body = json!({
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(2048),
-        "temperature": temperature_value(request.temperature),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
         "stream": true,
@@ -1217,20 +1344,17 @@ async fn stream_claude(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1280,10 +1404,9 @@ async fn stream_openai(
     let mut body_obj = json!({
         "model": request.config.model,
         "messages": messages,
-        "max_tokens": request.max_tokens.unwrap_or(2048),
         "stream": true,
     });
-    add_temperature_if_supported(&mut body_obj, request);
+    set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
     if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
@@ -1304,20 +1427,17 @@ async fn stream_openai(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1369,13 +1489,12 @@ async fn stream_responses_api(
 ) -> Result<(), String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let mut body = json!({
+    let body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
         "stream": true,
     });
-    add_temperature_if_supported(&mut body, request);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1391,20 +1510,17 @@ async fn stream_responses_api(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1462,7 +1578,6 @@ async fn stream_gemini(
         "contents": contents,
         "generationConfig": {
             "maxOutputTokens": request.max_tokens.unwrap_or(2048),
-            "temperature": temperature_value(request.temperature),
         },
     });
 
@@ -1481,19 +1596,16 @@ async fn stream_gemini(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                         let text = gemini_text(&event);
@@ -1570,7 +1682,22 @@ impl StreamingToolCallAccumulator {
         match event {
             StreamToolEvent::Chunk(chunk) => on_chunk(chunk),
             StreamToolEvent::ToolCallStart { index, id, name } => {
-                self.calls.insert(index, PartialToolCall { id, name, arguments: String::new() });
+                // Merge with any existing entry for this index instead of
+                // overwriting it. Some OpenAI-compatible providers (e.g. GLM)
+                // re-send `id` (as an empty string) or omit `name` on
+                // subsequent delta chunks; a blind insert would wipe a
+                // previously-correct name and reset accumulated arguments,
+                // producing "Unknown tool:" errors.
+                if let Some(existing) = self.calls.get_mut(&index) {
+                    if !id.is_empty() {
+                        existing.id = id;
+                    }
+                    if !name.is_empty() {
+                        existing.name = name;
+                    }
+                } else {
+                    self.calls.insert(index, PartialToolCall { id, name, arguments: String::new() });
+                }
                 if !self.ordered_indices.contains(&index) {
                     self.ordered_indices.push(index);
                 }
@@ -1655,7 +1782,7 @@ async fn stream_claude_with_tools(
 
     let tool_json: Vec<serde_json::Value> = tools.iter().map(|t| t.to_anthropic_tool()).collect();
 
-    let mut body = json!({
+    let body = json!({
         "model": request.config.model,
         "max_tokens": request.max_tokens.unwrap_or(4096),
         "system": claude_system_prompt(&request.system_prompt),
@@ -1663,7 +1790,6 @@ async fn stream_claude_with_tools(
         "tools": tool_json,
         "stream": true,
     });
-    add_temperature_if_supported(&mut body, request);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1679,7 +1805,7 @@ async fn stream_claude_with_tools(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     // Track the current content block index and type for tool_use blocks
     let mut current_block_index: Option<u32> = None;
     let mut current_block_type: Option<String> = None;
@@ -1690,13 +1816,10 @@ async fn stream_claude_with_tools(
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1834,13 +1957,12 @@ async fn stream_openai_with_tools(
     let mut body = json!({
         "model": request.config.model,
         "messages": messages,
-        "max_tokens": request.max_tokens.unwrap_or(4096),
         "tools": tool_json,
         "tool_choice": "auto",
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    add_temperature_if_supported(&mut body, request);
+    set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1856,7 +1978,7 @@ async fn stream_openai_with_tools(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     let mut token_usage: Option<TokenUsage> = None;
 
     loop {
@@ -1864,13 +1986,10 @@ async fn stream_openai_with_tools(
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1909,8 +2028,11 @@ async fn stream_openai_with_tools(
                         if let Some(tool_calls) = event["choices"].get(0).and_then(|c| c["delta"]["tool_calls"].as_array()) {
                             for tc in tool_calls {
                                 let idx = tc["index"].as_u64().unwrap_or(0) as u32;
-                                // First chunk for this tool call has id and name
-                                if let Some(id) = tc["id"].as_str() {
+                                // The first delta carries the tool call id and
+                                // function name. Some OpenAI-compatible providers
+                                // (e.g. GLM) send id="" on subsequent deltas, so
+                                // only a non-empty id marks a genuine start.
+                                if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
                                     let name = tc["function"]["name"].as_str().unwrap_or_default().to_string();
                                     on_event(StreamToolEvent::ToolCallStart { index: idx, id: id.to_string(), name });
                                 }
@@ -1919,6 +2041,132 @@ async fn stream_openai_with_tools(
                                     on_event(StreamToolEvent::ToolCallDelta { index: idx, fragment: fragment.to_string() });
                                 }
                             }
+                        }
+                    }
+                }
+
+                if finished { break; }
+            }
+            _ = cancelled.notified() => { break; }
+        }
+    }
+
+    Ok(token_usage)
+}
+
+async fn stream_responses_with_tools(
+    client: &reqwest::Client,
+    session_id: &str,
+    request: &AiCompletionRequest,
+    tools: &[crate::agent_events::ToolDefinition],
+    cancelled: &Notify,
+    on_event: &impl Fn(StreamToolEvent),
+) -> Result<Option<TokenUsage>, String> {
+    let headers = maybe_bearer_headers(&request.config)?;
+    let tool_json: Vec<serde_json::Value> = tools.iter().map(responses_function_tool).collect();
+
+    let body = json!({
+        "model": request.config.model,
+        "input": build_responses_input_with_tools(&request.system_prompt, &request.messages),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "tools": tool_json,
+        "tool_choice": "auto",
+        "stream": true,
+    });
+
+    let res = client
+        .post(resolve_endpoint(&request.config))
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("AI request failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        return Err(extract_error(&data).unwrap_or_else(|| "API error".to_string()));
+    }
+
+    let mut byte_stream = res.bytes_stream();
+    let mut buf = Vec::new();
+    let mut item_indices: HashMap<String, u32> = HashMap::new();
+    let mut started_indices: HashSet<u32> = HashSet::new();
+    let mut argument_indices: HashSet<u32> = HashSet::new();
+    let mut next_index: u32 = 0;
+    let mut token_usage: Option<TokenUsage> = None;
+
+    loop {
+        tokio::select! {
+            chunk = byte_stream.next() => {
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                buf.extend_from_slice(&chunk);
+
+                let mut finished = false;
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
+                    let Some(data) = stream_data_payload(&line) else { continue };
+                    if data == "[DONE]" {
+                        finished = true;
+                        break;
+                    }
+
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(usage) = responses_token_usage(&event) {
+                            token_usage = Some(usage);
+                        }
+
+                        if let Some(text) = responses_stream_text(&event) {
+                            on_event(StreamToolEvent::Chunk(AiStreamChunk {
+                                session_id: session_id.to_string(),
+                                delta: text.to_string(),
+                                reasoning_delta: None,
+                                done: false,
+                            }));
+                        }
+
+                        match event["type"].as_str().unwrap_or_default() {
+                            "response.output_item.added" => {
+                                emit_responses_function_call_item(
+                                    &event,
+                                    &mut item_indices,
+                                    &mut started_indices,
+                                    &mut argument_indices,
+                                    &mut next_index,
+                                    on_event,
+                                );
+                            }
+                            "response.output_item.done" => {
+                                if let Some(index) = emit_responses_function_call_item(
+                                    &event,
+                                    &mut item_indices,
+                                    &mut started_indices,
+                                    &mut argument_indices,
+                                    &mut next_index,
+                                    on_event,
+                                ) {
+                                    on_event(StreamToolEvent::ToolCallComplete { index });
+                                }
+                            }
+                            "response.function_call_arguments.delta" => {
+                                let index = event["item_id"]
+                                    .as_str()
+                                    .and_then(|id| item_indices.get(id).copied())
+                                    .or_else(|| event["output_index"].as_u64().map(|i| i as u32))
+                                    .unwrap_or(0);
+                                if let Some(fragment) = event["delta"].as_str() {
+                                    argument_indices.insert(index);
+                                    on_event(StreamToolEvent::ToolCallDelta { index, fragment: fragment.to_string() });
+                                }
+                            }
+                            "response.function_call_arguments.done" => {
+                                let index = event["item_id"]
+                                    .as_str()
+                                    .and_then(|id| item_indices.get(id).copied())
+                                    .or_else(|| event["output_index"].as_u64().map(|i| i as u32))
+                                    .unwrap_or(0);
+                                on_event(StreamToolEvent::ToolCallComplete { index });
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -2014,7 +2262,7 @@ async fn stream_gemini_with_tools(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     let mut tool_call_idx: u32 = 0;
     let mut token_usage: Option<TokenUsage> = None;
 
@@ -2023,12 +2271,9 @@ async fn stream_gemini_with_tools(
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                         // Token usage (overwrite each chunk, keep last value)
@@ -2117,6 +2362,12 @@ pub async fn stream_with_tools(
             })
             .await?
         }
+        _ if config.api_style == AiApiStyle::Responses => {
+            stream_responses_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                accumulator.lock().unwrap().process(event, &on_chunk);
+            })
+            .await?
+        }
         _ => {
             stream_openai_with_tools(&client, session_id, request, tools, cancelled, &|event| {
                 accumulator.lock().unwrap().process(event, &on_chunk);
@@ -2188,14 +2439,72 @@ pub fn load_config(path: &Path) -> Result<Option<AiConfig>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+
     use super::{
-        add_temperature_if_supported_for_config, build_ai_http_client, claude_headers, claude_system_prompt,
-        gemini_text, is_kimi_model, openai_response_text, openai_stream_reasoning, openai_stream_text,
-        parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens,
-        responses_text, supports_temperature, temperature_value, uses_anthropic_messages_api, validate_config,
-        AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AiReasoningLevel, AUTHORIZATION,
+        build_ai_http_client, build_responses_input_with_tools, claude_headers, claude_system_prompt,
+        drain_next_stream_line, emit_responses_function_call_item, gemini_text, is_kimi_model, openai_response_text,
+        openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
+        resolve_model_list_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
+        responses_text, responses_token_usage, set_chat_completion_token_limit, stream_data_payload,
+        uses_anthropic_messages_api, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiMessage, AiModelInfo,
+        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
         CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
+
+    /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
+    /// (e.g. GLM via proxy) re-send the `id` field in every tool-call delta.
+    /// The second delta carries `id` but omits `function.name`, so the OpenAI
+    /// parser emits a second ToolCallStart with an empty name. The
+    /// accumulator's `insert` then overwrites the previously-correct name.
+    #[test]
+    fn accumulator_preserves_name_when_provider_resends_id() {
+        let mut acc = StreamingToolCallAccumulator::new();
+        let noop = |_chunk| {};
+
+        // First chunk: id + name present (standard OpenAI first delta)
+        acc.process(
+            StreamToolEvent::ToolCallStart { index: 0, id: "call_1".to_string(), name: "get_columns".to_string() },
+            &noop,
+        );
+        acc.process(StreamToolEvent::ToolCallDelta { index: 0, fragment: "{\"table\":".to_string() }, &noop);
+
+        // Second chunk: provider re-sends `id` but omits `function.name`.
+        // The OpenAI parser sees `id` is Some and emits ToolCallStart with
+        // name = "" (from unwrap_or_default()).
+        acc.process(StreamToolEvent::ToolCallStart { index: 0, id: "call_1".to_string(), name: String::new() }, &noop);
+        acc.process(StreamToolEvent::ToolCallDelta { index: 0, fragment: "\"record_trip_id_t\"}".to_string() }, &noop);
+
+        let calls = acc.finalize();
+        assert_eq!(calls.len(), 1, "expected exactly one accumulated tool call");
+        assert_eq!(
+            calls[0].name, "get_columns",
+            "tool name was wiped to empty by a re-sent ToolCallStart — this is the \"Unknown tool:\" bug"
+        );
+        assert_eq!(calls[0].arguments["table"], "record_trip_id_t", "arguments were reset by a re-sent ToolCallStart");
+    }
+
+    #[test]
+    fn stream_line_decoder_preserves_split_multibyte_utf8() {
+        let text = "\u{8bf4}\u{660e}";
+        let json = serde_json::json!({ "delta": text }).to_string();
+        let line = format!("data: {json}\n");
+        let bytes = line.as_bytes();
+        let split = bytes.iter().position(|byte| *byte >= 0x80).unwrap() + 1;
+        let mut buffer = Vec::new();
+
+        buffer.extend_from_slice(&bytes[..split]);
+        assert_eq!(drain_next_stream_line(&mut buffer).unwrap(), None);
+
+        buffer.extend_from_slice(&bytes[split..]);
+        let decoded = drain_next_stream_line(&mut buffer).unwrap().unwrap();
+        let payload = stream_data_payload(&decoded).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+
+        assert_eq!(parsed["delta"].as_str(), Some(text));
+        assert!(!decoded.contains('\u{fffd}'));
+    }
 
     #[test]
     fn ai_config_proxy_fields_default_for_legacy_config() {
@@ -2533,15 +2842,223 @@ mod tests {
     }
 
     #[test]
-    fn temperature_value_rounds_f32_to_provider_safe_precision() {
-        assert_eq!(temperature_value(Some(0.15)), serde_json::json!(0.15));
-        assert_eq!(temperature_value(Some(0.149)), serde_json::json!(0.15));
-        assert_eq!(temperature_value(None), serde_json::json!(0.2));
-        assert_eq!(serde_json::to_string(&temperature_value(Some(0.15))).unwrap(), "0.15");
+    fn responses_stream_text_reads_current_delta_shapes() {
+        assert_eq!(
+            responses_stream_text(&serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "SELECT"
+            })),
+            Some("SELECT")
+        );
+        assert_eq!(
+            responses_stream_text(&serde_json::json!({
+                "type": "response.output_text.done",
+                "text": "SELECT 1;"
+            })),
+            None
+        );
     }
 
     #[test]
-    fn omits_temperature_for_openai_reasoning_models() {
+    fn responses_token_usage_reads_stream_completed_response_usage() {
+        let completed_usage = responses_token_usage(&serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 34
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(completed_usage.input_tokens, 12);
+        assert_eq!(completed_usage.output_tokens, 34);
+
+        let top_level_usage = responses_token_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 56,
+                "output_tokens": 78
+            }
+        }))
+        .unwrap();
+        assert_eq!(top_level_usage.input_tokens, 56);
+        assert_eq!(top_level_usage.output_tokens, 78);
+    }
+
+    #[test]
+    fn responses_tools_use_responses_schema() {
+        let input = build_responses_input_with_tools(
+            "system",
+            &[
+                AiMessage {
+                    role: "user".to_string(),
+                    content: "inspect db".to_string(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                },
+                AiMessage {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![ToolCallRef {
+                        id: "call_1".to_string(),
+                        name: "list_tables".to_string(),
+                        arguments: serde_json::json!({"schema": "public"}),
+                    }],
+                },
+                AiMessage {
+                    role: "tool".to_string(),
+                    content: "users".to_string(),
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_calls: Vec::new(),
+                },
+            ],
+        );
+
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[2]["arguments"], "{\"schema\":\"public\"}");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_1");
+
+        let tool = crate::agent_events::ToolDefinition {
+            name: "list_tables",
+            description: "List tables",
+            parameters: serde_json::json!({"type": "object"}),
+            read_only: true,
+            parallel_ok: true,
+        };
+        let tool_json = responses_function_tool(&tool);
+        assert_eq!(tool_json["type"], "function");
+        assert_eq!(tool_json["name"], "list_tables");
+        assert!(tool_json.get("function").is_none());
+    }
+
+    #[test]
+    fn responses_tool_done_item_can_supply_complete_function_call() {
+        let mut accumulator = StreamingToolCallAccumulator::new();
+        let mut item_indices = HashMap::new();
+        let mut started_indices = HashSet::new();
+        let mut argument_indices = HashSet::new();
+        let mut next_index = 0;
+        let event = serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "list_tables",
+                "arguments": "{\"schema\":\"public\"}"
+            }
+        });
+        let events = RefCell::new(Vec::new());
+        if let Some(index) = emit_responses_function_call_item(
+            &event,
+            &mut item_indices,
+            &mut started_indices,
+            &mut argument_indices,
+            &mut next_index,
+            &|event| events.borrow_mut().push(event),
+        ) {
+            events.borrow_mut().push(StreamToolEvent::ToolCallComplete { index });
+        }
+        for event in events.into_inner() {
+            accumulator.process(event, &|_| {});
+        }
+
+        let calls = accumulator.finalize();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "list_tables");
+        assert_eq!(calls[0].arguments["schema"], "public");
+    }
+
+    #[test]
+    fn responses_tool_arguments_are_not_duplicated_when_done_follows_delta() {
+        let mut accumulator = StreamingToolCallAccumulator::new();
+        let mut item_indices = HashMap::new();
+        let mut started_indices = HashSet::new();
+        let mut argument_indices = HashSet::new();
+        let mut next_index = 0;
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "list_tables"
+            }
+        });
+        let done = serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "list_tables",
+                "arguments": "{\"schema\":\"public\"}"
+            }
+        });
+
+        let events = RefCell::new(Vec::new());
+        emit_responses_function_call_item(
+            &added,
+            &mut item_indices,
+            &mut started_indices,
+            &mut argument_indices,
+            &mut next_index,
+            &|event| events.borrow_mut().push(event),
+        );
+        for event in events.take() {
+            accumulator.process(event, &|_| {});
+        }
+
+        let delta_index = item_indices.get("fc_1").copied().unwrap();
+        argument_indices.insert(delta_index);
+        accumulator.process(
+            StreamToolEvent::ToolCallDelta { index: delta_index, fragment: "{\"schema\":\"public\"}".to_string() },
+            &|_| {},
+        );
+
+        if let Some(index) = emit_responses_function_call_item(
+            &done,
+            &mut item_indices,
+            &mut started_indices,
+            &mut argument_indices,
+            &mut next_index,
+            &|event| events.borrow_mut().push(event),
+        ) {
+            events.borrow_mut().push(StreamToolEvent::ToolCallComplete { index });
+        }
+        for event in events.into_inner() {
+            accumulator.process(event, &|_| {});
+        }
+
+        let calls = accumulator.finalize();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, serde_json::json!({"schema": "public"}));
+    }
+
+    #[test]
+    fn detects_kimi_models_that_skip_extra_body_thinking_toggle() {
+        assert!(is_kimi_model("kimi-k2.7-code"));
+        assert!(is_kimi_model("kimi-k2.6"));
+        assert!(is_kimi_model("kimi-k2.5"));
+        assert!(is_kimi_model("kimi-k3"));
+
+        // Older K2 variants should not skip OpenAI-compatible thinking toggles.
+        assert!(!is_kimi_model("kimi-k2"));
+        assert!(!is_kimi_model("kimi-k2-thinking"));
+        assert!(!is_kimi_model("kimi-k2-0711-preview"));
+        assert!(!is_kimi_model("kimi-k2.4"));
+    }
+
+    #[test]
+    fn uses_max_completion_tokens_for_openai_reasoning_chat_completions() {
         let mut config = AiConfig {
             provider: AiProvider::Openai,
             api_key: "key".to_string(),
@@ -2558,57 +3075,55 @@ mod tests {
             codex_cli_env: Default::default(),
         };
 
-        assert!(!supports_temperature(&config));
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
 
-        config.model = "o4-mini".to_string();
-        assert!(!supports_temperature(&config));
+        assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_tokens").is_none());
 
         config.model = "gpt-4o".to_string();
-        assert!(supports_temperature(&config));
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
+
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_completion_tokens").is_none());
+
+        config.endpoint = "http://localhost:11434/v1".to_string();
+        config.model = "gpt-5-proxy".to_string();
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
+
+        assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_tokens").is_none());
 
         config.provider = AiProvider::OpenaiCompatible;
         config.endpoint = "http://localhost:11434/v1".to_string();
         config.model = "gpt-5-local".to_string();
-        assert!(supports_temperature(&config));
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
 
-        // Kimi K2.5+ models: temperature is forced to 1.0 by the API
-        config.model = "kimi-k2.7-code".to_string();
-        assert!(!supports_temperature(&config));
-        assert!(is_kimi_model(&config.model));
-
-        config.model = "kimi-k2.6".to_string();
-        assert!(!supports_temperature(&config));
-        assert!(is_kimi_model(&config.model));
-
-        config.model = "kimi-k2.5".to_string();
-        assert!(!supports_temperature(&config));
-        assert!(is_kimi_model(&config.model));
-
-        // K3+ should also be matched
-        config.model = "kimi-k3".to_string();
-        assert!(!supports_temperature(&config));
-        assert!(is_kimi_model(&config.model));
-
-        // Older K2 variants should NOT be matched (they support custom temperature)
-        config.model = "kimi-k2".to_string();
-        assert!(supports_temperature(&config));
-        assert!(!is_kimi_model(&config.model));
-
-        config.model = "kimi-k2-thinking".to_string();
-        assert!(supports_temperature(&config));
-        assert!(!is_kimi_model(&config.model));
-
-        config.model = "kimi-k2-0711-preview".to_string();
-        assert!(supports_temperature(&config));
-        assert!(!is_kimi_model(&config.model));
-
-        config.model = "kimi-k2.4".to_string();
-        assert!(supports_temperature(&config));
-        assert!(!is_kimi_model(&config.model));
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
-    fn omits_temperature_for_kimi_test_connection_body() {
+    fn omits_extra_body_for_kimi_test_connection_body() {
         let config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
             api_key: "key".to_string(),
@@ -2631,14 +3146,12 @@ mod tests {
             "stream": true,
         });
 
-        add_temperature_if_supported_for_config(&mut body, &config, Some(0.0));
         if !config.enable_thinking && !is_kimi_model(&config.model) {
             body["extra_body"] = serde_json::json!({
                 "chat_template_kwargs": { "enable_thinking": false }
             });
         }
 
-        assert!(body.get("temperature").is_none());
         assert!(body.get("extra_body").is_none());
     }
 

@@ -6,6 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isSingleDatabase } from "@/lib/databaseCapabilities";
+import { canExecuteWithoutSelectedDatabase } from "@/lib/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
@@ -72,7 +73,7 @@ export function useSqlExecution(deps: {
     const tab = deps.activeTab.value;
     const sql = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
-    if (requiresDatabaseSelection(tab, deps.activeConnection.value)) {
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
       deps.onMissingDatabase?.();
       return;
     }
@@ -118,7 +119,7 @@ export function useSqlExecution(deps: {
     sql ??= await resolvedExecutableSql();
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
-    if (requiresDatabaseSelection(tab, deps.activeConnection.value)) {
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
       deps.onMissingDatabase?.();
       return;
     }
@@ -226,9 +227,10 @@ function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined)
   return connection.db_type !== "redis" && connection.db_type !== "mongodb";
 }
 
-function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined): boolean {
+export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {
   if (tab.mode !== "query") return false;
   if (!connection || tab.database) return false;
   if (isSingleDatabase(connection.db_type)) return false;
+  if (canExecuteWithoutSelectedDatabase(connection, sql)) return false;
   return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
 }

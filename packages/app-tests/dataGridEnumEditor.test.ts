@@ -31,6 +31,15 @@ test("parses enum with escaped single quotes", () => {
   assert.deepEqual(enumValuesForColumn({ data_type: "enum('it''s','normal')" }), ["it's", "normal"]);
 });
 
+test("parses MySQL enum values with charset and collation suffixes", () => {
+  assert.deepEqual(
+    enumValuesForColumn({
+      data_type: "enum('id','string','text','long','double','bool','date','datetime','object','secret') CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci",
+    }),
+    ["id", "string", "text", "long", "double", "bool", "date", "datetime", "object", "secret"],
+  );
+});
+
 test("returns empty array for non-enum types", () => {
   assert.deepEqual(enumValuesForColumn({ data_type: "varchar(255)" }), []);
   assert.deepEqual(enumValuesForColumn(undefined), []);

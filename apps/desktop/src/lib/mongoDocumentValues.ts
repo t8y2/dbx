@@ -2,6 +2,7 @@ export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 const LEGACY_MONGO_DATE_DISPLAY_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?$/;
+const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 
 export function mongoShellDateToExtendedJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -67,6 +68,22 @@ export function buildMongoInsertDocument(row: MongoInputValue[], columns: string
   return doc;
 }
 
+export function buildMongoCopyInsertDocument(row: MongoInputValue[], columns: string[], options: { excludePrimaryKeys?: boolean } = {}): Record<string, unknown> {
+  const doc: Record<string, unknown> = {};
+  for (let ci = 0; ci < columns.length; ci++) {
+    const col = columns[ci];
+    if (!col || (options.excludePrimaryKeys && col === "_id")) continue;
+    const val = row[ci];
+    if (val === null) continue;
+    if (col === "_id" && typeof val === "string" && MONGO_OBJECT_ID_PATTERN.test(val)) {
+      doc[col] = { $oid: val };
+      continue;
+    }
+    doc[col] = parseMongoDocumentInputValue(val);
+  }
+  return doc;
+}
+
 export function formatMongoShellLiteral(value: unknown): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -77,6 +94,9 @@ export function formatMongoShellLiteral(value: unknown): string {
     const keys = Object.keys(object);
     if (keys.length === 1 && typeof object.$date === "string") {
       return `ISODate(${JSON.stringify(object.$date)})`;
+    }
+    if (keys.length === 1 && typeof object.$oid === "string" && MONGO_OBJECT_ID_PATTERN.test(object.$oid)) {
+      return `ObjectId(${JSON.stringify(object.$oid)})`;
     }
     return `{${keys.map((key) => `${JSON.stringify(key)}:${formatMongoShellLiteral(object[key])}`).join(",")}}`;
   }

@@ -7,6 +7,8 @@ services:
       - "4224:4224"
     environment:
       - DBX_PASSWORD=changeme
+      # Uncomment when publishing DBX under a reverse-proxy subpath, e.g. https://example.com/dbx/
+      # - DBX_PUBLIC_BASE_PATH=/dbx
     volumes:
       - dbx-data:/app/data
     restart: unless-stopped

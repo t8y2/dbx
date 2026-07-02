@@ -52,6 +52,11 @@ export async function resolveExecutableSqlWithBackend(fullSql: string, selectedS
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 
+  // MongoDB uses dedicated per-command gutter actions for "current command";
+  // the main editor execute action keeps its long-standing "run all text"
+  // behavior when nothing is selected.
+  if (options?.databaseType === "mongodb") return fullSql;
+
   if (options?.mode === "current" && options.cursorPos !== undefined) {
     return await api.findStatementAtCursor(fullSql, options.cursorPos, options.databaseType);
   }

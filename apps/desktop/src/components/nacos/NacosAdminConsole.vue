@@ -13,6 +13,7 @@ import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
 import { useToast } from "@/composables/useToast";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/api";
 import { buildNacosConfigDeleteConfirm, buildNacosConfigExportFileName, buildNacosConfigHistoryRollbackConfirm, buildNacosInstanceConfirm, createNacosSaveAsCopy, resolveNacosConfigCopyText } from "@/lib/nacosAdmin";
@@ -39,6 +40,7 @@ type AdminTab = "configs" | "services";
 const { toast } = useToast();
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
+const connectionStore = useConnectionStore();
 const { isDark } = useTheme();
 const activeTab = ref<AdminTab>("configs");
 const connectionInfo = ref<NacosConnectionInfo | null>(null);
@@ -839,12 +841,22 @@ watch(
     originalConfigContent.value = "";
     destroyConfigEditor();
     selectedService.value = null;
+    try {
+      await connectionStore.ensureConnected(props.connectionId);
+    } catch (e) {
+      console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+    }
     await loadInfo();
     await Promise.all([loadConfigsWithRetry(1), loadServicesWithRetry(1)]);
   },
 );
 
 onMounted(async () => {
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
   await loadInfo();
   await Promise.all([loadConfigsWithRetry(1), loadServicesWithRetry(1)]);
 });

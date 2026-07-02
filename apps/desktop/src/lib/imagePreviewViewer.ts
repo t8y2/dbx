@@ -27,3 +27,44 @@ export function imagePreviewFitScale(options: { imageWidth: number; imageHeight:
 export function imagePreviewTransform(options: { scale: number; offsetX: number; offsetY: number }): string {
   return `translate(${options.offsetX}px, ${options.offsetY}px) scale(${options.scale})`;
 }
+
+export function imagePreviewDialogSize(options: {
+  imageWidth: number;
+  imageHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  toolbarHeight?: number;
+  maxWidthRatio?: number;
+  maxHeightRatio?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+  minWidth?: number;
+  minStageHeight?: number;
+}): { width: number; height: number } | null {
+  if (options.imageWidth <= 0 || options.imageHeight <= 0 || options.viewportWidth <= 0 || options.viewportHeight <= 0) {
+    return null;
+  }
+
+  const toolbarHeight = options.toolbarHeight ?? 48;
+  const maxWidth = Math.min(options.viewportWidth * (options.maxWidthRatio ?? 0.92), options.maxWidth ?? 1280);
+  const maxHeight = Math.min(options.viewportHeight * (options.maxHeightRatio ?? 0.86), options.maxHeight ?? 920);
+  const maxStageHeight = Math.max(1, maxHeight - toolbarHeight);
+  const minWidth = Math.min(maxWidth, options.minWidth ?? 360);
+  const minStageHeight = Math.min(maxStageHeight, options.minStageHeight ?? 180);
+  const imageRatio = options.imageWidth / options.imageHeight;
+  let stageWidth = maxWidth;
+  let stageHeight = stageWidth / imageRatio;
+
+  if (stageHeight > maxStageHeight) {
+    stageHeight = maxStageHeight;
+    stageWidth = stageHeight * imageRatio;
+  }
+
+  stageWidth = Math.min(maxWidth, Math.max(stageWidth, minWidth));
+  stageHeight = Math.min(maxStageHeight, Math.max(stageHeight, minStageHeight));
+
+  return {
+    width: Math.max(1, Math.floor(stageWidth)),
+    height: Math.max(1, Math.floor(stageHeight + toolbarHeight)),
+  };
+}

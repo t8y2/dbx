@@ -5,9 +5,12 @@ import { Search, X, ListFilter, Crosshair, Server, Database, FolderTree, Table2,
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useToast } from "@/composables/useToast";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/lib/sidebarSearchTree";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
+import { copyNameForTreeNode } from "@/lib/treeNodeClick";
+import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/clipboard";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
@@ -24,9 +27,11 @@ const { t } = useI18n();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const { toast } = useToast();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
 const searchInputRef = ref<HTMLInputElement>();
+const rootRef = ref<HTMLElement>();
 const pointerInsideTree = ref(false);
 const treeScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const plainTreeScrollerRef = ref<HTMLElement | null>(null);
@@ -208,10 +213,12 @@ const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryS
 // ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
 const stickyScrollTop = ref(0);
 const sidebarScrollMetrics = ref({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
 let sidebarScrollbarResizeObserver: ResizeObserver | null = null;
 let sidebarScrollbarAnimationFrame = 0;
 let sidebarScrollbarDragOffset = 0;
+let sidebarScrollingTimer = 0;
 
 function updateSidebarScrollMetrics() {
   const scroller = currentTreeScroller();
@@ -234,6 +241,11 @@ function scheduleSidebarScrollMetricsUpdate() {
 }
 
 function onTreeScroll() {
+  isScrollingSidebar.value = true;
+  window.clearTimeout(sidebarScrollingTimer);
+  sidebarScrollingTimer = window.setTimeout(() => {
+    isScrollingSidebar.value = false;
+  }, 700);
   scheduleSidebarScrollMetricsUpdate();
 }
 
@@ -435,9 +447,12 @@ function clearSidebarSelection() {
 
 async function createNewGroup() {
   const groupId = store.createConnectionGroup(t("connectionGroup.newGroupDefault"));
+  await startRenamingCreatedGroup(groupId);
+}
+
+async function startRenamingCreatedGroup(groupId: string) {
   pendingRenameGroupId.value = groupId;
   store.selectedTreeNodeId = groupId;
-
   if (isFiltering.value) {
     searchQuery.value = "";
     deferredSearchQuery.value = "";
@@ -687,6 +702,13 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
+function collapseAllTreeNodes() {
+  store.collapseAllTreeNodes();
+  if (isSearching.value) {
+    searchCollapsedIds.value = new Set(flatNodes.value.filter((item) => item.node.children?.length).map((item) => item.id));
+  }
+}
+
 function currentTreeScroller(): HTMLElement | null {
   return ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ?? null;
 }
@@ -756,7 +778,25 @@ function focusSearchAtEnd() {
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (!pointerInsideTree.value || event.defaultPrevented || isEditableSidebarTypeSearchTarget(event.target)) return;
+  if (event.defaultPrevented) return;
+  if (sidebarShortcutTargetIsActive(event.target)) {
+    if (eventTargetAllowsAppClipboardShortcut(event, "c")) {
+      if (copySelectedSidebarNames()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
+      if (requestSelectedSidebarPasteTable()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+  }
+
+  if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target)) return;
   if (isCancelSearchShortcut(event)) {
     if (!searchQuery.value) return;
     event.preventDefault();
@@ -771,6 +811,49 @@ function onWindowKeydown(event: KeyboardEvent) {
   focusSearchAtEnd();
 }
 
+function sidebarShortcutTargetIsActive(target: EventTarget | null): boolean {
+  const root = rootRef.value;
+  if (!root) return false;
+  if (target instanceof Node && root.contains(target)) return true;
+  const active = document.activeElement;
+  return pointerInsideTree.value && (!active || active === document.body || root.contains(active));
+}
+
+function selectedSidebarNodesInVisibleOrder(): TreeNode[] {
+  const selectedIds = new Set(store.selectedTreeNodeIds);
+  return visibleNodes.value.filter((node) => selectedIds.has(node.id));
+}
+
+function copySelectedSidebarNames(): boolean {
+  const nodes = selectedSidebarNodesInVisibleOrder();
+  if (nodes.length === 0) return false;
+  const tableNodes = nodes.filter((node) => node.type === "table" && !!node.connectionId && !!node.database);
+  store.treeClipboard =
+    tableNodes.length > 0
+      ? {
+          kind: "table-copy",
+          tables: tableNodes.map((node) => ({
+            connectionId: node.connectionId!,
+            database: node.database!,
+            schema: node.schema,
+            tableName: node.label,
+          })),
+        }
+      : null;
+  copyToClipboard(nodes.map(copyNameForTreeNode).join("\n"))
+    .then(() => toast(t("connection.copied"), 2000))
+    .catch((e: any) => toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000));
+  return true;
+}
+
+function requestSelectedSidebarPasteTable(): boolean {
+  const clipboard = store.treeClipboard;
+  const selectedNodeId = store.selectedTreeNodeId;
+  if (clipboard?.kind !== "table-copy" || clipboard.tables.length === 0 || !selectedNodeId) return false;
+  window.dispatchEvent(new CustomEvent("dbx:sidebar-request-paste-table", { detail: { nodeId: selectedNodeId } }));
+  return true;
+}
+
 onMounted(() => {
   window.addEventListener("keydown", onWindowKeydown);
 });
@@ -780,13 +863,14 @@ onUnmounted(() => {
   stopSidebarScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
+  window.clearTimeout(sidebarScrollingTimer);
 });
 
-defineExpose({ focusSearch, createNewGroup });
+defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
 </script>
 
 <template>
-  <div class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
+  <div ref="rootRef" class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
     <div class="sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
         <div class="relative flex-1">
@@ -843,17 +927,26 @@ defineExpose({ focusSearch, createNewGroup });
         :prerender="SIDEBAR_TREE_PRERENDER_COUNT"
         :skip-hover="true"
         key-field="id"
-        type-field="type"
+        type-field="poolType"
         flow-mode
       >
         <template #default="{ item }">
-          <TreeItem :node="item.node" :depth="item.depth" :drag-disabled="isFiltering" :pending-rename="pendingRenameGroupId === item.node.id" :highlighted="highlightedNodeId === item.node.id" @search-toggle="onSearchToggle" @rename-started="pendingRenameGroupId = null" />
+          <TreeItem
+            :node="item.node"
+            :depth="item.depth"
+            :drag-disabled="isFiltering"
+            :pending-rename="pendingRenameGroupId === item.node.id"
+            :highlighted="highlightedNodeId === item.node.id"
+            @search-toggle="onSearchToggle"
+            @rename-started="pendingRenameGroupId = null"
+            @group-created="startRenamingCreatedGroup"
+          />
         </template>
       </RecycleScroller>
       <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
         <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" @search-toggle="onSearchToggle" />
       </div>
-      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
         <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
       </div>
     </div>
@@ -869,9 +962,10 @@ defineExpose({ focusSearch, createNewGroup });
           :highlighted="highlightedNodeId === item.id"
           @search-toggle="onSearchToggle"
           @rename-started="pendingRenameGroupId = null"
+          @group-created="startRenamingCreatedGroup"
         />
       </div>
-      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
         <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
       </div>
     </div>
@@ -889,10 +983,13 @@ defineExpose({ focusSearch, createNewGroup });
 .connection-tree-scroller {
   will-change: scroll-position;
   contain: content;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.connection-tree-scroller::-webkit-scrollbar:vertical {
+.connection-tree-scroller::-webkit-scrollbar {
   width: 0;
+  height: 0;
 }
 
 .connection-tree-scroller :deep(.vue-recycle-scroller__item-view) {
@@ -906,9 +1003,9 @@ defineExpose({ focusSearch, createNewGroup });
 
 .sidebar-tree-scrollbar {
   position: absolute;
-  top: 4px;
+  top: 0;
   right: 0;
-  bottom: 4px;
+  bottom: 0;
   z-index: 10;
   width: 12px;
   cursor: default;
@@ -916,6 +1013,7 @@ defineExpose({ focusSearch, createNewGroup });
   transition: opacity 120ms ease;
 }
 
+.sidebar-tree-scrollbar--scrolling,
 .sidebar-tree-scrollbar:hover,
 .sidebar-tree-scrollbar--dragging {
   opacity: 1;

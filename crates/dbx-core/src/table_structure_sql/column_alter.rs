@@ -360,18 +360,19 @@ pub(super) fn build_oracle_like_existing_column_sql(
     if type_changed || nullable_changed || default_changed {
         let data_type = column_data_type(dialect, column);
         let mut parts = vec![quote_ident(dialect, &current_name), data_type];
-        // Always include nullability so the statement is self-contained (required by Dameng).
-        if !column.is_nullable {
-            parts.push("NOT NULL".to_string());
-        } else {
-            parts.push("NULL".to_string());
-        }
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
             parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
         } else if default_changed {
             // User cleared the default — explicitly drop it.
             parts.push("DEFAULT NULL".to_string());
+        }
+        if nullable_changed {
+            if column.is_nullable {
+                parts.push("NULL".to_string());
+            } else {
+                parts.push("NOT NULL".to_string());
+            }
         }
         statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
     }
@@ -444,12 +445,13 @@ pub(super) fn build_sqlserver_existing_column_sql(
                 .unwrap_or(false);
 
         if has_old_default {
+            let sql_var = sqlserver_default_constraint_sql_var(table, &current_name);
             statements.push(format!(
-                "DECLARE @sql NVARCHAR(MAX);\
-                 SELECT @sql = 'ALTER TABLE {table} DROP CONSTRAINT [' + name + ']'\
-                 FROM sys.default_constraints\
-                 WHERE parent_object_id = OBJECT_ID('{table}') AND parent_column_id = COLUMNPROPERTY(OBJECT_ID('{table}'), '{col_name}', 'ColumnId');\
-                 EXEC sp_executesql @sql;",
+                "DECLARE {sql_var} NVARCHAR(MAX); \
+                 SELECT TOP (1) {sql_var} = N'ALTER TABLE {table} DROP CONSTRAINT ' + QUOTENAME(dc.name) \
+                 FROM sys.default_constraints AS dc \
+                 WHERE dc.parent_object_id = OBJECT_ID(N'{table}') AND dc.parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'{table}'), N'{col_name}', 'ColumnId'); \
+                 IF {sql_var} IS NOT NULL EXEC sp_executesql {sql_var};",
                 table = table.replace('\'', "''"),
                 col_name = current_name.replace('\'', "''")
             ));
@@ -482,6 +484,15 @@ pub(super) fn build_sqlserver_existing_column_sql(
     }
 
     statements
+}
+
+fn sqlserver_default_constraint_sql_var(table: &str, column_name: &str) -> String {
+    let mut hash = 0x811c_9dc5u32;
+    for byte in table.bytes().chain([0]).chain(column_name.bytes()) {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("@dbx_default_sql_{hash:08x}")
 }
 
 fn has_sqlserver_identity_change(column: &EditableStructureColumn) -> bool {

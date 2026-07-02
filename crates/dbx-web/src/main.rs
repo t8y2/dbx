@@ -32,6 +32,73 @@ fn web_body_limit_bytes() -> usize {
     mb.saturating_mul(1024 * 1024)
 }
 
+fn web_agent_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    web_agent_dir_from_env(data_dir, std::env::var("DBX_AGENT_DIR").ok())
+}
+
+fn web_agent_dir_from_env(data_dir: &std::path::Path, agent_dir: Option<String>) -> std::path::PathBuf {
+    agent_dir.map(std::path::PathBuf::from).unwrap_or_else(|| data_dir.join("agents"))
+}
+
+fn normalize_public_base_path(value: Option<String>) -> String {
+    let trimmed = value
+        .unwrap_or_else(|| "/".to_string())
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("/")
+        .trim()
+        .trim_matches('/')
+        .to_string();
+    if trimmed.chars().any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace() || matches!(ch, ';' | ',')) {
+        panic!("DBX_PUBLIC_BASE_PATH contains invalid characters");
+    }
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_public_base_path, web_agent_dir_from_env};
+
+    #[test]
+    fn normalize_public_base_path_defaults_to_root() {
+        assert_eq!(normalize_public_base_path(None), "/");
+        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
+        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn normalize_public_base_path_trims_and_preserves_segments() {
+        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
+    }
+
+    #[test]
+    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
+    fn normalize_public_base_path_rejects_invalid_characters() {
+        normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn web_agent_dir_defaults_under_data_dir() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
+    }
+
+    #[test]
+    fn web_agent_dir_uses_explicit_env_override() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(
+            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
+            std::path::PathBuf::from("/custom/agents")
+        );
+    }
+}
+
 #[cfg(feature = "mq-admin")]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
@@ -74,7 +141,9 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/tokens/issue", post(routes::mq::issue_token))
         .route("/mq/tokens/list", post(routes::mq::list_token_records))
         .route("/mq/monitoring/backlog", post(routes::mq::get_backlog))
+        .route("/mq/monitoring/cluster-info", post(routes::mq::get_cluster_info))
         .route("/mq/raw", post(routes::mq::raw_request))
+        .route("/mq/send-message", post(routes::mq::send_message))
 }
 
 #[cfg(not(feature = "mq-admin"))]
@@ -104,9 +173,10 @@ async fn main() {
         let db_path = data_dir.join("dbx.db");
         let storage = Storage::open(&db_path).await.expect("Failed to open storage");
         storage.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
-        Arc::new(AppState::new_with_plugin_dir_and_app_version(
+        Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             data_dir.join("plugins"),
+            web_agent_dir(&data_dir),
             env!("CARGO_PKG_VERSION"),
         ))
     };
@@ -125,9 +195,12 @@ async fn main() {
         app_state.storage.load_password_hash().await.unwrap_or(None)
     };
 
+    let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
+
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
+        public_base_path: public_base_path.clone(),
         password_disabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
@@ -258,6 +331,7 @@ async fn main() {
         .route("/query/build-create-schema-sql", post(routes::query::build_create_schema_sql))
         .route("/query/build-drop-schema-sql", post(routes::query::build_drop_schema_sql))
         .route("/query/build-duplicate-table-structure-sql", post(routes::query::build_duplicate_table_structure_sql))
+        .route("/query/build-copy-table-data-sql", post(routes::query::build_copy_table_data_sql))
         .route(
             "/query/build-executable-object-source-statements",
             post(routes::query::build_executable_object_source_statements),
@@ -289,6 +363,14 @@ async fn main() {
         .route(
             "/query/build-data-grid-column-value-filter-condition",
             post(routes::query::build_data_grid_column_value_filter_condition),
+        )
+        .route(
+            "/query/build-data-grid-column-values-filter-condition",
+            post(routes::query::build_data_grid_column_values_filter_condition),
+        )
+        .route(
+            "/query/build-data-grid-column-distinct-values-sql",
+            post(routes::query::build_data_grid_column_distinct_values_sql),
         )
         .route("/query/build-data-grid-count-sql", post(routes::query::build_data_grid_count_sql))
         .route("/query/build-hive-table-properties-sql", post(routes::query::build_hive_table_properties_sql))
@@ -360,12 +442,21 @@ async fn main() {
         // MongoDB
         .route("/mongo/list-databases", post(routes::mongo::list_databases))
         .route("/mongo/list-collections", post(routes::mongo::list_collections))
+        .route("/mongo/vector-collection-detail", post(routes::mongo::vector_collection_detail))
         .route("/mongo/create-database", post(routes::mongo::create_database))
         .route("/mongo/drop-database", post(routes::mongo::drop_database))
         .route("/mongo/drop-collection", post(routes::mongo::drop_collection))
-        .route("/document-store/find-documents", post(routes::mongo::document_find_documents))
+        .route("/document-store/list-databases", post(routes::document_store::list_databases))
+        .route("/document-store/list-collections", post(routes::document_store::list_collections))
+        .route("/document-store/find-documents", post(routes::document_store::find_documents))
+        .route("/document-store/insert-document", post(routes::document_store::insert_document))
+        .route("/document-store/update-document", post(routes::document_store::update_document))
+        .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
+        .route("/mongo/server-version", post(routes::mongo::server_version))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
+        .route("/mongo/create-index", post(routes::mongo::create_index))
+        .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))
         .route("/mongo/update-document", post(routes::mongo::update_document))
@@ -389,6 +480,8 @@ async fn main() {
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
         // AI
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
+        .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
+        .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
         .route("/ai/conversation", post(routes::ai::save_ai_conversation))
         .route("/ai/conversations", get(routes::ai::load_ai_conversations))
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
@@ -472,11 +565,18 @@ async fn main() {
         app = app.fallback_service(serve_dir);
     }
 
+    if public_base_path != "/" {
+        app = Router::new().nest(&public_base_path, app);
+    }
+
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     tracing::info!("DBX Web server starting on http://{}", addr);
+    if public_base_path != "/" {
+        tracing::info!("Serving DBX Web under context path {}", public_base_path);
+    }
     if password_disabled {
         tracing::info!("Password protection is disabled");
     } else if std::env::var("DBX_PASSWORD").is_ok() {

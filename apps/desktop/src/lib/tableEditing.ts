@@ -34,6 +34,10 @@ export function isTableDataEditable(databaseType: DatabaseType | undefined, prim
   return primaryKeys.length > 0;
 }
 
+export function canInsertTableRows(databaseType: DatabaseType | undefined): boolean {
+  return getDatabaseCapability(databaseType).tableData.insert;
+}
+
 export function supportsDataGridTransaction(databaseType: DatabaseType | undefined): boolean {
   return getDatabaseCapability(databaseType).tableData.transaction;
 }

@@ -58,6 +58,7 @@ type RedisCommandHistoryEntry = {
 const props = defineProps<{
   connectionId: string;
   db: number;
+  blockDangerousRedisCommands: boolean;
 }>();
 
 const flatKeys = ref<RedisKeyInfo[]>([]);
@@ -210,7 +211,12 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
 
 async function fetchScanPage(): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
-  return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, 1, false);
+  // Redis SCAN may return an empty page with a non-zero cursor; batch a few
+  // key-search pages so sparse MATCH patterns do not look empty immediately.
+  const keySearchIterations = 8;
+  return isValueSearchMode.value
+    ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all")
+    : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, keySearchIterations, false);
 }
 
 /// Batch-scan variant that performs multiple SCAN iterations server-side.
@@ -473,7 +479,7 @@ async function runRedisCommand(command: string) {
   const prompt = commandPrompt.value;
   commandRunning.value = true;
   try {
-    const result = await api.redisExecuteCommand(props.connectionId, commandDb.value, command);
+    const result = await api.redisExecuteCommand(props.connectionId, commandDb.value, command, !props.blockDangerousRedisCommands);
     appendCommandHistory({
       prompt,
       command,
@@ -743,6 +749,13 @@ async function executeCommand() {
 
   const safety = classifyRedisCommandSafety(command);
   if (safety === "blocked") {
+    if (!props.blockDangerousRedisCommands) {
+      // 安全模式已关闭，放行 blocked 命令
+      commandText.value = "";
+      commandHistoryIndex.value = -1;
+      await runRedisCommand(command);
+      return;
+    }
     appendCommandHistory({
       prompt: commandPrompt.value,
       command,
@@ -754,6 +767,13 @@ async function executeCommand() {
     return;
   }
   if (safety === "confirm") {
+    if (!props.blockDangerousRedisCommands) {
+      // 安全模式已关闭，跳过确认弹窗直接执行
+      commandText.value = "";
+      commandHistoryIndex.value = -1;
+      await runRedisCommand(command);
+      return;
+    }
     pendingDanger.value = { kind: "command", command };
     showDangerConfirm.value = true;
     commandText.value = "";
@@ -798,6 +818,7 @@ function typeColor(type: string): string {
 }
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let hasAutoFocusedSearch = false;
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
@@ -817,6 +838,15 @@ function toggleFuzzyKeySearch() {
 
 function getSearchInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-redis-search-input]") ?? null;
+}
+
+async function autofocusSearchOnce() {
+  if (hasAutoFocusedSearch) return;
+  await nextTick();
+  const input = getSearchInput();
+  if (!input) return;
+  hasAutoFocusedSearch = true;
+  input.focus({ preventScroll: true });
 }
 
 function getCommandInput(): HTMLInputElement | null {
@@ -921,12 +951,31 @@ function onCommandInputKeydown(event: KeyboardEvent) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   resumeRedisBrowserBackgroundWork();
+  void autofocusSearchOnce();
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
   void loadKeys();
 });
 
-onActivated(resumeRedisBrowserBackgroundWork);
+onActivated(async () => {
+  resumeRedisBrowserBackgroundWork();
+  void autofocusSearchOnce();
+  // Ensure the connection is still alive after reactivation (e.g. tab switch).
+  // If keys failed to load previously (empty list), retry loading.
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+  } catch (e) {
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
+  if (flatKeys.value.length === 0 && !loading.value) {
+    void loadKeys();
+  }
+});
 
 onDeactivated(pauseRedisBrowserBackgroundWork);
 
@@ -949,33 +998,57 @@ defineExpose({ focusSearch });
       <Pane :size="36" :min-size="24">
         <div class="relative h-full flex flex-col overflow-hidden">
           <!-- Toolbar -->
-          <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0">
-            <Search class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-            <div class="h-6 flex rounded-md border bg-muted/30 p-0.5 shrink-0" role="group">
-              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'key' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('key')">
-                {{ t("redis.searchByKey") }}
-              </button>
-              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'value' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('value')">
-                {{ t("redis.searchByValue") }}
-              </button>
-              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('all')">
-                {{ t("redis.searchByAll") }}
-              </button>
+          <div class="border-b px-2 py-2 shrink-0">
+            <div class="flex flex-wrap items-start gap-1.5">
+              <div class="flex min-w-0 flex-1 flex-wrap rounded-md border bg-muted/30 p-0.5" role="group">
+                <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'key' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('key')">
+                  {{ t("redis.searchByKey") }}
+                </button>
+                <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'value' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('value')">
+                  {{ t("redis.searchByValue") }}
+                </button>
+                <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('all')">
+                  {{ t("redis.searchByAll") }}
+                </button>
+              </div>
+              <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
+                <span class="min-w-0 max-w-full truncate text-xs text-muted-foreground" :title="keyCountText">{{ keyCountText }}</span>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" @click="requestBatchDelete"> <Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }} </Button>
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" @click="loadKeys">
+                  <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
+                  <RefreshCw v-else class="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog">
+                  <Plus class="h-3 w-3" />
+                </Button>
+              </div>
             </div>
-            <Input v-model="searchPattern" data-redis-search-input class="h-6 text-xs border-0 shadow-none focus-visible:ring-0" :placeholder="searchPlaceholder" @input="onSearchInput" @keydown="onSearchKeydown" />
-            <Button v-if="searchMode === 'key'" variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-xs" :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" :title="t('redis.fuzzyMatchTitle')" :aria-pressed="fuzzyKeySearch" @click="toggleFuzzyKeySearch">
-              <Asterisk class="h-3 w-3 mr-1" />
-              {{ t("redis.fuzzyMatch") }}
-            </Button>
-            <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" @click="loadKeys">
-              <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
-              <RefreshCw v-else class="h-3 w-3" />
-            </Button>
-            <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog">
-              <Plus class="h-3 w-3" />
-            </Button>
-            <span class="text-xs text-muted-foreground shrink-0 ml-1">{{ keyCountText }}</span>
-            <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 text-xs text-destructive shrink-0 ml-1" @click="requestBatchDelete"> <Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }} </Button>
+            <div class="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+              <div class="relative min-w-[120px] flex-1 basis-[180px]">
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
+                <Input
+                  v-model="searchPattern"
+                  data-redis-search-input
+                  class="h-8 border-border/70 bg-background pl-8 pr-3 text-xs shadow-sm caret-primary placeholder:text-muted-foreground/80 focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20"
+                  :placeholder="searchPlaceholder"
+                  @input="onSearchInput"
+                  @keydown="onSearchKeydown"
+                />
+              </div>
+              <Button
+                v-if="searchMode === 'key'"
+                variant="ghost"
+                size="sm"
+                class="h-8 max-w-full shrink-0 px-2 text-xs"
+                :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'border border-dashed border-border/70 text-muted-foreground hover:text-foreground'"
+                :title="t('redis.fuzzyMatchTitle')"
+                :aria-pressed="fuzzyKeySearch"
+                @click="toggleFuzzyKeySearch"
+              >
+                <Asterisk class="h-3 w-3 mr-1" />
+                {{ t("redis.fuzzyMatch") }}
+              </Button>
+            </div>
           </div>
 
           <div v-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">

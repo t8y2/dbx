@@ -152,9 +152,17 @@ pub async fn test_connection(client: &VectorClient, timeout: Duration) -> Result
 }
 
 pub async fn list_collections(client: &VectorClient) -> Result<Vec<CollectionInfo>, String> {
+    list_collections_with_db(client, "").await
+}
+
+/// List collections, passing an optional database name (used by Milvus).
+pub(crate) async fn list_collections_with_db(
+    client: &VectorClient,
+    database: &str,
+) -> Result<Vec<CollectionInfo>, String> {
     match client.kind {
         VectorDbKind::Qdrant => list_qdrant_collections(client).await,
-        VectorDbKind::Milvus => list_milvus_collections(client).await,
+        VectorDbKind::Milvus => list_milvus_collections(client, database).await,
         VectorDbKind::Weaviate => list_weaviate_collections(client).await,
         VectorDbKind::ChromaDb => list_chroma_collections(client).await,
     }
@@ -176,9 +184,10 @@ async fn list_qdrant_collections(client: &VectorClient) -> Result<Vec<Collection
     Ok(infos)
 }
 
-async fn list_milvus_collections(client: &VectorClient) -> Result<Vec<CollectionInfo>, String> {
+async fn list_milvus_collections(client: &VectorClient, database: &str) -> Result<Vec<CollectionInfo>, String> {
+    let db_name = if database.is_empty() { "default" } else { database };
     let body = send_json(
-        client.post("/v2/vectordb/collections/list").json(&serde_json::json!({ "dbName": "default" })),
+        client.post("/v2/vectordb/collections/list").json(&serde_json::json!({ "dbName": db_name })),
         "Milvus",
     )
     .await?;
@@ -232,27 +241,160 @@ async fn list_chroma_collections(client: &VectorClient) -> Result<Vec<Collection
     Ok(infos)
 }
 
+pub async fn get_collection_detail(
+    client: &VectorClient,
+    database: &str,
+    collection: &str,
+) -> Result<CollectionInfo, String> {
+    match client.kind {
+        VectorDbKind::Qdrant => get_qdrant_collection_detail(client, collection).await,
+        VectorDbKind::Milvus => get_milvus_collection_detail(client, database, collection).await,
+        VectorDbKind::Weaviate => {
+            // Weaviate REST API does not expose vector dimension
+            Ok(CollectionInfo { name: collection.to_string(), id: collection.to_string(), dimension: None })
+        }
+        VectorDbKind::ChromaDb => get_chroma_collection_detail(client, collection).await,
+    }
+}
+
+async fn get_qdrant_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
+    let body = send_json(client.get(&format!("/collections/{}", path_segment(collection))), "Qdrant").await?;
+    let dim = body
+        .pointer("/result/config/params/vectors/size")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            body.pointer("/result/config/params/vectors")
+                .and_then(Value::as_object)
+                .and_then(|obj| obj.values().find_map(|v| v.get("size").and_then(|s| s.as_u64())))
+        })
+        .map(|d| d as u32);
+    Ok(CollectionInfo { name: collection.to_string(), id: collection.to_string(), dimension: dim })
+}
+
+fn milvus_vector_dim_from_field(field: &Value) -> Option<u32> {
+    if let Some(dim) = field.pointer("/params/dim").and_then(Value::as_u64) {
+        return Some(dim as u32);
+    }
+    if let Some(params) = field.get("params").and_then(Value::as_array) {
+        for param in params {
+            if param.get("key").and_then(Value::as_str) == Some("dim") {
+                if let Some(v) = param.get("value").and_then(Value::as_str) {
+                    return v.parse().ok();
+                }
+                if let Some(v) = param.get("value").and_then(Value::as_u64) {
+                    return Some(v as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn get_milvus_collection_detail(
+    client: &VectorClient,
+    database: &str,
+    collection: &str,
+) -> Result<CollectionInfo, String> {
+    let db_name = if database.is_empty() { "default" } else { database };
+    let body = send_json(
+        client
+            .post("/v2/vectordb/collections/describe")
+            .json(&serde_json::json!({ "dbName": db_name, "collectionName": collection })),
+        "Milvus",
+    )
+    .await?;
+    if body.get("code").and_then(Value::as_i64) != Some(0) {
+        let msg = body.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+        return Err(format!("Milvus collection detail error: {msg}"));
+    }
+    let fields = body.pointer("/data/fields").and_then(Value::as_array);
+    let dim = fields
+        .and_then(|f| {
+            f.iter().find(|f| {
+                let t = f.get("type");
+                t.and_then(Value::as_str) == Some("FloatVector")
+                    || t.and_then(Value::as_str) == Some("BinaryVector")
+                    || t.and_then(Value::as_i64) == Some(101)
+                    || t.and_then(Value::as_i64) == Some(102)
+            })
+        })
+        .and_then(milvus_vector_dim_from_field);
+    Ok(CollectionInfo { name: collection.to_string(), id: collection.to_string(), dimension: dim })
+}
+
+async fn get_chroma_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
+    let body = send_json(
+        client.get(&format!(
+            "/api/v2/tenants/default_tenant/databases/default_database/collections/{}",
+            path_segment(collection)
+        )),
+        "ChromaDB",
+    )
+    .await?;
+    let name = body.get("name").and_then(Value::as_str).unwrap_or(collection);
+    let id = body.get("id").and_then(Value::as_str).unwrap_or(collection);
+    let dimension = body.get("dimension").and_then(|v| v.as_u64()).map(|d| d as u32);
+    Ok(CollectionInfo { name: name.to_string(), id: id.to_string(), dimension })
+}
+
 fn chroma_get_response_to_rows(body: &Value) -> Vec<Value> {
-    let ids = body.get("ids").and_then(Value::as_array).cloned().unwrap_or_default();
-    let docs = body.get("documents").and_then(Value::as_array).cloned().unwrap_or_default();
-    let metas = body.get("metadatas").and_then(Value::as_array).cloned().unwrap_or_default();
+    let flatten = |key: &str| -> Vec<Value> {
+        let raw = body.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+        let is_nested = raw.first().and_then(|v| v.as_array()).is_some();
+        if is_nested {
+            raw.iter().flat_map(|v| v.as_array().cloned().unwrap_or_default()).collect()
+        } else {
+            raw
+        }
+    };
+
+    let ids = flatten("ids");
+    let documents = flatten("documents");
+    let metadatas = flatten("metadatas");
+    let distances = flatten("distances");
 
     ids.into_iter()
         .enumerate()
         .map(|(i, id_val)| {
             let mut row = serde_json::Map::new();
             row.insert("id".to_string(), id_val);
-            if let Some(doc) = docs.get(i) {
+            if let Some(doc) = documents.get(i) {
                 row.insert("document".to_string(), doc.clone());
             }
-            if let Some(Value::Object(meta_obj)) = metas.get(i) {
+            if let Some(Value::Object(meta_obj)) = metadatas.get(i) {
                 for (k, v) in meta_obj {
                     row.insert(k.clone(), v.clone());
                 }
             }
+            if let Some(dist) = distances.get(i) {
+                row.insert("distance".to_string(), dist.clone());
+            }
             Value::Object(row)
         })
         .collect()
+}
+
+fn weaviate_graphql_to_rows(body: &Value) -> Option<Vec<Value>> {
+    let get_obj = body.pointer("/data/Get")?.as_object()?;
+    let (_class_name, items) = get_obj.iter().next()?;
+    let items = items.as_array()?;
+    Some(
+        items
+            .iter()
+            .map(|item| {
+                let mut obj = match item {
+                    Value::Object(m) => m.clone(),
+                    _ => return item.clone(),
+                };
+                if let Some(Value::Object(additional)) = obj.remove("_additional") {
+                    for (k, v) in additional {
+                        obj.entry(k).or_insert(v);
+                    }
+                }
+                Value::Object(obj)
+            })
+            .collect(),
+    )
 }
 
 fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
@@ -424,11 +566,11 @@ fn starts_with_http_method(input: &str) -> bool {
     ["GET ", "POST ", "PUT ", "DELETE "].iter().any(|prefix| input.to_ascii_uppercase().starts_with(prefix))
 }
 
-fn path_segment(value: &str) -> String {
+pub(crate) fn path_segment(value: &str) -> String {
     utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
 }
 
-fn query_value(value: &str) -> String {
+pub(crate) fn query_value(value: &str) -> String {
     utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET).to_string()
 }
 
@@ -463,6 +605,10 @@ fn json_to_query_result(status: u16, body: Value, start: Instant) -> QueryResult
     {
         let rows = chroma_get_response_to_rows(&body);
         return values_to_query_result(rows, start);
+    }
+    // Weaviate GraphQL search response
+    if let Some(items) = weaviate_graphql_to_rows(&body) {
+        return values_to_query_result(items, start);
     }
     QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],

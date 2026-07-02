@@ -58,6 +58,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   questdb: { type: "questdb", profile: "questdb", label: "QuestDB", defaultPort: 8812 },
   tdengine: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
   "taos-ws": { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  oscar: { type: "oscar", profile: "oscar", label: "神通 OSCAR", defaultPort: 2003 },
   xugu: { type: "xugu", profile: "xugu", label: "XuguDB", defaultPort: 5138 },
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
   iris: { type: "iris", profile: "iris", label: "IRIS", defaultPort: 1972 },

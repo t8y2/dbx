@@ -88,3 +88,13 @@ export function supportsTableTruncate(dbType?: DatabaseType): boolean {
 export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
+
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
+
+/**
+ * Returns true if the given database type supports explicit transaction control
+ * (i.e. toggling between auto-commit and manual transaction mode via BEGIN/COMMIT).
+ */
+export function supportsTransaction(dbType?: string): boolean {
+  return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
+}

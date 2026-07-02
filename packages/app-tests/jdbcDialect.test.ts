@@ -18,3 +18,13 @@ test("infers GoldenDB for generic JDBC connections", () => {
     "goldendb",
   );
 });
+
+test("infers JDBC dialect from driver profile", () => {
+  assert.equal(
+    inferJdbcDialect({
+      db_type: "jdbc",
+      driver_profile: "sqlserver",
+    }),
+    "sqlserver",
+  );
+});

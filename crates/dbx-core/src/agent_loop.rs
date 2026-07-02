@@ -27,6 +27,19 @@ fn take_text(m: &std::sync::Mutex<String>) -> String {
     m.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// Convert a streaming AI chunk into agent events for the frontend.
+/// Pure function — no side effects, easily testable.
+fn chunk_to_events(chunk: &AiStreamChunk) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    if !chunk.delta.is_empty() {
+        events.push(AgentEvent::TextDelta { delta: chunk.delta.clone() });
+    }
+    if let Some(ref reasoning) = chunk.reasoning_delta {
+        events.push(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
+    }
+    events
+}
+
 enum LoopExit {
     Completed,
     Cancelled,
@@ -82,7 +95,6 @@ pub async fn run_agent_loop(
     on_event: impl Fn(AgentEvent) + Send + Sync + Clone + 'static,
     cancelled: &Notify,
     max_tokens: Option<u32>,
-    temperature: Option<f32>,
     task_contract: Option<&AiTaskContract>,
     is_agent_mode: bool,
 ) -> Result<String, String> {
@@ -124,12 +136,15 @@ pub async fn run_agent_loop(
             on_event,
             cancelled,
             max_tokens,
-            temperature,
             task_contract,
         )
         .await;
     }
-    let tools = if is_agent_mode { agent_tools::all_tools(agent_ctx.db_type) } else { agent_tools::read_only_tools() };
+    let tools = if is_agent_mode {
+        agent_tools::all_tools(agent_ctx.db_type)
+    } else {
+        agent_tools::read_only_tools(agent_ctx.db_type)
+    };
     let task_contract = task_contract.cloned();
     let mut conversation_messages: Vec<AiMessage> = messages.to_vec();
     let mut final_text = String::new();
@@ -177,7 +192,6 @@ pub async fn run_agent_loop(
                 &conversation_messages,
                 &tools,
                 max_tokens,
-                temperature,
                 task_contract.clone(),
             );
 
@@ -195,9 +209,11 @@ pub async fn run_agent_loop(
                     emitted.store(true, Ordering::Relaxed);
                     acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(&chunk.delta);
                 }
-                if let Some(ref reasoning) = chunk.reasoning_delta {
+                if chunk.reasoning_delta.is_some() {
                     emitted.store(true, Ordering::Relaxed);
-                    on_event2(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
+                }
+                for event in chunk_to_events(&chunk) {
+                    on_event2(event);
                 }
             };
 
@@ -281,9 +297,6 @@ pub async fn run_agent_loop(
         if collected_tool_calls.is_empty() {
             match validate_final_answer(task_contract.as_ref(), &accumulated_text) {
                 FinalAnswerCheck::Satisfied => {
-                    if !accumulated_text.is_empty() {
-                        on_event(AgentEvent::TextDelta { delta: accumulated_text.clone() });
-                    }
                     final_text = accumulated_text;
                     loop_exit = LoopExit::Completed;
                     break;
@@ -430,7 +443,6 @@ fn build_tool_request(
     messages: &[AiMessage],
     _tools: &[ToolDefinition], // Tools are injected in ai::stream_with_tools, not via AiCompletionRequest.
     max_tokens: Option<u32>,
-    temperature: Option<f32>,
     task_contract: Option<AiTaskContract>,
 ) -> AiCompletionRequest {
     // Note: tools are passed via the body, not via AiCompletionRequest.
@@ -441,7 +453,6 @@ fn build_tool_request(
         messages: messages.to_vec(),
         task_contract,
         max_tokens: max_tokens.or(Some(4096)),
-        temperature: temperature.or(Some(0.2)),
     }
 }
 
@@ -648,7 +659,6 @@ async fn run_agent_loop_text_only(
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     _cancelled: &Notify,
     max_tokens: Option<u32>,
-    temperature: Option<f32>,
     task_contract: Option<&AiTaskContract>,
 ) -> Result<String, String> {
     // Build a schema-enriched system prompt so the LLM can answer schema questions
@@ -661,7 +671,6 @@ async fn run_agent_loop_text_only(
         messages: messages.to_vec(),
         task_contract: task_contract.cloned(),
         max_tokens: max_tokens.or(Some(4096)),
-        temperature: temperature.or(Some(0.2)),
     };
 
     for attempt in 0..=MAX_CONTRACT_REPAIR_ATTEMPTS {
@@ -894,7 +903,6 @@ async fn maybe_compact(
         }],
         task_contract: None,
         max_tokens: Some(1024),
-        temperature: Some(0.1),
     };
 
     let summary = match cancelled.notified().now_or_never() {
@@ -1199,5 +1207,81 @@ mod tests {
         assert!(wrapped.contains("INTERMEDIATE EVIDENCE"));
         assert!(wrapped.contains("continue the original user task"));
         assert!(wrapped.contains("Columns of tb_customer"));
+    }
+
+    // --- chunk_to_events tests ---
+
+    #[test]
+    fn chunk_to_events_emits_text_delta_for_text() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: "hello".to_string(),
+            reasoning_delta: None,
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::TextDelta { delta } if delta == "hello"));
+    }
+
+    #[test]
+    fn chunk_to_events_emits_reasoning_delta_for_reasoning() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: Some("thinking...".to_string()),
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::ReasoningDelta { delta } if delta == "thinking..."));
+    }
+
+    #[test]
+    fn chunk_to_events_emits_both_for_mixed_chunk() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: "answer".to_string(),
+            reasoning_delta: Some("thinking...".to_string()),
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], AgentEvent::TextDelta { delta } if delta == "answer"));
+        assert!(matches!(&events[1], AgentEvent::ReasoningDelta { delta } if delta == "thinking..."));
+    }
+
+    #[test]
+    fn chunk_to_events_returns_empty_for_empty_chunk() {
+        let chunk =
+            AiStreamChunk { session_id: "test".to_string(), delta: String::new(), reasoning_delta: None, done: false };
+        let events = chunk_to_events(&chunk);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn chunk_to_events_reasoning_only_no_text() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: Some("reasoning".to_string()),
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::ReasoningDelta { .. }));
+    }
+
+    #[test]
+    fn chunk_to_events_text_only_no_reasoning() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: "text only".to_string(),
+            reasoning_delta: None,
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::TextDelta { .. }));
     }
 }

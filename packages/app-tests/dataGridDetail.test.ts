@@ -67,6 +67,61 @@ test("buildDataGridCellDetail reports image preview URLs", () => {
   assert.equal(detail?.imagePreviewUrl, "https://example.com/avatar.png");
 });
 
+test("buildDataGridCellDetail reports binary image preview URLs", () => {
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: ["0x89504e470d0a1a0a0000000d49484452"],
+    columns: ["avatar"],
+    columnIndex: 0,
+    typeByColumn: new Map([["avatar", "longblob"]]),
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.match(detail?.imagePreviewUrl ?? "", /^data:image\/png;base64,/);
+});
+
+test("buildDataGridCellDetail uses result column types for query results", () => {
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: [30001, "0x89504e470d0a1a0a0000000d49484452"],
+    columns: ["id", "image_data"],
+    columnIndex: 1,
+    resultColumnTypes: ["bigint", "longblob"],
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.equal(detail?.type, "longblob");
+  assert.match(detail?.imagePreviewUrl ?? "", /^data:image\/png;base64,/);
+});
+
+test("aggregate details defer binary image preview generation", () => {
+  const rowDetail = buildDataGridRowDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: ["0x89504e470d0a1a0a0000000d49484452"],
+    columns: ["avatar"],
+    columnIndexes: [0],
+    resultColumnTypes: ["longblob"],
+    displayValue: (value) => String(value),
+  });
+  const columnDetail = buildDataGridColumnDetail({
+    rows: [{ rowIndex: 0, rowId: 1, row: ["0x89504e470d0a1a0a0000000d49484452"] }],
+    columns: ["avatar"],
+    columnIndex: 0,
+    resultColumnTypes: ["longblob"],
+    displayValue: (value) => String(value),
+  });
+
+  assert.equal(rowDetail.fields[0]?.type, "longblob");
+  assert.equal(rowDetail.fields[0]?.imagePreviewUrl, null);
+  assert.equal(columnDetail?.fields[0]?.type, "longblob");
+  assert.equal(columnDetail?.fields[0]?.imagePreviewUrl, null);
+});
+
 test("buildDataGridCellDetail limits rendered previews for huge text values", () => {
   const hugeJson = `{"body":"${"x".repeat(120_000)}"}`;
   const detail = buildDataGridCellDetail({

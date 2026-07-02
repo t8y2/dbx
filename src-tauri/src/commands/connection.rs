@@ -502,8 +502,17 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
     let result = match probe_result {
         Err(e) => Err(e),
         Ok(()) => match config.db_type {
-            DatabaseType::Mysql if config.needs_bare_mysql() => {
+            DatabaseType::Mysql if config.needs_bare_mysql() && !config.bare_mysql_uses_tls() => {
                 match db::mysql::connect_bare(&url, connect_timeout).await {
+                    Ok(pool) => {
+                        let _ = pool.disconnect().await;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            DatabaseType::Mysql if config.needs_bare_mysql() && config.bare_mysql_uses_tls() => {
+                match db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await {
                     Ok(pool) => {
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
@@ -520,8 +529,22 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     Err(e) => Err(e),
                 }
             }
-            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
+            DatabaseType::Doris | DatabaseType::ManticoreSearch => {
                 match db::mysql::connect_bare(&url, connect_timeout).await {
+                    Ok(pool) => {
+                        let _ = pool.disconnect().await;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            DatabaseType::StarRocks => {
+                let connect = if config.bare_mysql_uses_tls() {
+                    db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await
+                } else {
+                    db::mysql::connect_bare(&url, connect_timeout).await
+                };
+                match connect {
                     Ok(pool) => {
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
@@ -559,7 +582,8 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     state.connect_redis_cluster(&tunnel_id, &config).await?;
                     return Ok("Connection successful".to_string());
                 } else if config.uses_redis_sentinel() {
-                    db::redis_driver::connect_sentinel(&config).await?
+                    state.connect_redis_sentinel(&tunnel_id, &config).await?;
+                    return Ok("Connection successful".to_string());
                 } else {
                     db::redis_driver::connect(&url, connect_timeout).await?
                 };
@@ -636,6 +660,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 &config.username,
                 &config.password,
                 config.database.as_deref(),
+                config.url_params.as_deref(),
                 connect_timeout,
             )
             .await
@@ -735,8 +760,18 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
-                let adapter = state.mq_registry.build_transient_config(mqc).await?;
-                adapter.test_connection().await?;
+                let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, &state);
+                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
+                    Ok(adapter) => adapter,
+                    Err(err) => {
+                        state.mq_registry.drop_connection(connection_id).await;
+                        return Err(err);
+                    }
+                };
+                if let Err(err) = adapter.test_connection().await {
+                    state.mq_registry.drop_connection(connection_id).await;
+                    return Err(err);
+                }
                 Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -824,7 +859,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 ))
             } else if db_config.uses_redis_sentinel() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                    db::redis_driver::connect_sentinel(&db_config).await?,
+                    state.connect_redis_sentinel(&id, &db_config).await?,
                 )))
             } else {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
@@ -923,6 +958,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 &db_config.username,
                 &db_config.password,
                 db_config.database.as_deref(),
+                db_config.url_params.as_deref(),
                 connect_timeout,
             )
             .await?;
@@ -1018,8 +1054,18 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {
             let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
-            let adapter = state.mq_registry.build_transient_config(mqc).await?;
-            adapter.test_connection().await?;
+            let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, &state);
+            let adapter = match state.mq_registry.get_or_build_config(&id, mqc, kafka_launch).await {
+                Ok(adapter) => adapter,
+                Err(err) => {
+                    state.mq_registry.drop_connection(&id).await;
+                    return Err(err);
+                }
+            };
+            if let Err(err) = adapter.test_connection().await {
+                state.mq_registry.drop_connection(&id).await;
+                return Err(err);
+            }
             PoolKind::MessageQueue
         }
         #[cfg(not(feature = "mq-admin"))]

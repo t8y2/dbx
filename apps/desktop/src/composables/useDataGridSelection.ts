@@ -9,6 +9,7 @@ interface RowItem {
   newIndex?: number;
   data: CellValue[];
   isNew: boolean;
+  isDraft?: boolean;
   isDeleted: boolean;
   isDirtyCol: boolean[];
   status: string;
@@ -45,21 +46,37 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     return normalizeSelectionRange(selectionAnchor.value, selectionFocus.value);
   });
 
-  const visibleSelectionRows = computed(() => displayItems.value.map((item) => item.data));
-
   const selectedCells = computed<SelectionData>(() => {
     if (hasColumnSelection.value) {
-      return extractColumnsSelection(columns.value, visibleSelectionRows.value, selectedColumnIndexes.value);
+      const rows = displayItems.value.filter((item) => !item.isDraft).map((item) => item.data);
+      return extractColumnsSelection(columns.value, rows, selectedColumnIndexes.value);
     }
     if (selectedCellKeys.value.size > 0) {
-      return extractSelectedCellKeys(columns.value, visibleSelectionRows.value, selectedCellKeys.value);
+      const selectableKeys = [...selectedCellKeys.value].filter((key) => {
+        const position = parseCellKey(key);
+        return !!position && !displayItems.value[position.rowIndex]?.isDraft;
+      });
+      return extractSelectedCellKeys(
+        columns.value,
+        displayItems.value.map((item) => item.data),
+        selectableKeys,
+      );
     }
     const range = selectedRange.value;
     if (!range) return { columns: [], rows: [] };
-    return extractSelection(columns.value, visibleSelectionRows.value, range);
+    const rows = displayItems.value
+      .slice(range.startRow, range.endRow + 1)
+      .filter((item) => !item.isDraft)
+      .map((item) => item.data);
+    return extractSelection(columns.value, rows, {
+      startRow: 0,
+      endRow: rows.length - 1,
+      startCol: range.startCol,
+      endCol: range.endCol,
+    });
   });
 
-  const selectedCellCount = computed(() => (selectedCellKeys.value.size > 0 ? selectedCellKeys.value.size : selectedCells.value.columns.length * selectedCells.value.rows.length));
+  const selectedCellCount = computed(() => selectedCells.value.rows.reduce((count, row) => count + row.length, 0));
   const hasCellSelection = computed(() => selectedCellCount.value > 0);
 
   function clearCellSelection() {

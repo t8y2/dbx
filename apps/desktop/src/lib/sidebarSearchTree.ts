@@ -1,7 +1,7 @@
 import type { TreeNode, TreeNodeType } from "@/types/database";
 import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sidebarSearch";
 
-const preserveMatchedSubtreeTypes = new Set(["database", "schema", "table", "view"]);
+const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view"]);
 
 const normalizedLabelCache = new WeakMap<TreeNode, { label: string; normalized: string }>();
 
@@ -51,7 +51,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
           node: {
             ...node,
             children,
-            isLoading: node.type === "connection" ? false : node.isLoading,
+            isLoading: node.isLoading,
             isExpanded: children.length > 0 && !collapsedIds.has(node.id),
           },
           score: selfMatch?.score ?? 0,

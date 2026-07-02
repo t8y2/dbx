@@ -4,6 +4,7 @@ use serde_json::json;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
 use crate::connection::AppState;
+use crate::db::vector_driver;
 use crate::models::connection::DatabaseType;
 use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
@@ -19,18 +20,35 @@ const EXECUTE_QUERY_LIMIT: usize = 50;
 /// Maximum number of rows returned by get_sample_data tool.
 const SAMPLE_DATA_LIMIT: usize = 20;
 
+/// Maximum number of rows returned by browse_collection tool.
+const BROWSE_COLLECTION_LIMIT: usize = 20;
+
 /// Absolute maximum rows any query tool may request.
 const MAX_ALLOWED_ROWS: usize = 100;
 
-/// Get read-only tool definitions (list_tables + get_columns).
-pub fn read_only_tools() -> Vec<ToolDefinition> {
-    vec![list_tables_tool(), get_columns_tool()]
+/// Returns true for vector database types (Qdrant, Milvus, Weaviate, ChromaDb).
+/// If modifying this, also update VECTOR_DB_TYPES in apps/desktop/src/lib/ai.ts.
+pub fn is_vector_db(db_type: DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb)
+}
+
+/// Get read-only tool definitions for the given database type.
+/// Returns vector tools for vector DBs, SQL tools otherwise.
+pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
+    if is_vector_db(db_type) {
+        vec![list_collections_tool()]
+    } else {
+        vec![list_tables_tool(), get_columns_tool()]
+    }
 }
 
 /// Get all available tool definitions for the given database type.
 /// Includes read-only tools plus execute_query, get_sample_data, and
 /// explain_query for database types that support them.
 pub fn all_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
+    if is_vector_db(db_type) {
+        return vec![list_collections_tool(), browse_collection_tool()];
+    }
     let mut tools = vec![list_tables_tool(), get_columns_tool()];
     if supports_sql_query(db_type) {
         tools.push(execute_query_tool());
@@ -167,6 +185,45 @@ fn explain_query_tool() -> ToolDefinition {
     }
 }
 
+/// list_collections tool definition (vector databases).
+fn list_collections_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "list_collections",
+        description: "List all collections in the current vector database. Returns collection names and dimensions.",
+        parameters: json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
+/// browse_collection tool definition (vector databases).
+fn browse_collection_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "browse_collection",
+        description: "Browse documents in a collection. Returns up to 20 items with payload/metadata (vectors excluded for compactness). For ChromaDB, use the collection id (UUID from list_collections) instead of the collection name.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "Collection name"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max items to return (default 20, max 100)"
+                }
+            },
+            "required": ["collection"]
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
 /// Execute a tool call and return the result.
 pub async fn execute_tool(
     tool_call: &ToolCall,
@@ -180,6 +237,8 @@ pub async fn execute_tool(
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, db_type).await,
         "execute_query" => execute_execute_query(tool_call, state, connection_id, database, db_type).await,
         "get_sample_data" => execute_get_sample_data(tool_call, state, connection_id, database, db_type).await,
+        "list_collections" => execute_list_collections(tool_call, state, connection_id, database, db_type).await,
+        "browse_collection" => execute_browse_collection(tool_call, state, connection_id, database, db_type).await,
         "explain_query" => {
             let (text_result, explain_data) =
                 execute_explain_query(tool_call, state, connection_id, database, db_type).await;
@@ -551,4 +610,234 @@ async fn execute_explain_query(
     };
 
     (Ok(text), explain_data)
+}
+
+/// Execute list_collections tool (vector databases).
+async fn execute_list_collections(
+    _tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    _db_type: &DatabaseType,
+) -> Result<String, String> {
+    let collections = crate::schema::list_vector_collections_core(state, connection_id, database)
+        .await
+        .map_err(|e| format!("Failed to list collections: {e}"))?;
+
+    if collections.is_empty() {
+        return Ok("No collections found.".to_string());
+    }
+
+    let mut lines: Vec<String> = collections
+        .iter()
+        .map(|c| {
+            let mut line = format!("- {} (COLLECTION)", c.name);
+            if let Some(dim) = c.dimension {
+                line.push_str(&format!(" -- {}d", dim));
+            }
+            line.push_str(&format!(" [id: {}]", c.id));
+            line
+        })
+        .collect();
+
+    if lines.len() > LIST_TABLES_LIMIT {
+        lines.truncate(LIST_TABLES_LIMIT);
+        lines.push(format!("... (showing {LIST_TABLES_LIMIT} of {} collections)", collections.len()));
+    }
+
+    Ok(lines.join("\n"))
+}
+
+/// Execute browse_collection tool (vector databases).
+/// Generates a database-specific REST query and executes it.
+async fn execute_browse_collection(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    db_type: &DatabaseType,
+) -> Result<String, String> {
+    let collection = tool_call
+        .arguments
+        .get("collection")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing required parameter: collection")?
+        .trim();
+
+    if collection.is_empty() {
+        return Err("Collection name cannot be empty".to_string());
+    }
+
+    let limit = tool_call
+        .arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
+        .unwrap_or(BROWSE_COLLECTION_LIMIT);
+
+    // ChromaDB requires UUID in URL path, not collection name.
+    // If the collection param is already a UUID (from list_collections output), use it directly.
+    let collection_id = if *db_type == DatabaseType::ChromaDb && !is_uuid(collection) {
+        resolve_chroma_collection_uuid(state, connection_id, database, collection).await?
+    } else {
+        collection.to_string()
+    };
+
+    let query = build_browse_query(db_type, &collection_id, database, limit)?;
+
+    let options = QueryExecutionOptions { max_rows: Some(limit), timeout_secs: Some(30), ..Default::default() };
+    let result =
+        crate::query::execute_sql_statement_with_options(state, connection_id, database, &query, None, None, options)
+            .await?;
+
+    format_query_result_as_text(&result, limit)
+}
+
+/// Build a browse query for the given vector database type.
+/// Intentionally omits offset/pagination — Agent browse only fetches the first N items.
+fn build_browse_query(
+    db_type: &DatabaseType,
+    collection: &str,
+    database: &str,
+    limit: usize,
+) -> Result<String, String> {
+    let collection = collection.trim();
+    if collection.is_empty() {
+        return Err("Collection name cannot be empty".to_string());
+    }
+    let limit = limit.max(1) as u64;
+
+    match db_type {
+        DatabaseType::Qdrant => Ok(format!(
+            "POST /collections/{}/points/scroll\n{}",
+            vector_driver::path_segment(collection),
+            serde_json::json!({ "limit": limit, "with_payload": true, "with_vector": false })
+        )),
+        // Milvus v2 omitting outputFields defaults to returning only scalar fields (no vectors).
+        DatabaseType::Milvus => Ok(format!(
+            "POST /v2/vectordb/entities/query\n{}",
+            serde_json::json!({
+                "dbName": if database.is_empty() { "default" } else { database },
+                "collectionName": collection,
+                "filter": "", "limit": limit
+            })
+        )),
+        DatabaseType::Weaviate => {
+            Ok(format!("GET /v1/objects?class={}&limit={}", vector_driver::query_value(collection), limit))
+        }
+        // TODO: ChromaDB Cloud 支持自定义租户和数据库，当前只实现了本地部署
+        // （固定 default_tenant / default_database），后续支持云服务时需改为可配置。
+        DatabaseType::ChromaDb => Ok(format!(
+            "POST /api/v2/tenants/default_tenant/databases/default_database/collections/{}/get\n{}",
+            collection,
+            serde_json::json!({ "limit": limit, "include": ["documents", "metadatas"] })
+        )),
+        _ => Err(format!("Unsupported database type: {:?}", db_type)),
+    }
+}
+
+/// Check if a string looks like a UUID (simple check — 36 chars with 4 hyphens).
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.chars().filter(|&c| c == '-').count() == 4
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// Resolve a ChromaDB collection name to its UUID by listing all collections.
+async fn resolve_chroma_collection_uuid(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    name: &str,
+) -> Result<String, String> {
+    let collections = crate::schema::list_vector_collections_core(state, connection_id, database).await?;
+    collections
+        .into_iter()
+        .find(|c| c.name == name)
+        .map(|c| c.id)
+        .ok_or_else(|| format!("Collection '{name}' not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_read_only_tools_do_not_include_collection_browsing() {
+        let tools = read_only_tools(DatabaseType::Qdrant);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+
+        assert_eq!(names, vec!["list_collections"]);
+    }
+
+    #[test]
+    fn vector_agent_tools_include_collection_browsing() {
+        let tools = all_tools(DatabaseType::Qdrant);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+
+        assert_eq!(names, vec!["list_collections", "browse_collection"]);
+    }
+
+    #[test]
+    fn build_browse_query_qdrant() {
+        let q = build_browse_query(&DatabaseType::Qdrant, "articles", "", 10).unwrap();
+        assert!(q.starts_with("POST /collections/articles/points/scroll"));
+        assert!(q.contains("\"limit\":10"));
+        assert!(q.contains("\"with_payload\":true"));
+    }
+
+    #[test]
+    fn build_browse_query_qdrant_encodes_url_chars() {
+        let q = build_browse_query(&DatabaseType::Qdrant, "my collection", "", 10).unwrap();
+        assert!(q.starts_with("POST /collections/my%20collection/points/scroll"));
+    }
+
+    #[test]
+    fn build_browse_query_milvus() {
+        let q = build_browse_query(&DatabaseType::Milvus, "articles", "custom_db", 20).unwrap();
+        assert!(q.starts_with("POST /v2/vectordb/entities/query"));
+        assert!(q.contains("\"dbName\":\"custom_db\""));
+        assert!(q.contains("\"collectionName\":\"articles\""));
+        assert!(q.contains("\"limit\":20"));
+        assert!(!q.contains("outputFields"));
+    }
+
+    #[test]
+    fn build_browse_query_milvus_default_db() {
+        let q = build_browse_query(&DatabaseType::Milvus, "articles", "", 10).unwrap();
+        assert!(q.contains("\"dbName\":\"default\""));
+    }
+
+    #[test]
+    fn build_browse_query_weaviate() {
+        let q = build_browse_query(&DatabaseType::Weaviate, "Articles", "", 5).unwrap();
+        assert_eq!(q, "GET /v1/objects?class=Articles&limit=5");
+    }
+
+    #[test]
+    fn build_browse_query_weaviate_encodes_query_param() {
+        let q = build_browse_query(&DatabaseType::Weaviate, "A&B", "", 5).unwrap();
+        assert!(q.contains("class=A%26B"));
+    }
+
+    #[test]
+    fn build_browse_query_chromadb() {
+        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "", 15).unwrap();
+        assert!(
+            q.starts_with("POST /api/v2/tenants/default_tenant/databases/default_database/collections/uuid-123/get")
+        );
+        assert!(q.contains("\"limit\":15"));
+    }
+
+    #[test]
+    fn build_browse_query_rejects_empty_collection() {
+        let result = build_browse_query(&DatabaseType::Qdrant, "  ", "", 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_browse_query_rejects_unsupported_type() {
+        let result = build_browse_query(&DatabaseType::Postgres, "articles", "", 10);
+        assert!(result.is_err());
+    }
 }

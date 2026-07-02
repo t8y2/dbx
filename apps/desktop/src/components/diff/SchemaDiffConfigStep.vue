@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/api";
@@ -253,46 +254,57 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <Select :model-value="sourceConnectionId" @update:model-value="(v: any) => $emit('update:sourceConnectionId', String(v))">
-            <SelectTrigger class="h-8 text-xs">
+          <SearchableSelect
+            :model-value="sourceConnectionId"
+            @update:model-value="(v: string) => $emit('update:sourceConnectionId', v)"
+            :options="sqlConnections.map((c) => c.id)"
+            :placeholder="t('diff.selectConnection')"
+            :search-placeholder="t('diff.searchConnection')"
+            :empty-text="t('common.noResults')"
+            :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
+            trigger-variant="outline"
+            trigger-class="h-8 w-full justify-between text-xs"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          >
+            <template #option-label="{ option, label }">
               <div class="flex items-center gap-2">
-                <DatabaseIcon v-if="sourceConnectionId" :db-type="connectionIconType(sourceConnectionId)" class="w-3.5 h-3.5" />
-                <SelectValue :placeholder="t('diff.selectConnection')" />
+                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="w-3.5 h-3.5" />
+                {{ label }}
               </div>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5" />
-                  {{ c.name }}
-                </div>
-              </SelectItem>
-            </SelectContent>
-          </Select>
+            </template>
+          </SearchableSelect>
         </div>
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.database") }}</Label>
-          <Select :model-value="sourceDatabase" @update:model-value="(v: any) => $emit('update:sourceDatabase', String(v))">
-            <SelectTrigger class="h-8 text-xs" :disabled="!sourceDatabases.length">
-              <SelectValue :placeholder="t('diff.selectDatabase')" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="db in sourceDatabases" :key="db" :value="db">{{ db }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            :model-value="sourceDatabase"
+            @update:model-value="(v: string) => $emit('update:sourceDatabase', v)"
+            :options="sourceDatabases"
+            :placeholder="t('diff.selectDatabase')"
+            :search-placeholder="t('diff.searchDatabase')"
+            :empty-text="t('common.noResults')"
+            :disabled="!sourceDatabases.length"
+            trigger-variant="outline"
+            trigger-class="h-8 w-full justify-between text-xs"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <div v-if="isSchemaAware(sourceConfig?.db_type)" class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.schema") }}</Label>
-          <Select :model-value="sourceSchema" @update:model-value="(v: any) => $emit('update:sourceSchema', String(v))">
-            <SelectTrigger class="h-8 text-xs" :disabled="!sourceSchemas.length">
-              <SelectValue :placeholder="t('diff.selectSchema')" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="schema in sourceSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            :model-value="sourceSchema"
+            @update:model-value="(v: string) => $emit('update:sourceSchema', v)"
+            :options="sourceSchemas"
+            :placeholder="t('diff.selectSchema')"
+            :search-placeholder="t('diff.searchSchema')"
+            :empty-text="t('common.noResults')"
+            :disabled="!sourceSchemas.length"
+            trigger-variant="outline"
+            trigger-class="h-8 w-full justify-between text-xs"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <!-- Source Info -->
@@ -326,46 +338,57 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <Select :model-value="targetConnectionId" @update:model-value="(v: any) => $emit('update:targetConnectionId', String(v))">
-            <SelectTrigger class="h-8 text-xs">
+          <SearchableSelect
+            :model-value="targetConnectionId"
+            @update:model-value="(v: string) => $emit('update:targetConnectionId', v)"
+            :options="sqlConnections.map((c) => c.id)"
+            :placeholder="t('diff.selectConnection')"
+            :search-placeholder="t('diff.searchConnection')"
+            :empty-text="t('common.noResults')"
+            :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
+            trigger-variant="outline"
+            trigger-class="h-8 w-full justify-between text-xs"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          >
+            <template #option-label="{ option, label }">
               <div class="flex items-center gap-2">
-                <DatabaseIcon v-if="targetConnectionId" :db-type="connectionIconType(targetConnectionId)" class="w-3.5 h-3.5" />
-                <SelectValue :placeholder="t('diff.selectConnection')" />
+                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="w-3.5 h-3.5" />
+                {{ label }}
               </div>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5" />
-                  {{ c.name }}
-                </div>
-              </SelectItem>
-            </SelectContent>
-          </Select>
+            </template>
+          </SearchableSelect>
         </div>
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.database") }}</Label>
-          <Select :model-value="targetDatabase" @update:model-value="(v: any) => $emit('update:targetDatabase', String(v))">
-            <SelectTrigger class="h-8 text-xs" :disabled="!targetDatabases.length">
-              <SelectValue :placeholder="t('diff.selectDatabase')" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="db in targetDatabases" :key="db" :value="db">{{ db }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            :model-value="targetDatabase"
+            @update:model-value="(v: string) => $emit('update:targetDatabase', v)"
+            :options="targetDatabases"
+            :placeholder="t('diff.selectDatabase')"
+            :search-placeholder="t('diff.searchDatabase')"
+            :empty-text="t('common.noResults')"
+            :disabled="!targetDatabases.length"
+            trigger-variant="outline"
+            trigger-class="h-8 w-full justify-between text-xs"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <div v-if="isSchemaAware(targetConfig?.db_type)" class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.schema") }}</Label>
-          <Select :model-value="targetSchema" @update:model-value="(v: any) => $emit('update:targetSchema', String(v))">
-            <SelectTrigger class="h-8 text-xs" :disabled="!targetSchemas.length">
-              <SelectValue :placeholder="t('diff.selectSchema')" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="schema in targetSchemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            :model-value="targetSchema"
+            @update:model-value="(v: string) => $emit('update:targetSchema', v)"
+            :options="targetSchemas"
+            :placeholder="t('diff.selectSchema')"
+            :search-placeholder="t('diff.searchSchema')"
+            :empty-text="t('common.noResults')"
+            :disabled="!targetSchemas.length"
+            trigger-variant="outline"
+            trigger-class="h-8 w-full justify-between text-xs"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <!-- Target Info -->

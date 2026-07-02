@@ -146,7 +146,7 @@ function valuesFromElement(element: Element) {
 }
 
 function isConnectionCandidate(node: ParsedNode) {
-  const type = getAny(node.values, ["type", "connType", "connectionType", "databaseType", "driver"]);
+  const type = getAny(node.values, ["connType", "databaseType", "driver", "connectionType", "type"]);
   const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]);
   const host = getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]);
   const file = getSqlitePath(node.values);
@@ -154,7 +154,7 @@ function isConnectionCandidate(node: ParsedNode) {
 }
 
 async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | null> {
-  const rawType = getAny(node.values, ["type", "connType", "connectionType", "databaseType", "driver", "dbType"]);
+  const rawType = getAny(node.values, ["connType", "databaseType", "driver", "dbType", "connectionType", "type"]);
   const portValue = Number(getAny(node.values, ["port", "serverPort"]));
   const port = Number.isFinite(portValue) && portValue > 0 ? portValue : undefined;
   const profile = inferProfile(rawType, node.tag, port);

@@ -41,6 +41,19 @@ describe("sqlCompletion table aliases", () => {
     expect(table?.apply).toBe("order_items AS oi");
   });
 
+  it("omits AS from Oracle table alias completions", () => {
+    const sql = "SELECT * FROM ord";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "order_items", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      autoAliasTables: true,
+    });
+
+    const table = items.find((item) => item.label === "order_items" && item.type === "table");
+    expect(table?.apply).toBe("order_items oi");
+  });
+
   it("keeps plain table completions when generated aliases are disabled", () => {
     const sql = "SELECT * FROM ord";
     const items = buildSqlCompletionItems(sql, sql.length, {
@@ -51,6 +64,18 @@ describe("sqlCompletion table aliases", () => {
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
     expect(table?.apply).toBe("order_items");
+  });
+
+  it("omits AS from Oracle alias suggestions", () => {
+    const sql = "SELECT * FROM order_items ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "order_items", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+
+    const alias = items.find((item) => item.type === "snippet" && item.detail === "alias for order_items");
+    expect(alias?.apply).toBe("oi ");
   });
 
   it("uses a numbered alias when the generated table alias already exists", () => {
@@ -109,6 +134,17 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.suggestColumns).toBe(true);
   });
 
+  it("classifies unqualified WHERE field input as column context", () => {
+    const sql = "SELECT * FROM A1User WHERE userc";
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.prefix).toBe("userc");
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "A1User" })]));
+    expect(context.suggestColumns).toBe(true);
+    expect(context.suggestRoutines).toBe(false);
+  });
+
   it("classifies CALL routine contexts", () => {
     const sql = "CALL usp_";
     const context = getSqlCompletionContext(sql, sql.length);
@@ -142,6 +178,17 @@ describe("sqlCompletion scoped context classification", () => {
     const context = getSqlCompletionContext(sql, sql.length);
 
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ schema: "dbo", name: "Users", alias: "u" }), expect.objectContaining({ name: "Orders", alias: "o" })]));
+  });
+
+  it("treats schema-qualified table prefixes in FROM as table completion input", () => {
+    const sql = "SELECT * FROM dws_game_sdk_base.di";
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    expect(context.qualifier).toBe("dws_game_sdk_base");
+    expect(context.prefix).toBe("di");
+    expect(context.suggestTables).toBe(true);
+    expect(context.exclusiveTableSuggestions).toBe(true);
+    expect(context.suggestColumns).toBe(true);
   });
 
   it("exposes CTEs as table-like referenced tables", () => {

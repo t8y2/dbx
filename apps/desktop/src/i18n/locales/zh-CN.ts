@@ -468,6 +468,8 @@ export default withEnglishFallback({
       executeSelection: "执行选中 SQL",
       executeCurrent: "执行 SQL",
       copySelection: "复制选中内容",
+      uppercaseSelection: "转为大写",
+      lowercaseSelection: "转为小写",
       selectAll: "全选",
     },
     search: {

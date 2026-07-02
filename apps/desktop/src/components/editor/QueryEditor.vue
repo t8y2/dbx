@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { FileCode, Play, Copy, Table2, TextSelect } from "@lucide/vue";
+import { CaseLower, CaseUpper, FileCode, Play, Copy, Table2, TextSelect } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
@@ -187,6 +187,7 @@ interface EditorGestureEvent extends Event {
 
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
+let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
@@ -228,6 +229,8 @@ let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
+
+type SelectionCaseMode = "upper" | "lower";
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
 let editorScrollbarPointerCleanup: (() => void) | null = null;
 const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
@@ -549,6 +552,29 @@ function selectAllSqlFromContextMenu() {
   focusEditor();
 }
 
+function convertSelectedSqlCaseFromContextMenu(mode: SelectionCaseMode) {
+  const currentView = view.value;
+  const EditorSelection = codeMirrorEditorSelection;
+  if (!currentView || !EditorSelection || !canCopySelectedSql.value) return;
+
+  const state = currentView.state;
+  const transaction = state.changeByRange((range) => {
+    if (range.empty) return { range };
+
+    const selectedText = state.sliceDoc(range.from, range.to);
+    const convertedText = mode === "upper" ? selectedText.toUpperCase() : selectedText.toLowerCase();
+    return {
+      changes: { from: range.from, to: range.to, insert: convertedText },
+      range: EditorSelection.range(range.from, range.from + convertedText.length),
+    };
+  });
+
+  if (!transaction.changes.empty) {
+    currentView.dispatch({ ...transaction, scrollIntoView: true, userEvent: "input" });
+  }
+  focusEditor();
+}
+
 function openTableFromContextMenu() {
   if (!contextTableName.value) return;
   emit("viewTableData", contextTableName.value);
@@ -614,6 +640,18 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => [
     action: copySelectedSqlFromContextMenu,
     disabled: !canCopySelectedSql.value,
     icon: Copy,
+  },
+  {
+    label: t("editor.contextMenu.uppercaseSelection"),
+    action: () => convertSelectedSqlCaseFromContextMenu("upper"),
+    disabled: !canCopySelectedSql.value,
+    icon: CaseUpper,
+  },
+  {
+    label: t("editor.contextMenu.lowercaseSelection"),
+    action: () => convertSelectedSqlCaseFromContextMenu("lower"),
+    disabled: !canCopySelectedSql.value,
+    icon: CaseLower,
   },
   { label: t("editor.contextMenu.selectAll"), action: selectAllSqlFromContextMenu, icon: TextSelect },
 ]);
@@ -2022,7 +2060,7 @@ onMounted(async () => {
 
   const [
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
-    { EditorState, Compartment, Prec, StateEffect, StateField },
+    { EditorState, EditorSelection, Compartment, Prec, StateEffect, StateField },
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, history, defaultKeymap, historyKeymap },
@@ -2031,6 +2069,7 @@ onMounted(async () => {
   ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/autocomplete"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
   editorViewModule = { EditorView, keymap, rectangularSelection } as typeof import("@codemirror/view");
   codeMirrorPrec = Prec;
+  codeMirrorEditorSelection = EditorSelection;
   codeMirrorSnippetCompletion = snippetCompletion;
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();

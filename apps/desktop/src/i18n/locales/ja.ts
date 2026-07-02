@@ -460,6 +460,8 @@ export default withEnglishFallback({
       executeSelection: "選択範囲を実行",
       executeCurrent: "SQLを実行",
       copySelection: "選択範囲をコピー",
+      uppercaseSelection: "大文字に変換",
+      lowercaseSelection: "小文字に変換",
       selectAll: "すべて選択",
     },
     search: {

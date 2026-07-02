@@ -462,6 +462,8 @@ export default withEnglishFallback({
       executeSelection: "執行選取 SQL",
       executeCurrent: "執行 SQL",
       copySelection: "複製選取內容",
+      uppercaseSelection: "轉為大寫",
+      lowercaseSelection: "轉為小寫",
       selectAll: "全選",
     },
     search: {

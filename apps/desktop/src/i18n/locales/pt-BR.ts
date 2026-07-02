@@ -474,6 +474,8 @@ export default withEnglishFallback({
       executeSelection: "Executar seleção",
       executeCurrent: "Executar SQL",
       copySelection: "Copiar seleção",
+      uppercaseSelection: "Converter para maiúsculas",
+      lowercaseSelection: "Converter para minúsculas",
       selectAll: "Selecionar tudo",
     },
     search: {

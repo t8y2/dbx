@@ -465,6 +465,8 @@ export default {
       executeSelection: "Execute selection",
       executeCurrent: "Execute SQL",
       copySelection: "Copy selection",
+      uppercaseSelection: "Convert to uppercase",
+      lowercaseSelection: "Convert to lowercase",
       selectAll: "Select all",
     },
     search: {

@@ -293,6 +293,60 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
 }
 
 #[test]
+fn oracle_timestamp_default_precedes_nullability_in_modify_sql() {
+    let mut col = column("time");
+    col.data_type = "TIMESTAMP(6)".to_string();
+    col.default_value = "CURRENT_TIMESTAMP".to_string();
+    col.original = Some(ColumnInfo {
+        name: "time".to_string(),
+        data_type: "TIMESTAMP(6)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some(String::new()),
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_TEST".to_string()),
+        table_name: "test".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"DBX_TEST\".\"test\" MODIFY (\"time\" TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP);"]
+    );
+}
+
+#[test]
+fn oracle_timestamp_precision_change_does_not_repeat_unchanged_nullability() {
+    let mut col = column("time");
+    col.data_type = "TIMESTAMP(9)".to_string();
+    col.original = Some(ColumnInfo {
+        name: "time".to_string(),
+        data_type: "TIMESTAMP(6)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some(String::new()),
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("DBX_TEST".to_string()),
+        table_name: "test".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"DBX_TEST\".\"test\" MODIFY (\"time\" TIMESTAMP(9));"]);
+}
+
+#[test]
 fn iris_drop_index_includes_table_name() {
     let mut old_index = index("index_id", &["ID"]);
     old_index.marked_for_drop = true;

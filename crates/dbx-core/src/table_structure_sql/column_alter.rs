@@ -360,18 +360,19 @@ pub(super) fn build_oracle_like_existing_column_sql(
     if type_changed || nullable_changed || default_changed {
         let data_type = column_data_type(dialect, column);
         let mut parts = vec![quote_ident(dialect, &current_name), data_type];
-        // Always include nullability so the statement is self-contained (required by Dameng).
-        if !column.is_nullable {
-            parts.push("NOT NULL".to_string());
-        } else {
-            parts.push("NULL".to_string());
-        }
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
             parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
         } else if default_changed {
             // User cleared the default — explicitly drop it.
             parts.push("DEFAULT NULL".to_string());
+        }
+        if nullable_changed {
+            if column.is_nullable {
+                parts.push("NULL".to_string());
+            } else {
+                parts.push("NOT NULL".to_string());
+            }
         }
         statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
     }

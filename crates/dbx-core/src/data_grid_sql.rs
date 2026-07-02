@@ -1104,7 +1104,7 @@ fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> b
 
 fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
-    let parts = regex_like_rfc3339(text)?;
+    let parts = regex_like_oracle_temporal(text)?;
     let fraction = parts.fraction.unwrap_or_default();
     let datetime = format!("{} {}{}", parts.date, parts.time, fraction);
     match kind {
@@ -1114,6 +1114,10 @@ fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option
             Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"))
         }
         OracleTemporalKind::TimestampWithTimeZone => {
+            if parts.zone.is_empty() {
+                let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+                return Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"));
+            }
             let zone = oracle_timezone_suffix(&parts.zone);
             let mask = oracle_timestamp_format_mask(datetime.contains('.'));
             Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"))
@@ -1148,6 +1152,50 @@ fn oracle_timezone_suffix(zone: &str) -> String {
     } else {
         zone.to_string()
     }
+}
+
+fn regex_like_oracle_temporal(text: &str) -> Option<Rfc3339Parts> {
+    if let Some(parts) = regex_like_rfc3339(text) {
+        return Some(parts);
+    }
+    regex_like_local_datetime(text)
+}
+
+fn regex_like_local_datetime(text: &str) -> Option<Rfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let date = &text[0..10];
+    if bytes.len() == 10 {
+        return Some(Rfc3339Parts {
+            date: date.to_string(),
+            time: "00:00:00".to_string(),
+            fraction: None,
+            zone: String::new(),
+        });
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let time = &text[11..19];
+    let rest = &text[19..];
+    let fraction = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 || digit_count != rest.len() {
+            return None;
+        }
+        Some(format!(".{}", &rest[..digit_count]))
+    } else if rest.is_empty() {
+        None
+    } else {
+        return None;
+    };
+    Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: String::new() })
 }
 
 fn is_mysql_bit_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
@@ -2242,6 +2290,25 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&text)),
             "'2022-08-25T09:58:43Z'"
+        );
+    }
+
+    #[test]
+    fn formats_oracle_temporal_literals_from_editor_values_without_nls_parsing() {
+        let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
+        let date = column("event_day", "DATE", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43.123456"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43.123456', 'YYYY-MM-DD HH24:MI:SS.FF')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&date)),
+            "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
         );
     }
 

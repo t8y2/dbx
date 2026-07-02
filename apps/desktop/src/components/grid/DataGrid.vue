@@ -65,6 +65,7 @@ import {
   Database,
   Columns3,
   PencilRuler,
+  Timer,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -237,6 +238,7 @@ const isMac = isMacOS();
 const shortcutMod = isMac ? "Cmd" : "Ctrl";
 const saveShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.saveSql));
 const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
+const AUTO_REFRESH_INTERVAL_OPTIONS = [5, 10, 30, 60, 300];
 
 const emit = defineEmits<{
   reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number];
@@ -245,6 +247,11 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
 }>();
+
+const autoRefreshIntervalSeconds = ref(10);
+const autoRefreshEnabled = ref(false);
+let autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+const autoRefreshLabel = computed(() => (autoRefreshEnabled.value ? t("tabs.autoRefreshEvery", { seconds: autoRefreshIntervalSeconds.value }) : t("tabs.autoRefresh")));
 
 console.info("[DBX][DataGrid:setup]", {
   traceId: dataGridTraceId,
@@ -3822,6 +3829,36 @@ async function onToolbarRefresh() {
   emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
 }
 
+function stopAutoRefreshTimer() {
+  clearInterval(autoRefreshTimer);
+  autoRefreshTimer = undefined;
+}
+
+function runAutoRefreshTick() {
+  if (!autoRefreshEnabled.value || !canAutoRefresh.value) return;
+  void onToolbarRefresh();
+}
+
+function restartAutoRefreshTimer() {
+  stopAutoRefreshTimer();
+  if (!autoRefreshEnabled.value) return;
+  autoRefreshTimer = setInterval(runAutoRefreshTick, autoRefreshIntervalSeconds.value * 1000);
+}
+
+function setAutoRefreshInterval(seconds: number) {
+  autoRefreshIntervalSeconds.value = seconds;
+  if (autoRefreshEnabled.value) restartAutoRefreshTimer();
+}
+
+function toggleAutoRefresh() {
+  autoRefreshEnabled.value = !autoRefreshEnabled.value;
+  if (autoRefreshEnabled.value) {
+    restartAutoRefreshTimer();
+  } else {
+    stopAutoRefreshTimer();
+  }
+}
+
 async function onToolbarCommit() {
   await saveChanges();
 }
@@ -5728,6 +5765,8 @@ const {
   exportCancelHandler,
 });
 
+const canAutoRefresh = computed(() => !isSaving.value && !props.loading);
+
 const pageSizeMenuItems = computed(() =>
   pageSizeOptions.value.map((size) => ({
     value: String(size),
@@ -7587,11 +7626,18 @@ watch(
   },
 );
 
-onActivated(startLoadingElapsedTimer);
-onDeactivated(stopLoadingElapsedTimer);
+onActivated(() => {
+  startLoadingElapsedTimer();
+  restartAutoRefreshTimer();
+});
+onDeactivated(() => {
+  stopLoadingElapsedTimer();
+  stopAutoRefreshTimer();
+});
 
 onUnmounted(() => {
   cleanupFrames();
+  stopAutoRefreshTimer();
   onSearchSplitResizeEnd();
   onDdlResizeEnd();
   onDetailResizeEnd();
@@ -8419,7 +8465,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 {{ t("grid.keylessEditWarningHint") }}
               </TooltipContent>
             </Tooltip>
-            <Tooltip v-if="props.context !== 'results'">
+            <Tooltip>
               <TooltipTrigger as-child>
                 <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', isSaving ? '' : '']" :disabled="isSaving" @click="onToolbarRefresh">
                   <Loader2 v-if="loading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
@@ -8429,6 +8475,33 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </TooltipTrigger>
               <TooltipContent side="bottom">{{ t("grid.refresh") }} ({{ shortcutMod }}+R)</TooltipContent>
             </Tooltip>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', autoRefreshEnabled ? 'text-primary bg-primary/10 hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground']"
+                  :title="autoRefreshLabel"
+                  :aria-label="autoRefreshLabel"
+                  :aria-pressed="autoRefreshEnabled"
+                >
+                  <Timer class="data-grid-topbar-action-icon w-3 h-3" />
+                  <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ autoRefreshEnabled ? `${autoRefreshIntervalSeconds}s` : t("tabs.autoRefreshShort") }}</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="w-40">
+                <DropdownMenuItem class="gap-2" @select="toggleAutoRefresh">
+                  <Check v-if="autoRefreshEnabled" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ autoRefreshEnabled ? t("tabs.stopAutoRefresh") : t("tabs.startAutoRefresh") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem v-for="seconds in AUTO_REFRESH_INTERVAL_OPTIONS" :key="seconds" class="gap-2" @select="setAutoRefreshInterval(seconds)">
+                  <Check v-if="autoRefreshIntervalSeconds === seconds" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ t("tabs.autoRefreshEvery", { seconds }) }}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Tooltip v-if="props.result.columns.length">
               <TooltipTrigger as-child>
                 <Popover v-model:open="goToColumnOpen">

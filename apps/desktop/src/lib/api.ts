@@ -1,7 +1,6 @@
 import { isTauriRuntime } from "./tauriRuntime";
 import type * as TauriModule from "./tauri";
 import { appendDebugLog } from "./debugLog";
-import { apiWebSocketUrl } from "./webPath";
 
 // ---------------------------------------------------------------------------
 // Lazy backend resolution (avoids top-level await)
@@ -311,12 +310,9 @@ export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
 export const redisPubSubPublish = forward("redisPubSubPublish");
+export const redisPubSubConnect = forward("redisPubSubConnect");
 export const redisSlowlogGet = forward("redisSlowlogGet");
 export const redisClusterMasterNodes = forward("redisClusterMasterNodes");
-
-export function redisPubSubConnect(connectionId: string): WebSocket {
-  return new WebSocket(apiWebSocketUrl(`/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`));
-}
 
 // etcd
 export const etcdListPrefix = forward("etcdListPrefix");

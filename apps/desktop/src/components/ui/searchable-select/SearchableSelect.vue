@@ -22,6 +22,7 @@ const props = withDefaults(
     allowCustom?: boolean;
     triggerVariant?: ButtonVariants["variant"];
     triggerClass?: HTMLAttributes["class"];
+    triggerIconClass?: HTMLAttributes["class"];
     contentClass?: HTMLAttributes["class"];
     itemClass?: HTMLAttributes["class"];
     displayName?: (option: string) => string;
@@ -35,6 +36,7 @@ const props = withDefaults(
     clearable: false,
     loadingText: "Loading...",
     triggerVariant: "ghost",
+    triggerIconClass: "h-3 w-3",
     displayName: (option: string) => option,
     normalizeCustom: (value: string) => value,
   },
@@ -158,8 +160,8 @@ function handleKeydown(event: KeyboardEvent) {
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
           <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
         </slot>
-        <X v-if="clearable && !disabled && modelValue" class="h-3 w-3 shrink-0 opacity-60 hover:opacity-100" @pointerdown.stop.prevent="emit('update:modelValue', '')" />
-        <ChevronDown v-else class="h-3 w-3 shrink-0 opacity-60" />
+        <X v-if="clearable && !disabled && modelValue" :class="cn('shrink-0 opacity-60 hover:opacity-100', triggerIconClass)" @pointerdown.stop.prevent="emit('update:modelValue', '')" />
+        <ChevronDown v-else :class="cn('shrink-0 opacity-60', triggerIconClass)" />
       </Button>
     </PopoverTrigger>
     <PopoverContent align="end" :class="cn('w-52 gap-1 p-1.5', contentClass)">

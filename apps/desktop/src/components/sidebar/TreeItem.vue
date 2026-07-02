@@ -102,7 +102,7 @@ import {
   type TableAdminSqlOptions,
 } from "@/lib/dbAdminSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
-import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
+import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sqlFormatter";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
@@ -1751,9 +1751,17 @@ function viewObjectSource() {
       return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType as any);
     })
     .then(async (result) => {
+      const databaseType = currentDatabaseType();
+      if (!databaseType) throw new Error("Connection type is unavailable.");
       const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
-      const formatted = await formatSqlForDisplay(result.source, sqlFormatDialectForDbType(currentDatabaseType()), settingsStore.editorSettings.sqlFormatter);
-      queryStore.updateSql(tabId, formatted);
+      const editable = await buildEditableObjectSource({
+        databaseType,
+        objectType,
+        schema,
+        name: node.label,
+        source: result.source,
+      });
+      queryStore.updateSql(tabId, editable);
       if (objectType !== "SEQUENCE") {
         queryStore.setObjectSource(tabId, {
           schema,

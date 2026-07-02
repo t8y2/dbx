@@ -1364,6 +1364,11 @@ export async function redisPubSubPublish(connectionId: string, db: number, chann
   return invoke("redis_pubsub_publish", { connectionId, db, channel, message });
 }
 
+export async function redisPubSubConnect(connectionId: string): Promise<WebSocket> {
+  const port = await invoke<number>("redis_pubsub_server_port");
+  return new WebSocket(`ws://127.0.0.1:${port}/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`);
+}
+
 export async function redisSlowlogGet(connectionId: string, count: number, nodeHost?: string, nodePort?: number): Promise<RedisSlowlogEntry[]> {
   return invoke("redis_slowlog_get", { connectionId, count, nodeHost, nodePort });
 }

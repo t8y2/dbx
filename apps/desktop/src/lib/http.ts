@@ -111,7 +111,7 @@ import type { CreateDatabaseSqlOptions } from "@/lib/createDatabaseSql";
 import type { DatabaseNameSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/databaseExport";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataCompare";
-import { apiUrl } from "@/lib/webPath";
+import { apiUrl, apiWebSocketUrl } from "@/lib/webPath";
 import type { DataGridSavePreparation } from "./tauri";
 import type {
   NacosConfigHistoryKey,
@@ -1629,6 +1629,10 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
   return post("/api/redis/pubsub/publish", { connectionId, db, channel, message });
+}
+
+export async function redisPubSubConnect(connectionId: string): Promise<WebSocket> {
+  return new WebSocket(apiWebSocketUrl(`/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`));
 }
 
 export async function redisSlowlogGet(connectionId: string, count: number, nodeHost?: string, nodePort?: number): Promise<RedisSlowlogEntry[]> {

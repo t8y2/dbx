@@ -65,7 +65,7 @@ async function connect() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   connecting.value = true;
   try {
-    ws = api.redisPubSubConnect(props.connectionId);
+    ws = await api.redisPubSubConnect(props.connectionId);
 
     ws.onopen = () => {
       connected.value = true;

@@ -73,6 +73,7 @@ import { buildHistoryAiAnalysisPrompt } from "@/lib/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/agentDriverUpdateBadge";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { apiUrl, webPath } from "@/lib/webPath";
+import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSqlHistory";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
@@ -383,6 +384,22 @@ function resetUiZoom() {
   setGlobalUiScale(1);
 }
 
+function applyUiFontFamily(fontFamily: string) {
+  if (typeof document === "undefined") return;
+  const next = fontFamily || DEFAULT_UI_FONT_FAMILY;
+  // Override Tailwind's shared sans variable so app chrome and existing UI classes stay in sync.
+  document.documentElement.style.setProperty(APP_FONT_SANS_CSS_VAR, next);
+  document.body.style.fontFamily = `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`;
+}
+
+const appUiFontFamilyStyle = computed<Record<string, string>>(() => {
+  const fontFamily = settingsStore.editorSettings.uiFontFamily || DEFAULT_UI_FONT_FAMILY;
+  return {
+    [APP_FONT_SANS_CSS_VAR]: fontFamily,
+    fontFamily: `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`,
+  };
+});
+
 function isGlobalUiZoomTarget(target: EventTarget | null): target is Element {
   if (!(target instanceof Element)) return false;
   if (target.closest("[data-query-editor-root], [data-cell-detail-editor-root], [data-object-source-editor]")) {
@@ -424,6 +441,14 @@ watch(
   () => settingsStore.editorSettings.uiScale,
   (scale) => {
     void applyUiScale(scale);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings.uiFontFamily,
+  (fontFamily) => {
+    applyUiFontFamily(fontFamily);
   },
   { immediate: true },
 );
@@ -1110,6 +1135,12 @@ function onViewTableDdl(tableName: string) {
   showQueryEditorDdlDialog.value = true;
 }
 
+function onEditTableStructure(tableName: string) {
+  const target = tableTargetFromActiveTab(tableName);
+  if (!target) return;
+  queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName);
+}
+
 async function changeActiveConnection(connectionId: string) {
   const tab = activeTab.value;
   if (!tab) return;
@@ -1675,7 +1706,7 @@ onUnmounted(() => {
   <LoginPage v-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
   <div v-show="!setupRequired && (!needsAuth || authenticated)" class="fixed inset-0 h-screen w-screen overflow-hidden">
     <TooltipProvider :delay-duration="300">
-      <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden">
+      <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :style="appUiFontFamilyStyle">
         <AppToolbar
           :is-dark="isDark"
           :theme-mode="themeMode"
@@ -1814,6 +1845,7 @@ onUnmounted(() => {
                     @execute-sql="onExecuteSql"
                     @click-table="onClickTable"
                     @view-table-data="onViewTableData"
+                    @edit-table-structure="onEditTableStructure"
                     @view-table-ddl="onViewTableDdl"
                     @open-object-table="
                       (target) =>

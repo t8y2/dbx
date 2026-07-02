@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/tableColumnTemplates.ts";
+import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/appFonts.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
@@ -99,6 +100,18 @@ test("normalizes editor theme settings", () => {
   assert.equal(normalizeEditorSettings({ theme: "app" }).theme, "app");
   assert.equal(normalizeEditorSettings({ theme: "vscode-light" }).theme, "vscode-light");
   assert.equal(normalizeEditorSettings({ theme: "invalid" as any }).theme, DEFAULT_EDITOR_SETTINGS.theme);
+});
+
+test("defaults UI font family to the app sans stack", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.uiFontFamily, DEFAULT_UI_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({}).uiFontFamily, DEFAULT_UI_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({ uiFontFamily: "" as any }).uiFontFamily, DEFAULT_UI_FONT_FAMILY);
+});
+
+test("keeps saved UI font family", () => {
+  const uiFontFamily = `"Aptos", system-ui, sans-serif`;
+  assert.equal(normalizeEditorSettings({ uiFontFamily } as any).uiFontFamily, uiFontFamily);
+  assert.equal(normalizeEditorSettings({ uiFontFamily: SYSTEM_UI_FONT_FAMILY } as any).uiFontFamily, SYSTEM_UI_FONT_FAMILY);
 });
 
 test("defaults dangerous SQL confirmation to enabled", () => {

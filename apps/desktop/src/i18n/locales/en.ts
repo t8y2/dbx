@@ -808,6 +808,7 @@ export default {
     copyColumnTsv: "Copy Column (TSV)",
     editValue: "Edit Value",
     formatJson: "Format JSON",
+    compactJson: "Compact JSON",
     formattedJsonEditWarning: "You are editing formatted JSON. Saving will write it as JSON, so the original formatting may change.",
     setNull: "Set NULL",
     restoreOriginalValue: "Restore Original",

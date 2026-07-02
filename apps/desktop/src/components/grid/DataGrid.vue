@@ -112,7 +112,7 @@ import { getApplicablePreviewActions } from "@/lib/resultPreviewRegistry";
 import "@/lib/previewHandlers/geometryMapPreview";
 import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, isBinaryCellColumnType, parseBinaryCellBytes, type BinaryCellDownloadMode } from "@/lib/binaryCellDownload";
 import { buildBinaryHexViewRows } from "@/lib/binaryHexViewer";
-import { canFormatCellDetailJson, cellDetailEditorText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/cellDetailPresentation";
+import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/cellDetailPresentation";
 import { renderWktOnCanvas, isHexGeometry } from "@/lib/geometryPreview";
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "@/lib/dataGridDetail";
 import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/columnFormatter";
@@ -4550,6 +4550,15 @@ const sideJsonPreviewText = computed(() => {
   if (!detail?.formattedJson) return "";
   return sideDetailJsonView.value ? detail.formattedJson : detail.rawValuePreview;
 });
+const canCompactDetailJson = computed(() => {
+  const detail = activeCellDetail.value;
+  return !!detail && isEditingDetail.value && canFormatCellDetailJson(detailEditValue.value, detail.type);
+});
+const showCompactDetailJson = computed(() => {
+  const detail = activeCellDetail.value;
+  if (!detail || !isEditingDetail.value) return false;
+  return !!detail.formattedJson || looksLikeJsonContainerText(detailEditValue.value);
+});
 
 // CodeMirror-based cell detail editors
 const detailsEditorContainer = ref<HTMLElement>();
@@ -4782,6 +4791,13 @@ function formatValueEditorJson() {
   detailEditValue.value = formatJsonText(detailEditValue.value) ?? detailEditValue.value;
   syncEditorFromDetailEdit();
   warnFormattedJsonEditIfNeeded(detail, true);
+}
+
+function compactDetailJson() {
+  const detail = activeCellDetail.value;
+  if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
+  detailEditValue.value = compactJsonText(detailEditValue.value) ?? detailEditValue.value;
+  syncEditorFromDetailEdit();
 }
 
 function setDetailNull() {
@@ -9664,18 +9680,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': sideDetailValueFillsHeight }, sideDetailValueFillsHeight && !(activeCellDetail.imagePreviewUrl && !isEditingDetail) ? 'flex-1' : '', activeCellDetail.imagePreviewUrl && !isEditingDetail ? 'shrink-0' : '']">
                     <div class="flex min-h-5 items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
-                      <div v-if="!isEditingDetail" class="flex items-center gap-1">
-                        <Button v-if="activeCellDetail.formattedJson" :variant="sideDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="toggleCellDetailJsonFormatted">
+                      <div class="flex items-center gap-1">
+                        <Button v-if="showCompactDetailJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompactDetailJson" :title="t('grid.compactJson')" @click="compactDetailJson">
+                          <Code2 class="h-3 w-3" />
+                          {{ t("grid.compactJson") }}
+                        </Button>
+                        <Button v-if="!isEditingDetail && activeCellDetail.formattedJson" :variant="sideDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="toggleCellDetailJsonFormatted">
                           <Code2 class="h-3 w-3" />
                           {{ t("grid.formattedJson") }}
                         </Button>
-                        <Button v-if="activeCellDetail.isEditable" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.editValue')" @click="startDetailEdit">
+                        <Button v-if="!isEditingDetail && activeCellDetail.isEditable" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.editValue')" @click="startDetailEdit">
                           <Pencil class="h-3 w-3" />
                         </Button>
-                        <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.copyValue')" @click="copyDetailCurrentValue">
+                        <Button v-if="!isEditingDetail" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.copyValue')" @click="copyDetailCurrentValue">
                           <Copy class="h-3 w-3" />
                         </Button>
-                        <DropdownMenu v-if="canDownloadDetailBinaryValue(activeCellDetail)">
+                        <DropdownMenu v-if="!isEditingDetail && canDownloadDetailBinaryValue(activeCellDetail)">
                           <DropdownMenuTrigger as-child>
                             <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.downloadBinaryValue')">
                               <Download class="h-3 w-3" />

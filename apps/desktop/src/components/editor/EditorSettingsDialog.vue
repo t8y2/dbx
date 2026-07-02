@@ -34,6 +34,7 @@ import {
   type DesktopIconTheme,
   type InterfaceLayout,
   type DisconnectTabHandlingMode,
+  type OpenTabsRestoreMode,
   type SqlSemanticDiagnosticsMode,
   type UpdateDownloadSource,
   type CustomThemeColors,
@@ -241,6 +242,7 @@ const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
+const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
@@ -512,6 +514,7 @@ watch(
       editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
       editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
       editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+      editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
       editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
       editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
       editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
@@ -577,6 +580,7 @@ function hasChanges(): boolean {
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
     editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
     editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
+    editOpenTabsRestoreMode.value !== settingsStore.editorSettings.openTabsRestoreMode ||
     editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
     editReuseDataTab.value !== settingsStore.editorSettings.reuseDataTab ||
     editUpdateNotificationsEnabled.value !== settingsStore.editorSettings.updateNotificationsEnabled ||
@@ -623,6 +627,7 @@ async function persistSettings() {
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     reuseDataTab: editReuseDataTab.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
@@ -692,6 +697,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+    editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -754,6 +760,7 @@ function resetAllDefaults() {
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+  editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -2550,6 +2557,27 @@ onUnmounted(cleanupPreviewEditor);
                   </HelpTooltip>
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
+              </div>
+              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="open-tabs-restore-mode">{{ t("settings.openTabsRestoreMode") }}</Label>
+                  <HelpTooltip :label="t('settings.openTabsRestoreMode')">
+                    {{ t("settings.openTabsRestoreModeDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Select :model-value="editOpenTabsRestoreMode" @update:model-value="(value) => (editOpenTabsRestoreMode = value as OpenTabsRestoreMode)">
+                  <SelectTrigger id="open-tabs-restore-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">{{ t("settings.openTabsRestoreModeAll") }}</SelectItem>
+                    <SelectItem value="pinned">{{ t("settings.openTabsRestoreModePinned") }}</SelectItem>
+                    <SelectItem value="none">{{ t("settings.openTabsRestoreModeNone") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.openTabsRestoreModeHint") }}
+                </p>
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

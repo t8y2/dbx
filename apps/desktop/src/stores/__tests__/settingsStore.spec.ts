@@ -30,6 +30,21 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).updateDownloadSource).toBe("official");
   });
 
+  it("restores all open tabs on launch by default", () => {
+    expect(normalizeEditorSettings({}).openTabsRestoreMode).toBe("all");
+  });
+
+  it("preserves explicit open tab restore modes", () => {
+    expect(normalizeEditorSettings({ openTabsRestoreMode: "pinned" }).openTabsRestoreMode).toBe("pinned");
+    expect(normalizeEditorSettings({ openTabsRestoreMode: "none" }).openTabsRestoreMode).toBe("none");
+    expect(normalizeEditorSettings({ openTabsRestoreMode: "invalid" as any }).openTabsRestoreMode).toBe("all");
+  });
+
+  it("migrates legacy open tab restore booleans", () => {
+    expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: false } as any).openTabsRestoreMode).toBe("none");
+    expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: true } as any).openTabsRestoreMode).toBe("all");
+  });
+
   it("preserves CNB update download source and rejects invalid values", () => {
     expect(normalizeEditorSettings({ updateDownloadSource: "cnb" }).updateDownloadSource).toBe("cnb");
     expect(normalizeEditorSettings({ updateDownloadSource: "mirror" as any }).updateDownloadSource).toBe("official");

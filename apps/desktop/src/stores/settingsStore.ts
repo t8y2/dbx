@@ -60,6 +60,7 @@ export type InterfaceLayout = "separated" | "classic";
 
 export type UpdateDownloadSource = "official" | "cnb";
 export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
+export type OpenTabsRestoreMode = "all" | "pinned" | "none";
 
 export const DEFAULT_SIDEBAR_TABLE_PAGE_SIZE = 1000;
 const SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED = false;
@@ -357,6 +358,7 @@ export interface EditorSettings {
   sidebarActivation: SidebarActivation;
   sidebarObjectDisplay: "grouped" | "simple";
   autoSelectActiveSidebarNode: boolean;
+  openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
   reuseDataTab: boolean;
   updateNotificationsEnabled: boolean;
@@ -466,6 +468,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarActivation: "single",
   sidebarObjectDisplay: "grouped",
   autoSelectActiveSidebarNode: false,
+  openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
   reuseDataTab: false,
   updateNotificationsEnabled: true,
@@ -544,6 +547,12 @@ function normalizeDisconnectTabHandlingMode(value: unknown, legacyCloseTabsOnDis
     return legacyCloseTabsOnDisconnect ? "close-tabs" : "keep-tabs-clear-results";
   }
   return DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
+}
+
+function normalizeOpenTabsRestoreMode(value: unknown, legacyRestoreOpenTabsOnLaunch?: unknown): OpenTabsRestoreMode {
+  if (value === "all" || value === "pinned" || value === "none") return value;
+  if (typeof legacyRestoreOpenTabsOnLaunch === "boolean") return legacyRestoreOpenTabsOnLaunch ? "all" : "none";
+  return DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
 }
 
 function normalizeColumnFormatters(value: unknown): Record<string, ColumnFormatterConfig> {
@@ -664,6 +673,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
+    openTabsRestoreMode: normalizeOpenTabsRestoreMode((settings as Partial<EditorSettings>).openTabsRestoreMode, (settings as Partial<EditorSettings> & { restoreOpenTabsOnLaunch?: boolean }).restoreOpenTabsOnLaunch),
     disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
     reuseDataTab: settings.reuseDataTab ?? DEFAULT_EDITOR_SETTINGS.reuseDataTab,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
@@ -844,6 +854,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
+    if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
     if (partial.reuseDataTab !== undefined) editorSettings.value.reuseDataTab = partial.reuseDataTab;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;

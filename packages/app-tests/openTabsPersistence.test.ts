@@ -253,6 +253,18 @@ test("restores unsaved query tabs and active tab after restart", () => {
   assert.equal(restored.activeTabId, "tab-2");
 });
 
+test("restores only pinned tabs when requested", () => {
+  const raw = JSON.stringify([queryTab({ id: "tab-1", pinned: true }), queryTab({ id: "tab-2", pinned: false }), queryTab({ id: "tab-3", pinned: true })]);
+
+  const restored = restoreOpenTabsState(raw, "tab-2", { filter: "pinned" });
+
+  assert.deepEqual(
+    restored.tabs.map((tab) => tab.id),
+    ["tab-1", "tab-3"],
+  );
+  assert.equal(restored.activeTabId, "tab-1");
+});
+
 test("restores object source save context", () => {
   const raw = JSON.stringify([
     queryTab({

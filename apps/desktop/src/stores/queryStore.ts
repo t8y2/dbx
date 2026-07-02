@@ -7,7 +7,7 @@ import { orderPinnedFirst } from "@/lib/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/explainPlan";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sqlAnalysis";
-import { restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -51,8 +51,6 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import type { SavedSqlFile } from "@/types/database";
 
-const STORAGE_KEY = "dbx-open-tabs";
-const ACTIVE_TAB_KEY = "dbx-active-tab";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
@@ -164,14 +162,20 @@ function normalizeOracleLikeQueryAnalysis(dbType: string, analysis: EditableQuer
 
 function saveTabs(tabs: QueryTab[], activeTabId: string | null) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeOpenTabs(tabs)));
-    localStorage.setItem(ACTIVE_TAB_KEY, activeTabId || "");
+    localStorage.setItem(OPEN_TABS_STORAGE_KEY, JSON.stringify(serializeOpenTabs(tabs)));
+    localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, activeTabId || "");
   } catch {}
 }
 
 function loadSavedTabs(): { tabs: QueryTab[]; activeTabId: string | null } {
   try {
-    return restoreOpenTabsState(localStorage.getItem(STORAGE_KEY), localStorage.getItem(ACTIVE_TAB_KEY));
+    const restoreMode = useSettingsStore().editorSettings.openTabsRestoreMode;
+    if (restoreMode === "none") {
+      return { tabs: [], activeTabId: null };
+    }
+    return restoreOpenTabsState(localStorage.getItem(OPEN_TABS_STORAGE_KEY), localStorage.getItem(ACTIVE_TAB_STORAGE_KEY), {
+      filter: restoreMode === "pinned" ? "pinned" : "all",
+    });
   } catch {
     return { tabs: [], activeTabId: null };
   }

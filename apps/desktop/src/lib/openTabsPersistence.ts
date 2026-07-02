@@ -1,5 +1,8 @@
 import type { QueryTab } from "@/types/database";
 
+export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
+export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
+
 export interface SavedQueryResultRun {
   id: string;
   title: string;
@@ -54,6 +57,8 @@ export interface RestoredOpenTabs {
   tabs: QueryTab[];
   activeTabId: string | null;
 }
+
+export type OpenTabsRestoreFilter = "all" | "pinned";
 
 function shouldPersistTabSql(tab: QueryTab) {
   if (!tab.savedSqlId) return true;
@@ -120,7 +125,7 @@ function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");
 }
 
-export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean } = {}): RestoredOpenTabs {
+export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
   if (!rawTabs) return { tabs: [], activeTabId: null };
 
   try {
@@ -128,7 +133,11 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
     if (!Array.isArray(parsed)) return { tabs: [], activeTabId: null };
 
     const saved = parsed.filter(isSavedOpenTab);
-    const filtered = options.queryOnly ? saved.filter((tab) => (tab.mode ?? "query") === "query") : saved;
+    const filtered = saved.filter((tab) => {
+      if (options.queryOnly && (tab.mode ?? "query") !== "query") return false;
+      if (options.filter === "pinned" && !tab.pinned) return false;
+      return true;
+    });
     const tabs: QueryTab[] = filtered.map((tab) => {
       const mode = tab.mode ?? "query";
       const resultRuns =

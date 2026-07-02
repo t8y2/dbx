@@ -69,7 +69,7 @@ defineExpose({ focusSearch });
                 model-value=""
                 :items="importSourceItems"
                 :aria-label="t('sidebar.import')"
-                :trigger-icon="Download"
+                :trigger-icon="Upload"
                 trigger-class="inline-flex h-6 w-5 items-center justify-center rounded-md outline-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
                 trigger-icon-class="h-4 w-4"
                 content-class="w-44"
@@ -87,7 +87,7 @@ defineExpose({ focusSearch });
         <Tooltip>
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('export')">
-              <Upload class="h-3 w-3" />
+              <Download class="h-3 w-3" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{{ t("sidebar.export") }}</TooltipContent>

@@ -532,7 +532,7 @@ export default withEnglishFallback({
     stopAutoRefresh: "Ferma aggiornamento automatico",
     missingResultRun: "Questo risultato non e piu disponibile",
     exportResultArchive: "Salva Archivio Risultati",
-    importResultArchive: "Importa Risultati",
+    importResultArchive: "Importa Archivio Risultati",
     importedResultArchive: "Risultati importati",
     resultArchiveExported: "Risultati esportati",
     resultArchiveImported: "Risultati importati",

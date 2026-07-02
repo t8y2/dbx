@@ -3850,7 +3850,7 @@ const shortcutDelete = "Delete";
 function exportDataSubmenu(): ContextMenuItem {
   return {
     label: t("contextMenu.exportData"),
-    icon: Upload,
+    icon: Download,
     children: [
       { label: "CSV", action: () => exportData("csv") },
       { label: "JSON", action: () => exportData("json") },
@@ -4140,7 +4140,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
     items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
     items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Download });
     const destructiveActions: ContextMenuItem[] = [];
     if (canDropDatabase.value) {
       destructiveActions.push({
@@ -4317,14 +4317,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
+      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
     }
     if (isTableNotView.value) {
       items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     }
     items.push({ label: "", separator: true });
     items.push(exportDataSubmenu());
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Download });
     items.push({ label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
     items.push(copyStructureAsSubmenu());
     if (isTableNotView.value) {

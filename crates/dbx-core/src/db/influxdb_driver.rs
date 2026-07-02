@@ -1,5 +1,5 @@
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use reqwest::{Certificate, Client as HttpClient};
+use reqwest::{Certificate, Client as HttpClient, Response};
 use serde::Deserialize;
 use std::fs;
 use std::time::{Duration, Instant};
@@ -91,7 +91,10 @@ impl Clone for InfluxdbClient {
 #[derive(Deserialize, Default)]
 struct InfluxErrorResult {
     #[serde(default)]
-    error: String,
+    #[serde(rename = "error", alias = "err")]
+    error: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -143,7 +146,7 @@ fn build_request(client: &InfluxdbClient, req: reqwest::RequestBuilder) -> reqwe
 }
 
 async fn influx_query(client: &InfluxdbClient, sql: &str, database: Option<&str>) -> Result<InfluxJsonResult, String> {
-    let url = build_query_url(&client, database, sql);
+    let url = build_query_url(client, database, sql);
     log::info!("[influxdb] query url={url} username={:?} password={}", client.username, client.password.is_some());
 
     let req = if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW"]) {
@@ -155,16 +158,15 @@ async fn influx_query(client: &InfluxdbClient, sql: &str, database: Option<&str>
     let resp = req.send().await.map_err(|e| format!("InfluxDB request failed: {e}"))?;
     log::info!("[influxdb] response status={}", resp.status());
     if !resp.status().is_success() {
-        let error_json = resp.json::<InfluxErrorResult>().await.unwrap_or_default();
-        let msg = error_json.error;
-        log::error!("[influxdb] error: {msg}");
-        return Err(format!("InfluxDB error: {msg}"));
+        return handle_influx_error(resp).await;
     }
-    resp.json::<InfluxJsonResult>().await.map_err(|e| format!("InfluxDB parse error: {e}"))
+    let response_text = resp.text().await.unwrap_or_default();
+    serde_json::from_str::<InfluxJsonResult>(&response_text)
+        .map_err(|e| format!("InfluxDB parse error: {e}; response: {response_text}"))
 }
 
 pub async fn test_connection(client: &InfluxdbClient, timeout: Duration) -> Result<(), String> {
-    let url = format!("{}/query?q=SHOW DATABASES", client.base_url);
+    let url = build_query_url(client, None, "SHOW DATABASES");
     let req = build_request(client, client.http.get(&url));
     let resp = with_connection_timeout("InfluxDB", timeout, async {
         req.send().await.map_err(|e| format!("InfluxDB connection failed: {e}"))
@@ -268,19 +270,7 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
 
 pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
-    let url = build_query_url(&client, Some(database), sql);
-    let req = if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW"]) {
-        build_request(client, client.http.get(&url))
-    } else {
-        build_request(client, client.http.post(&url))
-    };
-    let resp = req.send().await.map_err(|e| format!("InfluxDB request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let error_json = resp.json::<InfluxErrorResult>().await.unwrap_or_default();
-        let msg = error_json.error;
-        return Err(format!("InfluxDB error: {msg}"));
-    }
-    let json = resp.json::<InfluxJsonResult>().await.map_err(|e| format!("InfluxDB parse error: {e}"))?;
+    let json = influx_query(client, sql, Some(database)).await?;
     let series = json.results.iter().flat_map(|r| &r.series).next();
     match series {
         Some(s) => Ok(QueryResult {
@@ -306,6 +296,50 @@ pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -
             has_more: false,
         }),
     }
+}
+
+async fn handle_influx_error<T>(resp: Response) -> Result<T, String> {
+    let status = resp.status();
+
+    let status_message = match status {
+        reqwest::StatusCode::UNAUTHORIZED => Some("Unauthorized access."),
+        reqwest::StatusCode::FORBIDDEN => Some("Access denied."),
+        reqwest::StatusCode::NOT_FOUND => Some("Database not found."),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY => Some("Unprocessable entity."),
+        _ => None,
+    };
+
+    let error_msg = if let Some(msg) = status_message {
+        msg.to_string()
+    } else {
+        // 尝试从响应体中解析错误信息
+        let error_body = resp.text().await.unwrap_or_default();
+        extract_error_message(&error_body).unwrap_or_else(|| {
+            if error_body.trim().is_empty() {
+                "Unknown error.".to_string()
+            } else {
+                error_body
+            }
+        })
+    };
+
+    log::warn!("[influxdb] error response: status = {}, message = {}", status, error_msg);
+    Err(format!("InfluxDB error: status = {}, message = {}", status.as_str(), error_msg))
+}
+
+/// 从 InfluxDB 错误响应中提取错误消息
+fn extract_error_message(body: &str) -> Option<String> {
+    if body.trim().is_empty() {
+        return None;
+    }
+
+    serde_json::from_str::<InfluxErrorResult>(body).ok().and_then(|error_json| {
+        // 优先使用 error 字段，其次使用 message 字段
+        error_json
+            .error
+            .filter(|msg| !msg.trim().is_empty())
+            .or_else(|| error_json.message.filter(|msg| !msg.trim().is_empty()))
+    })
 }
 
 #[cfg(test)]

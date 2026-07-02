@@ -59,6 +59,7 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     indexes: false,
     foreignKeys: false,
     triggers: false,
+    ddl: false,
   },
   questdb: {
     indexes: true,

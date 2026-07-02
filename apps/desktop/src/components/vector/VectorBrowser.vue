@@ -34,6 +34,10 @@ const operationMode = ref<VectorOperationMode>("browse");
 const requestText = ref(defaultRequestText(props.databaseType, props.database, props.collection, operationMode.value));
 let loadingTimer: ReturnType<typeof setInterval> | undefined;
 
+const dim = computed(() => props.dimension || 4);
+function sampleVector(): number[] {
+  return Array.from({ length: dim.value }, (_, i) => parseFloat(((i + 1) / 10).toFixed(1)));
+}
 const productLabel = computed(() => {
   switch (props.databaseType) {
     case "milvus":
@@ -91,7 +95,7 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
               data: [
                 {
                   id: 1,
-                  vector: [0.1, 0.2, 0.3, 0.4],
+                  vector: sampleVector(),
                   title: "updated vector",
                   kind: "demo",
                 },
@@ -133,9 +137,7 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
       return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/delete\n${JSON.stringify({ ids: ["id1"] }, null, 2)}`;
     }
     if (mode === "upsert") {
-      const dim = props.dimension || 4;
-      const emb = Array.from({ length: dim }, (_, i) => +(i * 0.1 + 0.1).toFixed(1));
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [emb], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
+      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [sampleVector()], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
     }
     return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/get\n${JSON.stringify({ limit: 100, include: ["documents", "metadatas"] }, null, 2)}`;
   }
@@ -149,7 +151,7 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
         points: [
           {
             id: 1,
-            vector: [0.1, 0.2, 0.3, 0.4],
+            vector: sampleVector(),
             payload: {
               title: "updated vector",
               kind: "demo",

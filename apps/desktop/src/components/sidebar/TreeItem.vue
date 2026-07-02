@@ -3401,6 +3401,16 @@ function openDatabaseExport() {
   };
 }
 
+function openAllDatabasesExport() {
+  const node = props.node;
+  if (node.type !== "connection" || !node.connectionId) return;
+  connectionStore.databaseExportSource = {
+    connectionId: node.connectionId,
+    database: "",
+    allDatabases: true,
+  };
+}
+
 function openTableImport() {
   const node = props.node;
   if (node.type !== "table" || !node.connectionId || !node.database) return;
@@ -3440,6 +3450,11 @@ const canExpand = computed(() =>
 const canPin = computed(() => canTreeNodePin(props.node.type));
 const canOpenSqlFileExecution = computed(() => {
   return supportsSqlFileExecution(rawDatabaseType());
+});
+const canExportAllDatabases = computed(() => {
+  if (props.node.type !== "connection" || !props.node.connectionId) return false;
+  const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
+  return !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(dbType || "");
 });
 const canOpenDiagram = computed(() => {
   return !!props.node.database && supportsSchemaDiagram(currentDatabaseType());
@@ -3948,6 +3963,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     if (canOpenSqlFileExecution.value) {
       items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+    }
+    if (canExportAllDatabases.value) {
+      items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
     }
     if (canCreateDatabase.value) {
       items.push({

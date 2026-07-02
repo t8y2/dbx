@@ -549,6 +549,20 @@ mod tests {
     }
 
     #[test]
+    fn builds_goldendb_create_database_sql_with_mysql_charset_options() {
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Goldendb),
+                driver_profile: Some("goldendb".to_string()),
+                name: "app_db".to_string(),
+                charset: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+            }),
+            "CREATE DATABASE `app_db` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        );
+    }
+
+    #[test]
     fn omits_create_database_charset_for_non_mysql_types() {
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
@@ -563,9 +577,24 @@ mod tests {
     }
 
     #[test]
+    fn builds_vastbase_create_database_sql_without_mysql_charset_options() {
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Vastbase),
+                driver_profile: Some("vastbase".to_string()),
+                name: "app_db".to_string(),
+                charset: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+            }),
+            "CREATE DATABASE \"app_db\";"
+        );
+    }
+
+    #[test]
     fn recognizes_mysql_compatible_create_database_profiles() {
         assert!(supports_create_database_charset(Some(DatabaseType::Mysql), Some("oceanbase")));
         assert!(supports_create_database_charset(Some(DatabaseType::Mysql), Some("doris")));
+        assert!(supports_create_database_charset(Some(DatabaseType::Goldendb), Some("goldendb")));
         assert!(!supports_create_database_charset(Some(DatabaseType::Postgres), None));
     }
 

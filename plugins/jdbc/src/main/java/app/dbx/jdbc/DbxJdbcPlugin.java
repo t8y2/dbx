@@ -9,6 +9,7 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
 import java.net.URL;
@@ -334,6 +335,8 @@ public final class DbxJdbcPlugin {
         if (url == null) {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
+        JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
+        url = urlCredentials.url;
         String key = connectionKey(connection);
         if (sharedConnection != null && key.equals(sharedConnectionKey) && !sharedConnection.isClosed()) {
             return sharedConnection;
@@ -343,6 +346,12 @@ public final class DbxJdbcPlugin {
         Properties properties = new Properties();
         String username = optionalText(connection, "username");
         String password = optionalText(connection, "password");
+        if (username == null) {
+            username = urlCredentials.username;
+        }
+        if (password == null) {
+            password = urlCredentials.password;
+        }
         if (username != null) {
             properties.setProperty("user", username);
         }
@@ -1649,6 +1658,98 @@ public final class DbxJdbcPlugin {
     static String jdbcUrl(JsonNode connection) {
         String url = appendJdbcUrlParams(optionalText(connection, "connection_string"), optionalText(connection, "url_params"));
         return jdbcUrlWithPasswordKey(url, optionalText(connection, "password"));
+    }
+
+    private record JdbcUrlCredentials(String url, String username, String password) {}
+
+    private record JdbcUrlParam(String separator, String text) {}
+
+    static JdbcUrlCredentials extractJdbcUrlCredentials(String url) {
+        if (url == null) {
+            return new JdbcUrlCredentials(null, null, null);
+        }
+        int queryStart = url.indexOf('?');
+        if (queryStart < 0) {
+            return new JdbcUrlCredentials(url, null, null);
+        }
+
+        int fragmentStart = url.indexOf('#', queryStart + 1);
+        String base = url.substring(0, queryStart);
+        String query = fragmentStart < 0 ? url.substring(queryStart + 1) : url.substring(queryStart + 1, fragmentStart);
+        String fragment = fragmentStart < 0 ? "" : url.substring(fragmentStart);
+
+        String username = null;
+        String password = null;
+        boolean foundCredential = false;
+        List<JdbcUrlParam> keptParams = new ArrayList<>();
+        for (JdbcUrlParam part : splitJdbcUrlParams(query)) {
+            String name = partName(part.text());
+            String key = decodeQueryPart(name).trim().toLowerCase(Locale.ROOT);
+            if ("user".equals(key)) {
+                username = emptyToNull(decodeQueryPart(partValue(part.text())).trim());
+                foundCredential = true;
+            } else if ("password".equals(key)) {
+                password = emptyToNull(decodeQueryPart(partValue(part.text())).trim());
+                foundCredential = true;
+            } else {
+                keptParams.add(part);
+            }
+        }
+
+        if (!foundCredential) {
+            return new JdbcUrlCredentials(url, null, null);
+        }
+        String sanitizedQuery = joinJdbcUrlParams(keptParams);
+        String sanitizedUrl = sanitizedQuery.isEmpty() ? base + fragment : base + "?" + sanitizedQuery + fragment;
+        return new JdbcUrlCredentials(sanitizedUrl, username, password);
+    }
+
+    private static List<JdbcUrlParam> splitJdbcUrlParams(String query) {
+        List<JdbcUrlParam> result = new ArrayList<>();
+        String separator = "";
+        int start = 0;
+        for (int i = 0; i < query.length(); i++) {
+            char ch = query.charAt(i);
+            if (ch == '&' || ch == ';') {
+                result.add(new JdbcUrlParam(separator, query.substring(start, i)));
+                separator = String.valueOf(ch);
+                start = i + 1;
+            }
+        }
+        result.add(new JdbcUrlParam(separator, query.substring(start)));
+        return result;
+    }
+
+    private static String joinJdbcUrlParams(List<JdbcUrlParam> params) {
+        StringBuilder result = new StringBuilder();
+        for (JdbcUrlParam param : params) {
+            if (param.text().isEmpty()) {
+                continue;
+            }
+            if (result.length() > 0) {
+                result.append(param.separator().isEmpty() ? "&" : param.separator());
+            }
+            result.append(param.text());
+        }
+        return result.toString();
+    }
+
+    private static String partName(String part) {
+        int equals = part.indexOf('=');
+        return equals < 0 ? part : part.substring(0, equals);
+    }
+
+    private static String partValue(String part) {
+        int equals = part.indexOf('=');
+        return equals < 0 ? "" : part.substring(equals + 1);
+    }
+
+    private static String decodeQueryPart(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException ignored) {
+            return value;
+        }
     }
 
     private static boolean isSqliteUrl(String url) {

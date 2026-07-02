@@ -32,6 +32,25 @@ pub async fn list_databases(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 
+pub async fn list_database_statistics(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::schema::list_database_statistics_core(&state.app, &q.connection_id).await.map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn database_size(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().ok_or_else(|| AppError("database is required".to_string()))?;
+    let result =
+        dbx_core::schema::database_size_core(&state.app, &q.connection_id, database).await.map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
 /// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.
 async fn external_doris_catalog(state: &Arc<WebState>, connection_id: &str, catalog: Option<&str>) -> Option<String> {
     dbx_core::schema::resolve_external_doris_catalog(&state.app, connection_id, catalog).await

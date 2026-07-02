@@ -1452,6 +1452,8 @@ export default withEnglishFallback({
     finalProxyPortCopied: "最终代理端口 {port} 已复制",
     setDefaultDatabase: "设为默认数据库",
     clearDefaultDatabase: "取消默认数据库",
+    fetchDatabaseSize: "获取数据库大小",
+    fetchDatabaseSizeFailed: "获取数据库大小失败：{message}",
     exportDatabase: "导出数据库",
     exportAllDatabases: "导出全部数据库",
     exportDatabaseSuccess: "已导出 {count} 张表，每表最多 {limit} 行",

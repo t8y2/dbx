@@ -394,6 +394,19 @@ function currentTableStructureDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? tableStructureDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
 }
 
+// Database types whose backend size query is implemented (schema.rs
+// `database_size_core`): the native MySQL pool (incl. JDBC/agent MySQL) and the
+// native PostgreSQL pool family. Agent-backed PG forks (HighGo/Vastbase/
+// Kingbase) are NOT dispatched by the backend, so the manual action must not be
+// offered for them — otherwise the menu appears but can never return a size.
+const DATABASE_SIZE_SUPPORTED_TYPES = new Set<DatabaseType>(["mysql", "postgres", "gaussdb", "kwdb", "opengauss"]);
+
+const canFetchDatabaseSize = computed(() => {
+  if (props.node.type !== "database" || props.node.catalog) return false;
+  const dbType = currentDatabaseType();
+  return !!dbType && DATABASE_SIZE_SUPPORTED_TYPES.has(dbType);
+});
+
 function rawDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? connectionStore.getConfig(props.node.connectionId)?.db_type : undefined;
 }
@@ -1779,6 +1792,16 @@ async function clearNodeDefaultDatabase() {
     await connectionStore.clearDefaultDatabase(node.connectionId);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function fetchDatabaseSize() {
+  const node = props.node;
+  if (!node.connectionId || !node.database) return;
+  try {
+    await connectionStore.fetchDatabaseSize(node.connectionId, node.database);
+  } catch (e: any) {
+    toast(t("contextMenu.fetchDatabaseSizeFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 
@@ -4227,6 +4250,14 @@ const tableComment = computed(() =>
     : null,
 );
 const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!columnComment.value || !!tableComment.value }));
+const formattedSize = computed(() => {
+  const bytes = props.node.sizeBytes;
+  if (bytes == null || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+});
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const tableSearchParentId = computed(() => props.node.tableSearchParentId || "");
 const tableSearchValue = computed(() => {
@@ -5227,6 +5258,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
         items.push({ label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
       }
     }
+    if (canFetchDatabaseSize.value) {
+      items.push({ label: t("contextMenu.fetchDatabaseSize"), action: fetchDatabaseSize, icon: Database });
+    }
     if (canEditDatabaseProperties.value) {
       items.push({ label: t("contextMenu.editDatabaseProperties"), action: openEditDatabasePropertiesDialog, icon: SquarePen });
     }
@@ -5751,6 +5785,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         </Badge>
         <span v-if="columnComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ columnComment }}</span>
         <span v-if="tableComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ tableComment }}</span>
+        <span v-if="formattedSize" class="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/70">{{ formattedSize }}</span>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="showsDatabaseOpenIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>

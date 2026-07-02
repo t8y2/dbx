@@ -17,7 +17,7 @@ use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryResult, TableInfo, TriggerInfo,
+    DatabaseStatistics, ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryResult, TableInfo, TriggerInfo,
 };
 
 use super::file_validator::validate_file_path;
@@ -1417,9 +1417,12 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
+    list_databases_without_size(pool).await
+}
+
+async fn list_databases_without_size(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = match conn.query_iter("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME").await
-    {
+    let result = match conn.query_iter(list_databases_sql()).await {
         Ok(result) => result,
         Err(err) => {
             log::debug!("Falling back to SHOW DATABASES after information_schema.SCHEMATA failed: {err}");
@@ -1444,6 +1447,280 @@ pub async fn list_databases_show(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, 
     Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), true))
 }
 
+fn list_databases_sql() -> &'static str {
+    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME"
+}
+
+/// Upper bound (ms) for server-side execution of MySQL statistics queries so a
+/// slow or busy server cannot hang the sidebar. Emitted as an optimizer hint,
+/// which MySQL (5.7.8+) honors and MariaDB / other forks silently ignore. Kept
+/// below the frontend statistics timeout so the server aborts a stuck query
+/// before the client gives up, instead of leaving it running server-side.
+const MYSQL_STATISTICS_MAX_EXECUTION_TIME_MS: u32 = 8_000;
+
+/// Client-side execution bound for the information_schema size/statistics scans.
+/// The `MAX_EXECUTION_TIME` hint above is ignored by MariaDB and other forks, so
+/// without this a slow scan there would hold the pooled connection until the
+/// outer metadata timeout fires — starving interactive queries (e.g. opening a
+/// table) and making the UI feel stuck. This bound works on every server.
+const MYSQL_STATISTICS_QUERY_TIMEOUT_SECS: u64 = 8;
+
+/// Loads a statistics result set on an existing connection, bounded by `timeout`.
+/// Returns `Ok(None)` when the query does not finish in time, in which case the
+/// connection must not be reused (its result stream is abandoned).
+async fn mysql_query_statistics_rows_within(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    timeout: Duration,
+) -> Result<Option<Vec<mysql_async::Row>>, String> {
+    if timeout.is_zero() {
+        return Ok(None);
+    }
+    match tokio::time::timeout(timeout, async {
+        let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+        result.collect_and_drop::<mysql_async::Row>().await.map_err(|e| e.to_string())
+    })
+    .await
+    {
+        Ok(Ok(rows)) => Ok(Some(rows)),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Loads a bounded statistics result set using the default per-query budget.
+async fn mysql_query_statistics_rows_bounded(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+) -> Result<Option<Vec<mysql_async::Row>>, String> {
+    mysql_query_statistics_rows_within(conn, sql, Duration::from_secs(MYSQL_STATISTICS_QUERY_TIMEOUT_SECS)).await
+}
+
+pub async fn list_database_statistics(pool: &MySqlPool) -> Result<Vec<DatabaseStatistics>, String> {
+    let databases = list_databases(pool).await?;
+    let database_names: Vec<String> = databases.into_iter().map(|database| database.name).collect();
+    if database_names.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let has_global_statistics_privilege = match mysql_current_user_has_global_database_statistics_privilege(pool).await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            log::debug!("Unable to read MySQL global statistics privileges; database sizes will remain NULL: {err}");
+            false
+        }
+    };
+    let schema_statistics_privileges = if has_global_statistics_privilege {
+        HashSet::new()
+    } else {
+        match mysql_current_user_schema_statistics_privileges(pool).await {
+            Ok(value) => value,
+            Err(err) => {
+                log::debug!(
+                    "Unable to read MySQL schema statistics privileges; database sizes will remain NULL: {err}"
+                );
+                HashSet::new()
+            }
+        }
+    };
+
+    let databases_with_full_statistics: Vec<String> = database_names
+        .iter()
+        .filter(|name| has_global_statistics_privilege || schema_statistics_privileges.contains(*name))
+        .cloned()
+        .collect();
+    let size_by_database = if databases_with_full_statistics.is_empty() {
+        HashMap::new()
+    } else {
+        match mysql_database_size_by_schema(pool, &databases_with_full_statistics).await {
+            Ok(value) => value,
+            Err(err) => {
+                log::debug!("Unable to read MySQL database statistics; database sizes will remain NULL: {err}");
+                HashMap::new()
+            }
+        }
+    };
+
+    Ok(database_names
+        .into_iter()
+        .map(|name| {
+            let has_full_schema_statistics =
+                has_global_statistics_privilege || schema_statistics_privileges.contains(&name);
+            DatabaseStatistics {
+                size_bytes: mysql_database_statistics_size(
+                    has_full_schema_statistics,
+                    size_by_database.get(&name).copied(),
+                ),
+                name,
+            }
+        })
+        .collect())
+}
+
+async fn mysql_current_user_has_global_database_statistics_privilege(pool: &MySqlPool) -> Result<bool, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(mysql_global_database_statistics_privilege_sql()).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows.first().and_then(|row| get_opt_i64(row, "HAS_PRIVILEGE")).unwrap_or(0) != 0)
+}
+
+pub(crate) fn mysql_global_database_statistics_privilege_sql() -> &'static str {
+    "SELECT CASE WHEN EXISTS ( \
+         SELECT 1 \
+         FROM information_schema.USER_PRIVILEGES \
+         WHERE REPLACE(GRANTEE, '''', '') = CURRENT_USER() \
+           AND PRIVILEGE_TYPE IN ('SELECT','INSERT','UPDATE','DELETE','REFERENCES','INDEX','ALTER') \
+     ) THEN 1 ELSE 0 END AS HAS_PRIVILEGE"
+}
+
+async fn mysql_current_user_schema_statistics_privileges(pool: &MySqlPool) -> Result<HashSet<String>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(mysql_schema_database_statistics_privileges_sql()).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| get_str_by_name(row, "TABLE_SCHEMA").trim().to_string())
+        .filter(|schema| !schema.is_empty())
+        .collect())
+}
+
+pub(crate) fn mysql_schema_database_statistics_privileges_sql() -> &'static str {
+    "SELECT TABLE_SCHEMA \
+     FROM information_schema.SCHEMA_PRIVILEGES \
+     WHERE REPLACE(GRANTEE, '''', '') = CURRENT_USER() \
+       AND PRIVILEGE_TYPE IN ('SELECT','INSERT','UPDATE','DELETE','REFERENCES','INDEX','ALTER') \
+     GROUP BY TABLE_SCHEMA"
+}
+
+async fn mysql_database_size_by_schema(
+    pool: &MySqlPool,
+    database_names: &[String],
+) -> Result<HashMap<String, i64>, String> {
+    // Small batches let each completed query commit its schemas' sizes before the
+    // shared time budget runs out. On servers where scanning every schema at once
+    // exceeds the budget (returning nothing), this yields partial sizes for the
+    // schemas that did respond instead of all-or-nothing.
+    const BATCH_SIZE: usize = 8;
+    let mut sizes = HashMap::new();
+    // Reuse a single connection for the whole statistics pass: the session-level
+    // stats setting below only applies to the connection it runs on, and reusing
+    // one connection avoids repeated checkout latency across batches.
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    // Prefer cached information_schema statistics (MySQL 8.0+) so DATA_LENGTH /
+    // INDEX_LENGTH come from the data dictionary instead of being recomputed from
+    // the storage engine on every call. Recomputation is the main cause of slow
+    // or hanging size queries on servers with many tables. Best-effort: forks
+    // without this variable (MariaDB, MySQL 5.7) reject it but stay usable, which
+    // is expected — log at trace level so it is not mistaken for a real error.
+    if let Err(err) = conn.query_drop(mysql_cached_statistics_session_sql()).await {
+        log::trace!("MySQL information_schema_stats_expiry unsupported (using live stats): {err}");
+    }
+    // Wall-clock budget shared across all batches so the whole pass (not each
+    // batch) stays bounded and releases the pooled connection promptly.
+    let budget = Duration::from_secs(MYSQL_STATISTICS_QUERY_TIMEOUT_SECS);
+    let started_at = Instant::now();
+    for batch in database_names.chunks(BATCH_SIZE) {
+        if batch.is_empty() {
+            continue;
+        }
+        let remaining = budget.checked_sub(started_at.elapsed()).unwrap_or_default();
+        let sql = mysql_database_size_by_schema_sql(batch);
+        let rows = match mysql_query_statistics_rows_within(&mut conn, &sql, remaining).await? {
+            Some(rows) => rows,
+            None => {
+                log::debug!(
+                    "MySQL database size scan hit the {}s budget after {} schemas; remaining sizes left unknown",
+                    MYSQL_STATISTICS_QUERY_TIMEOUT_SECS,
+                    sizes.len()
+                );
+                break;
+            }
+        };
+        for row in rows {
+            let name = get_str_by_name(&row, "TABLE_SCHEMA").trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(size_bytes) = get_opt_i64(&row, "SIZE_BYTES") {
+                sizes.insert(name, size_bytes);
+            }
+        }
+    }
+    Ok(sizes)
+}
+
+fn mysql_cached_statistics_session_sql() -> &'static str {
+    "SET SESSION information_schema_stats_expiry = 86400"
+}
+
+pub(crate) fn mysql_database_size_by_schema_sql(database_names: &[String]) -> String {
+    let database_filter = database_names.iter().map(|name| quote_value(name)).collect::<Vec<_>>().join(", ");
+    format!(
+        "SELECT /*+ MAX_EXECUTION_TIME({max_ms}) */ TABLE_SCHEMA, \
+                SUM(COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)) AS SIZE_BYTES \
+         FROM information_schema.TABLES \
+         WHERE TABLE_TYPE <> 'VIEW' \
+           AND TABLE_SCHEMA IN ({database_filter}) \
+         GROUP BY TABLE_SCHEMA",
+        max_ms = MYSQL_STATISTICS_MAX_EXECUTION_TIME_MS,
+    )
+}
+
+pub(crate) fn mysql_database_statistics_size(
+    has_full_schema_statistics: bool,
+    visible_size_bytes: Option<i64>,
+) -> Option<i64> {
+    if has_full_schema_statistics {
+        visible_size_bytes
+    } else {
+        None
+    }
+}
+
+/// Computes the size of a single database on demand (manual right-click action).
+///
+/// Scanning `information_schema.TABLES` for one schema is far cheaper than the
+/// all-database automatic pass, so callers can afford a longer `timeout`. Keeps
+/// the same NULL-safety as the automatic path: without full statistics privilege
+/// on the schema (or when the bounded query does not finish) it returns `None`
+/// rather than a misleading partial or zero size.
+pub async fn database_size(pool: &MySqlPool, database: &str, timeout: Duration) -> Result<Option<i64>, String> {
+    let has_full_schema_statistics = match mysql_current_user_has_global_database_statistics_privilege(pool).await {
+        Ok(true) => true,
+        Ok(false) => mysql_current_user_schema_statistics_privileges(pool)
+            .await
+            .map(|schemas| schemas.contains(database))
+            .unwrap_or(false),
+        Err(err) => {
+            log::debug!("Unable to read MySQL statistics privileges; database size will remain NULL: {err}");
+            false
+        }
+    };
+    if !has_full_schema_statistics {
+        return Ok(None);
+    }
+
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    if let Err(err) = conn.query_drop(mysql_cached_statistics_session_sql()).await {
+        log::trace!("MySQL information_schema_stats_expiry unsupported (using live stats): {err}");
+    }
+    let sql = mysql_database_size_by_schema_sql(&[database.to_string()]);
+    let rows = match mysql_query_statistics_rows_within(&mut conn, &sql, timeout).await? {
+        Some(rows) => rows,
+        None => return Ok(None),
+    };
+    let size_bytes = rows.iter().find_map(|row| {
+        let name = get_str_by_name(row, "TABLE_SCHEMA").trim().to_string();
+        if name == database {
+            get_opt_i64(row, "SIZE_BYTES")
+        } else {
+            None
+        }
+    });
+    Ok(size_bytes)
+}
+
 fn database_infos_from_names(
     names: impl IntoIterator<Item = String>,
     include_catalogless_when_blank: bool,
@@ -1454,12 +1731,12 @@ fn database_infos_from_names(
         .filter_map(|name| {
             saw_row = true;
             let name = name.trim().to_string();
-            (!name.is_empty()).then_some(DatabaseInfo { name })
+            (!name.is_empty()).then_some(DatabaseInfo { name, size_bytes: None })
         })
         .collect();
     databases.sort_by(|a, b| a.name.cmp(&b.name));
     if databases.is_empty() && saw_row && include_catalogless_when_blank {
-        return vec![DatabaseInfo { name: String::new() }];
+        return vec![DatabaseInfo { name: String::new(), size_bytes: None }];
     }
     databases
 }
@@ -2140,17 +2417,32 @@ pub async fn list_objects(
     Ok(PagedObjectList { objects, paging_applied })
 }
 
-pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectStatistics>, String> {
-    let sql = format!(
-        "SELECT TABLE_NAME, TABLE_ROWS, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
+fn mysql_object_statistics_sql(database: &str) -> String {
+    format!(
+        "SELECT /*+ MAX_EXECUTION_TIME({max_ms}) */ TABLE_NAME, TABLE_ROWS, \
+                COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
          FROM information_schema.TABLES \
-         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE <> 'VIEW' \
+         WHERE TABLE_SCHEMA = {schema} AND TABLE_TYPE <> 'VIEW' \
          ORDER BY TABLE_NAME",
-        quote_value(database),
-    );
+        max_ms = MYSQL_STATISTICS_MAX_EXECUTION_TIME_MS,
+        schema = quote_value(database),
+    )
+}
+
+pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+    let sql = mysql_object_statistics_sql(database);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    if let Err(err) = conn.query_drop(mysql_cached_statistics_session_sql()).await {
+        log::trace!("MySQL information_schema_stats_expiry unsupported (using live stats): {err}");
+    }
+    let rows = match mysql_query_statistics_rows_bounded(&mut conn, &sql).await? {
+        Some(rows) => rows,
+        None => {
+            return Err(format!(
+                "MySQL object statistics query for `{database}` exceeded {MYSQL_STATISTICS_QUERY_TIMEOUT_SECS}s"
+            ))
+        }
+    };
     Ok(rows
         .iter()
         .filter_map(|row| {
@@ -4031,6 +4323,75 @@ mod tests {
 
         let no_marker = database_infos_from_names(vec!["".to_string()], false);
         assert!(no_marker.is_empty());
+    }
+
+    #[test]
+    fn mysql_list_databases_sql_does_not_load_size_statistics() {
+        let sql = list_databases_sql();
+
+        assert!(sql.contains("information_schema.SCHEMATA"));
+        assert!(!sql.contains("information_schema.TABLES"));
+        assert!(!sql.contains("DATA_LENGTH"));
+        assert!(!sql.contains("INDEX_LENGTH"));
+    }
+
+    #[test]
+    fn mysql_database_statistics_sql_preserves_missing_sizes_and_ignores_table_only_privileges() {
+        let global_privilege_sql = mysql_global_database_statistics_privilege_sql();
+        let schema_privilege_sql = mysql_schema_database_statistics_privileges_sql();
+        let size_sql = mysql_database_size_by_schema_sql(&["app".to_string(), "we'ird".to_string()]);
+
+        assert!(global_privilege_sql.contains("information_schema.USER_PRIVILEGES"));
+        assert!(schema_privilege_sql.contains("information_schema.SCHEMA_PRIVILEGES"));
+        assert!(schema_privilege_sql.contains("GROUP BY TABLE_SCHEMA"));
+        assert!(size_sql.contains("information_schema.TABLES"));
+        assert!(size_sql.contains("DATA_LENGTH"));
+        assert!(size_sql.contains("INDEX_LENGTH"));
+        assert!(size_sql.contains("SIZE_BYTES"));
+        assert!(size_sql.contains("TABLE_TYPE <> 'VIEW'"));
+        assert!(size_sql.contains("TABLE_SCHEMA IN ('app', 'we\\'ird')"));
+        assert!(!global_privilege_sql.contains("information_schema.TABLE_PRIVILEGES"));
+        assert!(!schema_privilege_sql.contains("information_schema.TABLE_PRIVILEGES"));
+        assert!(!size_sql.contains("information_schema.TABLE_PRIVILEGES"));
+        assert!(!size_sql.contains("COALESCE(SIZE_BYTES, 0)"));
+    }
+
+    #[test]
+    fn mysql_database_size_query_is_bounded_and_uses_cached_statistics() {
+        let size_sql = mysql_database_size_by_schema_sql(&["app".to_string()]);
+
+        // Server-side execution bound so a slow information_schema scan cannot hang the sidebar.
+        assert!(size_sql.contains(&format!("MAX_EXECUTION_TIME({MYSQL_STATISTICS_MAX_EXECUTION_TIME_MS})")));
+        // Bound stays under the 10s frontend statistics timeout.
+        assert!(MYSQL_STATISTICS_MAX_EXECUTION_TIME_MS < 10_000);
+        // Prefer cached data-dictionary statistics over live storage-engine recomputation.
+        assert_eq!(mysql_cached_statistics_session_sql(), "SET SESSION information_schema_stats_expiry = 86400");
+        // The manual single-database size action reuses this builder with one schema.
+        assert!(size_sql.contains("TABLE_SCHEMA IN ('app')"));
+    }
+
+    #[test]
+    fn mysql_object_statistics_query_is_bounded() {
+        let sql = mysql_object_statistics_sql("app");
+
+        // Object-browser size/row scan is the same expensive information_schema.TABLES query,
+        // so it must carry the same server-side execution bound to avoid stalling table opening.
+        assert!(sql.contains(&format!("MAX_EXECUTION_TIME({MYSQL_STATISTICS_MAX_EXECUTION_TIME_MS})")));
+        assert!(sql.contains("information_schema.TABLES"));
+        assert!(sql.contains("TABLE_SCHEMA = 'app'"));
+        assert!(sql.contains("TABLE_TYPE <> 'VIEW'"));
+        // Client-side bound is universal (covers MariaDB / MySQL 5.7 that ignore the hint) and
+        // stays under the 12s backend statistics timeout in schema.rs.
+        assert!(MYSQL_STATISTICS_QUERY_TIMEOUT_SECS < 12);
+    }
+
+    #[test]
+    fn mysql_database_statistics_size_keeps_null_for_low_privilege_or_missing_stats() {
+        assert_eq!(mysql_database_statistics_size(false, Some(4096)), None);
+        assert_eq!(mysql_database_statistics_size(false, None), None);
+        assert_eq!(mysql_database_statistics_size(true, None), None);
+        assert_eq!(mysql_database_statistics_size(true, Some(0)), Some(0));
+        assert_eq!(mysql_database_statistics_size(true, Some(4096)), Some(4096));
     }
 
     #[test]

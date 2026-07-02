@@ -62,7 +62,7 @@ pub fn duckdb_list_databases_with_attached(
     let rows = stmt
         .query_map([], |row| {
             let name = row.get::<_, String>(0)?;
-            Ok(db::DatabaseInfo { name: if name == primary { "main".to_string() } else { name } })
+            Ok(db::DatabaseInfo { name: if name == primary { "main".to_string() } else { name }, size_bytes: None })
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|row| row.ok()).collect())

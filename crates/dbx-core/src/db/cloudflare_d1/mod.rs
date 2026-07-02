@@ -111,7 +111,7 @@ pub async fn connect(config: &ConnectionConfig, timeout: Duration) -> Result<Clo
 }
 
 pub async fn list_databases(_client: &CloudflareD1Client) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: "main".to_string() }])
+    Ok(vec![DatabaseInfo { name: "main".to_string(), size_bytes: None }])
 }
 
 pub async fn list_tables(client: &CloudflareD1Client, _schema: &str) -> Result<Vec<TableInfo>, String> {

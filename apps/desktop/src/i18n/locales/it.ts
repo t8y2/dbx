@@ -1390,6 +1390,8 @@ export default withEnglishFallback({
     finalProxyPortCopied: "Porta proxy finale {port} copiata",
     setDefaultDatabase: "Imposta come Database Predefinito",
     clearDefaultDatabase: "Cancella Database Predefinito",
+    fetchDatabaseSize: "Ottieni Dimensione Database",
+    fetchDatabaseSizeFailed: "Impossibile ottenere la dimensione del database: {message}",
     exportDatabase: "Esporta Database",
     exportAllDatabases: "Esporta tutti i database",
     exportDatabaseSuccess: "Esportate {count} tabelle, fino a {limit} righe ciascuna",

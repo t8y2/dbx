@@ -1389,6 +1389,8 @@ export default withEnglishFallback({
     finalProxyPortCopied: "最終プロキシポート {port} をコピーしました",
     setDefaultDatabase: "デフォルトデータベースに設定",
     clearDefaultDatabase: "デフォルトデータベースをクリア",
+    fetchDatabaseSize: "データベースサイズを取得",
+    fetchDatabaseSizeFailed: "データベースサイズの取得に失敗しました：{message}",
     exportDatabase: "データベースをエクスポート",
     exportAllDatabases: "すべてのデータベースをエクスポート",
     exportDatabaseSuccess: "{count}テーブルをエクスポートしました（各{limit}行まで）",

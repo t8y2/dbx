@@ -1,6 +1,7 @@
 import type {
   ConnectionConfig,
   DatabaseInfo,
+  DatabaseStatistics,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -519,6 +520,14 @@ export async function syncSavedSqlDirectory(_request: SavedSqlSyncRequest): Prom
 
 export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
+}
+
+export async function listDatabaseStatistics(connectionId: string): Promise<DatabaseStatistics[]> {
+  return get(`/api/schema/database-statistics?${qs({ connection_id: connectionId })}`);
+}
+
+export async function databaseSize(connectionId: string, database: string): Promise<number | null> {
+  return get(`/api/schema/database-size?${qs({ connection_id: connectionId, database })}`);
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {

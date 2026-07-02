@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dbx_core::connection::AppState;
+use dbx_core::db::mysql::{execute_query_with_max_rows, list_database_statistics, list_databases};
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{execute_multi_core, execute_sql_statement};
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
@@ -78,6 +79,21 @@ fn json_cell_text(value: &serde_json::Value) -> String {
     }
 }
 
+fn mysql_url_with_credentials(admin_url: &str, database: &str, user: &str, password: &str) -> String {
+    let opts = mysql_async::Opts::from_url(admin_url).expect("DBX_LIVE_MYSQL_ADMIN_URL should be a valid URL");
+    let host = opts.ip_or_hostname();
+    let port = opts.tcp_port();
+    format!("mysql://{user}:{password}@{host}:{port}/{database}")
+}
+
+fn mysql_quote_identifier(value: &str) -> String {
+    format!("`{}`", value.replace('`', "``"))
+}
+
+fn mysql_quote_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+}
+
 #[tokio::test]
 #[ignore = "requires the remote DBX MySQL 5.7 smoke-test container"]
 async fn live_mysql57_text_protocol_select_succeeds() {
@@ -96,6 +112,63 @@ async fn live_mysql57_text_protocol_select_succeeds() {
 
     assert_eq!(result.columns, vec!["id", "label"]);
     assert_eq!(result.rows, vec![vec![serde_json::json!("1"), serde_json::json!("mysql57")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MYSQL_ADMIN_URL for a writable MySQL endpoint with CREATE USER/GRANT privileges"]
+async fn live_mysql_database_statistics_keeps_null_for_table_only_privileges() {
+    let admin_url = std::env::var("DBX_LIVE_MYSQL_ADMIN_URL").expect("DBX_LIVE_MYSQL_ADMIN_URL");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let database = format!("dbx_stats_{suffix}");
+    let user = format!("dbx_stats_u_{}", &suffix[..16]);
+    let password = format!("dbxStats{}!", &suffix[..12]);
+    let quoted_database = mysql_quote_identifier(&database);
+    let quoted_user = mysql_quote_string(&user);
+    let quoted_password = mysql_quote_string(&password);
+    let admin_pool = dbx_core::db::mysql::connect(&admin_url, std::time::Duration::from_secs(10)).await.unwrap();
+
+    let setup_sql = [
+        format!("DROP USER IF EXISTS {quoted_user}@'%'"),
+        format!("DROP DATABASE IF EXISTS {quoted_database}"),
+        format!("CREATE DATABASE {quoted_database}"),
+        format!("CREATE TABLE {quoted_database}.visible_table (id INT PRIMARY KEY, payload VARCHAR(32))"),
+        format!("CREATE TABLE {quoted_database}.hidden_table (id INT PRIMARY KEY, payload VARCHAR(32))"),
+        format!("INSERT INTO {quoted_database}.visible_table VALUES (1, 'visible')"),
+        format!("INSERT INTO {quoted_database}.hidden_table VALUES (1, 'hidden')"),
+        format!("CREATE USER {quoted_user}@'%' IDENTIFIED BY {quoted_password}"),
+        format!("GRANT SELECT ON {quoted_database}.visible_table TO {quoted_user}@'%'"),
+    ];
+    for sql in setup_sql {
+        execute_query_with_max_rows(&admin_pool, &sql, false, Some(10), Default::default())
+            .await
+            .unwrap_or_else(|err| panic!("setup SQL failed: {sql}: {err}"));
+    }
+
+    let limited_url = mysql_url_with_credentials(&admin_url, &database, &user, &password);
+    let limited_pool = dbx_core::db::mysql::connect(&limited_url, std::time::Duration::from_secs(10)).await.unwrap();
+
+    let databases_result = list_databases(&limited_pool).await;
+    let statistics_result = list_database_statistics(&limited_pool).await;
+
+    let cleanup_sql =
+        [format!("DROP USER IF EXISTS {quoted_user}@'%'"), format!("DROP DATABASE IF EXISTS {quoted_database}")];
+    for sql in cleanup_sql {
+        let _ = execute_query_with_max_rows(&admin_pool, &sql, false, Some(10), Default::default()).await;
+    }
+
+    let databases = databases_result.expect("low-privilege user should still list databases");
+    assert!(databases.iter().any(|entry| entry.name == database));
+    assert!(
+        databases.iter().all(|entry| entry.size_bytes.is_none()),
+        "base database list must not load size statistics"
+    );
+
+    let statistics = statistics_result.expect("table-only privileges must not make statistics loading fail");
+    let target = statistics.iter().find(|entry| entry.name == database).expect("target database statistics entry");
+    assert_eq!(
+        target.size_bytes, None,
+        "table-only privileges expose an incomplete table set, so DBX must not report a partial size"
+    );
 }
 
 #[tokio::test]

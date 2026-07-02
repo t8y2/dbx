@@ -1450,6 +1450,8 @@ export default {
     finalProxyPortCopied: "Final proxy port {port} copied",
     setDefaultDatabase: "Set as Default Database",
     clearDefaultDatabase: "Clear Default Database",
+    fetchDatabaseSize: "Fetch Database Size",
+    fetchDatabaseSizeFailed: "Failed to fetch database size: {message}",
     exportDatabase: "Export Database",
     exportAllDatabases: "Export All Databases",
     exportDatabaseSuccess: "Exported {count} tables, up to {limit} rows each",

@@ -20,6 +20,23 @@ pub async fn list_databases(
 }
 
 #[tauri::command]
+pub async fn list_database_statistics(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<db::DatabaseStatistics>, String> {
+    dbx_core::schema::list_database_statistics_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn database_size(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Option<i64>, String> {
+    dbx_core::schema::database_size_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
 pub async fn list_doris_catalogs(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

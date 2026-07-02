@@ -935,6 +935,8 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
             commands::schema::list_databases,
+            commands::schema::list_database_statistics,
+            commands::schema::database_size,
             commands::schema::list_doris_catalogs,
             commands::schema::list_doris_catalog_databases,
             commands::schema::list_sqlserver_linked_servers,

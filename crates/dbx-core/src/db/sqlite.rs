@@ -1081,7 +1081,7 @@ mod tests {
 }
 
 pub async fn list_databases(_pool: &SqliteHandle) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: "main".to_string() }])
+    Ok(vec![DatabaseInfo { name: "main".to_string(), size_bytes: None }])
 }
 
 pub async fn list_tables(pool: &SqliteHandle, _schema: &str) -> Result<Vec<TableInfo>, String> {

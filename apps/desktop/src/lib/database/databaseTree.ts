@@ -26,6 +26,7 @@ export function buildDatabaseTreeNodes(connectionId: string, databases: Database
         type: "database" as const,
         connectionId,
         database: name,
+        sizeBytes: db.size_bytes ?? null,
         isExpanded: false,
         children: [],
       },

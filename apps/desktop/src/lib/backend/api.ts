@@ -127,6 +127,8 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
+export const listDatabaseStatistics = forward("listDatabaseStatistics");
+export const databaseSize = forward("databaseSize");
 export const listDorisCatalogs = forward("listDorisCatalogs");
 export const listDorisCatalogDatabases = forward("listDorisCatalogDatabases");
 export const listSqlServerLinkedServers = forward("listSqlServerLinkedServers");

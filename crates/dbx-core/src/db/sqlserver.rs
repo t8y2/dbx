@@ -760,7 +760,10 @@ pub async fn list_databases(client: &mut SqlServerClient) -> Result<Vec<Database
         .await
         .map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string() }).collect())
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo { name: row.get::<&str, _>(0).unwrap_or("").to_string(), size_bytes: None })
+        .collect())
 }
 
 pub async fn test_connection(client: &mut SqlServerClient) -> Result<(), String> {
@@ -805,7 +808,7 @@ pub async fn list_linked_server_catalogs(
     Ok(rows
         .iter()
         .filter_map(|row| row.get::<&str, _>(0).map(str::trim).filter(|name| !name.is_empty()))
-        .map(|name| DatabaseInfo { name: name.to_string() })
+        .map(|name| DatabaseInfo { name: name.to_string(), size_bytes: None })
         .collect())
 }
 

@@ -324,6 +324,12 @@ export interface JdbcPluginStatus {
 
 export interface DatabaseInfo {
   name: string;
+  size_bytes?: number | null;
+}
+
+export interface DatabaseStatistics {
+  name: string;
+  size_bytes: number | null;
 }
 
 export interface SchemaInfo {
@@ -667,6 +673,7 @@ export interface TreeNode {
   signature?: string;
   tableType?: string;
   comment?: string | null;
+  sizeBytes?: number | null;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;

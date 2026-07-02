@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ConnectionConfig,
   DatabaseInfo,
+  DatabaseStatistics,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -663,6 +664,14 @@ export async function closeDatabaseConnection(connectionId: string, database: st
 
 export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
   return invoke("list_databases", { connectionId });
+}
+
+export async function listDatabaseStatistics(connectionId: string): Promise<DatabaseStatistics[]> {
+  return invoke("list_database_statistics", { connectionId });
+}
+
+export async function databaseSize(connectionId: string, database: string): Promise<number | null> {
+  return invoke("database_size", { connectionId, database });
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {

@@ -1392,6 +1392,8 @@ export default withEnglishFallback({
     copyName: "Copiar Nome",
     setDefaultDatabase: "Definir como Banco de Dados Padrão",
     clearDefaultDatabase: "Limpar Banco de Dados Padrão",
+    fetchDatabaseSize: "Obter Tamanho do Banco de Dados",
+    fetchDatabaseSizeFailed: "Falha ao obter o tamanho do banco de dados: {message}",
     exportDatabase: "Exportar Banco de Dados",
     exportAllDatabases: "Exportar todos os bancos de dados",
     exportDatabaseSuccess: "{count} tabelas exportadas, até {limit} linhas cada",

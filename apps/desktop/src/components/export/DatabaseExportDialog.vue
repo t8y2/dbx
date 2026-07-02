@@ -11,7 +11,7 @@ import * as api from "@/lib/api";
 import type { ExportProgress } from "@/lib/api";
 import { isSchemaAware } from "@/lib/databaseFeatureSupport";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { generateDatabaseExportId } from "@/lib/databaseExport";
+import { buildAllDatabaseExportPlan, generateDatabaseExportId, type AllDatabaseExportPlanItem } from "@/lib/databaseExport";
 import { buildSelectedTablesPayload } from "@/lib/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useToast } from "@/composables/useToast";
@@ -225,11 +225,16 @@ function clearSelectedDatabases() {
   selectedDatabases.value = selectedDatabases.value.filter((name) => !removing.has(name));
 }
 
-async function defaultSchemaForDatabase(db: string): Promise<string> {
+async function buildExportPlanForDatabases(dbs: string[]): Promise<AllDatabaseExportPlanItem[]> {
   const config = store.getConfig(connectionId.value);
-  if (!isSchemaAware(config?.db_type)) return db;
-  const schemaList = await api.listSchemas(connectionId.value, db);
-  return schemaList.includes("public") ? "public" : (schemaList[0] ?? db);
+  const schemaAware = isSchemaAware(config?.db_type);
+  const schemasByDatabase: Record<string, string[]> = {};
+  if (schemaAware) {
+    for (const db of dbs) {
+      schemasByDatabase[db] = await api.listSchemas(connectionId.value, db);
+    }
+  }
+  return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase });
 }
 
 async function startExport() {
@@ -347,26 +352,29 @@ async function startAllDatabasesExport() {
   exportCancelled.value = false;
   exportProgress.value = null;
   batchDatabaseIndex.value = 0;
-  batchDatabaseTotal.value = selectedDatabases.value.length;
 
   const dbs = [...selectedDatabases.value];
   const batchId = generateDatabaseExportId();
   exportId.value = batchId;
   addDatabaseExportTask(batchId, t("databaseExport.allDatabasesTask", { count: dbs.length }), directoryPath);
+  let exportPlan: AllDatabaseExportPlanItem[] = [];
 
   try {
-    for (let index = 0; index < dbs.length; index += 1) {
+    exportPlan = await buildExportPlanForDatabases(dbs);
+    batchDatabaseTotal.value = exportPlan.length;
+
+    for (let index = 0; index < exportPlan.length; index += 1) {
       if (exportCancelled.value) break;
-      const db = dbs[index]!;
+      const item = exportPlan[index]!;
       batchDatabaseIndex.value = index + 1;
       const currentExportId = `${batchId}-${index + 1}`;
       activeDatabaseExportId.value = currentExportId;
-      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(db)}.sql`) : `__web_export_${currentExportId}.sql`;
+      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.sql`) : `__web_export_${currentExportId}.sql`;
       const request: api.DatabaseExportRequest = {
         exportId: currentExportId,
         connectionId: connectionId.value,
-        database: db,
-        schema: await defaultSchemaForDatabase(db),
+        database: item.database,
+        schema: item.schema,
         filePath,
         includeStructure: includeStructure.value,
         includeData: includeData.value,
@@ -376,13 +384,13 @@ async function startAllDatabasesExport() {
       };
 
       await runDatabaseExportUntilTerminal(request, (progress) => {
-        exportProgress.value = { ...progress, exportId: batchId, currentObject: `${db}: ${progress.currentObject || db}` };
+        exportProgress.value = { ...progress, exportId: batchId, currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}` };
         updateDatabaseExportTask(batchId, {
           ...progress,
           exportId: batchId,
-          currentObject: db,
+          currentObject: item.displayName,
           objectIndex: index,
-          totalObjects: dbs.length,
+          totalObjects: exportPlan.length,
         });
         if (progress.status === "Error") {
           exportError.value = progress.error;
@@ -403,8 +411,8 @@ async function startAllDatabasesExport() {
       updateDatabaseExportTask(batchId, {
         exportId: batchId,
         currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
-        objectIndex: dbs.length,
-        totalObjects: dbs.length,
+        objectIndex: exportPlan.length,
+        totalObjects: exportPlan.length,
         rowsExported: currentRowsExported(),
         totalRows: null,
         status: "Done",
@@ -418,7 +426,7 @@ async function startAllDatabasesExport() {
       exportId: batchId,
       currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
       objectIndex: Math.max(0, batchDatabaseIndex.value - 1),
-      totalObjects: dbs.length,
+      totalObjects: batchDatabaseTotal.value || dbs.length,
       rowsExported: currentRowsExported(),
       totalRows: null,
       status: "Error",

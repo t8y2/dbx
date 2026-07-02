@@ -52,6 +52,19 @@ export interface BuildExportPageSqlOptions {
   offset?: number;
 }
 
+export interface AllDatabaseExportPlanInput {
+  databases: string[];
+  schemaAware: boolean;
+  schemasByDatabase?: Record<string, string[]>;
+}
+
+export interface AllDatabaseExportPlanItem {
+  database: string;
+  schema: string;
+  fileStem: string;
+  displayName: string;
+}
+
 export function buildInsertStatements(options: BuildExportInsertStatementsOptions): Promise<string[]> {
   return api.buildExportInsertStatements(options);
 }
@@ -68,6 +81,21 @@ export async function buildExportPageSql(options: BuildExportPageSqlOptions): Pr
 
 export function generateDatabaseExportId(): string {
   return uuid();
+}
+
+export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput): AllDatabaseExportPlanItem[] {
+  return options.databases.flatMap((database) => {
+    const schemas = options.schemaAware ? (options.schemasByDatabase?.[database] ?? []).filter((schema) => schema.trim()) : [database];
+    const exportSchemas = schemas.length > 0 ? schemas : [database];
+    const includeSchemaInFileName = options.schemaAware && exportSchemas.length > 1;
+
+    return exportSchemas.map((schema) => ({
+      database,
+      schema,
+      fileStem: includeSchemaInFileName ? `${database}.${schema}` : database,
+      displayName: includeSchemaInFileName ? `${database}.${schema}` : database,
+    }));
+  });
 }
 
 export function buildDatabaseSqlExport(options: BuildDatabaseSqlExportOptions): Promise<string> {

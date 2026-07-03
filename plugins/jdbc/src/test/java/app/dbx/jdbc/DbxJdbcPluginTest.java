@@ -288,7 +288,7 @@ final class DbxJdbcPluginTest {
             JsonNode response = request("testConnection", """
                 {
                   "connection": {
-                    "connection_string": "jdbc:dbx-proxysql-url://127.0.0.1:6033/example?socketTimeout=5;user=xxxxx%40db_readonly%40127.0.0.1;password=p%40wd&useSSL=false",
+                    "connection_string": "jdbc:dbx-proxysql-url://127.0.0.1:6033/example?socketTimeout=5&user=xxxxx%40db_readonly%40127.0.0.1&password=p%40wd&useSSL=false",
                     "connect_timeout_secs": 30
                   }
                 }
@@ -298,6 +298,51 @@ final class DbxJdbcPluginTest {
             assertEquals("jdbc:dbx-proxysql-url://127.0.0.1:6033/example?socketTimeout=5&useSSL=false", driver.urls.get(0));
             assertEquals("xxxxx@db_readonly@127.0.0.1", driver.properties.get(0).getProperty("user"));
             assertEquals("p@wd", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void jdbcUrlCredentialExtractionKeepsSemicolonInsidePasswordValue() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-semicolon-password:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-semicolon-password://127.0.0.1:6033/example?password=p;ss&useSSL=false",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-semicolon-password://127.0.0.1:6033/example?useSSL=false", driver.urls.get(0));
+            assertEquals("p;ss", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void jdbcUrlCredentialExtractionPreservesDecodedWhitespace() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-space-password:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-space-password://127.0.0.1:6033/example?user=tenant%40host&password=%20secret%20&useSSL=false",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-space-password://127.0.0.1:6033/example?useSSL=false", driver.urls.get(0));
+            assertEquals("tenant@host", driver.properties.get(0).getProperty("user"));
+            assertEquals(" secret ", driver.properties.get(0).getProperty("password"));
         } finally {
             DriverManager.deregisterDriver(driver);
         }

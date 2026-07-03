@@ -45,6 +45,7 @@ import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -335,14 +336,14 @@ public final class DbxJdbcPlugin {
         if (url == null) {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
-        JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
-        url = urlCredentials.url;
         String key = connectionKey(connection);
         if (sharedConnection != null && key.equals(sharedConnectionKey) && !sharedConnection.isClosed()) {
             return sharedConnection;
         }
         closeSharedConnection();
 
+        JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
+        url = urlCredentials.url;
         Properties properties = new Properties();
         String username = optionalText(connection, "username");
         String password = optionalText(connection, "password");
@@ -1662,8 +1663,6 @@ public final class DbxJdbcPlugin {
 
     private record JdbcUrlCredentials(String url, String username, String password) {}
 
-    private record JdbcUrlParam(String separator, String text) {}
-
     static JdbcUrlCredentials extractJdbcUrlCredentials(String url) {
         if (url == null) {
             return new JdbcUrlCredentials(null, null, null);
@@ -1681,15 +1680,15 @@ public final class DbxJdbcPlugin {
         String username = null;
         String password = null;
         boolean foundCredential = false;
-        List<JdbcUrlParam> keptParams = new ArrayList<>();
-        for (JdbcUrlParam part : splitJdbcUrlParams(query)) {
-            String name = partName(part.text());
+        List<String> keptParams = new ArrayList<>();
+        for (String part : splitJdbcUrlParams(query)) {
+            String name = partName(part);
             String key = decodeQueryPart(name).trim().toLowerCase(Locale.ROOT);
             if ("user".equals(key)) {
-                username = emptyToNull(decodeQueryPart(partValue(part.text())).trim());
+                username = decodeQueryPart(partValue(part));
                 foundCredential = true;
             } else if ("password".equals(key)) {
-                password = emptyToNull(decodeQueryPart(partValue(part.text())).trim());
+                password = decodeQueryPart(partValue(part));
                 foundCredential = true;
             } else {
                 keptParams.add(part);
@@ -1704,34 +1703,22 @@ public final class DbxJdbcPlugin {
         return new JdbcUrlCredentials(sanitizedUrl, username, password);
     }
 
-    private static List<JdbcUrlParam> splitJdbcUrlParams(String query) {
-        List<JdbcUrlParam> result = new ArrayList<>();
-        String separator = "";
+    private static List<String> splitJdbcUrlParams(String query) {
+        List<String> result = new ArrayList<>();
         int start = 0;
         for (int i = 0; i < query.length(); i++) {
             char ch = query.charAt(i);
-            if (ch == '&' || ch == ';') {
-                result.add(new JdbcUrlParam(separator, query.substring(start, i)));
-                separator = String.valueOf(ch);
+            if (ch == '&') {
+                result.add(query.substring(start, i));
                 start = i + 1;
             }
         }
-        result.add(new JdbcUrlParam(separator, query.substring(start)));
+        result.add(query.substring(start));
         return result;
     }
 
-    private static String joinJdbcUrlParams(List<JdbcUrlParam> params) {
-        StringBuilder result = new StringBuilder();
-        for (JdbcUrlParam param : params) {
-            if (param.text().isEmpty()) {
-                continue;
-            }
-            if (result.length() > 0) {
-                result.append(param.separator().isEmpty() ? "&" : param.separator());
-            }
-            result.append(param.text());
-        }
-        return result.toString();
+    private static String joinJdbcUrlParams(List<String> params) {
+        return params.stream().filter(param -> !param.isEmpty()).collect(Collectors.joining("&"));
     }
 
     private static String partName(String part) {

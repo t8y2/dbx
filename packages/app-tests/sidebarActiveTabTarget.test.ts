@@ -59,6 +59,50 @@ test("mongo tabs target the matching visible collection node", () => {
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(collection)])?.id, "events-node");
 });
 
+test("GridFS tabs target the shared GridFS sidebar entry", () => {
+  const managerTab: QueryTab = {
+    id: "tab-gridfs",
+    title: "GridFS",
+    connectionId: "conn-1",
+    database: "app",
+    sql: "",
+    isExecuting: false,
+    mode: "mongo-gridfs" as QueryTab["mode"],
+  };
+  const bucketTab: QueryTab = {
+    id: "tab-bucket",
+    title: "app.receipts",
+    connectionId: "conn-1",
+    database: "app",
+    sql: "receipts",
+    isExecuting: false,
+    mode: "mongo-bucket",
+    mongoBucket: {
+      bucketName: "receipts",
+    },
+  };
+  const gridFsNode: TreeNode = {
+    id: "gridfs-node",
+    label: "GridFS",
+    type: "mongo-gridfs" as TreeNode["type"],
+    connectionId: "conn-1",
+    database: "app",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(managerTab), {
+    type: "mongo-gridfs",
+    connectionId: "conn-1",
+    database: "app",
+  });
+  assert.deepEqual(activeTabSidebarTarget(bucketTab), {
+    type: "mongo-gridfs",
+    connectionId: "conn-1",
+    database: "app",
+  });
+  assert.equal(findSidebarNodeForActiveTab(managerTab, [flat(gridFsNode)])?.id, "gridfs-node");
+  assert.equal(findSidebarNodeForActiveTab(bucketTab, [flat(gridFsNode)])?.id, "gridfs-node");
+});
+
 test("MQ tabs with a selected tenant target the matching tenant node", () => {
   const tab: QueryTab = {
     id: "tab-1",

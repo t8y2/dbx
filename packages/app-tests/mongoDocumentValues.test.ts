@@ -43,23 +43,17 @@ test("builds Mongo inserts with parsed date values", () => {
 });
 
 test("builds Mongo copy inserts with ObjectId and parsed document values", () => {
-  assert.deepEqual(
-    buildMongoCopyInsertDocument(
-      ["6743e4bfa3f6f84bc3fff6c8", "577", '{"endingBalance":{"beginningBalance":"0"},"Line":[]}', 'ISODate("2024-11-25T02:45:36.184Z")'],
-      ["_id", "accountId", "data", "lastUpdatedDate"],
-    ),
-    {
-      _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
-      accountId: 577,
-      data: {
-        endingBalance: {
-          beginningBalance: "0",
-        },
-        Line: [],
+  assert.deepEqual(buildMongoCopyInsertDocument(["6743e4bfa3f6f84bc3fff6c8", "577", '{"endingBalance":{"beginningBalance":"0"},"Line":[]}', 'ISODate("2024-11-25T02:45:36.184Z")'], ["_id", "accountId", "data", "lastUpdatedDate"]), {
+    _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+    accountId: 577,
+    data: {
+      endingBalance: {
+        beginningBalance: "0",
       },
-      lastUpdatedDate: { $date: "2024-11-25T02:45:36.184Z" },
+      Line: [],
     },
-  );
+    lastUpdatedDate: { $date: "2024-11-25T02:45:36.184Z" },
+  });
 });
 
 test("builds Mongo copy inserts without primary keys when requested", () => {
@@ -81,4 +75,8 @@ test("formats extended JSON dates as Mongo shell ISODate literals", () => {
 
 test("formats extended JSON object ids as Mongo shell ObjectId literals", () => {
   assert.equal(formatMongoShellLiteral({ $oid: "6743e4bfa3f6f84bc3fff6c8" }), 'ObjectId("6743e4bfa3f6f84bc3fff6c8")');
+});
+
+test("formats extended JSON int64 values as Mongo shell NumberLong literals", () => {
+  assert.equal(formatMongoShellLiteral({ snowflake: { $numberLong: "9007199254740993" } }), '{"snowflake":NumberLong("9007199254740993")}');
 });

@@ -1,8 +1,28 @@
 import type { TreeNodeType } from "@/types/database";
 
-const leafTypes: Set<TreeNodeType> = new Set(["column", "index", "fkey", "trigger", "procedure", "function", "package", "package-body", "object-browser", "redis-db", "mq-tenant", "zookeeper-root", "vector-collection", "elasticsearch-index", "user-admin", "saved-sql-file", "load-more"]);
+const leafTypes: Set<TreeNodeType> = new Set([
+  "column",
+  "index",
+  "fkey",
+  "trigger",
+  "procedure",
+  "function",
+  "package",
+  "package-body",
+  "object-browser",
+  "redis-db",
+  "mq-tenant",
+  "zookeeper-root",
+  "mongo-gridfs",
+  "mongo-bucket",
+  "vector-collection",
+  "elasticsearch-index",
+  "user-admin",
+  "saved-sql-file",
+  "load-more",
+]);
 
-const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "vector-collection", "elasticsearch-index"]);
+const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"]);
 
 const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder"]);
 
@@ -18,6 +38,8 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "materialized_view",
   "redis-db",
   "mongo-db",
+  "mongo-gridfs",
+  "mongo-bucket",
   "mongo-collection",
   "vector-collection",
   "elasticsearch-index",

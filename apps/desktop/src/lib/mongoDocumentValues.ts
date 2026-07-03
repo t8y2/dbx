@@ -98,6 +98,9 @@ export function formatMongoShellLiteral(value: unknown): string {
     if (keys.length === 1 && typeof object.$oid === "string" && MONGO_OBJECT_ID_PATTERN.test(object.$oid)) {
       return `ObjectId(${JSON.stringify(object.$oid)})`;
     }
+    if (keys.length === 1 && typeof object.$numberLong === "string") {
+      return `NumberLong(${JSON.stringify(object.$numberLong)})`;
+    }
     return `{${keys.map((key) => `${JSON.stringify(key)}:${formatMongoShellLiteral(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(String(value));

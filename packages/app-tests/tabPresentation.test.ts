@@ -135,6 +135,45 @@ test("zookeeper tabs use key browser labels", () => {
   }
 });
 
+test("GridFS tabs use dedicated titles and labels", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    name: "uat-mongo",
+    db_type: "mongodb",
+    port: 27017,
+  });
+  const t = (key: string) => {
+    if (key === "tabs.gridfs") return "GridFS";
+    if (key === "tabs.mongo") return "Mongo";
+    return key;
+  };
+
+  try {
+    const managerTab = queryTab({
+      title: "GridFS",
+      database: "amazon",
+      mode: "mongo-gridfs" as QueryTab["mode"],
+      sql: "",
+    });
+    const bucketTab = queryTab({
+      title: "amazon.NMDocumentData_acc001",
+      database: "amazon",
+      mode: "mongo-bucket",
+      sql: "NMDocumentData_acc001",
+      mongoBucket: { bucketName: "NMDocumentData_acc001" },
+    });
+
+    assert.equal(tabDisplayTitle(managerTab, t), "GridFS@amazon");
+    assert.equal(tabDisplayTitle(bucketTab, t), "NMDocumentData_acc001@amazon");
+    assert.equal(tabModeLabel(managerTab, t), "GridFS");
+    assert.equal(tabModeLabel(bucketTab, t), "GridFS");
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("tabular result items hide statement results without returned columns", () => {
   const results = [result([]), result(["id"]), result([]), result(["name"])];
 

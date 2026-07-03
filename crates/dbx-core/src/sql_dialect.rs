@@ -7,7 +7,7 @@ mod types;
 mod tests;
 
 pub use capabilities::{
-    is_schema_aware, pagination_strategy, table_pagination_strategy, uses_fetch_first,
+    firebird_rows_clause, is_schema_aware, pagination_strategy, table_pagination_strategy, uses_fetch_first,
     uses_single_row_insert_statements, PaginationContext, TablePaginationStrategy,
 };
 pub use identifiers::{normalize_where_input, qualified_table_name, quote_table_identifier};

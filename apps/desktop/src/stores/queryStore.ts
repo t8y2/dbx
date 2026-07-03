@@ -691,6 +691,58 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openMongoBucket(connectionId: string, database: string, bucketName: string) {
+    const title = `${database}.${bucketName}`;
+    const existing = tabs.value.find((tab) => tab.mode === "mongo-bucket" && tab.connectionId === connectionId && tab.database === database && tab.mongoBucket?.bucketName === bucketName);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title,
+      connectionId,
+      database,
+      sql: bucketName,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-bucket",
+      mongoBucket: {
+        bucketName,
+      },
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openMongoGridFs(connectionId: string, database: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "mongo-gridfs" && tab.connectionId === connectionId && tab.database === database);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: "GridFS",
+      connectionId,
+      database,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-gridfs",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function openMqAdmin(connectionId: string, target?: { tenant?: string; initialTab?: QueryTab["mqInitialTab"] }) {
     const existing = tabs.value.find((tab) => tab.mode === "mq" && tab.connectionId === connectionId);
     if (existing) {
@@ -2778,6 +2830,8 @@ export const useQueryStore = defineStore("query", () => {
     rollbackTransaction,
     renameTab,
     openObjectBrowser,
+    openMongoGridFs,
+    openMongoBucket,
     openUserAdmin,
     openMqAdmin,
     openNacosAdmin,

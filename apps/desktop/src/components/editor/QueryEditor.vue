@@ -192,10 +192,16 @@ let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelectio
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
+let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let codeMirrorVim: typeof import("@replit/codemirror-vim").vim | null = null;
+let codeMirrorVimApi: typeof import("@replit/codemirror-vim").Vim | null = null;
+let codeMirrorGetVimCm: typeof import("@replit/codemirror-vim").getCM | null = null;
+let codeMirrorVimImportPromise: Promise<typeof import("@replit/codemirror-vim")> | null = null;
+let dbxVimCommandsConfigured = false;
 let buildSqlDiagnosticExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildSqlSignatureExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildSqlCompletionExtension: (() => import("@codemirror/state").Extension) | null = null;
@@ -236,6 +242,7 @@ let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
 let editorScrollbarPointerCleanup: (() => void) | null = null;
 const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
+const DBX_VIM_SAVE_EVENT = "dbx-vim-save";
 
 function editorThemeAppearance() {
   return isDark.value ? "dark" : "light";
@@ -264,6 +271,7 @@ const queryEditorAppearanceSettings = computed(() => {
     customThemes: settings.customThemes,
     activeCustomThemeId: settings.activeCustomThemeId,
     wordWrap: settings.wordWrap,
+    vimModeEnabled: settings.vimModeEnabled,
     shortcuts: settings.shortcuts,
   };
 });
@@ -728,6 +736,53 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
 function wordWrapExtension() {
   if (!editorViewModule) return [];
   return props.forceWordWrap || settingsStore.editorSettings.wordWrap ? editorViewModule.EditorView.lineWrapping : [];
+}
+
+function vimModeExtension(enabled = settingsStore.editorSettings.vimModeEnabled) {
+  if (!codeMirrorVim || !enabled) return [];
+  const vimExtension = codeMirrorVim({ status: true });
+  if (!codeMirrorPrec || !editorViewModule || !codeMirrorGetVimCm || !codeMirrorVimApi) return vimExtension;
+
+  // Beekeeper treats Vim as a first-class editor keymap. Keep it above DBX's
+  // normal shortcuts so regular normal-mode keys are not stolen by other maps.
+  return codeMirrorPrec.highest([
+    editorViewModule.keymap.of([
+      {
+        key: "Ctrl-[",
+        mac: "Ctrl-[",
+        linux: "Ctrl-[",
+        win: "Ctrl-[",
+        run(currentView) {
+          const cm = codeMirrorGetVimCm?.(currentView);
+          if (cm?.state.vim?.insertMode) {
+            codeMirrorVimApi?.exitInsertMode(cm as any, true);
+            return true;
+          }
+          return false;
+        },
+      },
+    ]),
+    vimExtension,
+  ]);
+}
+
+function configureDbxVimCommands(vimApi: typeof import("@replit/codemirror-vim").Vim) {
+  if (dbxVimCommandsConfigured) return;
+  dbxVimCommandsConfigured = true;
+  vimApi.defineEx("write", "w", (cm) => {
+    cm.cm6?.contentDOM.dispatchEvent(new CustomEvent(DBX_VIM_SAVE_EVENT, { bubbles: true }));
+  });
+}
+
+async function ensureCodeMirrorVim() {
+  if (codeMirrorVim && codeMirrorVimApi && codeMirrorGetVimCm) return true;
+  codeMirrorVimImportPromise ??= import("@replit/codemirror-vim");
+  const { vim, Vim, getCM } = await codeMirrorVimImportPromise;
+  codeMirrorVim = vim;
+  codeMirrorVimApi = Vim;
+  codeMirrorGetVimCm = getCM;
+  configureDbxVimCommands(Vim);
+  return true;
 }
 
 function indentExtension() {
@@ -2089,6 +2144,7 @@ onMounted(async () => {
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();
   wordWrapComp = new Compartment();
+  vimModeComp = new Compartment();
   readOnlyComp = new Compartment();
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
@@ -2201,6 +2257,9 @@ onMounted(async () => {
 
   const initialSettings = settingsStore.editorSettings;
   const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors());
+  if (initialSettings.vimModeEnabled) {
+    await ensureCodeMirrorVim();
+  }
 
   class RunStatementGutterMarker extends GutterMarker {
     toDOM() {
@@ -2291,6 +2350,8 @@ onMounted(async () => {
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       crosshairCursor(),
       activeLineHighlighter,
+      // Vim must be mounted before DBX/default keymaps so normal-mode keys are handled first.
+      vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
       keymap.of([...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, ...completionKeymap]),
       langSql.sql({ dialect }),
       tooltips({ parent: document.body }),
@@ -2376,6 +2437,10 @@ onMounted(async () => {
           imeCompositionActive = false;
           window.setTimeout(flushImeComposition, 0);
           return false;
+        },
+        [DBX_VIM_SAVE_EVENT]() {
+          emit("save");
+          return true;
         },
         wheel(event) {
           if (!event.metaKey && !event.ctrlKey) return false;
@@ -2622,7 +2687,7 @@ function getCurrentCustomThemeColors() {
 watch(
   [queryEditorAppearanceSettings, () => isDark.value],
   async ([ss]) => {
-    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !vimModeComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
@@ -2630,9 +2695,17 @@ watch(
     }
     syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
     const themeColors = getCurrentCustomThemeColors();
-    const themeExt = await loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors);
+    const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
+    if (!view.value || !codeMirrorTheme || !wordWrapComp || !vimModeComp || !runKeymapComp || !editorViewModule) {
+      return;
+    }
     view.value.dispatch({
-      effects: [codeMirrorTheme.reconfigure(themeExt), wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []), runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap))],
+      effects: [
+        codeMirrorTheme.reconfigure(themeExt),
+        wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
+        vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
+        runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
+      ],
     });
   },
   { deep: true },

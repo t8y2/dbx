@@ -514,6 +514,9 @@ export type TreeNodeType =
   | "etcd-root"
   | "zookeeper-root"
   | "mongo-db"
+  | "mongo-gridfs"
+  | "mongo-buckets"
+  | "mongo-bucket"
   | "mongo-collection"
   | "vector-collection"
   | "elasticsearch-index";
@@ -637,7 +640,7 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;
@@ -683,6 +686,9 @@ export interface QueryTab {
   mongoEditTarget?: {
     collection: string;
     idColumn: "_id";
+  };
+  mongoBucket?: {
+    bucketName: string;
   };
   resultEvicted?: boolean;
   whereInput?: string;
@@ -735,4 +741,6 @@ export interface CollectionInfo {
   name: string;
   id: string;
   dimension?: number;
+  kind?: "collection" | "bucket";
+  bucketName?: string;
 }

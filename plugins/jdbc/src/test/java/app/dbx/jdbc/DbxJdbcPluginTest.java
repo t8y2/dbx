@@ -256,6 +256,124 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void connectionUsernameWithMultipleAtSignsIsPassedToDriverProperties() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-form:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-form://127.0.0.1:6033/example",
+                    "username": "xxxxx@db_readonly@127.0.0.1",
+                    "password": "p@wd",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-form://127.0.0.1:6033/example", driver.urls.get(0));
+            assertEquals("xxxxx@db_readonly@127.0.0.1", driver.properties.get(0).getProperty("user"));
+            assertEquals("p@wd", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void jdbcUrlUserParamsWithMultipleAtSignsAreDecodedIntoDriverProperties() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-url:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-url://127.0.0.1:6033/example?socketTimeout=5&user=xxxxx%40db_readonly%40127.0.0.1&password=p%40wd&useSSL=false",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-url://127.0.0.1:6033/example?socketTimeout=5&useSSL=false", driver.urls.get(0));
+            assertEquals("xxxxx@db_readonly@127.0.0.1", driver.properties.get(0).getProperty("user"));
+            assertEquals("p@wd", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void jdbcUrlCredentialExtractionKeepsSemicolonInsidePasswordValue() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-semicolon-password:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-semicolon-password://127.0.0.1:6033/example?password=p;ss&useSSL=false",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-semicolon-password://127.0.0.1:6033/example?useSSL=false", driver.urls.get(0));
+            assertEquals("p;ss", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void jdbcUrlCredentialExtractionPreservesDecodedWhitespace() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-space-password:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-space-password://127.0.0.1:6033/example?user=tenant%40host&password=%20secret%20&useSSL=false",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-space-password://127.0.0.1:6033/example?useSSL=false", driver.urls.get(0));
+            assertEquals("tenant@host", driver.properties.get(0).getProperty("user"));
+            assertEquals(" secret ", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void explicitConnectionCredentialsOverrideJdbcUrlCredentialParams() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-proxysql-override:");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("testConnection", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:dbx-proxysql-override://127.0.0.1:6033/example?user=url%40tenant&password=url-secret&useSSL=false",
+                    "username": "form@tenant@host",
+                    "password": "form-secret",
+                    "connect_timeout_secs": 30
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("jdbc:dbx-proxysql-override://127.0.0.1:6033/example?useSSL=false", driver.urls.get(0));
+            assertEquals("form@tenant@host", driver.properties.get(0).getProperty("user"));
+            assertEquals("form-secret", driver.properties.get(0).getProperty("password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
     void connectTimeoutIsMappedToDriverProperties() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyConnectTimeout", JsonNode.class, Properties.class);
         method.setAccessible(true);
@@ -1370,6 +1488,71 @@ final class DbxJdbcPluginTest {
                         default -> defaultValue(method.getReturnType());
                     };
                 }
+            }
+        );
+    }
+
+    private static final class RecordingConnectDriver implements Driver {
+        private final String urlPrefix;
+        private final List<String> urls = new ArrayList<>();
+        private final List<Properties> properties = new ArrayList<>();
+
+        private RecordingConnectDriver(String urlPrefix) {
+            this.urlPrefix = urlPrefix;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) throws SQLException {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            urls.add(url);
+            Properties copy = new Properties();
+            copy.putAll(info);
+            properties.add(copy);
+            return recordingConnection();
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection recordingConnection() {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
             }
         );
     }

@@ -55,6 +55,7 @@ import {
   SquarePen,
   ListX,
   Info,
+  Archive,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -76,7 +77,7 @@ import { clearActiveTableReferencePayload, createTableReferencePayload, createTa
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
-import { copyNameForTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
+import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { joinExportedDdls } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
@@ -115,7 +116,7 @@ import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableD
 import { sidebarDisplayTableName } from "@/lib/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebarLabelTooltip";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebarTreeSelection";
-import { selectedConnectionDeleteTargets } from "@/lib/sidebarConnectionSelection";
+import { selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
@@ -315,6 +316,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
+    case "mongo-gridfs":
+    case "mongo-buckets":
+      return { icon: Archive, colorClass: "text-amber-500" };
+    case "mongo-bucket":
+      return { icon: Archive, colorClass: "text-amber-400" };
     case "mongo-collection":
       return { icon: Table, colorClass: "text-green-400" };
     case "vector-collection":
@@ -648,12 +654,16 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser();
     return;
   }
+  if (node.type === "mongo-gridfs") {
+    openMongoTreeData(node);
+    return;
+  }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
     openData();
-  } else if (node.type === "mongo-collection") {
-    openMongoCollectionData(node);
+  } else if (isDocumentBrowserTreeNode(node.type)) {
+    openMongoTreeData(node);
   } else if (node.type === "procedure" || node.type === "function" || node.type === "sequence" || node.type === "package" || node.type === "package-body") {
     void viewObjectSource();
   } else if (action === "toggle") {
@@ -928,16 +938,25 @@ function onDoubleClick() {
     void viewObjectSource();
   } else if (action === "open-saved-sql") {
     openSavedSqlFile();
-  } else if (action === "toggle" && props.node.type === "mongo-collection") {
-    openMongoCollectionData(props.node);
+  } else if (action === "toggle" && (props.node.type === "mongo-gridfs" || isDocumentBrowserTreeNode(props.node.type))) {
+    openMongoTreeData(props.node);
   } else if (action === "toggle") {
     toggle();
   }
 }
 
-function openMongoCollectionData(node: TreeNode) {
-  if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
+function openMongoTreeData(node: TreeNode) {
+  if (!node.connectionId || !node.database) return;
+  if (node.type === "mongo-gridfs") {
+    queryStore.openMongoGridFs(node.connectionId, node.database);
+    return;
+  }
   const tabTitle = `${node.database}.${node.label}`;
+  if (node.type === "mongo-bucket") {
+    queryStore.openMongoBucket(node.connectionId, node.database, node.label);
+    return;
+  }
+  if (node.type !== "mongo-collection") return;
   const tab = queryStore.createTab(node.connectionId, node.database, tabTitle, "mongo");
   queryStore.updateSql(tab, node.label);
 }
@@ -1444,6 +1463,15 @@ function connectionDeleteMenuLabel(): string {
   return count > 1 ? t("contextMenu.deleteSelectedConnections", { count }) : t("contextMenu.deleteConnection");
 }
 
+function connectionDuplicateTargets() {
+  return selectedConnectionDuplicateTargets(props.node, selectedTreeNodesInVisibleOrder());
+}
+
+function connectionDuplicateMenuLabel(): string {
+  const count = connectionDuplicateTargets().length;
+  return count > 1 ? t("contextMenu.duplicateSelectedConnections", { count }) : t("contextMenu.duplicateConnection");
+}
+
 function connectionDeleteConfirmMessage(): string {
   const targets = connectionDeleteTargets();
   return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length }) : t("contextMenu.confirmDeleteMessage", { name: props.node.label });
@@ -1525,13 +1553,18 @@ function updateTreeClipboardForNodes(nodes: TreeNode[]) {
 }
 
 async function duplicateConnection() {
-  const connId = props.node.connectionId;
-  if (!connId) return;
-  const config = connectionStore.getConfig(connId);
-  if (!config) return;
-  const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
-  await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(connId));
-  toast(t("connection.duplicated"), 2000);
+  const targets = connectionDuplicateTargets();
+  if (!targets.length) return;
+  let duplicatedCount = 0;
+  for (const target of targets) {
+    const config = connectionStore.getConfig(target.connectionId);
+    if (!config) continue;
+    const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
+    await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(target.connectionId));
+    duplicatedCount += 1;
+  }
+  if (!duplicatedCount) return;
+  toast(duplicatedCount > 1 ? t("connection.duplicatedSelected", { count: duplicatedCount }) : t("connection.duplicated"), 2000);
 }
 
 // --- Table Management Operations ---
@@ -4048,7 +4081,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: HardDriveDownload,
       });
     }
-    items.push({ label: t("contextMenu.duplicateConnection"), action: duplicateConnection, icon: CopyPlus });
+    items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
     items.push({
       label: connectionDeleteMenuLabel(),

@@ -1,6 +1,7 @@
 import type { ComposerTranslation } from "vue-i18n";
 import type { DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongoShellCommand";
+import { formatMongoShellLiteral } from "@/lib/mongoDocumentValues";
 
 export type DocumentStoreKind = "mongodb" | "elasticsearch";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "less-than" | "is-null" | "is-not-null";
@@ -48,13 +49,23 @@ const mongoDocumentProvider: DocumentStoreProvider = {
   documentsLabel: ({ total, t }) => t("mongo.documents", { count: total }),
   queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
     const collectionRef = `db.getCollection(${JSON.stringify(collection)})`;
-    const parts = [`${collectionRef}.find(${filterJson || "{}"})`];
-    if (sortJson?.trim()) parts.push(`.sort(${sortJson.trim()})`);
+    const parts = [`${collectionRef}.find(${mongoShellPreviewLiteral(filterJson || "{}")})`];
+    if (sortJson?.trim()) parts.push(`.sort(${mongoShellPreviewLiteral(sortJson)})`);
     parts.push(`.skip(${skip}).limit(${limit})`);
     return parts.join("");
   },
   sortInputForColumn: (column, direction) => (direction ? JSON.stringify({ [column]: direction === "asc" ? 1 : -1 }) : ""),
 };
+
+function mongoShellPreviewLiteral(json: string): string {
+  const trimmed = json.trim();
+  if (!trimmed) return "{}";
+  try {
+    return formatMongoShellLiteral(JSON.parse(trimmed));
+  } catch {
+    return trimmed;
+  }
+}
 
 const elasticsearchDocumentProvider: DocumentStoreProvider = {
   kind: "elasticsearch",
@@ -86,19 +97,24 @@ export function documentFilterModeNeedsValue(mode: DocumentFilterMode): boolean 
   return mode !== "is-null" && mode !== "is-not-null";
 }
 
-export function buildDocumentFilterCondition(rule: DocumentFilterRule): Record<string, unknown> | null {
+type DocumentFilterParseOptions = {
+  kind?: DocumentStoreKind;
+};
+
+export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: DocumentFilterParseOptions = {}): Record<string, unknown> | null {
   if (!rule.fieldName) return null;
   if (documentFilterModeNeedsValue(rule.mode) && !rule.rawValue.trim()) return null;
-  const value = documentFilterModeNeedsValue(rule.mode) ? parseDocumentFilterValue(rule.rawValue) : null;
+  const value = documentFilterModeNeedsValue(rule.mode) ? parseDocumentFilterValue(rule.rawValue, options) : null;
+  const textValue = documentFilterModeNeedsValue(rule.mode) ? String(parseDocumentFilterValue(rule.rawValue)) : "";
   switch (rule.mode) {
     case "equals":
       return { [rule.fieldName]: value };
     case "not-equals":
       return { [rule.fieldName]: { $ne: value } };
     case "like":
-      return { [rule.fieldName]: { $regex: String(value), $options: "i" } };
+      return { [rule.fieldName]: { $regex: textValue, $options: "i" } };
     case "not-like":
-      return { [rule.fieldName]: { $not: { $regex: String(value), $options: "i" } } };
+      return { [rule.fieldName]: { $not: { $regex: textValue, $options: "i" } } };
     case "greater-than":
       return { [rule.fieldName]: { $gt: value } };
     case "less-than":
@@ -121,41 +137,123 @@ export function combineDocumentFilterConditions(conditions: Record<string, unkno
 }
 
 const MAX_SAFE_BIGINT = 9007199254740991n;
+const MIN_BSON_INT64 = -9223372036854775808n;
+const MAX_BSON_INT64 = 9223372036854775807n;
 
-function parseJsonPreservingLargeIntegers(json: string): unknown {
-  const safe = json.replace(/([\[:,\s]\s*?)(-?\d+)(\s*[,\]\}])/g, (_match, before, num, after) => {
-    try {
-      const n = BigInt(num);
-      if (n > MAX_SAFE_BIGINT || n < -MAX_SAFE_BIGINT) {
-        return `${before}"${num}"${after}`;
-      }
-    } catch {
-      /* not a valid integer */
-    }
-    return _match;
-  });
-  return JSON.parse(safe);
+function parseJsonPreservingLargeIntegers(json: string, options: DocumentFilterParseOptions = {}): unknown {
+  return JSON.parse(rewriteUnsafeIntegerTokens(json, options));
 }
 
-export function parseDocumentFilterInput(input: string): Record<string, unknown> {
+function rewriteUnsafeIntegerTokens(json: string, options: DocumentFilterParseOptions): string {
+  let output = "";
+  let i = 0;
+  while (i < json.length) {
+    const ch = json[i];
+    if (ch === '"') {
+      const start = i;
+      i++;
+      while (i < json.length) {
+        const current = json[i++];
+        if (current === "\\") {
+          i++;
+        } else if (current === '"') {
+          break;
+        }
+      }
+      output += json.slice(start, i);
+      continue;
+    }
+
+    if (ch === "-" || isDigit(ch)) {
+      const start = i;
+      let end = i;
+      if (json[end] === "-") end++;
+      if (!isDigit(json[end])) {
+        output += ch;
+        i++;
+        continue;
+      }
+
+      if (json[end] === "0") {
+        end++;
+      } else {
+        while (isDigit(json[end])) end++;
+      }
+
+      let decimalOrExponent = false;
+      if (json[end] === ".") {
+        decimalOrExponent = true;
+        end++;
+        while (isDigit(json[end])) end++;
+      }
+      if (json[end] === "e" || json[end] === "E") {
+        decimalOrExponent = true;
+        end++;
+        if (json[end] === "+" || json[end] === "-") end++;
+        while (isDigit(json[end])) end++;
+      }
+
+      const token = json.slice(start, end);
+      if (!decimalOrExponent) {
+        try {
+          const n = BigInt(token);
+          if (n > MAX_SAFE_BIGINT || n < -MAX_SAFE_BIGINT) {
+            output += unsafeIntegerReplacement(token, n, options);
+            i = end;
+            continue;
+          }
+        } catch {
+          /* not a valid integer */
+        }
+      }
+
+      output += token;
+      i = end;
+      continue;
+    }
+
+    output += ch;
+    i++;
+  }
+  return output;
+}
+
+function unsafeIntegerReplacement(token: string, value: bigint, options: DocumentFilterParseOptions): string {
+  if (options.kind === "mongodb" && value >= MIN_BSON_INT64 && value <= MAX_BSON_INT64) {
+    // MongoDB int64 filters must use Extended JSON so JS Number never rounds snowflake-style IDs.
+    return `{"$numberLong":${JSON.stringify(token)}}`;
+  }
+  return JSON.stringify(token);
+}
+
+function isDigit(value: string | undefined): boolean {
+  return value !== undefined && value >= "0" && value <= "9";
+}
+
+export function parseDocumentFilterInput(input: string, options: DocumentFilterParseOptions = {}): Record<string, unknown> {
   const trimmed = input.trim();
   if (!trimmed) return {};
   const safe = quoteUnquotedObjectKeys(trimmed);
-  const parsed = parseJsonPreservingLargeIntegers(safe);
+  const parsed = parseJsonPreservingLargeIntegers(safe, options);
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 }
 
-export function currentDocumentFilterJson(input: string, structured: Record<string, unknown> | null): string | undefined {
-  const manual = parseDocumentFilterInput(input);
+export function currentDocumentFilterJson(input: string, structured: Record<string, unknown> | null, kind?: DocumentStoreKind): string | undefined {
+  const manual = parseDocumentFilterInput(input, { kind });
   const filter = structured ? (Object.keys(manual).length ? { $and: [manual, structured] } : structured) : manual;
   return Object.keys(filter).length ? JSON.stringify(filter) : undefined;
 }
 
-function parseDocumentFilterValue(raw: string): unknown {
+export function currentDocumentSortJson(input: string): string | undefined {
+  const sort = parseDocumentFilterInput(input);
+  return Object.keys(sort).length ? JSON.stringify(sort) : undefined;
+}
+
+function parseDocumentFilterValue(raw: string, options: DocumentFilterParseOptions = {}): unknown {
   const trimmed = raw.trim();
   if (!trimmed) return "";
   try {
-    return parseJsonPreservingLargeIntegers(trimmed);
+    return parseJsonPreservingLargeIntegers(trimmed, options);
   } catch {
     return trimmed;
   }

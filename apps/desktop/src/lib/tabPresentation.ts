@@ -70,6 +70,15 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return tab.sql;
     return `${tab.sql}@${database}`;
   }
+  if (tab.mode === "mongo-gridfs") {
+    if (compact) return t("tabs.gridfs");
+    return `${t("tabs.gridfs")}@${database}`;
+  }
+  if (tab.mode === "mongo-bucket") {
+    const bucketName = tab.mongoBucket?.bucketName || tab.sql || tab.title.split(".").pop() || tab.title;
+    if (compact) return bucketName;
+    return `${bucketName}@${database}`;
+  }
   if (tab.mode === "vector" && tab.sql) {
     if (compact) return tab.sql;
     return `${tab.sql}@${database}`;
@@ -113,6 +122,12 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "mongo" && tab.sql) {
     lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });
+  }
+  if (tab.mode === "mongo-gridfs") {
+    lines.push({ label: t("tabs.gridfs"), value: t("tabs.gridfs") });
+  }
+  if (tab.mode === "mongo-bucket") {
+    lines.push({ label: t("tabs.gridfs"), value: tab.mongoBucket?.bucketName || tab.sql || tab.title });
   }
   if (tab.mode === "vector" && tab.sql) {
     lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });
@@ -182,6 +197,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "data") return t("tabs.table");
   if (tab.mode === "query") return t("tabs.sql");
   if (tab.mode === "mongo") return t("tabs.mongo");
+  if (tab.mode === "mongo-gridfs" || tab.mode === "mongo-bucket") return t("tabs.gridfs");
   if (tab.mode === "vector") return t("tabs.vector");
   if (tab.mode === "redis") return t("tabs.redis");
   if (tab.mode === "etcd") return t("tabs.etcd");

@@ -1,0 +1,129 @@
+package com.dbx.agent.gbase8a;
+
+import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.test.TestSupport;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.List;
+
+class Gbase8aAgentTest {
+    @Test
+    void listObjectsIncludesRoutinesFromInformationSchema() {
+        List<String> sql = new ArrayList<>();
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(
+                new String[]{"TABLE_NAME", "TABLE_TYPE"},
+                new Object[][]{{"orders", "BASE TABLE"}}
+            ),
+            resultSet(
+                new String[]{"ROUTINE_NAME", "ROUTINE_TYPE", "ROUTINE_COMMENT"},
+                new Object[][]{{"refresh_orders", "PROCEDURE", "proc comment"}, {"format_order", "FUNCTION", null}}
+            )
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("app");
+
+        Assertions.assertEquals(3, objects.size());
+        Assertions.assertEquals("orders", objects.get(0).getName());
+        Assertions.assertEquals("TABLE", objects.get(0).getObject_type());
+        Assertions.assertEquals("refresh_orders", objects.get(1).getName());
+        Assertions.assertEquals("PROCEDURE", objects.get(1).getObject_type());
+        Assertions.assertEquals("app", objects.get(1).getSchema());
+        Assertions.assertEquals("proc comment", objects.get(1).getComment());
+        Assertions.assertEquals("format_order", objects.get(2).getName());
+        Assertions.assertEquals("FUNCTION", objects.get(2).getObject_type());
+        Assertions.assertEquals("app", objects.get(2).getSchema());
+        Assertions.assertTrue(sql.get(1).contains("FROM information_schema.ROUTINES"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("ROUTINE_SCHEMA = ?"), sql.get(1));
+    }
+
+    private static Connection preparedConnection(List<String> sql, ResultSet... resultSets) {
+        int[] resultSetIndex = {0};
+        PreparedStatement statement = proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                int current = Math.min(resultSetIndex[0], resultSets.length - 1);
+                resultSetIndex[0] += 1;
+                return resultSets[current];
+            }
+            if ("setString".equals(method.getName()) || "close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static ResultSet resultSet(String[] columns, Object[][] rows) {
+        int[] index = {-1};
+        return proxy(ResultSet.class, (method, args) -> {
+            switch (method.getName()) {
+                case "next":
+                    index[0] += 1;
+                    return index[0] < rows.length;
+                case "getString":
+                    Object value = columnValue(columns, rows[index[0]], args[0]);
+                    return value == null ? null : String.valueOf(value);
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static Object columnValue(String[] columns, Object[] row, Object key) {
+        if (key instanceof Number) {
+            return row[((Number) key).intValue() - 1];
+        }
+        for (int i = 0; i < columns.length; i++) {
+            if (columns[i].equalsIgnoreCase(String.valueOf(key))) {
+                return row[i];
+            }
+        }
+        return null;
+    }
+
+    private static <T> T proxy(Class<T> type, MethodHandler handler) {
+        InvocationHandler invocationHandler = new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                return handler.handle(method, args == null ? new Object[0] : args);
+            }
+        };
+        return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, invocationHandler));
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (type == Boolean.TYPE) return false;
+        if (type == Byte.TYPE) return (byte) 0;
+        if (type == Short.TYPE) return (short) 0;
+        if (type == Integer.TYPE) return 0;
+        if (type == Long.TYPE) return 0L;
+        if (type == Float.TYPE) return 0f;
+        if (type == Double.TYPE) return 0d;
+        if (type == Character.TYPE) return (char) 0;
+        return null;
+    }
+
+    private interface MethodHandler {
+        Object handle(Method method, Object[] args) throws Throwable;
+    }
+}

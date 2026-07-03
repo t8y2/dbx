@@ -66,7 +66,6 @@ export const TREE_SCHEMA_TYPES = new Set<DatabaseType>([
   "informix",
   "xugu",
   "oscar",
-  "iotdb",
   "iris",
   "duckdb",
 ]);

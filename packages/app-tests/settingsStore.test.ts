@@ -133,6 +133,13 @@ test("defaults unsaved SQL close confirmation to enabled", () => {
   assert.equal(normalizeEditorSettings({ confirmUnsavedSqlClose: false }).confirmUnsavedSqlClose, false);
 });
 
+test("defaults Vim mode to off and preserves saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.vimModeEnabled, false);
+  assert.equal(normalizeEditorSettings({}).vimModeEnabled, false);
+  assert.equal(normalizeEditorSettings({ vimModeEnabled: true }).vimModeEnabled, true);
+  assert.equal(normalizeEditorSettings({ vimModeEnabled: "yes" as any }).vimModeEnabled, false);
+});
+
 test("defaults update notifications to enabled", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled, true);
   assert.equal(normalizeEditorSettings({}).updateNotificationsEnabled, true);

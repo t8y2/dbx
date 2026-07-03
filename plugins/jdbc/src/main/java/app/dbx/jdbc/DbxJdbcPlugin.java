@@ -9,6 +9,7 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
 import java.net.URL;
@@ -44,6 +45,7 @@ import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -346,9 +348,17 @@ public final class DbxJdbcPlugin {
         }
         closeSharedConnection();
 
+        JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
+        url = urlCredentials.url;
         Properties properties = new Properties();
         String username = optionalText(connection, "username");
         String password = optionalText(connection, "password");
+        if (username == null) {
+            username = urlCredentials.username;
+        }
+        if (password == null) {
+            password = urlCredentials.password;
+        }
         if (username != null) {
             properties.setProperty("user", username);
         }
@@ -1761,6 +1771,84 @@ public final class DbxJdbcPlugin {
     static String jdbcUrl(JsonNode connection) {
         String url = appendJdbcUrlParams(optionalText(connection, "connection_string"), optionalText(connection, "url_params"));
         return jdbcUrlWithPasswordKey(url, optionalText(connection, "password"));
+    }
+
+    private record JdbcUrlCredentials(String url, String username, String password) {}
+
+    static JdbcUrlCredentials extractJdbcUrlCredentials(String url) {
+        if (url == null) {
+            return new JdbcUrlCredentials(null, null, null);
+        }
+        int queryStart = url.indexOf('?');
+        if (queryStart < 0) {
+            return new JdbcUrlCredentials(url, null, null);
+        }
+
+        int fragmentStart = url.indexOf('#', queryStart + 1);
+        String base = url.substring(0, queryStart);
+        String query = fragmentStart < 0 ? url.substring(queryStart + 1) : url.substring(queryStart + 1, fragmentStart);
+        String fragment = fragmentStart < 0 ? "" : url.substring(fragmentStart);
+
+        String username = null;
+        String password = null;
+        boolean foundCredential = false;
+        List<String> keptParams = new ArrayList<>();
+        for (String part : splitJdbcUrlParams(query)) {
+            String name = partName(part);
+            String key = decodeQueryPart(name).trim().toLowerCase(Locale.ROOT);
+            if ("user".equals(key)) {
+                username = decodeQueryPart(partValue(part));
+                foundCredential = true;
+            } else if ("password".equals(key)) {
+                password = decodeQueryPart(partValue(part));
+                foundCredential = true;
+            } else {
+                keptParams.add(part);
+            }
+        }
+
+        if (!foundCredential) {
+            return new JdbcUrlCredentials(url, null, null);
+        }
+        String sanitizedQuery = joinJdbcUrlParams(keptParams);
+        String sanitizedUrl = sanitizedQuery.isEmpty() ? base + fragment : base + "?" + sanitizedQuery + fragment;
+        return new JdbcUrlCredentials(sanitizedUrl, username, password);
+    }
+
+    private static List<String> splitJdbcUrlParams(String query) {
+        List<String> result = new ArrayList<>();
+        int start = 0;
+        for (int i = 0; i < query.length(); i++) {
+            char ch = query.charAt(i);
+            if (ch == '&') {
+                result.add(query.substring(start, i));
+                start = i + 1;
+            }
+        }
+        result.add(query.substring(start));
+        return result;
+    }
+
+    private static String joinJdbcUrlParams(List<String> params) {
+        return params.stream().filter(param -> !param.isEmpty()).collect(Collectors.joining("&"));
+    }
+
+    private static String partName(String part) {
+        int equals = part.indexOf('=');
+        return equals < 0 ? part : part.substring(0, equals);
+    }
+
+    private static String partValue(String part) {
+        int equals = part.indexOf('=');
+        return equals < 0 ? "" : part.substring(equals + 1);
+    }
+
+    private static String decodeQueryPart(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException ignored) {
+            return value;
+        }
     }
 
     private static boolean isSqliteUrl(String url) {

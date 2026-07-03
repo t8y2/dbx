@@ -28,10 +28,13 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 const QUERY_VALUE_ENCODE_SET: &AsciiSet = &PATH_SEGMENT_ENCODE_SET.add(b'&').add(b'=').add(b'+');
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CollectionInfo {
     pub name: String,
     pub id: String,
     pub dimension: Option<u32>,
+    pub kind: Option<String>,
+    pub bucket_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,7 +180,13 @@ async fn list_qdrant_collections(client: &VectorClient) -> Result<Vec<Collection
         .flatten()
         .filter_map(|item| {
             let name = item.get("name").and_then(Value::as_str)?;
-            Some(CollectionInfo { name: name.to_string(), id: name.to_string(), dimension: None })
+            Some(CollectionInfo {
+                name: name.to_string(),
+                id: name.to_string(),
+                dimension: None,
+                kind: None,
+                bucket_name: None,
+            })
         })
         .collect();
     infos.sort_by(|a, b| a.name.cmp(&b.name));
@@ -196,7 +205,7 @@ async fn list_milvus_collections(client: &VectorClient, database: &str) -> Resul
             .iter()
             .filter_map(|item| {
                 let name = collection_name_from_milvus_item(item)?;
-                Some(CollectionInfo { name: name.clone(), id: name, dimension: None })
+                Some(CollectionInfo { name: name.clone(), id: name, dimension: None, kind: None, bucket_name: None })
             })
             .collect(),
         _ => Vec::new(),
@@ -216,7 +225,7 @@ async fn list_weaviate_collections(client: &VectorClient) -> Result<Vec<Collecti
     let body = send_json(client.get("/v1/schema"), "Weaviate").await?;
     let mut infos: Vec<CollectionInfo> = weaviate_collection_names_from_schema(&body)
         .into_iter()
-        .map(|name| CollectionInfo { name: name.clone(), id: name, dimension: None })
+        .map(|name| CollectionInfo { name: name.clone(), id: name, dimension: None, kind: None, bucket_name: None })
         .collect();
     infos.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(infos)
@@ -234,7 +243,13 @@ async fn list_chroma_collections(client: &VectorClient) -> Result<Vec<Collection
             let name = item.get("name").and_then(Value::as_str)?;
             let id = item.get("id").and_then(Value::as_str)?;
             let dimension = item.get("dimension").and_then(|v| v.as_u64()).map(|d| d as u32);
-            Some(CollectionInfo { name: name.to_string(), id: id.to_string(), dimension })
+            Some(CollectionInfo {
+                name: name.to_string(),
+                id: id.to_string(),
+                dimension,
+                kind: None,
+                bucket_name: None,
+            })
         })
         .collect();
     infos.sort_by(|a, b| a.name.cmp(&b.name));
@@ -251,7 +266,13 @@ pub async fn get_collection_detail(
         VectorDbKind::Milvus => get_milvus_collection_detail(client, database, collection).await,
         VectorDbKind::Weaviate => {
             // Weaviate REST API does not expose vector dimension
-            Ok(CollectionInfo { name: collection.to_string(), id: collection.to_string(), dimension: None })
+            Ok(CollectionInfo {
+                name: collection.to_string(),
+                id: collection.to_string(),
+                dimension: None,
+                kind: None,
+                bucket_name: None,
+            })
         }
         VectorDbKind::ChromaDb => get_chroma_collection_detail(client, collection).await,
     }
@@ -268,7 +289,13 @@ async fn get_qdrant_collection_detail(client: &VectorClient, collection: &str) -
                 .and_then(|obj| obj.values().find_map(|v| v.get("size").and_then(|s| s.as_u64())))
         })
         .map(|d| d as u32);
-    Ok(CollectionInfo { name: collection.to_string(), id: collection.to_string(), dimension: dim })
+    Ok(CollectionInfo {
+        name: collection.to_string(),
+        id: collection.to_string(),
+        dimension: dim,
+        kind: None,
+        bucket_name: None,
+    })
 }
 
 fn milvus_vector_dim_from_field(field: &Value) -> Option<u32> {
@@ -319,7 +346,13 @@ async fn get_milvus_collection_detail(
             })
         })
         .and_then(milvus_vector_dim_from_field);
-    Ok(CollectionInfo { name: collection.to_string(), id: collection.to_string(), dimension: dim })
+    Ok(CollectionInfo {
+        name: collection.to_string(),
+        id: collection.to_string(),
+        dimension: dim,
+        kind: None,
+        bucket_name: None,
+    })
 }
 
 async fn get_chroma_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
@@ -334,7 +367,7 @@ async fn get_chroma_collection_detail(client: &VectorClient, collection: &str) -
     let name = body.get("name").and_then(Value::as_str).unwrap_or(collection);
     let id = body.get("id").and_then(Value::as_str).unwrap_or(collection);
     let dimension = body.get("dimension").and_then(|v| v.as_u64()).map(|d| d as u32);
-    Ok(CollectionInfo { name: name.to_string(), id: id.to_string(), dimension })
+    Ok(CollectionInfo { name: name.to_string(), id: id.to_string(), dimension, kind: None, bucket_name: None })
 }
 
 fn chroma_get_response_to_rows(body: &Value) -> Vec<Value> {
@@ -773,7 +806,13 @@ mod tests {
             .filter_map(|item| {
                 let name = item.get("name").and_then(|v| v.as_str())?;
                 let id = item.get("id").and_then(|v| v.as_str())?;
-                Some(CollectionInfo { name: name.to_string(), id: id.to_string(), dimension: None })
+                Some(CollectionInfo {
+                    name: name.to_string(),
+                    id: id.to_string(),
+                    dimension: None,
+                    kind: None,
+                    bucket_name: None,
+                })
             })
             .collect();
         assert_eq!(infos.len(), 2);

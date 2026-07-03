@@ -19,6 +19,26 @@ test("reorders cached MongoDB collections alphabetically", () => {
   );
 });
 
+test("keeps MongoDB GridFS entry before collections", () => {
+  const parent: Pick<TreeNode, "type"> = { type: "mongo-db" };
+  const children: TreeNode[] = [
+    { id: "c:db:movies", label: "movies", type: "mongo-collection" },
+    { id: "c:db:__gridfs", label: "GridFS", type: "mongo-gridfs" as TreeNode["type"] },
+    { id: "c:db:comments", label: "comments", type: "mongo-collection" },
+  ];
+
+  const sorted = sortSidebarTreeChildrenForParent(parent, children, "mongodb");
+
+  assert.deepEqual(
+    sorted.map((child) => [child.type, child.label]),
+    [
+      ["mongo-gridfs", "GridFS"],
+      ["mongo-collection", "comments"],
+      ["mongo-collection", "movies"],
+    ],
+  );
+});
+
 test("keeps SQL Server object groups first and sorts schema children after them", () => {
   const parent: Pick<TreeNode, "type"> = { type: "database" };
   const children: TreeNode[] = [

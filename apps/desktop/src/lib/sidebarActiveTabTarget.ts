@@ -16,6 +16,11 @@ export type ActiveTabSidebarTarget =
       collectionName: string;
     }
   | {
+      type: "mongo-gridfs";
+      connectionId: string;
+      database: string;
+    }
+  | {
       type: "vector-collection";
       connectionId: string;
       collectionName: string;
@@ -75,6 +80,22 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     };
   }
 
+  if (tab.mode === "mongo-bucket") {
+    return {
+      type: "mongo-gridfs",
+      connectionId: tab.connectionId,
+      database: tab.database,
+    };
+  }
+
+  if (tab.mode === "mongo-gridfs") {
+    return {
+      type: "mongo-gridfs",
+      connectionId: tab.connectionId,
+      database: tab.database,
+    };
+  }
+
   if (tab.mode === "vector") {
     const collectionName = tab.sql || tab.title;
     if (!collectionName) return null;
@@ -129,6 +150,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
       return node.connectionId === target.connectionId && node.label === target.collectionName;
     }
     return node.type === "mongo-collection" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.collectionName;
+  }
+
+  if (target.type === "mongo-gridfs") {
+    return node.type === "mongo-gridfs" && node.connectionId === target.connectionId && node.database === target.database;
   }
 
   if (target.type === "vector-collection") {

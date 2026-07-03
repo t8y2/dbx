@@ -112,6 +112,27 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   };
 }
 
+export function applyMongoFindSort(input: string, column: string, direction: "asc" | "desc"): string | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const parsed = parseMongoFindCommand(source);
+  if (!parsed) return null;
+
+  const target = parseFindTarget(source);
+  if (!target) return null;
+
+  const findOpenIndex = source.indexOf("(", target.findCallIndex);
+  const findCloseIndex = findMatchingParen(source, findOpenIndex);
+  if (findCloseIndex < 0) return null;
+
+  const prefix = source.slice(0, findCloseIndex + 1);
+  const chainSource = source.slice(findCloseIndex + 1).trim();
+  if (chainSource && !chainSource.startsWith(".")) return null;
+
+  const chain = removeChainedMethodCall(chainSource, "sort");
+  const sortCall = `.sort(${JSON.stringify({ [column]: direction === "asc" ? 1 : -1 })})`;
+  return `${prefix}${sortCall}${chain}`;
+}
+
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   // Accept deprecated Mongo shell count helpers for old server workflows, but
@@ -932,6 +953,21 @@ function readChainedIntegerArgument(source: string, name: string, fallback: numb
   const value = Number(raw.trim());
   if (!Number.isSafeInteger(value) || value < 0) return null;
   return value;
+}
+
+function removeChainedMethodCall(chain: string, name: string): string {
+  if (!chain.trim()) return "";
+  let result = chain.trim();
+  const pattern = chainedMethodCallPattern(name);
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(result)) !== null) {
+    const openIndex = result.indexOf("(", match.index);
+    const closeIndex = findMatchingParen(result, openIndex);
+    if (closeIndex < 0) break;
+    result = `${result.slice(0, match.index)}${result.slice(closeIndex + 1)}`.trim();
+    pattern.lastIndex = 0;
+  }
+  return result;
 }
 
 function readChainedCallArgument(source: string, name: string): string | undefined {

@@ -112,7 +112,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::resultValue
+            resultValueReader()
         );
     }
 
@@ -124,7 +124,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::resultValue
+            resultValueReader()
         );
     }
 
@@ -146,7 +146,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             schema,
             this::setSchemaSQL,
             options,
-            this::resultValue
+            resultValueReader()
         );
     }
 
@@ -223,5 +223,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             }
             return rs.wasNull() ? null : value;
         });
+    }
+
+    protected JdbcExecutor.ResultValueReader resultValueReader() {
+        return this::resultValue;
     }
 }

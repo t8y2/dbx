@@ -1484,6 +1484,24 @@ export interface MongoDocumentResult {
   total: number;
 }
 
+export interface MongoGridFsFileInfo {
+  id: string;
+  filename?: string;
+  length: number;
+  chunkSize: number;
+  uploadDate?: string;
+  metadata?: any;
+  md5?: string;
+  contentType?: string;
+  aliases?: string[];
+}
+
+export interface MongoGridFsBucketInfo {
+  name: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
 export async function documentListDatabases(connectionId: string): Promise<string[]> {
   return invoke("document_list_databases", { connectionId });
 }
@@ -1531,6 +1549,42 @@ export async function mongoFindDocuments(connectionId: string, database: string,
 
 export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
   return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
+}
+
+export async function documentListGridFsFiles(connectionId: string, database: string, bucket: string): Promise<MongoGridFsFileInfo[]> {
+  return invoke("document_list_gridfs_files", { connectionId, database, bucket });
+}
+
+export async function documentListGridFsBuckets(connectionId: string, database: string): Promise<MongoGridFsBucketInfo[]> {
+  return invoke("document_list_gridfs_buckets", { connectionId, database });
+}
+
+export async function documentCreateGridFsBucket(connectionId: string, database: string, bucket: string): Promise<void> {
+  return invoke("document_create_gridfs_bucket", { connectionId, database, bucket });
+}
+
+export async function documentDeleteGridFsBucket(connectionId: string, database: string, bucket: string): Promise<void> {
+  return invoke("document_delete_gridfs_bucket", { connectionId, database, bucket });
+}
+
+export async function documentDownloadGridFsFile(connectionId: string, database: string, bucket: string, fileId: string): Promise<Uint8Array> {
+  const data = await invoke<number[]>("document_download_gridfs_file", { connectionId, database, bucket, fileId });
+  return new Uint8Array(data);
+}
+
+export async function documentUploadGridFsFile(connectionId: string, database: string, bucket: string, fileName: string, data: Uint8Array, contentType?: string): Promise<string> {
+  return invoke("document_upload_gridfs_file", {
+    connectionId,
+    database,
+    bucket,
+    fileName,
+    data: Array.from(data),
+    contentType,
+  });
+}
+
+export async function documentDeleteGridFsFile(connectionId: string, database: string, bucket: string, fileId: string): Promise<void> {
+  return invoke("document_delete_gridfs_file", { connectionId, database, bucket, fileId });
 }
 
 export async function mongoServerVersion(connectionId: string, database: string, executionId?: string): Promise<string> {

@@ -30,7 +30,7 @@ import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeperConnection";
 import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
-import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
+import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongoConnectionOptions";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/mysqlConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
@@ -1786,6 +1786,20 @@ const mongoAuthMechanism = computed({
     form.value.url_params = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
   },
 });
+const mongoTlsAllowInvalidCertificates = computed({
+  get: () => mongoUrlParamIsTrue(form.value.url_params, "tlsAllowInvalidCertificates"),
+  set: (value: boolean) => {
+    let next = setMongoUrlParamBoolean(form.value.url_params, "tlsAllowInvalidCertificates", value);
+    next = setMongoUrlParam(next, "tlsAllowInvalidHostnames", "");
+    form.value.url_params = next;
+  },
+});
+const mongoRetryWrites = computed({
+  get: () => mongoUrlParamIsTrue(form.value.url_params, "retryWrites", true),
+  set: (value: boolean) => {
+    form.value.url_params = setMongoUrlParamBoolean(form.value.url_params, "retryWrites", value, true);
+  },
+});
 const mongoDriverMode = computed({
   get: () => (form.value.driver_profile === "mongodb-legacy" ? "legacy" : "auto"),
   set: (value: string) => {
@@ -2058,6 +2072,11 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.driver_profile = "mongodb";
     config.driver_label = "MongoDB";
   }
+  if (config.db_type === "mongodb") {
+    const mongoTls = normalizeMongoTlsFormState(!!config.ssl, config.url_params, config.ca_cert_path);
+    config.url_params = mongoTls.urlParams;
+    config.ca_cert_path = mongoTls.caCertPath;
+  }
   if (config.db_type !== "oracle") {
     config.sysdba = undefined;
     config.oracle_connection_type = undefined;
@@ -2140,7 +2159,7 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "starrocks") {
+  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "starrocks" && config.db_type !== "mongodb") {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -3984,6 +4003,40 @@ function openExternalUrl(url: string) {
                         <span>{{ t("connection.sslEnable") }}</span>
                       </label>
                     </div>
+                    <template v-if="form.ssl">
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.mongoTlsAllowInvalidCertificates") }}</Label>
+                        <label class="col-span-3 flex items-start gap-2 cursor-pointer">
+                          <input v-model="mongoTlsAllowInvalidCertificates" type="checkbox" class="mr-0 mt-0.5" />
+                          <span class="text-xs leading-5 text-muted-foreground">
+                            {{ t("connection.mongoTlsAllowInvalidCertificatesHint") }}
+                          </span>
+                        </label>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.mongoRetryWrites") }}</Label>
+                        <label class="col-span-3 flex items-start gap-2 cursor-pointer">
+                          <input v-model="mongoRetryWrites" type="checkbox" class="mr-0 mt-0.5" />
+                          <span class="text-xs leading-5 text-muted-foreground">
+                            {{ t("connection.mongoRetryWritesHint") }}
+                          </span>
+                        </label>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.caCertPath") }}</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="form.ca_cert_path" class="flex-1" :placeholder="t('connection.caCertPathPlaceholder')" />
+                          <Tooltip v-if="isDesktop">
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseCaCertPath">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.caCertPathBrowse") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                    </template>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
@@ -4015,7 +4068,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
-                      <Input v-model="form.url_params" class="col-span-3" placeholder="authSource=admin&authMechanism=SCRAM-SHA-1" />
+                      <Input v-model="form.url_params" class="col-span-3" placeholder="replicaSet=rs0&authSource=admin" />
                     </div>
                   </template>
                 </template>

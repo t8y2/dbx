@@ -33,7 +33,7 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
-import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
+import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { splitSqlStatementRanges } from "@/lib/sqlStatementRanges";
@@ -2135,7 +2135,7 @@ export const useQueryStore = defineStore("query", () => {
       }
 
       const executionSchema = connectionUsesSchemaExecutionContext(conn) ? tab.schema || tab.database : tab.mode === "data" || connectionUsesDatabaseObjectTreeMode(conn) ? undefined : tab.schema;
-      const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
+      const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
       const sourceLabelDatabase = tab.database || conn?.database;
 
       let executionPromise: Promise<QueryResult[]>;
@@ -2174,7 +2174,7 @@ export const useQueryStore = defineStore("query", () => {
         });
         executionPromise = api.executeMulti(tab.connectionId, tab.database, sqlToExecute, executionSchema, executionId, executionOptions);
       }
-      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, queryTimeoutSecs === 0 ? 0 : frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
+      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
       console.info("[DBX][executeTabSql:execute-multi:done]", {
         traceId,
         resultCount: results.length,

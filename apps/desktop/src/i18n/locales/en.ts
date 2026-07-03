@@ -203,6 +203,8 @@ export default {
     mysqlTlsModeRequired: "Required",
     mysqlTlsModeVerifyCa: "Verify CA",
     mysqlTlsModeVerifyIdentity: "Verify Identity",
+    mysqlCleartextPasswordAuth: "Cleartext Password Auth",
+    mysqlCleartextPasswordAuthHint: "Enable only when the MySQL server requires the cleartext password authentication plugin.",
     mysqlCaCertHint: "Required for Verify CA and Verify Identity when the server certificate uses a private CA.",
     mysqlClientCert: "Client Auth",
     mysqlClientCertPlaceholder: "/path/to/client.crt",

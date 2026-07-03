@@ -205,6 +205,8 @@ export default withEnglishFallback({
     mysqlTlsModeRequired: "Obrigatório",
     mysqlTlsModeVerifyCa: "Verificar CA",
     mysqlTlsModeVerifyIdentity: "Verificar Identidade",
+    mysqlCleartextPasswordAuth: "Autenticação de senha em texto claro",
+    mysqlCleartextPasswordAuthHint: "Ative somente quando o servidor MySQL exigir o plugin de autenticação de senha em texto claro.",
     mysqlCaCertHint: "Necessário para Verificar CA e Verificar Identidade quando o certificado do servidor usa uma CA privada.",
     mysqlClientCert: "Autenticação do Cliente",
     mysqlClientCertPlaceholder: "/caminho/para/client.crt",

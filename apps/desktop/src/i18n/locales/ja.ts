@@ -204,6 +204,8 @@ export default withEnglishFallback({
     mysqlTlsModeRequired: "必須",
     mysqlTlsModeVerifyCa: "CA検証",
     mysqlTlsModeVerifyIdentity: "ID検証",
+    mysqlCleartextPasswordAuth: "平文パスワード認証",
+    mysqlCleartextPasswordAuthHint: "MySQLサーバーがcleartext password認証プラグインを要求する場合のみ有効にしてください。",
     mysqlCaCertHint: "サーバー証明書がプライベートCAで署名されている場合、CA検証とID検証に必要です。",
     mysqlClientCert: "クライアント認証",
     mysqlClientCertPlaceholder: "/path/to/client.crt",

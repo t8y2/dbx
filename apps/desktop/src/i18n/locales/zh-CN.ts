@@ -205,6 +205,8 @@ export default withEnglishFallback({
     mysqlTlsModeRequired: "必须使用",
     mysqlTlsModeVerifyCa: "验证 CA",
     mysqlTlsModeVerifyIdentity: "验证身份",
+    mysqlCleartextPasswordAuth: "明文密码认证",
+    mysqlCleartextPasswordAuthHint: "仅在 MySQL 服务端要求明文密码认证插件时开启。",
     mysqlCaCertHint: "服务端证书由私有 CA 签发时，Verify CA / Verify Identity 模式需要填写。",
     mysqlClientCert: "客户端认证",
     mysqlClientCertPlaceholder: "/path/to/client.crt",

@@ -141,6 +141,29 @@ function cancelRenameTab() {
   editingTabId.value = null;
 }
 
+function isDirtyTab(tab: QueryTab) {
+  return queryStore.isTabDirty(tab);
+}
+
+function tabTitleLabel(tab: QueryTab) {
+  const title = tabDisplayTitle(tab, t);
+  return isDirtyTab(tab) ? `* ${title}` : title;
+}
+
+function tabTitleText(tab: QueryTab) {
+  return tabDisplayTitle(tab, t);
+}
+
+function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
+  if (!isDirtyTab(tab)) return undefined;
+  return {
+    fontStyle: "italic",
+    fontWeight: 700,
+    transform: "skewX(-8deg)",
+    transformOrigin: "left center",
+  };
+}
+
 type SpecialRegularSurface = "driverStore" | "settings";
 
 function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
@@ -554,7 +577,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       @keydown.escape.prevent="cancelRenameTab"
                       @blur="commitRenameTab(tab)"
                     />
-                    <span v-else class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    </span>
                     <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
                       <TooltipTrigger as-child>
                         <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
@@ -645,7 +671,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <div
                 class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
                 :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
-                :title="tabDisplayTitle(tab, t)"
+                :title="tabTitleLabel(tab)"
                 role="menuitem"
                 tabindex="0"
                 @click="activateTabFromOverflow(tab.id, 'regular')"
@@ -653,7 +679,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
               >
                 <component :is="tabMenuIcon(tab)" :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
-                <span class="min-w-0 flex-1 truncate">{{ tabDisplayTitle(tab, t) }}</span>
+                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                  <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                  <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                </span>
                 <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
                 <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
                 <span class="w-5 shrink-0">
@@ -727,7 +756,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       @keydown.escape.prevent="cancelRenameTab"
                       @blur="commitRenameTab(tab)"
                     />
-                    <span v-else class="min-w-0 truncate flex-1 text-foreground">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    </span>
                     <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
                       <TooltipTrigger as-child>
                         <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
@@ -766,7 +798,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <div
                 class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
                 :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
-                :title="tabDisplayTitle(tab, t)"
+                :title="tabTitleLabel(tab)"
                 role="menuitem"
                 tabindex="0"
                 @click="activateTabFromOverflow(tab.id, 'fixed')"
@@ -774,7 +806,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
               >
                 <component :is="tabMenuIcon(tab)" :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
-                <span class="min-w-0 flex-1 truncate">{{ tabDisplayTitle(tab, t) }}</span>
+                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                  <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                  <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                </span>
                 <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
                 <Pin class="h-3 w-3 shrink-0 fill-current text-primary" />
                 <span class="w-5 shrink-0">
@@ -850,6 +885,21 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </template>
 
 <style scoped>
+.dirty-tab-marker {
+  display: inline-flex;
+  width: 0.5rem;
+  height: 0.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 12px;
+  opacity: 0.9;
+  transform: translateY(2px);
+}
+
 .app-tab-scroll::-webkit-scrollbar {
   display: none;
 }

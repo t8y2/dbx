@@ -1216,9 +1216,30 @@ fn normalize_bare_mysql_url_params(value: &str) -> String {
         .join("&")
 }
 
+fn is_mysql_cleartext_password_param(key: &str) -> bool {
+    matches!(key.to_ascii_lowercase().as_str(), "allowcleartextpasswords" | "enable_cleartext_plugin")
+}
+
+fn mysql_url_param_value_is_true(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
+}
+
 fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs: bool) -> String {
     let value = value.trim_start_matches('?');
     let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
+    let enable_cleartext_plugin = parts.iter().any(|part| {
+        let Some((key, value)) = part.split_once('=') else {
+            return false;
+        };
+        is_mysql_cleartext_password_param(key.trim()) && mysql_url_param_value_is_true(value)
+    });
+
+    parts.retain(|part| {
+        let Some((key, _)) = part.split_once('=') else {
+            return true;
+        };
+        !is_mysql_cleartext_password_param(key.trim())
+    });
 
     if force_tls {
         parts.retain(|part| {
@@ -1241,6 +1262,9 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
 
     if !parts.iter().any(|part| url_param_key_is(part, "charset")) {
         parts.push("charset=utf8mb4".to_string());
+    }
+    if enable_cleartext_plugin {
+        parts.push("enable_cleartext_plugin=true".to_string());
     }
 
     parts.join("&")
@@ -2079,6 +2103,51 @@ mod tests {
     fn mysql_url_appends_custom_params() {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("charset=utf8mb4".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_cleartext_password_auth_alias_normalizes_to_driver_param() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("allowCleartextPasswords=true".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn mysql_cleartext_password_auth_keeps_canonical_driver_param() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("enable_cleartext_plugin=true".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn mysql_cleartext_password_auth_deduplicates_aliases() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params =
+            Some("allowCleartextPasswords=true&enable_cleartext_plugin=true&charset=utf8mb4".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn mysql_cleartext_password_auth_omits_disabled_values() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("allowCleartextPasswords=false&enable_cleartext_plugin=&charset=utf8mb4".to_string());
 
         assert_eq!(
             config.connection_url(),

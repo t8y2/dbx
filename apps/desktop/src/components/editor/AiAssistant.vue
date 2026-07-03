@@ -35,7 +35,7 @@ import { isSchemaAware } from "@/lib/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
 import { parseExplainResult, type ParsedExplainPlan } from "@/lib/explainPlan";
 import { copyToClipboard } from "@/lib/clipboard";
-import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
+import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/aiPromptKeyboard";
 import { looksLikeActionProposal, containsChinese } from "@/lib/aiProposalDetect";
 
@@ -184,6 +184,7 @@ const mentionStart = ref(0);
 const mentionSelectedIndex = ref(0);
 const mentionCandidates = ref<AiMentionCandidate[]>([]);
 const mentionCache = ref<Record<string, AiMentionCandidate[]>>({});
+const mentionListRef = ref<HTMLElement | null>(null);
 const selectedMentions = ref<AiTableMention[]>([]);
 let mentionTimer: ReturnType<typeof setTimeout> | undefined;
 let mentionRequestId = 0;
@@ -574,30 +575,30 @@ async function loadMentionCandidates(query: string) {
       const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, props.tab.database));
       const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
       const results = await Promise.all(
-        filteredSchemas.slice(0, 8).map(async (schema) => {
-          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, 20);
-          return filterMentionCandidates(
+        filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
+          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+          return filterAiTableMentionCandidates(
             tables.map((table) => mentionCandidateFromTable(table, schema)),
             tableFilter,
-            20,
+            AI_TABLE_MENTION_CANDIDATE_LIMIT,
           );
         }),
       );
-      candidates = results.flat();
+      candidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
     } else {
       const schema = props.tab.database || props.connection.database || "main";
-      const tables = await listTables(props.tab.connectionId, props.tab.database, schema, tableFilter || undefined, 40);
-      candidates = filterMentionCandidates(
+      const tables = await listTables(props.tab.connectionId, props.tab.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+      candidates = filterAiTableMentionCandidates(
         tables.map((table) => mentionCandidateFromTable(table)),
         tableFilter,
-        40,
+        AI_TABLE_MENTION_CANDIDATE_LIMIT,
       );
     }
 
     if (requestId !== mentionRequestId) return;
-    mentionCache.value[key] = candidates.slice(0, 40);
+    mentionCache.value[key] = candidates.slice(0, AI_TABLE_MENTION_CANDIDATE_LIMIT);
     mentionCandidates.value = mentionCache.value[key];
-    mentionSelectedIndex.value = 0;
+    setMentionSelectedIndex(0);
   } catch (e: unknown) {
     if (requestId !== mentionRequestId) return;
     const message = e instanceof Error ? e.message : String(e);
@@ -636,9 +637,31 @@ function formatMentionTableType(tableType: string) {
   return t("ai.tableMentionTypes.table");
 }
 
-function filterMentionCandidates(candidates: AiMentionCandidate[], tableFilter: string, limit: number): AiMentionCandidate[] {
-  const normalizedFilter = tableFilter.toLowerCase();
-  return candidates.filter((candidate) => !normalizedFilter || candidate.name.toLowerCase().includes(normalizedFilter)).slice(0, limit);
+function setMentionSelectedIndex(index: number, keepVisible = true) {
+  mentionSelectedIndex.value = Math.max(0, Math.min(index, Math.max(mentionCandidates.value.length - 1, 0)));
+  if (keepVisible) scrollMentionSelectedIntoView();
+}
+
+function scrollMentionSelectedIntoView() {
+  nextTick(() => {
+    const list = mentionListRef.value;
+    if (!list) return;
+    const item = list.querySelector<HTMLElement>(`[data-mention-index="${mentionSelectedIndex.value}"]`);
+    if (!item) return;
+
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const itemTop = itemRect.top - listRect.top + list.scrollTop;
+    const itemBottom = itemTop + itemRect.height;
+    const visibleTop = list.scrollTop;
+    const visibleBottom = visibleTop + list.clientHeight;
+
+    if (itemTop < visibleTop) {
+      list.scrollTop = itemTop;
+    } else if (itemBottom > visibleBottom) {
+      list.scrollTop = itemBottom - list.clientHeight;
+    }
+  });
 }
 
 function refreshMentionState() {
@@ -654,6 +677,11 @@ function refreshMentionState() {
   mentionTimer = setTimeout(() => {
     loadMentionCandidates(mention.query).catch(() => {});
   }, 120);
+}
+
+function onPromptKeyup(event: KeyboardEvent) {
+  if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
+  refreshMentionState();
 }
 
 function insertMention(candidate: AiMentionCandidate) {
@@ -677,12 +705,12 @@ function onPromptKeydown(event: KeyboardEvent) {
   if (mentionOpen.value) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      mentionSelectedIndex.value = Math.min(mentionSelectedIndex.value + 1, Math.max(mentionCandidates.value.length - 1, 0));
+      setMentionSelectedIndex(mentionSelectedIndex.value + 1);
       return;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      mentionSelectedIndex.value = Math.max(mentionSelectedIndex.value - 1, 0);
+      setMentionSelectedIndex(mentionSelectedIndex.value - 1);
       return;
     }
     if ((event.key === "Enter" || event.key === "Tab") && mentionCandidates.value[mentionSelectedIndex.value]) {
@@ -1291,15 +1319,16 @@ async function openExternalUrl(url: string) {
             <div v-else-if="!mentionCandidates.length" class="px-2 py-2 text-xs text-muted-foreground">
               {{ t("ai.tableMentionEmpty") }}
             </div>
-            <div v-else class="max-h-56 overflow-auto p-1">
+            <div v-else ref="mentionListRef" class="max-h-56 overflow-auto p-1">
               <button
                 v-for="(candidate, index) in mentionCandidates"
                 :key="`${candidate.schema || ''}.${candidate.name}`"
                 type="button"
+                :data-mention-index="index"
                 class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
                 :class="{ 'bg-muted': index === mentionSelectedIndex }"
                 @mousedown.prevent="insertMention(candidate)"
-                @mouseenter="mentionSelectedIndex = index"
+                @mouseenter="setMentionSelectedIndex(index, false)"
               >
                 <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span class="min-w-0 flex-1 truncate">
@@ -1331,7 +1360,7 @@ async function openExternalUrl(url: string) {
             :placeholder="activePlaceholder"
             @input="refreshMentionState"
             @click="refreshMentionState"
-            @keyup="refreshMentionState"
+            @keyup="onPromptKeyup"
             @compositionstart="promptCompositionActive = true"
             @compositionend="promptCompositionActive = false"
             @keydown="onPromptKeydown"

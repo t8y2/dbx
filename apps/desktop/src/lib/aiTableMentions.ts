@@ -4,6 +4,9 @@ export interface AiTableMention {
   table: string;
 }
 
+export const AI_TABLE_MENTION_SCHEMA_LIMIT = 8;
+export const AI_TABLE_MENTION_CANDIDATE_LIMIT = 200;
+
 const SIMPLE_IDENTIFIER_RE = /^[\p{L}_][\p{L}\p{N}_$]*$/u;
 
 function isMentionBoundary(char: string | undefined): boolean {
@@ -100,4 +103,9 @@ function formatMentionPart(part: string): string {
 
 export function aiTableMentionKey(schema: string | undefined, table: string): string {
   return `${schema || ""}.${table}`.toLowerCase();
+}
+
+export function filterAiTableMentionCandidates<T extends { name: string }>(candidates: T[], tableFilter: string, limit = AI_TABLE_MENTION_CANDIDATE_LIMIT): T[] {
+  const normalizedFilter = tableFilter.toLowerCase();
+  return candidates.filter((candidate) => !normalizedFilter || candidate.name.toLowerCase().includes(normalizedFilter)).slice(0, limit);
 }

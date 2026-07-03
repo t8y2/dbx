@@ -67,6 +67,22 @@ test("parseMongoCountDocumentsCommand accepts shell-style count commands", () =>
   });
 });
 
+test("parseMongoCountDocumentsCommand accepts legacy count helpers", () => {
+  assert.deepEqual(parseMongoCountDocumentsCommand("db.projects.count({ active: true })"), {
+    collection: "projects",
+    filter: '{ "active": true }',
+  });
+  assert.deepEqual(parseMongoCountDocumentsCommand('db.getCollection("audit.logs").count()'), {
+    collection: "audit.logs",
+    filter: "{}",
+  });
+  assert.deepEqual(parseMongoCountDocumentsCommand("db.projects.find({ active: true }).count()"), {
+    collection: "projects",
+    filter: '{ "active": true }',
+  });
+  assert.equal(parseMongoFindCommand("db.projects.find({ active: true }).count()"), null);
+});
+
 test("parseMongoAggregateCommand accepts aggregate pipelines", () => {
   assert.deepEqual(parseMongoAggregateCommand('db.projects.aggregate([{"$match":{"active":true}},{"$group":{"_id":"$owner","total":{"$sum":1}}}])'), {
     collection: "projects",

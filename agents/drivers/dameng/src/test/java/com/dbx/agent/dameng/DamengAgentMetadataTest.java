@@ -19,6 +19,7 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 class DamengAgentMetadataTest {
     @Test
@@ -188,6 +189,27 @@ class DamengAgentMetadataTest {
         Assertions.assertTrue(ddl.contains("COMMENT ON COLUMN \"APP\".\"USERS\".\"ID\" IS 'id comment';"), ddl);
     }
 
+    @Test
+    void appendsIndependentIndexesToTableDdl() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnectionWithIndexes(sqls));
+
+        String ddl = agent.getTableDdl("APP", "USERS");
+
+        Assertions.assertTrue(
+            ddl.contains("CREATE INDEX \"APP\".\"IDX_USERS_NAME\" ON \"APP\".\"USERS\" (\"NAME\");"),
+            ddl
+        );
+        Assertions.assertTrue(
+            ddl.contains("CREATE UNIQUE INDEX \"APP\".\"UX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"),
+            ddl
+        );
+        Assertions.assertFalse(ddl.contains("PK_USERS"), ddl);
+        String indexSql = sqls.stream().filter(sql -> sql.contains("ALL_INDEXES")).findFirst().orElseThrow();
+        Assertions.assertTrue(indexSql.contains("CONSTRAINT_TYPE IN ('P', 'U')"), indexSql);
+    }
+
     private static Connection metadataConnection() {
         return metadataConnection("id comment", null);
     }
@@ -197,12 +219,40 @@ class DamengAgentMetadataTest {
     }
 
     private static Connection metadataConnection(String allColumnComment, String fallbackColumnComment, boolean includeMaterializedView) {
+        return metadataConnection(allColumnComment, fallbackColumnComment, includeMaterializedView, List.of(), Map.of(), null);
+    }
+
+    private static Connection metadataConnectionWithIndexes(List<String> sqls) {
+        return metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of("IDX_USERS_NAME", "UX_USERS_EMAIL"),
+            Map.of(
+                "IDX_USERS_NAME", "CREATE INDEX \"APP\".\"IDX_USERS_NAME\" ON \"APP\".\"USERS\" (\"NAME\")",
+                "UX_USERS_EMAIL", "CREATE UNIQUE INDEX \"APP\".\"UX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\")"
+            ),
+            sqls
+        );
+    }
+
+    private static Connection metadataConnection(
+        String allColumnComment,
+        String fallbackColumnComment,
+        boolean includeMaterializedView,
+        List<String> independentIndexNames,
+        Map<String, String> indexDdlByName,
+        List<String> sqls
+    ) {
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
             if ("prepareStatement".equals(name)) {
                 String sql = (String) args[0];
+                if (sqls != null) {
+                    sqls.add(sql);
+                }
                 if (sql.contains("DBMS_METADATA.GET_DDL")) {
-                    return metadataStatement(List.of(List.of("CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);")));
+                    return dbmsMetadataStatement(indexDdlByName);
                 }
                 if (sql.contains("ALL_CONS_COLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));
@@ -236,6 +286,9 @@ class DamengAgentMetadataTest {
                 }
                 if (sql.contains("ALL_OBJECTS")) {
                     return metadataStatement(List.of());
+                }
+                if (sql.contains("ALL_INDEXES")) {
+                    return metadataStatement(independentIndexNames.stream().map(indexName -> List.of((Object) indexName)).toList());
                 }
                 if (sql.contains("ALL_TAB_COMMENTS")) {
                     List<List<Object>> rows = new ArrayList<>();
@@ -273,6 +326,33 @@ class DamengAgentMetadataTest {
             }
             if ("isClosed".equals(name)) {
                 return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement dbmsMetadataStatement(Map<String, String> indexDdlByName) {
+        List<String> params = new ArrayList<>();
+        return proxy(PreparedStatement.class, (method, args) -> {
+            String name = method.getName();
+            if ("executeQuery".equals(name)) {
+                String objectType = params.isEmpty() ? "" : params.get(0);
+                if ("INDEX".equals(objectType)) {
+                    String indexName = params.size() > 1 ? params.get(1) : "";
+                    return metadataResultSet(List.of(List.of(indexDdlByName.getOrDefault(indexName, ""))));
+                }
+                return metadataResultSet(List.of(List.of("CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);")));
+            }
+            if ("setString".equals(name)) {
+                int index = ((Integer) args[0]) - 1;
+                while (params.size() <= index) {
+                    params.add("");
+                }
+                params.set(index, String.valueOf(args[1]));
+                return null;
+            }
+            if ("close".equals(name)) {
+                return null;
             }
             return defaultValue(method.getReturnType());
         });

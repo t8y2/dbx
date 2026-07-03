@@ -14,6 +14,7 @@ const OFFICIAL_UPDATE_ENDPOINTS: [&str; 2] = [
 ];
 const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
+const ATOMGIT_RELEASE_DOWNLOAD_PREFIX: &str = "https://atomgit.com/t8y2/dbx/releases/download/";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +22,7 @@ const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
 pub enum UpdateDownloadSource {
     Official,
     Cnb,
+    Atomgit,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -34,6 +36,7 @@ impl UpdateDownloadSource {
         match self {
             Self::Official => "official",
             Self::Cnb => "cnb",
+            Self::Atomgit => "atomgit",
         }
     }
 
@@ -45,23 +48,35 @@ impl UpdateDownloadSource {
                     latest_version.ok_or_else(|| "Latest version is required for CNB updates.".to_string())?;
                 Ok(vec![format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version))])
             }
+            Self::Atomgit => {
+                let version =
+                    latest_version.ok_or_else(|| "Latest version is required for AtomGit updates.".to_string())?;
+                Ok(vec![format!("{ATOMGIT_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version))])
+            }
         }
     }
 
     fn rewrite_download_url(&self, url: &str) -> Result<Option<String>, String> {
-        if !matches!(self, Self::Cnb) {
+        let Some(target_prefix) = self.mirror_download_prefix() else { return Ok(None) };
+
+        if url.starts_with(target_prefix) {
             return Ok(None);
         }
 
-        if url.starts_with(CNB_RELEASE_DOWNLOAD_PREFIX) {
-            return Ok(None);
-        }
-
+        // Mirror latest.json files still contain GitHub asset URLs, so rewrite only that known release prefix.
         let rewritten = url
             .strip_prefix(GITHUB_RELEASE_DOWNLOAD_PREFIX)
-            .map(|path| format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{path}"))
-            .ok_or_else(|| format!("Unsupported update download URL for CNB source: {url}"))?;
+            .map(|path| format!("{target_prefix}{path}"))
+            .ok_or_else(|| format!("Unsupported update download URL for {} source: {url}", self.label()))?;
         Ok(Some(rewritten))
+    }
+
+    fn mirror_download_prefix(&self) -> Option<&'static str> {
+        match self {
+            Self::Cnb => Some(CNB_RELEASE_DOWNLOAD_PREFIX),
+            Self::Atomgit => Some(ATOMGIT_RELEASE_DOWNLOAD_PREFIX),
+            Self::Official => None,
+        }
     }
 }
 
@@ -145,7 +160,10 @@ pub async fn download_and_install_update(
 
 #[cfg(test)]
 mod tests {
-    use super::{tag_version, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX, OFFICIAL_UPDATE_ENDPOINTS};
+    use super::{
+        tag_version, UpdateDownloadSource, ATOMGIT_RELEASE_DOWNLOAD_PREFIX, CNB_RELEASE_DOWNLOAD_PREFIX,
+        OFFICIAL_UPDATE_ENDPOINTS,
+    };
 
     #[test]
     fn normalizes_update_tag_versions() {
@@ -166,6 +184,12 @@ mod tests {
     }
 
     #[test]
+    fn builds_atomgit_update_endpoint_for_tag() {
+        let endpoints = UpdateDownloadSource::Atomgit.endpoints(Some("0.5.44")).unwrap();
+        assert_eq!(endpoints, vec![format!("{ATOMGIT_RELEASE_DOWNLOAD_PREFIX}v0.5.44/latest.json")]);
+    }
+
+    #[test]
     fn rewrites_github_asset_url_to_cnb() {
         let download_url = UpdateDownloadSource::Cnb
             .rewrite_download_url("https://github.com/t8y2/dbx/releases/download/v0.5.39/DBX_0.5.39_aarch64.dmg")
@@ -178,6 +202,23 @@ mod tests {
     fn accepts_existing_cnb_asset_url() {
         let download_url = UpdateDownloadSource::Cnb
             .rewrite_download_url("https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.5.39/DBX_0.5.39_aarch64.dmg")
+            .unwrap();
+        assert_eq!(download_url, None);
+    }
+
+    #[test]
+    fn rewrites_github_asset_url_to_atomgit() {
+        let download_url = UpdateDownloadSource::Atomgit
+            .rewrite_download_url("https://github.com/t8y2/dbx/releases/download/v0.5.44/DBX_0.5.44_x64.dmg")
+            .unwrap()
+            .unwrap();
+        assert_eq!(download_url, "https://atomgit.com/t8y2/dbx/releases/download/v0.5.44/DBX_0.5.44_x64.dmg");
+    }
+
+    #[test]
+    fn accepts_existing_atomgit_asset_url() {
+        let download_url = UpdateDownloadSource::Atomgit
+            .rewrite_download_url("https://atomgit.com/t8y2/dbx/releases/download/v0.5.44/DBX_0.5.44_x64.dmg")
             .unwrap();
         assert_eq!(download_url, None);
     }

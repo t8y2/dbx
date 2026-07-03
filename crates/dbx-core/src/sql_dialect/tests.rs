@@ -62,6 +62,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::SqlServer)), TablePaginationStrategy::SqlServerTop);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Iris)), TablePaginationStrategy::IrisTop);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Informix)), TablePaginationStrategy::InformixFirst);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Firebird)), TablePaginationStrategy::FirebirdRows);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::OceanbaseOracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
@@ -123,6 +124,17 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             limit: 100,
         }),
         "SELECT \"id\", \"name\" FROM \"DB2INST1\".\"USERS\" ORDER BY \"id\" ASC FETCH FIRST 100 ROWS ONLY"
+    );
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Firebird),
+            schema: None,
+            table_name: "USERS",
+            columns: &columns,
+            order_columns: &keys,
+            limit: 100,
+        }),
+        "SELECT \"id\", \"name\" FROM \"USERS\" ORDER BY \"id\" ASC ROWS 100"
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
@@ -330,6 +342,23 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
         }),
         "SELECT * FROM \"DB2INST1\".\"ORDERS\" WHERE (amount > 10) FETCH FIRST 50 ROWS ONLY"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Firebird),
+            schema: None,
+            table_name: "ORDERS".to_string(),
+            table_type: None,
+            primary_keys: vec!["ID".to_string()],
+            columns: vec!["ID".to_string(), "AMOUNT".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: Some("\"ID\" ASC".to_string()),
+            limit: Some(50),
+            offset: Some(100),
+            where_input: Some("WHERE amount > 10".to_string()),
+            include_row_id: false,
+        }),
+        "SELECT * FROM \"ORDERS\" WHERE (amount > 10) ORDER BY \"ID\" ASC ROWS 101 TO 150"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

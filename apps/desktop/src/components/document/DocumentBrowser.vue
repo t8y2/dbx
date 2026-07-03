@@ -16,7 +16,18 @@ import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/documentViewerFontStyle";
-import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, defaultDocumentFilterRule, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/documentStoreProvider";
+import {
+  buildDocumentFilterCondition,
+  combineDocumentFilterConditions,
+  currentDocumentFilterJson,
+  currentDocumentSortJson,
+  defaultDocumentFilterRule,
+  documentFilterModeNeedsValue,
+  documentFilterModeOptions,
+  documentStoreProviderFor,
+  type DocumentFilterMode,
+  type DocumentFilterRule,
+} from "@/lib/documentStoreProvider";
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -199,7 +210,7 @@ function resetDocumentFilterBuilder() {
 }
 
 function currentDocumentFilter(): string | undefined {
-  return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value);
+  return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
 }
 
 const documentQueryPreview = computed(() => {
@@ -219,7 +230,12 @@ const documentQueryPreview = computed(() => {
 });
 
 async function applyDocumentStructuredFilters() {
-  const items = documentFilterRules.value.map((rule) => ({ rule, condition: buildDocumentFilterCondition(rule) })).filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
+  const items = documentFilterRules.value
+    .map((rule) => ({
+      rule,
+      condition: buildDocumentFilterCondition(rule, { kind: documentStoreProvider.value.kind }),
+    }))
+    .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
   const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
     items.map((item) => item.rule),
@@ -433,7 +449,7 @@ async function load() {
   const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
     const filter = currentDocumentFilter();
-    const sort = sortInput.value.trim() || undefined;
+    const sort = currentDocumentSortJson(sortInput.value);
     const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     const nextDocuments = result.documents.map(asRecord);

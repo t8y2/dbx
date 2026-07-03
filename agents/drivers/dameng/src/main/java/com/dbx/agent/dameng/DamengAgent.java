@@ -383,7 +383,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 stmt.setString(3, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
-                        return appendTableAndColumnComments(coalesce(rs.getString(1)), schema, table);
+                        String ddl = appendTableAndColumnComments(coalesce(rs.getString(1)), schema, table);
+                        return appendIndependentIndexDdl(ddl, schema, table);
                     }
                 }
             }
@@ -831,6 +832,64 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result.toString();
     }
 
+    private String appendIndependentIndexDdl(String ddl, String schema, String table) throws Exception {
+        StringBuilder result = new StringBuilder(ddl == null ? "" : ddl.trim());
+        for (String indexName : independentIndexNames(schema, table)) {
+            if (containsCreateIndex(result.toString(), schema, indexName)) {
+                continue;
+            }
+            String indexDdl = indexDdl(schema, indexName);
+            if (notBlank(indexDdl)) {
+                appendDdlStatement(result, ensureStatementTerminator(indexDdl));
+            }
+        }
+        return result.toString();
+    }
+
+    private List<String> independentIndexNames(String schema, String table) throws Exception {
+        List<String> result = new ArrayList<>();
+        // Primary-key and unique-constraint backing indexes are already represented in table DDL.
+        String sql = """
+            SELECT i.INDEX_NAME
+            FROM ALL_INDEXES i
+            WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM ALL_CONSTRAINTS c
+                    WHERE c.OWNER = i.TABLE_OWNER
+                        AND c.TABLE_NAME = i.TABLE_NAME
+                        AND c.INDEX_NAME = i.INDEX_NAME
+                        AND c.CONSTRAINT_TYPE IN ('P', 'U')
+                )
+            ORDER BY i.INDEX_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String indexName = rs.getString(1);
+                    if (notBlank(indexName)) {
+                        result.add(indexName);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    private String indexDdl(String schema, String indexName) throws Exception {
+        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, "INDEX");
+            stmt.setString(2, indexName);
+            stmt.setString(3, schema);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
     private String tableComment(String schema, String table) throws Exception {
         String sql = """
             SELECT COMMENTS
@@ -847,6 +906,10 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     private static void appendCommentStatement(StringBuilder ddl, String statement) {
+        appendDdlStatement(ddl, statement);
+    }
+
+    private static void appendDdlStatement(StringBuilder ddl, String statement) {
         if (!ddl.isEmpty()) {
             if (ddl.charAt(ddl.length() - 1) != '\n') {
                 ddl.append("\n");
@@ -856,12 +919,26 @@ public final class DamengAgent extends BaseDatabaseAgent {
         ddl.append(statement);
     }
 
+    private static String ensureStatementTerminator(String statement) {
+        String trimmed = coalesce(statement).trim();
+        if (trimmed.isEmpty() || trimmed.endsWith(";")) {
+            return trimmed;
+        }
+        return trimmed + ";";
+    }
+
     private static boolean containsCommentOnTable(String ddl, String schema, String table) {
         return normalizedDdl(ddl).contains("COMMENT ON TABLE " + normalizedQualifiedName(schema, table));
     }
 
     private static boolean containsCommentOnColumn(String ddl, String schema, String table, String column) {
         return normalizedDdl(ddl).contains("COMMENT ON COLUMN " + normalizedQualifiedName(schema, table) + "." + normalizedIdentifier(column));
+    }
+
+    private static boolean containsCreateIndex(String ddl, String schema, String indexName) {
+        String normalized = normalizedDdl(ddl);
+        return normalized.contains(" INDEX " + normalizedQualifiedName(schema, indexName) + " ")
+            || normalized.contains(" INDEX " + normalizedIdentifier(indexName) + " ");
     }
 
     private static String qualifiedName(String schema, String name) {

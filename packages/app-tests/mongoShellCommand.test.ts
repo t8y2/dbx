@@ -189,6 +189,27 @@ test("parseMongoCountDocumentsCommand parses db collection countDocuments", () =
   });
 });
 
+test("parseMongoCountDocumentsCommand parses legacy count helpers", () => {
+  assert.deepEqual(parseMongoCountDocumentsCommand("db.products.count({ active: true })"), {
+    collection: "products",
+    filter: '{ "active": true }',
+  });
+  assert.deepEqual(parseMongoCountDocumentsCommand('db.getCollection("audit.logs").count()'), {
+    collection: "audit.logs",
+    filter: "{}",
+  });
+  assert.deepEqual(parseMongoCountDocumentsCommand("db.products.find({ active: true }).count()"), {
+    collection: "products",
+    filter: '{ "active": true }',
+  });
+  assert.equal(parseMongoFindCommand("db.products.find({ active: true }).count()"), null);
+  assert.deepEqual(parseMongoCommand("db.products.find({ active: true }).count()")?.command, {
+    kind: "countDocuments",
+    collection: "products",
+    filter: '{ "active": true }',
+  });
+});
+
 test("parseMongoAggregateCommand parses db collection aggregate", () => {
   assert.deepEqual(parseMongoAggregateCommand('db.products.aggregate([{"$match":{"active":true}},{"$count":"total"}])'), {
     collection: "products",

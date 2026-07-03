@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { Download, FileInput, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X, ArrowDownWideNarrow } from "@lucide/vue";
+import { ArrowDownWideNarrow, Download, FileInput, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import * as api from "@/lib/api";
@@ -738,8 +739,8 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     return [
       { label: t("savedSql.newFolder"), action: openNewFolderInput, icon: FolderPlus },
       { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus },
-      { label: t("sqlLibrary.importDirectory"), action: () => importDirectoryIntoLibrary(), icon: Upload },
-      { label: t("sqlLibrary.exportLibrary"), action: () => exportFolderContents(), icon: Download },
+      { label: t("sqlLibrary.importDirectory"), action: () => importDirectoryIntoLibrary(), icon: Download },
+      { label: t("sqlLibrary.exportLibrary"), action: () => exportFolderContents(), icon: Upload },
       { label: "", separator: true },
       { label: t("sqlLibrary.openStorageDirectory"), action: openSqlStorageDirectory, icon: LocateFixed },
       { label: t("sqlLibrary.chooseSyncDirectory"), action: chooseSyncDirectory, icon: FolderCog },
@@ -769,8 +770,8 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   return [
     { label: t("savedSql.newFolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
     { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
-    { label: t("sqlLibrary.importIntoFolder"), action: () => importDirectoryIntoLibrary(target), icon: Upload },
-    { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Download },
+    { label: t("sqlLibrary.importIntoFolder"), action: () => importDirectoryIntoLibrary(target), icon: Download },
+    { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Upload },
     { label: "", separator: true },
     { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil },
     { label: "", separator: true },
@@ -1019,21 +1020,31 @@ function showDropInside(targetId: string) {
       <span class="text-[13px] font-medium">{{ t("sqlLibrary.title") }}</span>
       <span v-if="hasSelection" class="text-[12px] text-muted-foreground ml-1">({{ selectedCount }})</span>
       <span class="flex-1" />
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="sortMode === 'folder' ? t('sqlLibrary.sortByDate') : t('sqlLibrary.sortByFolder')" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
-        <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
-      </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('savedSql.newFolder')" @click="openNewFolderInput">
-        <FolderPlus class="h-3 w-3" />
-      </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('sqlLibrary.importDirectory')" @click="importDirectoryIntoLibrary()">
-        <Upload class="h-3 w-3" />
-      </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('sqlLibrary.exportLibrary')" @click="exportFolderContents()">
-        <Download class="h-3 w-3" />
-      </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
-        <X class="h-3 w-3" />
-      </Button>
+      <LightTooltip :text="sortMode === 'folder' ? t('sqlLibrary.sortByDate') : t('sqlLibrary.sortByFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
+          <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip :text="t('savedSql.newFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="openNewFolderInput">
+          <FolderPlus class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip :text="t('sqlLibrary.importDirectory')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="importDirectoryIntoLibrary()">
+          <Download class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip :text="t('sqlLibrary.exportLibrary')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="exportFolderContents()">
+          <Upload class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip :text="t('common.close')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
+          <X class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
     </div>
 
     <div class="border-b shrink-0 px-2 py-1">

@@ -129,24 +129,6 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
   await ensureConnected(config);
   if (config.db_type === "mongodb") {
-    const find = parseMongoFindCommand(sql);
-    if (find) {
-      const res = await apiFetch("/api/mongo/find-documents", {
-        method: "POST",
-        body: JSON.stringify({
-          connectionId: config.id,
-          database: config.database || "",
-          collection: find.collection,
-          skip: find.skip,
-          limit: find.limit,
-          filter: find.filter,
-          projection: find.projection,
-          sort: find.sort,
-        }),
-      });
-      const result = (await res.json()) as { documents: unknown[]; total: number };
-      return mongoDocumentsToQueryResult(result.documents.slice(0, options?.maxRows ?? result.documents.length), result.total);
-    }
     if (parseMongoVersionCommand(sql)) {
       const res = await apiFetch("/api/mongo/server-version", {
         method: "POST",
@@ -173,6 +155,24 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       });
       const result = (await res.json()) as { documents: unknown[]; total: number };
       return { columns: ["count"], rows: [{ count: result.total }], row_count: 1 };
+    }
+    const find = parseMongoFindCommand(sql);
+    if (find) {
+      const res = await apiFetch("/api/mongo/find-documents", {
+        method: "POST",
+        body: JSON.stringify({
+          connectionId: config.id,
+          database: config.database || "",
+          collection: find.collection,
+          skip: find.skip,
+          limit: find.limit,
+          filter: find.filter,
+          projection: find.projection,
+          sort: find.sort,
+        }),
+      });
+      const result = (await res.json()) as { documents: unknown[]; total: number };
+      return mongoDocumentsToQueryResult(result.documents.slice(0, options?.maxRows ?? result.documents.length), result.total);
     }
     const aggregate = parseMongoAggregateCommand(sql);
     if (aggregate) {
@@ -220,7 +220,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
+      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
     );
   }
   const res = await apiFetch("/api/query/execute", {

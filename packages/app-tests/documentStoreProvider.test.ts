@@ -26,6 +26,7 @@ test("providers build store-specific query previews", () => {
   assert.equal(mongo.documentsLabel({ total: 7, t }), "mongo.documents:7");
   assert.equal(mongo.queryPreview({ collection: "orders", filterJson: '{"city":"长治"}', sortJson: '{"createdAt":-1}', skip: 20, limit: 10 }), 'db.getCollection("orders").find({"city":"长治"}).sort({"createdAt":-1}).skip(20).limit(10)');
   assert.equal(mongo.queryPreview({ collection: "order-events", filterJson: '{"city":"长治"}', sortJson: undefined, skip: 0, limit: 100 }), 'db.getCollection("order-events").find({"city":"长治"}).skip(0).limit(100)');
+  assert.equal(mongo.queryPreview({ collection: "orders", filterJson: '{"snowflake":{"$numberLong":"9007199254740993"}}', sortJson: undefined, skip: 0, limit: 100 }), 'db.getCollection("orders").find({"snowflake":NumberLong("9007199254740993")}).skip(0).limit(100)');
   assert.equal(elasticsearch.documentsLabel({ total: 7, t }), "Documents");
   assert.equal(elasticsearch.filterInputLabel, "filter");
   assert.equal(
@@ -40,6 +41,34 @@ test("builds reusable document filter conditions", () => {
     city: { $not: { $regex: "test", $options: "i" } },
   });
   assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "is-not-null", rawValue: "" })), { city: { $ne: null } });
+});
+
+test("preserves MongoDB int64 document filter values", () => {
+  const id = "2048938405781032962";
+  const firstUnsafeInteger = "9007199254740993";
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "processInfoId", rawValue: id }), { kind: "mongodb" }), {
+    processInfoId: { $numberLong: id },
+  });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "snowflake", rawValue: firstUnsafeInteger }), { kind: "mongodb" }), {
+    snowflake: { $numberLong: firstUnsafeInteger },
+  });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "processInfoId", mode: "greater-than", rawValue: id }), { kind: "mongodb" }), {
+    processInfoId: { $gt: { $numberLong: id } },
+  });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "processInfoId", mode: "like", rawValue: id }), { kind: "mongodb" }), {
+    processInfoId: { $regex: id, $options: "i" },
+  });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "processInfoId", rawValue: `"${id}"` }), { kind: "mongodb" }), {
+    processInfoId: id,
+  });
+  assert.equal(currentDocumentFilterJson(`{processInfoId:${id}}`, null, "mongodb"), JSON.stringify({ processInfoId: { $numberLong: id } }));
+  assert.equal(currentDocumentFilterJson("", { processInfoId: { $numberLong: id } }, "mongodb"), JSON.stringify({ processInfoId: { $numberLong: id } }));
+});
+
+test("keeps unsafe standalone document filter integers precise outside MongoDB", () => {
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "processInfoId", rawValue: "2048938405781032962" })), {
+    processInfoId: "2048938405781032962",
+  });
 });
 
 test("combines manual and structured document filters", () => {

@@ -125,6 +125,18 @@ class MongoAgentTest {
     }
 
     @Test
+    void documentParametersParseExtendedJsonLongFilters() {
+        JsonObject params = new JsonObject();
+        params.addProperty("filter", "{\"processInfoId\":{\"$numberLong\":\"2048938405781032962\"},\"snowflake\":{\"$numberLong\":\"9007199254740993\"}}");
+
+        Document filter = MongoAgent.documentOrNull(params, "filter");
+
+        assertNotNull(filter);
+        assertEquals(2_048_938_405_781_032_962L, filter.get("processInfoId"));
+        assertEquals(9_007_199_254_740_993L, filter.get("snowflake"));
+    }
+
+    @Test
     void serverVersionMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"server_version\","

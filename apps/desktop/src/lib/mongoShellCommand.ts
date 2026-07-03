@@ -88,6 +88,7 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
 
   const chain = source.slice(findCloseIndex + 1).trim();
   if (chain && !chain.startsWith(".")) return null;
+  if (findChainedMethodCallIndex(chain, "count") >= 0) return null;
 
   const sortArg = readChainedCallArgument(chain, "sort");
   let sort: string | undefined;
@@ -111,9 +112,36 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   };
 }
 
+export function applyMongoFindSort(input: string, column: string, direction: "asc" | "desc"): string | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const parsed = parseMongoFindCommand(source);
+  if (!parsed) return null;
+
+  const target = parseFindTarget(source);
+  if (!target) return null;
+
+  const findOpenIndex = source.indexOf("(", target.findCallIndex);
+  const findCloseIndex = findMatchingParen(source, findOpenIndex);
+  if (findCloseIndex < 0) return null;
+
+  const prefix = source.slice(0, findCloseIndex + 1);
+  const chainSource = source.slice(findCloseIndex + 1).trim();
+  if (chainSource && !chainSource.startsWith(".")) return null;
+
+  const chain = removeChainedMethodCall(chainSource, "sort");
+  const sortCall = `.sort(${JSON.stringify({ [column]: direction === "asc" ? 1 : -1 })})`;
+  return `${prefix}${sortCall}${chain}`;
+}
+
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  const target = parseCollectionMethodTarget(source, "countDocuments");
+  // Accept deprecated Mongo shell count helpers for old server workflows, but
+  // keep DBX's internal execution mapped to the countDocuments result shape.
+  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseFindCountCommand(source);
+}
+
+function parseCollectionCountCommand(source: string, method: "countDocuments" | "count"): MongoCountDocumentsCommand | null {
+  const target = parseCollectionMethodTarget(source, method);
   if (!target) return null;
 
   const openIndex = source.indexOf("(", target.methodCallIndex);
@@ -123,6 +151,28 @@ export function parseMongoCountDocumentsCommand(input: string): MongoCountDocume
   const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
   if (args.length > 1 && args.slice(1).some((arg) => arg.trim())) return null;
   const filter = normalizeJsonArgument(args[0] || "{}");
+  if (!filter) return null;
+
+  return {
+    collection: target.collection,
+    filter,
+  };
+}
+
+function parseFindCountCommand(source: string): MongoCountDocumentsCommand | null {
+  const target = parseFindTarget(source);
+  if (!target) return null;
+
+  const findOpenIndex = source.indexOf("(", target.findCallIndex);
+  const findCloseIndex = findMatchingParen(source, findOpenIndex);
+  if (findCloseIndex < 0) return null;
+
+  const chain = source.slice(findCloseIndex + 1).trim();
+  if (!hasSingleEmptyChainedCall(chain, "count")) return null;
+
+  const findArgs = splitTopLevel(source.slice(findOpenIndex + 1, findCloseIndex));
+  if (findArgs.length > 2 && findArgs.slice(2).some((arg) => arg.trim())) return null;
+  const filter = normalizeJsonArgument(findArgs[0] || "{}");
   if (!filter) return null;
 
   return {
@@ -269,16 +319,18 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
   // returned kind matches the result renderer we want to use downstream.
   const parsers: Array<(source: string) => MongoCommand | null> = [
     (source) => {
-      const find = parseMongoFindCommand(source);
-      return find ? { kind: "find", ...find } : null;
-    },
-    (source) => {
       const version = parseMongoVersionCommand(source);
       return version ?? null;
     },
     (source) => {
+      // Legacy Mongo shell uses count()/find().count(); keep accepting it
+      // while mapping to DBX's countDocuments-compatible result path.
       const count = parseMongoCountDocumentsCommand(source);
       return count ? { kind: "countDocuments", ...count } : null;
+    },
+    (source) => {
+      const find = parseMongoFindCommand(source);
+      return find ? { kind: "find", ...find } : null;
     },
     (source) => {
       const aggregate = parseMongoAggregateCommand(source);
@@ -903,6 +955,21 @@ function readChainedIntegerArgument(source: string, name: string, fallback: numb
   return value;
 }
 
+function removeChainedMethodCall(chain: string, name: string): string {
+  if (!chain.trim()) return "";
+  let result = chain.trim();
+  const pattern = chainedMethodCallPattern(name);
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(result)) !== null) {
+    const openIndex = result.indexOf("(", match.index);
+    const closeIndex = findMatchingParen(result, openIndex);
+    if (closeIndex < 0) break;
+    result = `${result.slice(0, match.index)}${result.slice(closeIndex + 1)}`.trim();
+    pattern.lastIndex = 0;
+  }
+  return result;
+}
+
 function readChainedCallArgument(source: string, name: string): string | undefined {
   const pattern = chainedMethodCallPattern(name);
   let match = pattern.exec(source);
@@ -913,6 +980,15 @@ function readChainedCallArgument(source: string, name: string): string | undefin
     match = pattern.exec(source);
   }
   return undefined;
+}
+
+function hasSingleEmptyChainedCall(source: string, name: string): boolean {
+  const trimmed = source.trim();
+  const match = chainedMethodCallPattern(name).exec(trimmed);
+  if (!match || match.index !== 0) return false;
+  const openIndex = trimmed.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(trimmed, openIndex);
+  return closeIndex >= 0 && !trimmed.slice(openIndex + 1, closeIndex).trim() && !trimmed.slice(closeIndex + 1).trim();
 }
 
 function findChainedMethodCallIndex(source: string, name: string): number {

@@ -10,8 +10,8 @@ use crate::models::connection::DatabaseType;
 use crate::query::{execute_sql_statement_with_options, QueryExecutionOptions};
 use crate::schema::get_columns_core;
 use crate::sql_dialect::{
-    build_count_table_sql, pagination_strategy, qualified_table_name, quote_table_identifier, PaginationContext,
-    TablePaginationStrategy,
+    build_count_table_sql, firebird_rows_clause, pagination_strategy, qualified_table_name, quote_table_identifier,
+    PaginationContext, TablePaginationStrategy,
 };
 use crate::transfer::{generate_comment_ddl, generate_create_table_ddl};
 
@@ -906,6 +906,10 @@ fn build_data_compare_select_sql(
                 if offset > 0 { format!("SKIP {offset} FIRST {row_limit}") } else { format!("FIRST {row_limit}") };
             format!("SELECT {row_limit_clause} {select_columns} FROM {table}{order_by}")
         }
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(row_limit, offset);
+            format!("SELECT {select_columns} FROM {table}{order_by} {rows}")
+        }
         TablePaginationStrategy::AgentMaxRows => format!("SELECT {select_columns} FROM {table}{order_by};"),
         TablePaginationStrategy::Unbounded => format!("SELECT {select_columns} FROM {table}{order_by}"),
         TablePaginationStrategy::QuestDbLimit => {
@@ -1466,6 +1470,22 @@ mod tests {
                 0,
             ),
             "SELECT TOP (50) [id], [name] FROM [dbo].[users] ORDER BY [id] ASC"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_firebird_rows_syntax() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Firebird,
+                "ignored",
+                "USERS",
+                &["ID".to_string(), "NAME".to_string()],
+                &["ID".to_string()],
+                25,
+                50,
+            ),
+            "SELECT \"ID\", \"NAME\" FROM \"USERS\" ORDER BY \"ID\" ASC ROWS 51 TO 75"
         );
     }
 

@@ -4891,6 +4891,23 @@ mod ddl_tests {
             "SELECT pg_get_tabledef('\"tenant''s schema\".\"active users\"')"
         );
     }
+
+    #[test]
+    fn mysql_display_ddl_gets_statement_terminator() {
+        let ddl = "CREATE TABLE `users` (\n  `id` int NOT NULL\n) ENGINE=InnoDB";
+
+        assert_eq!(
+            ensure_display_ddl_terminated(ddl.to_string()),
+            "CREATE TABLE `users` (\n  `id` int NOT NULL\n) ENGINE=InnoDB;"
+        );
+    }
+
+    #[test]
+    fn mysql_display_ddl_does_not_duplicate_existing_terminator() {
+        let ddl = "CREATE TABLE `users` (`id` int);\n";
+
+        assert_eq!(ensure_display_ddl_terminated(ddl.to_string()), ddl);
+    }
 }
 
 pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, table: &str) -> Result<String, String> {
@@ -4905,14 +4922,27 @@ pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, table: &str) -> Result<Strin
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let row = rows.first().ok_or("DDL not found")?;
-    row.get_opt::<String, usize>(1)
+    let ddl = row
+        .get_opt::<String, usize>(1)
         .and_then(|result| result.ok())
         .or_else(|| {
             row.get_opt::<Vec<u8>, usize>(1)
                 .and_then(|result| result.ok())
                 .map(|b| String::from_utf8_lossy(&b).to_string())
         })
-        .ok_or_else(|| "Failed to read DDL".to_string())
+        .ok_or_else(|| "Failed to read DDL".to_string())?;
+    Ok(ensure_display_ddl_terminated(ddl))
+}
+
+fn ensure_display_ddl_terminated(sql: String) -> String {
+    let trimmed = sql.trim_end();
+    // SHOW CREATE TABLE returns a table definition, not a runnable script; DBX
+    // displays/copies it as SQL, so include the default statement terminator.
+    if trimmed.ends_with(';') {
+        sql
+    } else {
+        format!("{trimmed};")
+    }
 }
 
 pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, table: &str) -> Result<String, String> {

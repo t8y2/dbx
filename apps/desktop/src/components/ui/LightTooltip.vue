@@ -10,6 +10,7 @@ const props = withDefaults(
     delay?: number;
     closeDelay?: number;
     openOnFocus?: boolean;
+    nowrap?: boolean;
   }>(),
   {
     disabled: false,
@@ -18,6 +19,7 @@ const props = withDefaults(
     delay: 300,
     closeDelay: 100,
     openOnFocus: true,
+    nowrap: false,
   },
 );
 
@@ -240,7 +242,7 @@ watch(
       v-if="show"
       ref="tooltipRef"
       class="fixed z-50 rounded-md bg-foreground text-xs text-background"
-      :class="[slots.content ? '' : 'inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', tooltipTransformClass]"
+      :class="[slots.content ? '' : ['inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', nowrap ? 'whitespace-nowrap' : ''], tooltipTransformClass]"
       :style="{ left: `${x}px`, top: `${y}px` }"
       role="tooltip"
       @mouseenter="clearCloseTimer"

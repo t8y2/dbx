@@ -1916,7 +1916,7 @@ test("data tab execution preserves pagination offset metadata", async () => {
   }
 });
 
-test("data tab default pagination is independent from query result page size", async () => {
+test("data tab default pagination follows persisted rows-per-page", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -1949,12 +1949,12 @@ test("data tab default pagination is independent from query result page size", a
   });
 
   try {
-    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 100;');
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 1000;');
 
     assert.equal(preparedPagination, false);
-    assert.equal(executeBody.maxRows, 100);
-    assert.equal(executeBody.fetchSize, 100);
-    assert.equal(tab.resultPageLimit, 100);
+    assert.equal(executeBody.maxRows, 1000);
+    assert.equal(executeBody.fetchSize, 1000);
+    assert.equal(tab.resultPageLimit, 1000);
     assert.equal(tab.resultPageOffset, 0);
   } finally {
     globalThis.fetch = originalFetch;

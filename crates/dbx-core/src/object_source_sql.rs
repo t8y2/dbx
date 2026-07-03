@@ -125,7 +125,8 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         if input.object_type == ObjectSourceKind::View {
             return Ok(vec![build_sqlserver_alter_view_sql(input.schema.as_deref(), &input.name, source)]);
         }
-        return Ok(vec![replace_sqlserver_create_with_create_or_alter(source)]);
+        // CREATE OR ALTER requires SQL Server 2016 SP1+, while ALTER keeps existing routines executable on older servers.
+        return Ok(vec![replace_sqlserver_create_with_alter(source)]);
     }
 
     if matches!(
@@ -164,8 +165,8 @@ pub fn build_executable_object_source_sql(input: EditableObjectSourceSqlInput) -
 ///
 /// This is the *editable* presentation shown to the user when they open a view,
 /// procedure, or function for editing. For SQL Server the raw `CREATE VIEW` /
-/// `CREATE PROCEDURE` is rewritten to `CREATE OR ALTER` so the user doesn't see
-/// a mismatched CREATE statement for an already-existing object. Callers that
+/// `CREATE PROCEDURE` is rewritten to `ALTER` so the user doesn't see a
+/// mismatched CREATE statement for an already-existing object. Callers that
 /// only need the first statement should use this instead of calling
 /// `build_executable_object_source_statements` and discarding rename-cleanup
 /// statements.
@@ -456,11 +457,8 @@ fn routine_name_changed(source_name: &str, saved_name: &str) -> bool {
     !source_name.eq_ignore_ascii_case(saved_name)
 }
 
-fn replace_sqlserver_create_with_create_or_alter(source: &str) -> String {
-    Regex::new(r"(?i)^(?:CREATE\s+(?:OR\s+ALTER\s+)?|ALTER\s+)")
-        .unwrap()
-        .replace(source, "CREATE OR ALTER ")
-        .to_string()
+fn replace_sqlserver_create_with_alter(source: &str) -> String {
+    Regex::new(r"(?i)^(?:CREATE\s+(?:OR\s+ALTER\s+)?|ALTER\s+)").unwrap().replace(source, "ALTER ").to_string()
 }
 
 fn build_sqlserver_alter_view_sql(schema: Option<&str>, name: &str, source: &str) -> String {
@@ -507,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_edited_source_saves_as_create_or_alter() {
+    fn sqlserver_edited_source_saves_as_alter() {
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
             database_type: DatabaseType::SqlServer,
             object_type: ObjectSourceKind::Procedure,
@@ -516,11 +514,11 @@ mod tests {
             source: "CREATE PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
         })
         .unwrap();
-        assert_eq!(sql, "CREATE OR ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
+        assert_eq!(sql, "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
     }
 
     #[test]
-    fn sqlserver_alter_source_saves_as_create_or_alter() {
+    fn sqlserver_alter_source_saves_as_alter() {
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
             database_type: DatabaseType::SqlServer,
             object_type: ObjectSourceKind::Procedure,
@@ -529,7 +527,33 @@ mod tests {
             source: "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
         })
         .unwrap();
-        assert_eq!(sql, "CREATE OR ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
+        assert_eq!(sql, "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
+    }
+
+    #[test]
+    fn sqlserver_create_function_source_saves_as_alter() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("dbo".to_string()),
+            name: "fn_demo".to_string(),
+            source: "CREATE FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;".to_string(),
+        })
+        .unwrap();
+        assert_eq!(sql, "ALTER FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;");
+    }
+
+    #[test]
+    fn sqlserver_create_or_alter_function_source_saves_as_alter() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("dbo".to_string()),
+            name: "fn_demo".to_string(),
+            source: "CREATE OR ALTER FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;".to_string(),
+        })
+        .unwrap();
+        assert_eq!(sql, "ALTER FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;");
     }
 
     #[test]
@@ -785,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_procedure_source_opened_for_editing_shows_create_or_alter() {
+    fn sqlserver_procedure_source_opened_for_editing_shows_alter() {
         let sql = build_editable_object_source(EditableObjectSourceSqlInput {
             database_type: DatabaseType::SqlServer,
             object_type: ObjectSourceKind::Procedure,
@@ -793,7 +817,7 @@ mod tests {
             name: "usp_demo".to_string(),
             source: "CREATE PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
         });
-        assert_eq!(sql, "CREATE OR ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
+        assert_eq!(sql, "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
     }
 
     #[test]

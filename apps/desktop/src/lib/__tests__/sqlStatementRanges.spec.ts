@@ -273,6 +273,22 @@ describe("statementRangeAtCursor", () => {
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("keeps MySQL REPLACE function calls inside UPDATE assignments", () => {
+    const sql = `UPDATE ecm_archive_prepare_pool
+SET
+  request_json =
+    REPLACE(
+      request_json,
+      '"paperFlag":null',
+      '"paperFlag":false'
+    ),
+  process_flag = 0
+WHERE request_json LIKE '%"paperFlag":null%';`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REPLACE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
   it("does not merge a plain MySQL DESC table statement with the next query", () => {
     const sql = "DESC users\nSELECT * FROM users;";
     expect(statementRangeAtCursor(sql, indexOf(sql, "DESC"), "mysql")?.sql.trim()).toBe("DESC users");
@@ -347,6 +363,11 @@ describe("executableStatementRanges", () => {
     const ranges = executableStatementRanges(sql, "redis");
     expect(rangeSqlTexts(ranges)).toEqual(["GET user:1", "DEL user:2"]);
     expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL")]);
+  });
+
+  it("keeps MySQL REPLACE INTO as an executable statement start", () => {
+    const sql = "SELECT 1\nREPLACE INTO users (id, name) VALUES (1, 'a');";
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", "REPLACE INTO users (id, name) VALUES (1, 'a')"]);
   });
 
   it("returns MongoDB command ranges for newline-separated shell commands", () => {

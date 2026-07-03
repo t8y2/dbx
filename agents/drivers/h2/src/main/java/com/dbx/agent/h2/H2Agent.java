@@ -14,6 +14,7 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -320,6 +321,20 @@ public final class H2Agent extends AbstractJdbcAgent {
         return unchecked(() -> JdbcExecutor.INSTANCE.defaultResultValue(rs, index, sqlType));
     }
 
+    @Override
+    protected JdbcExecutor.ColumnAwareResultValueReader resultValueReader() {
+        return (rs, index, sqlType, columnTypeName) -> {
+            if (isJsonType(columnTypeName)) {
+                byte[] bytes = rs.getBytes(index);
+                // H2 stores JSON as UTF-8 bytes and getString/default JDBC
+                // handling exposes a hex literal such as 0x5b5d. Decode only
+                // JSON columns so real binary data keeps the existing hex view.
+                return rs.wasNull() || bytes == null ? null : new String(bytes, StandardCharsets.UTF_8);
+            }
+            return resultValue(rs, index, sqlType);
+        };
+    }
+
     static String buildUrl(ConnectParams params) {
         String connectionString = params.getConnection_string();
         if (connectionString != null && !connectionString.trim().isEmpty()) {
@@ -341,6 +356,10 @@ public final class H2Agent extends AbstractJdbcAgent {
     private static Integer intOrNull(ResultSet rs, String column) throws Exception {
         Object value = rs.getObject(column);
         return value instanceof Number ? ((Number) value).intValue() : null;
+    }
+
+    private static boolean isJsonType(String columnTypeName) {
+        return columnTypeName != null && "JSON".equals(columnTypeName.trim().toUpperCase(Locale.ROOT));
     }
 
     public static void main(String[] args) {

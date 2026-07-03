@@ -16,7 +16,15 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   if (postgresArrayValue !== undefined) return postgresArrayValue;
   if (typeof oldValue === "number") {
     const num = Number(value);
-    if (!Number.isNaN(num)) return num;
+    if (!Number.isNaN(num)) {
+      if (shouldPreserveNumericText(options, num)) {
+        // Keep precision-sensitive numeric edits as text; JS Number rounds 64-bit integers.
+        const text = value.trim();
+        if (text === String(oldValue)) return oldValue;
+        return text;
+      }
+      return num;
+    }
   }
   if (typeof oldValue === "boolean") {
     return value === "true" || value === "1";
@@ -56,7 +64,9 @@ function coercePostgresArrayValue(options: CoerceDataGridCellValueOptions): unkn
 
   if (trimmed.startsWith("{")) {
     try {
-      const parsed = parsePostgresArrayText(trimmed);
+      const parsed = parsePostgresArrayText(trimmed, {
+        numericDataType: postgresArrayElementDataType(options.columnInfo?.data_type),
+      });
       if (Array.isArray(options.oldValue) && deepEqual(parsed, options.oldValue)) {
         return options.oldValue;
       }
@@ -77,6 +87,57 @@ function isPostgresArrayColumn(columnInfo: Pick<ColumnInfo, "data_type"> | undef
   if (Array.isArray(oldValue)) return true;
   const dataType = columnInfo?.data_type.trim().toLowerCase() ?? "";
   return dataType === "array" || dataType.endsWith("[]") || dataType.startsWith("_");
+}
+
+function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, parsedNumber: number): boolean {
+  const text = options.value.trim();
+  if (!isNumericLiteralText(text)) return false;
+  return shouldPreserveNumericTextForType(options.columnInfo?.data_type, text, parsedNumber);
+}
+
+function postgresArrayElementDataType(dataType: string | undefined): string {
+  const normalized = normalizeDataType(dataType);
+  if (normalized.startsWith("_")) return normalized.slice(1);
+  if (normalized.endsWith("[]")) return normalized.slice(0, -2).trim();
+  return normalized;
+}
+
+function shouldPreserveNumericTextForType(dataType: string | undefined, text: string, parsedNumber: number): boolean {
+  const normalized = normalizeDataType(dataType);
+  if (isExactDecimalDataType(normalized)) return true;
+  if (isLargeIntegerDataType(normalized)) return !Number.isSafeInteger(parsedNumber);
+  return numericTextWouldLosePrecision(text, parsedNumber);
+}
+
+function normalizeDataType(dataType: string | undefined): string {
+  return (dataType ?? "").trim().toLowerCase();
+}
+
+function isExactDecimalDataType(dataType: string): boolean {
+  return /\b(?:decimal|numeric|number|dec|money|smallmoney|bigdecimal|bignumeric|big_numeric|fixed)\b/.test(dataType);
+}
+
+function isLargeIntegerDataType(dataType: string): boolean {
+  return /\b(?:bigint|int8|int64|uint64|u64|bigserial|serial8|int128|uint128|int256|uint256)\b/.test(dataType);
+}
+
+function numericTextWouldLosePrecision(text: string, parsedNumber: number): boolean {
+  if (isIntegerLiteralText(text)) return !Number.isSafeInteger(parsedNumber);
+  return significantDigitCount(text) > 15;
+}
+
+function isNumericLiteralText(text: string): boolean {
+  return /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(text);
+}
+
+function isIntegerLiteralText(text: string): boolean {
+  return /^[+-]?\d+$/.test(text);
+}
+
+function significantDigitCount(text: string): number {
+  const mantissa = text.replace(/^[+-]/, "").split(/[eE]/)[0].replace(".", "");
+  const withoutLeadingZeros = mantissa.replace(/^0+/, "");
+  return withoutLeadingZeros.length;
 }
 
 function normalizeSmartQuotedJsonInput(value: string): string {
@@ -148,7 +209,7 @@ function needsQuotedPostgresArrayElement(value: string): boolean {
   return value === "" || /[\s,"{}\\]/.test(value) || value.toUpperCase() === "NULL";
 }
 
-function parsePostgresArrayText(value: string): unknown[] {
+function parsePostgresArrayText(value: string, options: { numericDataType?: string } = {}): unknown[] {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
     throw new Error("Invalid PG array literal");
@@ -194,7 +255,7 @@ function parsePostgresArrayText(value: string): unknown[] {
         }
         i++;
       }
-      element = parsePostgresArrayText(inner.slice(start, i));
+      element = parsePostgresArrayText(inner.slice(start, i), options);
     } else {
       let start = i;
       while (i < inner.length && inner[i] !== "," && inner[i] !== "}") i++;
@@ -204,7 +265,9 @@ function parsePostgresArrayText(value: string): unknown[] {
       } else if (/^(true|false)$/i.test(token)) {
         element = token.toLowerCase() === "true";
       } else if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(token)) {
-        element = Number(token);
+        const num = Number(token);
+        // JS numbers cannot carry 64-bit integer or high-precision decimal array elements exactly.
+        element = shouldPreserveNumericTextForType(options.numericDataType, token, num) ? token : num;
       } else {
         element = token;
       }

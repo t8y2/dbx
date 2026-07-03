@@ -3,6 +3,8 @@ package com.dbx.agent.h2;
 import com.dbx.agent.BaseDatabaseAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseAgent;
+import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.test.JdbcExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataBehaviorTest;
 import java.util.List;
@@ -63,6 +65,36 @@ class H2ExecutionBehaviorTest extends JdbcExecutionBehaviorTest {
     @Override
     protected String rowsSql(int rowCount) {
         return "SELECT X FROM SYSTEM_RANGE(1, " + rowCount + ")";
+    }
+
+    @Test
+    void displaysJsonColumnsAsText() {
+        withAgent("dbx-agent-h2-json", agent -> {
+            agent.executeQuery(
+                "CREATE TABLE EVENTS (ID INT PRIMARY KEY, ACTION_PARAMS JSON, RAW_BYTES VARBINARY)",
+                null,
+                new ExecuteQueryOptions()
+            );
+            agent.executeQuery(
+                "INSERT INTO EVENTS VALUES (1, JSON '[]', X'5B5D'), (2, JSON '[{\"type\":\"ACCESS_CONTROL\"}]', X'00FF')",
+                null,
+                new ExecuteQueryOptions()
+            );
+
+            QueryResult result = agent.executeQuery(
+                "SELECT ACTION_PARAMS, RAW_BYTES FROM EVENTS ORDER BY ID",
+                null,
+                new ExecuteQueryOptions()
+            );
+
+            Assertions.assertEquals(
+                List.of(
+                    List.of("[]", "0x5b5d"),
+                    List.of("[{\"type\":\"ACCESS_CONTROL\"}]", "0x00ff")
+                ),
+                result.getRows()
+            );
+        });
     }
 }
 

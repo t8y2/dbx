@@ -8,6 +8,7 @@ pub enum TablePaginationStrategy {
     SqlServerTop,
     IrisTop,
     InformixFirst,
+    FirebirdRows,
     Rownum,
     QuestDbLimit,
     Unbounded,
@@ -84,6 +85,7 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,
         Some(DatabaseType::Informix) => TablePaginationStrategy::InformixFirst,
+        Some(DatabaseType::Firebird) => TablePaginationStrategy::FirebirdRows,
         Some(DatabaseType::OceanbaseOracle) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Questdb) => TablePaginationStrategy::QuestDbLimit,
         _ => TablePaginationStrategy::LimitOffset,
@@ -101,4 +103,14 @@ pub(super) fn is_simple_informix_identifier(name: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+}
+
+pub fn firebird_rows_clause(limit: usize, offset: usize) -> String {
+    if offset > 0 {
+        let start = offset + 1;
+        let end = offset + limit;
+        format!("ROWS {start} TO {end}")
+    } else {
+        format!("ROWS {limit}")
+    }
 }

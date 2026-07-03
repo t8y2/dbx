@@ -3,7 +3,8 @@ use serde_json::Value;
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
-    pagination_strategy, qualified_table_name, quote_table_identifier, PaginationContext, TablePaginationStrategy,
+    firebird_rows_clause, pagination_strategy, qualified_table_name, quote_table_identifier, PaginationContext,
+    TablePaginationStrategy,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +114,10 @@ pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<Da
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} * FROM {table} WHERE ({where_clause})"),
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(limit, 0);
+            format!("SELECT * FROM {table} WHERE ({where_clause}) {rows}")
+        }
         TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
             format!("SELECT * FROM {table} WHERE ({where_clause}) FETCH FIRST {limit} ROWS ONLY")
         }

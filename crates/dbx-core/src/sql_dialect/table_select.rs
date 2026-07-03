@@ -1,6 +1,6 @@
 use crate::models::connection::DatabaseType;
 
-use super::capabilities::{table_pagination_strategy, uses_fetch_first, TablePaginationStrategy};
+use super::capabilities::{firebird_rows_clause, table_pagination_strategy, uses_fetch_first, TablePaginationStrategy};
 use super::identifiers::{normalize_where_input, qualified_table_name, quote_table_identifier};
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
@@ -62,6 +62,10 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         TablePaginationStrategy::InformixFirst => {
             let row_limit = informix_row_limit_clause(limit, options.offset.unwrap_or(0));
             format!("SELECT {row_limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+        }
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(limit, options.offset.unwrap_or(0));
+            format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order} {rows}")
         }
         TablePaginationStrategy::Db2FetchFirst if options.offset.is_some_and(|offset| offset > 0) => {
             build_db2_table_select_page_sql(
@@ -155,6 +159,10 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_columns} FROM {table}{order_by}"),
         TablePaginationStrategy::InformixFirst => {
             format!("SELECT FIRST {limit} {select_columns} FROM {table}{order_by}")
+        }
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(limit, 0);
+            format!("SELECT {select_columns} FROM {table}{order_by} {rows}")
         }
         TablePaginationStrategy::Rownum => {
             build_rownum_table_select_sql(&table, "", &order_by, &select_columns, &select_columns, limit, 0)

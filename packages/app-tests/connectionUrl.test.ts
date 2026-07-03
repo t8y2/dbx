@@ -96,6 +96,18 @@ test("parses MySQL JDBC user and password URL params as credentials", () => {
   assert.equal(parsed.urlParams, "useUnicode=true&characterEncoding=UTF8&useSSL=false");
 });
 
+test("parses MySQL JDBC URL params with ProxySQL multi-at usernames", () => {
+  const parsed = parseConnectionUrl("jdbc:mysql://127.0.0.1:6033/example?user=xxxxx%40db_readonly%40127.0.0.1&password=p%40wd&useSSL=false");
+
+  assert.equal(parsed.dbType, "mysql");
+  assert.equal(parsed.host, "127.0.0.1");
+  assert.equal(parsed.port, 6033);
+  assert.equal(parsed.username, "xxxxx@db_readonly@127.0.0.1");
+  assert.equal(parsed.password, "p@wd");
+  assert.equal(parsed.database, "example");
+  assert.equal(parsed.urlParams, "useSSL=false");
+});
+
 test("leaves non-JDBC MySQL user and password URL params untouched", () => {
   const parsed = parseConnectionUrl("mysql://127.0.0.1:1234/example?user=admin&password=pwd&charset=utf8mb4");
 

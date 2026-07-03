@@ -625,10 +625,10 @@ async fn install_agent_driver_from_registry(
         ensure_jre_from_registry(am, registry, jre_key, db_type, progress, current, total_drivers).await?;
     }
 
-    let (artifact, target_path) = if let Some(native) = native_artifact {
-        (native, am.driver_native_path(db_type))
+    let (artifact, target_path, is_native_artifact) = if let Some(native) = native_artifact {
+        (native, am.driver_native_path(db_type), true)
     } else if let Some(jar) = jar_artifact {
-        (jar, am.driver_jar_path(db_type))
+        (jar, am.driver_jar_path(db_type), false)
     } else {
         return Err(format!("No driver artifact available for {db_type}"));
     };
@@ -654,11 +654,13 @@ async fn install_agent_driver_from_registry(
         total_drivers,
     )
     .await?;
-    if jar_artifact.is_some() && !am.is_driver_jar_valid(db_type) {
+    // Some drivers publish both a native agent and a legacy JAR fallback. Only
+    // validate the artifact type that was actually installed.
+    if !is_native_artifact && !am.is_driver_jar_valid(db_type) {
         std::fs::remove_file(&target_path).ok();
         return Err(format!("Downloaded driver jar is invalid or corrupt: {}", target_path.display()));
     }
-    if native_artifact.is_some() {
+    if is_native_artifact {
         mark_executable(&target_path)?;
         std::fs::remove_file(am.driver_jar_path(db_type)).ok();
     } else {
@@ -1328,6 +1330,121 @@ mod agent_download_url_tests {
             r2_path_with_cache_buster("agents/drivers/dbx-agent-h2.jar?mirror=r2", "0.5.33"),
             "agents/drivers/dbx-agent-h2.jar?mirror=r2&v=0.5.33"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_registry_install_tests {
+    use super::*;
+    use crate::agent_manager::{ArtifactInfo, DriverInfo, JavaRuntimeConfig};
+
+    fn test_manager(name: &str) -> AgentManager {
+        let dir = std::env::temp_dir().join(format!("dbx-agent-registry-install-{name}-{}", uuid::Uuid::new_v4()));
+        AgentManager::new_with_base_dir(dir)
+    }
+
+    fn registry_with_native_and_legacy_jar(
+        db_type: &str,
+        version: &str,
+        native_url: &str,
+        native_size: u64,
+    ) -> AgentRegistry {
+        let mut drivers = std::collections::HashMap::new();
+        drivers.insert(
+            db_type.to_string(),
+            DriverInfo {
+                version: version.to_string(),
+                label: db_type.to_string(),
+                min_app_version: "0.1.0".to_string(),
+                jre: DEFAULT_JRE_KEY.to_string(),
+                jar: Some(ArtifactInfo {
+                    url: format!("https://example.com/dbx-agent-{db_type}-legacy-placeholder.jar"),
+                    size: 0,
+                }),
+                native: [(
+                    AgentManager::current_platform().to_string(),
+                    ArtifactInfo { url: native_url.to_string(), size: native_size },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
+    }
+
+    fn registry_with_jar(db_type: &str, version: &str, url: &str, size: u64) -> AgentRegistry {
+        let mut drivers = std::collections::HashMap::new();
+        drivers.insert(
+            db_type.to_string(),
+            DriverInfo {
+                version: version.to_string(),
+                label: db_type.to_string(),
+                min_app_version: "0.1.0".to_string(),
+                jre: DEFAULT_JRE_KEY.to_string(),
+                jar: Some(ArtifactInfo { url: url.to_string(), size }),
+                native: std::collections::HashMap::new(),
+            },
+        );
+        AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
+    }
+
+    fn write_cached_driver_download(
+        am: &AgentManager,
+        db_type: &str,
+        version: &str,
+        url: &str,
+        dest: &Path,
+        bytes: &[u8],
+    ) {
+        let cache_path =
+            cached_download_path(am, url, bytes.len() as u64, Some(CacheIdentity::Driver { db_type, version }), dest);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(cache_path, bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_install_accepts_native_driver_with_legacy_jar_fallback() {
+        let manager = test_manager("native-with-jar-fallback");
+        let db_type = "oracle";
+        let version = "0.1.31";
+        let native_url = "https://example.com/dbx-agent-oracle";
+        let native_bytes = b"native-agent";
+        let registry = registry_with_native_and_legacy_jar(db_type, version, native_url, native_bytes.len() as u64);
+        let native_path = manager.driver_native_path(db_type);
+        write_cached_driver_download(&manager, db_type, version, native_url, &native_path, native_bytes);
+        let progress = |_| {};
+
+        install_agent_driver_from_registry(&manager, &registry, db_type, &progress, None, None).await.unwrap();
+
+        assert_eq!(std::fs::read(&native_path).unwrap(), native_bytes);
+        assert!(!manager.driver_jar_path(db_type).exists());
+        assert_eq!(manager.load_state().installed_drivers.get(db_type).unwrap().version, version);
+    }
+
+    #[tokio::test]
+    async fn registry_install_rejects_corrupt_downloaded_jar() {
+        let manager = test_manager("corrupt-jar");
+        let db_type = "h2";
+        let version = "0.2.0";
+        let jar_url = "https://example.com/dbx-agent-h2.jar";
+        let jar_bytes = b"jar";
+        let registry = registry_with_jar(db_type, version, jar_url, jar_bytes.len() as u64);
+        let jar_path = manager.driver_jar_path(db_type);
+        write_cached_driver_download(&manager, db_type, version, jar_url, &jar_path, jar_bytes);
+        manager
+            .save_state(&crate::agent_manager::AgentState {
+                java_runtime: JavaRuntimeConfig { mode: JavaRuntimeMode::System, custom_java_path: None },
+                ..Default::default()
+            })
+            .unwrap();
+        let progress = |_| {};
+
+        let err =
+            install_agent_driver_from_registry(&manager, &registry, db_type, &progress, None, None).await.unwrap_err();
+
+        assert!(err.contains("invalid or corrupt"));
+        assert!(!jar_path.exists());
+        assert!(!manager.load_state().installed_drivers.contains_key(db_type));
     }
 }
 

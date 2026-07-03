@@ -1163,7 +1163,7 @@ export interface UpdateInfo {
   release_notes: string;
 }
 
-export type UpdateDownloadSource = "official" | "cnb";
+export type UpdateDownloadSource = "official" | "cnb" | "atomgit";
 
 export interface UpdateDownloadProgress {
   downloaded: number;

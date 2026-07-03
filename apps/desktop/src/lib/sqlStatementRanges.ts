@@ -651,11 +651,18 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
   const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(pos));
   if (!match) return null;
   const keyword = match[0].toUpperCase();
+  if (keyword === "REPLACE" && nextNonWhitespaceChar(sql, pos + match[0].length) === "(") return null;
   return softStatementStartKeywords(databaseType).has(keyword) ? keyword : null;
 }
 
 function softStatementStartKeywords(databaseType?: DatabaseType): Set<string> {
   return new Set([...COMMON_SOFT_STATEMENT_START_KEYWORDS, ...(databaseType ? (DATABASE_SOFT_STATEMENT_KEYWORDS[databaseType] ?? []) : [])]);
+}
+
+function nextNonWhitespaceChar(sql: string, pos: number): string | null {
+  let i = pos;
+  while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
+  return i < sql.length ? sql[i] : null;
 }
 
 function isExplainLikeKeyword(keyword: string | null): boolean {

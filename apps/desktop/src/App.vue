@@ -41,6 +41,7 @@ import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/newQueryContext";
 import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sqlExecutionTarget";
 import { uuid } from "@/lib/utils";
+import { isMacOS } from "@/lib/platform";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
 import { sqlFileTitleFromPath } from "@/lib/sqlFileOpen";
@@ -1639,10 +1640,11 @@ onMounted(async () => {
   }
   // macOS: Ctrl+click fires both click and contextmenu.
   // Intercept click in capture phase to prevent unwanted navigation.
+  // Windows/Linux use Ctrl+click for multi-select; do not block there.
   document.addEventListener(
     "click",
     (e) => {
-      if (e.ctrlKey) e.stopPropagation();
+      if (e.ctrlKey && isMacOS()) e.stopPropagation();
     },
     true,
   );

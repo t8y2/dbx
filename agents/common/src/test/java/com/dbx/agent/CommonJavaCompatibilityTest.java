@@ -11,6 +11,8 @@ import java.io.InputStreamReader;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.ArrayList;
@@ -68,6 +70,28 @@ class CommonJavaCompatibilityTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "connect"));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "query"));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "metadata"));
+    }
+
+    @Test
+    void jsonRpcServerSerializesArbitraryPrecisionNumbersAsStrings() {
+        JsonRpcServer server = new JsonRpcServer(new PreciseNumberAgent());
+
+        String response = server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"" + AgentProtocol.METHOD_EXECUTE_QUERY + "\",\"params\":{\"sql\":\"select n from t\"}}"
+        );
+
+        JsonArray row = JsonParser.parseString(response)
+            .getAsJsonObject()
+            .getAsJsonObject("result")
+            .getAsJsonArray("rows")
+            .get(0)
+            .getAsJsonArray();
+        assertEquals("12345678901234567890.1234", row.get(0).getAsString());
+        assertTrue(row.get(0).getAsJsonPrimitive().isString());
+        assertEquals("12345678901234567890", row.get(1).getAsString());
+        assertTrue(row.get(1).getAsJsonPrimitive().isString());
+        assertEquals(42, row.get(2).getAsInt());
+        assertTrue(row.get(2).getAsJsonPrimitive().isNumber());
     }
 
     @Test
@@ -367,6 +391,22 @@ class CommonJavaCompatibilityTest {
         @Override
         public Connection getConnection() {
             return connection;
+        }
+    }
+
+    private static final class PreciseNumberAgent extends MinimalAgent {
+        @Override
+        public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+            return new QueryResult(
+                Arrays.asList("decimal_value", "integer_value", "safe_int"),
+                Collections.singletonList(Arrays.asList(
+                    new BigDecimal("12345678901234567890.1234"),
+                    new BigInteger("12345678901234567890"),
+                    42
+                )),
+                0L,
+                0L
+            );
         }
     }
 

@@ -780,11 +780,6 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     return convertBridgeQueryResult(result, options);
   }
   if (config.db_type === "mongodb") {
-    const find = parseMongoFindCommand(sql);
-    if (find) {
-      const result = await withTimeout(mongoFindDocuments(config, find.collection, find.skip, find.limit, find.filter, find.projection, find.sort), resolveTimeoutMs(options));
-      return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
-    }
     const version = parseMongoVersionCommand(sql);
     if (version) {
       const result = await withTimeout(mongoServerVersion(config), resolveTimeoutMs(options));
@@ -794,6 +789,11 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     if (count) {
       const result = await withTimeout(mongoFindDocuments(config, count.collection, 0, 1, count.filter), resolveTimeoutMs(options));
       return { columns: ["count"], rows: [{ count: result.total }], row_count: 1 };
+    }
+    const find = parseMongoFindCommand(sql);
+    if (find) {
+      const result = await withTimeout(mongoFindDocuments(config, find.collection, find.skip, find.limit, find.filter, find.projection, find.sort), resolveTimeoutMs(options));
+      return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
     const aggregate = parseMongoAggregateCommand(sql);
     if (aggregate) {
@@ -829,7 +829,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
+      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
     );
   }
   if (isDirectQueryType(config.db_type)) {
@@ -1206,6 +1206,7 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   }
   const chain = source.slice(findCloseIndex + 1).trim();
   if (chain && !chain.startsWith(".")) return null;
+  if (findChainedMethodCallIndex(chain, "count") >= 0) return null;
   const sortArg = readChainedCallArgument(chain, "sort");
   let sort: string | undefined;
   if (sortArg !== undefined) {
@@ -1226,7 +1227,17 @@ export function parseMongoVersionCommand(input: string): boolean {
 
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  const target = parseCollectionMethodTarget(source, "countDocuments");
+  // Accept deprecated Mongo shell count helpers for old server workflows, but
+  // keep DBX's internal execution mapped to the countDocuments result shape.
+  return (
+    parseCollectionCountCommand(source, "countDocuments") ??
+    parseCollectionCountCommand(source, "count") ??
+    parseFindCountCommand(source)
+  );
+}
+
+function parseCollectionCountCommand(source: string, method: "countDocuments" | "count"): MongoCountDocumentsCommand | null {
+  const target = parseCollectionMethodTarget(source, method);
   if (!target) return null;
   const openIndex = source.indexOf("(", target.methodCallIndex);
   const closeIndex = findMatchingParen(source, openIndex);
@@ -1234,6 +1245,20 @@ export function parseMongoCountDocumentsCommand(input: string): MongoCountDocume
   const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
   if (args.length > 1 && args.slice(1).some((arg) => arg.trim())) return null;
   const filter = normalizeJsonArgument(args[0] || "{}");
+  return filter ? { collection: target.collection, filter } : null;
+}
+
+function parseFindCountCommand(source: string): MongoCountDocumentsCommand | null {
+  const target = parseCollectionMethodTarget(source, "find");
+  if (!target) return null;
+  const findOpenIndex = source.indexOf("(", target.methodCallIndex);
+  const findCloseIndex = findMatchingParen(source, findOpenIndex);
+  if (findCloseIndex < 0) return null;
+  const chain = source.slice(findCloseIndex + 1).trim();
+  if (!hasSingleEmptyChainedCall(chain, "count")) return null;
+  const findArgs = splitTopLevel(source.slice(findOpenIndex + 1, findCloseIndex));
+  if (findArgs.length > 2 && findArgs.slice(2).some((arg) => arg.trim())) return null;
+  const filter = normalizeJsonArgument(findArgs[0] || "{}");
   return filter ? { collection: target.collection, filter } : null;
 }
 
@@ -1408,6 +1433,19 @@ function readChainedCallArgument(chain: string, method: string): string | undefi
   const openIndex = chain.indexOf("(", match.index);
   const closeIndex = findMatchingParen(chain, openIndex);
   return closeIndex < 0 ? undefined : chain.slice(openIndex + 1, closeIndex);
+}
+
+function hasSingleEmptyChainedCall(chain: string, method: string): boolean {
+  const trimmed = chain.trim();
+  const match = chainedMethodCallPattern(method).exec(trimmed);
+  if (!match || match.index !== 0) return false;
+  const openIndex = trimmed.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(trimmed, openIndex);
+  return (
+    closeIndex >= 0 &&
+    !trimmed.slice(openIndex + 1, closeIndex).trim() &&
+    !trimmed.slice(closeIndex + 1).trim()
+  );
 }
 
 function findChainedMethodCallIndex(source: string, method: string): number {

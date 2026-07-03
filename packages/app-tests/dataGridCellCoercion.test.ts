@@ -47,6 +47,50 @@ test("coerces PG brace-style input for Postgres array columns", () => {
   );
 });
 
+test("preserves high precision numeric edits as text", () => {
+  assert.equal(
+    coerceDataGridCellValue({
+      value: "144847503924137986",
+      oldValue: 142189065666650,
+      databaseType: "sqlserver",
+      columnInfo: { data_type: "bigint" },
+    }),
+    "144847503924137986",
+  );
+
+  assert.equal(
+    coerceDataGridCellValue({
+      value: "12345678901234567890123456789012345678",
+      oldValue: 1,
+      databaseType: "postgres",
+      columnInfo: { data_type: "numeric(38,0)" },
+    }),
+    "12345678901234567890123456789012345678",
+  );
+});
+
+test("keeps safe numeric edits on the existing number path", () => {
+  assert.equal(
+    coerceDataGridCellValue({
+      value: "42",
+      oldValue: 1,
+      databaseType: "sqlserver",
+      columnInfo: { data_type: "int" },
+    }),
+    42,
+  );
+
+  assert.strictEqual(
+    coerceDataGridCellValue({
+      value: "42",
+      oldValue: 42,
+      databaseType: "sqlserver",
+      columnInfo: { data_type: "bigint" },
+    }),
+    42,
+  );
+});
+
 test("coerces PG brace-style string array", () => {
   assert.deepEqual(
     coerceDataGridCellValue({
@@ -56,6 +100,18 @@ test("coerces PG brace-style string array", () => {
       columnInfo: { data_type: "_text" },
     }),
     ["draft", "needs space", "发布"],
+  );
+});
+
+test("preserves high precision numeric tokens in Postgres arrays", () => {
+  assert.deepEqual(
+    coerceDataGridCellValue({
+      value: "{144847503924137986,2}",
+      oldValue: [],
+      databaseType: "postgres",
+      columnInfo: { data_type: "_int8" },
+    }),
+    ["144847503924137986", 2],
   );
 });
 

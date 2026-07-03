@@ -11,7 +11,9 @@ mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{quote_table_identifier, table_pagination_strategy, TablePaginationStrategy};
+use crate::sql_dialect::{
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, TablePaginationStrategy,
+};
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
@@ -496,6 +498,10 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(limit, 0);
+            format!("SELECT {select_list}{from_clause} {rows}")
+        }
         TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
             format!("SELECT {select_list}{from_clause} FETCH FIRST {limit} ROWS ONLY")
         }
@@ -1029,6 +1035,17 @@ pub fn format_grid_sql_literal(
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    if is_mysql_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_mysql_binary_literal_text(&text) {
+            // DBX result values expose binary columns as prefixed hex; keep them
+            // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
+    if column_info.map(|column| is_numeric_type(&column.data_type)).unwrap_or(false) && is_numeric_literal(&text) {
+        // BigDecimal/BigInteger cells cross JSON-RPC as strings so browsers cannot round them.
+        return text;
+    }
     if database_type == Some(DatabaseType::ManticoreSearch) {
         if let Some(typed_value) = manticore_typed_attribute_value(&text, column_info) {
             return format_grid_sql_literal(&typed_value, database_type, column_info);
@@ -1227,6 +1244,30 @@ fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bo
                 | DatabaseType::Sundb
         )
     )
+}
+
+fn is_mysql_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::Mysql)
+        && column_info.map(|column| is_mysql_binary_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_mysql_binary_column_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
+}
+
+fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x")?;
+    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(if hex.is_empty() { "X''".to_string() } else { trimmed.to_string() })
+    } else {
+        None
+    }
 }
 
 fn is_geometry_column_type(data_type: &str) -> bool {
@@ -2024,6 +2065,66 @@ mod tests {
     }
 
     #[test]
+    fn mysql_copy_statements_preserve_blob_hex_literals() {
+        let table_meta = DataGridTableMeta {
+            schema: None,
+            table_name: "reports".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![column("id", "int", false, None), column("payload", "MEDIUMBLOB", true, None)]),
+        };
+        let columns = vec!["id".to_string(), "payload".to_string()];
+        let rows = vec![vec![json!(1), json!("0x0001abff")], vec![json!(2), json!("0x")]];
+
+        let insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: Some(table_meta.clone()),
+            columns: columns.clone(),
+            source_columns: None,
+            rows: rows.clone(),
+            exclude_primary_keys: false,
+        });
+        assert_eq!(
+            insert.as_deref(),
+            Some("INSERT INTO `reports` (`id`, `payload`) VALUES\n(1, 0x0001abff),\n(2, X'');")
+        );
+
+        let updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta,
+            columns,
+            source_columns: None,
+            rows,
+        });
+        assert_eq!(
+            updates,
+            vec![
+                "UPDATE `reports` SET `payload` = 0x0001abff WHERE `id` = 1;",
+                "UPDATE `reports` SET `payload` = X'' WHERE `id` = 2;"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_text_columns_keep_prefixed_hex_strings_quoted() {
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x0001abff"),
+                Some(DatabaseType::Mysql),
+                Some(&column("note", "varchar(64)", true, None)),
+            ),
+            "'0x0001abff'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0xnothex"),
+                Some(DatabaseType::Mysql),
+                Some(&column("payload", "blob", true, None)),
+            ),
+            "'0xnothex'"
+        );
+    }
+
+    #[test]
     fn builds_copy_insert_statement_omits_postgres_tsvector_columns() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -2188,6 +2289,20 @@ mod tests {
             }),
             "SELECT * FROM (SELECT \"KIND\" AS dbx_value, COUNT(*) AS dbx_count FROM \"APP\".\"EVENTS\" GROUP BY \"KIND\" ORDER BY dbx_count DESC, dbx_value) WHERE ROWNUM <= 10"
         );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Firebird),
+                schema: None,
+                table_name: "USERS".to_string(),
+                column_name: "STATUS".to_string(),
+                column_info: Some(column("STATUS", "varchar(32)", true, None)),
+                where_input: Some("WHERE DELETED_AT IS NULL".to_string()),
+                search_value: None,
+                limit: Some(25),
+                include_counts: false,
+            }),
+            "SELECT \"STATUS\" AS dbx_value FROM \"USERS\" WHERE (DELETED_AT IS NULL) GROUP BY \"STATUS\" ORDER BY dbx_value ROWS 25"
+        );
     }
 
     #[test]
@@ -2310,6 +2425,47 @@ mod tests {
             format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&date)),
             "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
         );
+    }
+
+    #[test]
+    fn formats_numeric_string_literals_for_numeric_columns_without_quotes() {
+        let number = column("amount", "NUMBER(20,0)", true, None);
+        let text = column("code", "VARCHAR2(32)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("12345678901234567890"), Some(DatabaseType::Oracle), Some(&number)),
+            "12345678901234567890"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("12345678901234567890"), Some(DatabaseType::Oracle), Some(&text)),
+            "'12345678901234567890'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("123-not-a-number"), Some(DatabaseType::Oracle), Some(&number)),
+            "'123-not-a-number'"
+        );
+    }
+
+    #[test]
+    fn prepares_sqlserver_bigint_update_from_numeric_string() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            table_meta: DataGridTableMeta {
+                schema: Some("dbo".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["Id".to_string()],
+                columns: Some(vec![column("Id", "int", false, None), column("UserId", "bigint", true, None)]),
+            },
+            columns: vec!["Id".to_string(), "UserId".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(142189065666650_i64)]],
+            dirty_rows: vec![(0, vec![(1, json!("144847503924137986"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE [dbo].[users] SET [UserId] = 144847503924137986 WHERE [Id] = 1;"]);
     }
 
     #[test]

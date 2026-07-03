@@ -115,7 +115,7 @@ import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableD
 import { sidebarDisplayTableName } from "@/lib/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebarLabelTooltip";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebarTreeSelection";
-import { selectedConnectionDeleteTargets } from "@/lib/sidebarConnectionSelection";
+import { selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
@@ -1122,7 +1122,7 @@ async function openData() {
 
     const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-    const limit = tableOpenPageLimit();
+    const limit = tableOpenPageLimit(settingsStore.editorSettings.pageSize);
     const refreshTableMetaInBackground = async () => {
       const metadataStartedAt = performance.now();
       console.info("[DBX][openData:metadata:start]", {
@@ -1444,6 +1444,15 @@ function connectionDeleteMenuLabel(): string {
   return count > 1 ? t("contextMenu.deleteSelectedConnections", { count }) : t("contextMenu.deleteConnection");
 }
 
+function connectionDuplicateTargets() {
+  return selectedConnectionDuplicateTargets(props.node, selectedTreeNodesInVisibleOrder());
+}
+
+function connectionDuplicateMenuLabel(): string {
+  const count = connectionDuplicateTargets().length;
+  return count > 1 ? t("contextMenu.duplicateSelectedConnections", { count }) : t("contextMenu.duplicateConnection");
+}
+
 function connectionDeleteConfirmMessage(): string {
   const targets = connectionDeleteTargets();
   return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length }) : t("contextMenu.confirmDeleteMessage", { name: props.node.label });
@@ -1525,13 +1534,18 @@ function updateTreeClipboardForNodes(nodes: TreeNode[]) {
 }
 
 async function duplicateConnection() {
-  const connId = props.node.connectionId;
-  if (!connId) return;
-  const config = connectionStore.getConfig(connId);
-  if (!config) return;
-  const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
-  await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(connId));
-  toast(t("connection.duplicated"), 2000);
+  const targets = connectionDuplicateTargets();
+  if (!targets.length) return;
+  let duplicatedCount = 0;
+  for (const target of targets) {
+    const config = connectionStore.getConfig(target.connectionId);
+    if (!config) continue;
+    const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
+    await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(target.connectionId));
+    duplicatedCount += 1;
+  }
+  if (!duplicatedCount) return;
+  toast(duplicatedCount > 1 ? t("connection.duplicatedSelected", { count: duplicatedCount }) : t("connection.duplicated"), 2000);
 }
 
 // --- Table Management Operations ---
@@ -4048,7 +4062,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: HardDriveDownload,
       });
     }
-    items.push({ label: t("contextMenu.duplicateConnection"), action: duplicateConnection, icon: CopyPlus });
+    items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
     items.push({
       label: connectionDeleteMenuLabel(),

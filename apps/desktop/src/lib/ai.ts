@@ -349,9 +349,11 @@ function formatSchema(context: AiContext): string {
     .join("\n\n");
 }
 
-export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig, options: { maxTables?: number; maxColumnsPerTable?: number; mentionedTables?: AiTableMention[] } = {}): Promise<AiContext> {
+export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig, options: { maxTables?: number; maxColumnsPerTable?: number; maxIndexesPerTable?: number; maxFksPerTable?: number; mentionedTables?: AiTableMention[] } = {}): Promise<AiContext> {
   const maxTables = options.maxTables ?? 50;
   const maxColumnsPerTable = options.maxColumnsPerTable ?? 40;
+  const maxIndexesPerTable = options.maxIndexesPerTable ?? 10;
+  const maxFksPerTable = options.maxFksPerTable ?? 10;
   const databaseType = aiDatabaseTypeForConnection(connection);
   const tables: AiSchemaTable[] = [];
   const tableKeys = new Set<string>();
@@ -371,8 +373,8 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
       tableType: "TABLE",
       comment: tableComment,
       columns: tab.tableMeta.columns.slice(0, maxColumnsPerTable),
-      indexes,
-      foreignKeys,
+      indexes: indexes.slice(0, maxIndexesPerTable),
+      foreignKeys: foreignKeys.slice(0, maxFksPerTable),
     });
     tableKeys.add(aiTableMentionKey(tab.tableMeta.schema, tName));
     truncated = tab.tableMeta.columns.length > maxColumnsPerTable;
@@ -381,7 +383,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   for (const mention of options.mentionedTables ?? []) {
     const key = aiTableMentionKey(mention.schema, mention.table);
     if (tableKeys.has(key)) continue;
-    const entry = await loadMentionedTableContext(tab, connection, mention, maxColumnsPerTable).catch(() => undefined);
+    const entry = await loadMentionedTableContext(tab, connection, mention, maxColumnsPerTable, maxIndexesPerTable, maxFksPerTable).catch(() => undefined);
     if (!entry) continue;
     tableKeys.add(aiTableMentionKey(entry.schema, entry.name));
     tables.push(entry);
@@ -443,8 +445,8 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
               tableType: table.table_type,
               comment: table.comment,
               columns: columns.slice(0, maxColumnsPerTable),
-              indexes,
-              foreignKeys,
+              indexes: indexes.slice(0, maxIndexesPerTable),
+              foreignKeys: foreignKeys.slice(0, maxFksPerTable),
               _truncatedCols: columns.length > maxColumnsPerTable,
             })),
           ),
@@ -479,7 +481,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   };
 }
 
-async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number): Promise<AiSchemaTable | undefined> {
+async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number, maxIndexesPerTable: number, maxFksPerTable: number): Promise<AiSchemaTable | undefined> {
   const databaseType = aiDatabaseTypeForConnection(connection);
   const schema = await resolveMentionedTableSchema(tab, connection, mention);
   const [columns, indexes, foreignKeys, tableComment] = await Promise.all([
@@ -494,8 +496,8 @@ async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionCo
     tableType: "TABLE",
     comment: tableComment,
     columns: columns.slice(0, maxColumnsPerTable),
-    indexes,
-    foreignKeys,
+    indexes: indexes.slice(0, maxIndexesPerTable),
+    foreignKeys: foreignKeys.slice(0, maxFksPerTable),
   };
 }
 
@@ -548,8 +550,15 @@ function extractLastError(result?: QueryResult): string | undefined {
 
 function formatResultPreview(result?: QueryResult): string | undefined {
   if (!result || result.columns.includes("Error") || !result.rows.length) return undefined;
+  const MAX_VALUE_CHARS = 200;
   const rows = result.rows.slice(0, 5).map((row) => {
-    return result.columns.map((column, index) => `${column}=${JSON.stringify(row[index] ?? null)}`).join(", ");
+    return result.columns
+      .map((column, index) => {
+        const raw = JSON.stringify(row[index] ?? null);
+        const val = raw.length > MAX_VALUE_CHARS ? raw.slice(0, MAX_VALUE_CHARS) + "…" : raw;
+        return `${column}=${val}`;
+      })
+      .join(", ");
   });
   return rows.join("\n");
 }

@@ -356,11 +356,24 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         })
         .collect::<Vec<_>>();
+    if copy_insert_uses_single_row_statements(options.database_type) {
+        return Some(
+            value_rows
+                .iter()
+                .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
     Some(format!(
         "INSERT INTO {table} ({columns}) VALUES{}{};",
         if value_rows.len() == 1 { " " } else { "\n" },
         value_rows.join(",\n")
     ))
+}
+
+fn copy_insert_uses_single_row_statements(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
@@ -2055,6 +2068,28 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
+        );
+    }
+
+    #[test]
+    fn oracle_copy_insert_statement_uses_one_statement_per_row() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            table_meta: Some(DataGridTableMeta {
+                schema: Some("APP".to_string()),
+                table_name: "USERS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: None,
+            }),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            exclude_primary_keys: false,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nINSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');")
         );
     }
 

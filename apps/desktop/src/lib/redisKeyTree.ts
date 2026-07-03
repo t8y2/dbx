@@ -29,6 +29,12 @@ export interface RedisKeyTreeRow {
   depth: number;
 }
 
+export function redisKeyNameCopyText(node: RedisKeyTreeNode): string | null {
+  // keyRaw is base64-encoded for backend roundtrips; copy the user-visible
+  // Redis key name instead of the internal transport value.
+  return node.kind === "leaf" ? node.fullKeyDisplay : null;
+}
+
 function buildGroupId(db: number, pathSegments: string[]): string {
   return `group:${db}:${pathSegments.join("\u0000")}`;
 }

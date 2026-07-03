@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redisKeyTree.ts";
+import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyNameCopyText, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redisKeyTree.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/api.ts";
 
 function makeKey(key_display: string, key_raw: string, key_type = "string", ttl = -1): RedisKeyInfo {
@@ -94,6 +94,24 @@ test("redisKeyToFlatTreeRow keeps search results flat with the full key label", 
   assert.equal(row.node.label, "user:profile:1");
   assert.deepEqual(row.node.pathSegments, ["user:profile:1"]);
   assert.equal(row.node.keyType, "");
+});
+
+test("redisKeyNameCopyText uses the display name instead of raw encoding", () => {
+  const tree = buildRedisKeyTree([makeKey("user:profile:1", "dXNlcjpwcm9maWxlOjE=")], 0);
+  const userGroup = tree[0];
+  assert.equal(userGroup?.kind, "group");
+  if (!userGroup || userGroup.kind !== "group") return;
+
+  assert.equal(redisKeyNameCopyText(userGroup), null);
+  const profileGroup = userGroup.children[0];
+  assert.equal(profileGroup?.kind, "group");
+  if (!profileGroup || profileGroup.kind !== "group") return;
+
+  const leaf = profileGroup.children[0];
+  assert.equal(leaf?.kind, "leaf");
+  if (!leaf || leaf.kind !== "leaf") return;
+  assert.equal(redisKeyNameCopyText(leaf), "user:profile:1");
+  assert.notEqual(redisKeyNameCopyText(leaf), leaf.keyRaw);
 });
 
 test("collectRedisGroupKeyRaws returns every leaf key under a group", () => {

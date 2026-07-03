@@ -356,6 +356,13 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     if (pos >= statement.from && pos <= statement.to) {
       return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
     }
+    const next = statements[index + 1];
+    // A caret after a statement's semicolon still belongs to that statement
+    // until the next statement's text begins.
+    if (pos > statement.to && (!next || pos < next.from) && isCursorInSameLineDelimiterGap(sql, statement.to, pos)) {
+      return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
+    }
+
     // Cursor in indentation or inter-statement whitespace immediately before
     // the statement should still target that statement, while the returned
     // execution range remains tight around the SQL text itself.
@@ -368,7 +375,6 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
       return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
     }
 
-    const next = statements[index + 1];
     if (pos > statement.to && (!next || pos < next.hitFrom) && isCursorOnStatementLine(sql, pos, statement)) {
       return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
     }

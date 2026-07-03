@@ -172,6 +172,13 @@ describe("statementRangeAtCursor", () => {
     expect(range?.sql.trim()).toBe("SELECT *\nFROM system_dept");
   });
 
+  it("keeps a semicolon-line-end cursor on the current multi-line statement", () => {
+    const sql = "SELECT *\nFROM system_dept;";
+    const gapPos = sql.indexOf(";") + 1;
+    const range = statementRangeAtCursor(sql, gapPos);
+    expect(range?.sql.trim()).toBe("SELECT *\nFROM system_dept");
+  });
+
   it("returns the next same-line statement when the cursor is inside it", () => {
     const sql = "SELECT 1;   SELECT 2;";
     const pos = indexOf(sql, "SELECT 2") + 1;
@@ -407,6 +414,13 @@ describe("buildExecutionCandidates", () => {
     const candidates = buildExecutionCandidates(sql, indentationPos);
     expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1;\n    SELECT 2;"]);
     expect(candidateLabels(candidates)).toEqual(["currentStatement", "allStatements"]);
+  });
+
+  it("uses the current statement when the cursor is immediately after its semicolon before a blank line", () => {
+    const sql = "select 1;\n\nselect 2;";
+    const cursorAfterFirstSemicolon = sql.indexOf(";") + 1;
+    const candidates = buildExecutionCandidates(sql, cursorAfterFirstSemicolon);
+    expect(candidateSummaries(candidates)).toEqual(["cursor:select 1", "all:select 1;\n\nselect 2;"]);
   });
 
   it("dedupes when the cursor statement equals the full document", () => {

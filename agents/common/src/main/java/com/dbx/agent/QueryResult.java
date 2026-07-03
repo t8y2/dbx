@@ -99,7 +99,7 @@ public final class QueryResult {
         if (input == null) {
             return Collections.emptyList();
         }
-        List<List<Object>> normalized = new ArrayList<>();
+        List<List<Object>> normalized = new ArrayList<>(input.size());
         for (List<?> row : input) {
             normalized.add(row == null ? Collections.emptyList() : new ArrayList<Object>(row));
         }

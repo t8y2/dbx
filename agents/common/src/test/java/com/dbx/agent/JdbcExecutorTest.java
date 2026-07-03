@@ -6,7 +6,10 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Types;
+import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,8 +41,88 @@ class JdbcExecutorTest {
         assertEquals("0x0a0b", JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.OTHER));
     }
 
+    @Test
+    void readResultSetCachesColumnTypeMetadataAcrossRows() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{
+            {1, "Ada"},
+            {2, "Grace"}
+        });
+
+        QueryResult result = JdbcExecutor.INSTANCE.readResultSet(
+            fixture.resultSet(),
+            12L,
+            10,
+            JdbcExecutor.INSTANCE::defaultResultValue
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList("INTEGER", "VARCHAR"), result.getColumn_types());
+        assertEquals(Arrays.asList(Arrays.asList(1, "Ada"), Arrays.asList(2, "Grace")), result.getRows());
+        assertEquals(1, fixture.getMetaDataCalls());
+        assertEquals(2, fixture.getColumnTypeCalls());
+    }
+
     private static ResultSet resultSet(byte[] bytes, StringSupplier stringSupplier) {
         return resultSet(bytes, stringSupplier, false);
+    }
+
+    private static CountingResultSetFixture countingResultSet(Object[][] rows) {
+        String[] labels = {"id", "name"};
+        int[] sqlTypes = {Types.INTEGER, Types.VARCHAR};
+        String[] typeNames = {"INTEGER", "VARCHAR"};
+        AtomicInteger cursor = new AtomicInteger(-1);
+        AtomicInteger getMetaDataCalls = new AtomicInteger();
+        AtomicInteger getColumnTypeCalls = new AtomicInteger();
+
+        InvocationHandler metaHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "getColumnCount":
+                    return labels.length;
+                case "getColumnLabel":
+                    return labels[(Integer) args[0] - 1];
+                case "getColumnType":
+                    getColumnTypeCalls.incrementAndGet();
+                    return sqlTypes[(Integer) args[0] - 1];
+                case "getColumnTypeName":
+                    return typeNames[(Integer) args[0] - 1];
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        ResultSetMetaData metadata = (ResultSetMetaData) Proxy.newProxyInstance(
+            ResultSetMetaData.class.getClassLoader(),
+            new Class<?>[]{ResultSetMetaData.class},
+            metaHandler
+        );
+
+        InvocationHandler resultSetHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "getMetaData":
+                    getMetaDataCalls.incrementAndGet();
+                    return metadata;
+                case "next":
+                    return cursor.incrementAndGet() < rows.length;
+                case "getInt":
+                    return ((Number) currentCell(rows, cursor.get(), (Integer) args[0])).intValue();
+                case "getString":
+                    Object value = currentCell(rows, cursor.get(), (Integer) args[0]);
+                    return value == null ? null : value.toString();
+                case "wasNull":
+                    return false;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        ResultSet resultSet = (ResultSet) Proxy.newProxyInstance(
+            ResultSet.class.getClassLoader(),
+            new Class<?>[]{ResultSet.class},
+            resultSetHandler
+        );
+        return new CountingResultSetFixture(resultSet, getMetaDataCalls, getColumnTypeCalls);
+    }
+
+    private static Object currentCell(Object[][] rows, int rowIndex, int columnIndex) {
+        return rows[rowIndex][columnIndex - 1];
     }
 
     private static ResultSet resultSet(Object objectValue, StringSupplier stringSupplier, boolean wasNull) {
@@ -94,5 +177,33 @@ class JdbcExecutorTest {
 
     private interface StringSupplier {
         String get() throws Exception;
+    }
+
+    private static final class CountingResultSetFixture {
+        private final ResultSet resultSet;
+        private final AtomicInteger getMetaDataCalls;
+        private final AtomicInteger getColumnTypeCalls;
+
+        private CountingResultSetFixture(
+            ResultSet resultSet,
+            AtomicInteger getMetaDataCalls,
+            AtomicInteger getColumnTypeCalls
+        ) {
+            this.resultSet = resultSet;
+            this.getMetaDataCalls = getMetaDataCalls;
+            this.getColumnTypeCalls = getColumnTypeCalls;
+        }
+
+        private ResultSet resultSet() {
+            return resultSet;
+        }
+
+        private int getMetaDataCalls() {
+            return getMetaDataCalls.get();
+        }
+
+        private int getColumnTypeCalls() {
+            return getColumnTypeCalls.get();
+        }
     }
 }

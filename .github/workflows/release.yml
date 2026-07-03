@@ -375,6 +375,53 @@ jobs:
             --target-repo "https://cnb.cool/${CNB_REPOSITORY}.git" \
             --tags "${TAG_NAME}"
 
+  sync-release-to-atomgit:
+    name: Sync release to AtomGit
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Ensure AtomGit tag exists
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
+          git push atomgit "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+
+      - name: Download GitHub release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Sync release assets to AtomGit
+        env:
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+          ATOMGIT_REPOSITORY: "t8y2/dbx"
+        run: |
+          set -euo pipefail
+          node .github/scripts/sync-atomgit-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets"
+
   docker:
     runs-on: ubuntu-latest
     strategy:

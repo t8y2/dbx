@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock } from "@lucide/vue";
+import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Splitpanes, Pane } from "splitpanes";
@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
+import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import RedisValueViewer from "./RedisValueViewer.vue";
 import RedisPubSubPanel from "./RedisPubSubPanel.vue";
@@ -21,12 +22,13 @@ import * as api from "@/lib/api";
 import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/lib/api";
 import { uuid } from "@/lib/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
+import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyNameCopyText, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
 import { formatRedisConsoleValue, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
+import { copyToClipboard } from "@/lib/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
 import { redisKeySearchPattern } from "@/lib/redisKeyPattern";
@@ -423,6 +425,33 @@ function requestGroupDelete(node: RedisKeyTreeNode, event: Event) {
   if (keyRaws.length === 0) return;
   pendingDanger.value = { kind: "delete-keys", title: node.pathSegments.join(":"), keyRaws };
   showDangerConfirm.value = true;
+}
+
+async function copyRedisKeyName(keyName: string) {
+  try {
+    await copyToClipboard(keyName);
+    toast(t("redis.copied"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+function redisKeyContextMenuItems(node: RedisKeyTreeNode): ContextMenuItem[] {
+  const copyText = redisKeyNameCopyText(node);
+  if (copyText === null) return [];
+  return [
+    {
+      label: t("redis.copyKeyName"),
+      icon: Copy,
+      action: () => copyRedisKeyName(copyText),
+    },
+  ];
+}
+
+function onRedisRowContextMenu(event: MouseEvent, node: RedisKeyTreeNode, openContextMenu: (event: MouseEvent) => void) {
+  if (node.kind !== "leaf") return;
+  selectedKeyRaw.value = node.keyRaw;
+  openContextMenu(event);
 }
 
 function resetLoadedKeys() {
@@ -1069,30 +1098,38 @@ defineExpose({ focusSearch });
           </div>
           <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item: row }">
-              <div class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer hover:bg-accent/50 group" :class="{ 'bg-accent': row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw }" :style="{ height: '30px' }" @click="onRowClick(row.node)">
-                <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${12 + row.depth * 16}px` }">
-                  <template v-if="row.node.kind === 'group'">
-                    <component :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight" class="w-3 h-3 shrink-0 text-muted-foreground" />
-                    <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="w-3 h-3 shrink-0 text-amber-500" />
-                    <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
-                    <span class="text-muted-foreground ml-1">({{ countLeaves(row.node) }})</span>
-                  </template>
-                  <template v-else>
-                    <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
-                      <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0" :class="{ 'opacity-0': checkedKeys.has(row.node.keyRaw) }" />
-                      <input type="checkbox" class="absolute h-3.5 w-3.5 accent-primary cursor-pointer opacity-0 group-hover:opacity-100" :class="{ 'opacity-100': checkedKeys.has(row.node.keyRaw) }" :checked="checkedKeys.has(row.node.keyRaw)" @click="toggleCheck(row.node.keyRaw, $event)" />
-                    </span>
-                    <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
-                  </template>
-                </div>
+              <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu }">
+                <div
+                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer hover:bg-accent/50 group"
+                  :class="{ 'bg-accent': row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw }"
+                  :style="{ height: '30px' }"
+                  @click="onRowClick(row.node)"
+                  @contextmenu="(event) => onRedisRowContextMenu(event, row.node, onContextMenu)"
+                >
+                  <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${12 + row.depth * 16}px` }">
+                    <template v-if="row.node.kind === 'group'">
+                      <component :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight" class="w-3 h-3 shrink-0 text-muted-foreground" />
+                      <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="w-3 h-3 shrink-0 text-amber-500" />
+                      <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
+                      <span class="text-muted-foreground ml-1">({{ countLeaves(row.node) }})</span>
+                    </template>
+                    <template v-else>
+                      <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
+                        <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0" :class="{ 'opacity-0': checkedKeys.has(row.node.keyRaw) }" />
+                        <input type="checkbox" class="absolute h-3.5 w-3.5 accent-primary cursor-pointer opacity-0 group-hover:opacity-100" :class="{ 'opacity-100': checkedKeys.has(row.node.keyRaw) }" :checked="checkedKeys.has(row.node.keyRaw)" @click="toggleCheck(row.node.keyRaw, $event)" />
+                      </span>
+                      <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
+                    </template>
+                  </div>
 
-                <div class="flex shrink-0 items-center justify-end gap-1">
-                  <Badge v-if="row.node.kind === 'leaf' && row.node.keyType" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
-                  <Button v-if="row.node.kind === 'group'" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" @click="requestGroupDelete(row.node, $event)">
-                    <Trash2 class="h-3 w-3" />
-                  </Button>
+                  <div class="flex shrink-0 items-center justify-end gap-1">
+                    <Badge v-if="row.node.kind === 'leaf' && row.node.keyType" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
+                    <Button v-if="row.node.kind === 'group'" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" @click="requestGroupDelete(row.node, $event)">
+                      <Trash2 class="h-3 w-3" />
+                    </Button>
+                  </div>
                 </div>
-              </div>
+              </CustomContextMenu>
             </template>
           </RecycleScroller>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">

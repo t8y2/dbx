@@ -9,6 +9,30 @@ const APP_PUBLISH_WORKFLOW = "publish-packages.yml";
 const PACKAGE_TAG_PREFIX = "packages-v";
 const AGENT_TAG_PREFIX = "agents-v";
 const APP_TAG_PREFIX = "v";
+const PACKAGE_RELEASE_PATHS = [
+  "packages/node-core/src/",
+  "packages/node-core/README.md",
+  "packages/node-core/package.json",
+  "packages/node-core/tsconfig.json",
+  "packages/cli/src/",
+  "packages/cli/README.md",
+  "packages/cli/package.json",
+  "packages/cli/tsconfig.json",
+  "packages/mcp-server/src/",
+  "packages/mcp-server/README.md",
+  "packages/mcp-server/package.json",
+  "packages/mcp-server/server.json",
+  "packages/mcp-server/tsconfig.json",
+];
+const AGENT_RELEASE_PATHS = [
+  "agents/build.gradle",
+  "agents/settings.gradle",
+  "agents/versions.json",
+  "agents/common/build.gradle",
+  "agents/common/src/main/",
+  "agents/drivers/",
+  "agents/opengauss/",
+];
 
 const args = process.argv.slice(2);
 let target = null;
@@ -16,6 +40,7 @@ let requestedBump = null;
 let dryRun = false;
 let yes = false;
 let skipFetch = false;
+let force = false;
 
 for (const arg of args) {
   switch (arg) {
@@ -30,6 +55,9 @@ for (const arg of args) {
       break;
     case "--skip-fetch":
       skipFetch = true;
+      break;
+    case "--force":
+      force = true;
       break;
     case "-h":
     case "--help":
@@ -75,13 +103,20 @@ if (target === "packages") {
 }
 
 async function releasePackages(bump) {
-  const latestVersion = getLatestPackageVersion();
+  const status = getPackageReleaseStatus();
+  const latestVersion = status.latestVersion ?? getLatestPackageVersion();
   const releaseVersion = resolveReleaseVersion(bump, latestVersion, PACKAGE_TAG_PREFIX);
   const releaseTag = `${PACKAGE_TAG_PREFIX}${releaseVersion}`;
   const workflowArgs = ["workflow", "run", PACKAGES_WORKFLOW, "--repo", REPO, "-f", `version=${releaseVersion}`];
 
   console.log(`Release target: Node packages / MCP`);
   console.log(`Current package version: ${latestVersion ?? "none"}`);
+  printReleaseStatus(status);
+  if (!status.needed && !force) {
+    console.log("No Node package release needed; publish-relevant package files have not changed.");
+    console.log("Use --force to trigger the workflow anyway.");
+    return;
+  }
   console.log(`New package version: ${releaseVersion}`);
   console.log(`Release tag: ${releaseTag}`);
   console.log(`Workflow: Node Packages Release (${PACKAGES_WORKFLOW})`);
@@ -101,6 +136,7 @@ async function releasePackages(bump) {
 
 async function releaseAgents(bump) {
   const latest = getLatestAgentTag();
+  const status = getAgentReleaseStatus(latest);
   const releaseTag = resolveAgentTag(bump, latest.tag);
 
   if (tagExists(releaseTag)) {
@@ -109,6 +145,12 @@ async function releaseAgents(bump) {
 
   console.log(`Release target: Agents`);
   console.log(`Current agent tag: ${latest.tag}${latest.source ? ` (${latest.source})` : ""}`);
+  printReleaseStatus(status);
+  if (!status.needed && !force) {
+    console.log("No agents release needed; publish-relevant agent runtime files have not changed.");
+    console.log("Use --force to create the tag anyway.");
+    return;
+  }
   console.log(`New agent tag: ${releaseTag}`);
   console.log(`Workflow: Agents Release (.github/workflows/agents-release.yml)`);
   console.log(`Commands: git tag ${releaseTag} && git push origin ${releaseTag}`);
@@ -150,9 +192,11 @@ async function publishApp(tagInput) {
 }
 
 async function promptTarget() {
+  const packageStatus = getPackageReleaseStatus();
+  const agentStatus = getAgentReleaseStatus(getLatestAgentTag());
   const answer = await ask(`Select release target:
-  1. Node packages / MCP
-  2. Agents
+  1. Node packages / MCP (${formatStatusSummary(packageStatus)})
+  2. Agents (${formatStatusSummary(agentStatus)})
   3. App distribution
 Choice [1]: `);
 
@@ -208,6 +252,27 @@ function getLatestPackageVersion() {
   return uniqueVersions[0];
 }
 
+function getPackageReleaseStatus() {
+  const latest = getLatestSemverTag(PACKAGE_TAG_PREFIX);
+  if (!latest) {
+    return {
+      needed: true,
+      baseline: "no packages-v* tag",
+      latestVersion: getLatestPackageVersion(),
+      changedFiles: [],
+      reason: "No previous package release tag was found.",
+    };
+  }
+
+  const changedFiles = getChangedFilesSince(latest.tag, PACKAGE_RELEASE_PATHS);
+  return {
+    needed: changedFiles.length > 0,
+    baseline: latest.tag,
+    latestVersion: latest.versionText,
+    changedFiles,
+  };
+}
+
 function getLatestAgentTag() {
   const tag = getLatestSemverTag(AGENT_TAG_PREFIX);
   if (tag) return { tag: tag.tag, source: "current repo" };
@@ -239,12 +304,61 @@ function getLatestAgentTag() {
   return { tag: `${AGENT_TAG_PREFIX}0.0.0`, source: "initial baseline" };
 }
 
+function getAgentReleaseStatus(latest = getLatestAgentTag()) {
+  if (!refExists(`refs/tags/${latest.tag}`)) {
+    return {
+      needed: true,
+      baseline: `${latest.tag} (${latest.source ?? "missing local tag"})`,
+      changedFiles: [],
+      reason: "No comparable local agents release tag was found.",
+    };
+  }
+
+  const changedFiles = getChangedFilesSince(latest.tag, AGENT_RELEASE_PATHS);
+  return {
+    needed: changedFiles.length > 0,
+    baseline: latest.tag,
+    changedFiles,
+  };
+}
+
 function getLatestAppTag() {
   const tag = getLatestSemverTag(APP_TAG_PREFIX);
   if (!tag) {
     fail("No v* app release tag was found.");
   }
   return { tag: tag.tag };
+}
+
+function getChangedFilesSince(ref, paths) {
+  const output = run("git", ["diff", "--name-only", `${ref}..HEAD`, "--", ...paths]).stdout.trim();
+  if (!output) return [];
+  return output.split(/\r?\n/).filter(Boolean);
+}
+
+function printReleaseStatus(status) {
+  console.log(`Release needed: ${status.needed ? "yes" : "no"}`);
+  console.log(`Compared against: ${status.baseline}`);
+  if (status.reason) {
+    console.log(`Reason: ${status.reason}`);
+  }
+  if (status.changedFiles.length > 0) {
+    console.log(`Changed publish-relevant files:`);
+    for (const file of status.changedFiles.slice(0, 20)) {
+      console.log(`  - ${file}`);
+    }
+    if (status.changedFiles.length > 20) {
+      console.log(`  ... and ${status.changedFiles.length - 20} more`);
+    }
+  }
+}
+
+function formatStatusSummary(status) {
+  if (status.needed) {
+    const detail = status.changedFiles.length > 0 ? `${status.changedFiles.length} changed file${status.changedFiles.length === 1 ? "" : "s"}` : "release baseline missing";
+    return `needs release, ${detail}`;
+  }
+  return `no release needed since ${status.baseline}`;
 }
 
 function getLatestSemverTag(prefix) {
@@ -258,6 +372,15 @@ function getLatestSemverTag(prefix) {
 
   if (tags.length === 0) return null;
   return { ...tags[0], versionText: formatVersion(tags[0].version) };
+}
+
+function refExists(ref) {
+  const result = spawnSync("git", ["rev-parse", "-q", "--verify", ref], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  return result.status === 0;
 }
 
 function resolveAgentTag(bump, latestTag) {
@@ -407,6 +530,7 @@ Options:
   --dry-run             Print the release command without triggering it
   -y, --yes             Skip the confirmation prompt
   --skip-fetch          Do not run git fetch --tags before reading release tags
+  --force               Allow a package/agent release even when no relevant files changed
   -h, --help            Show this help
 `);
 }

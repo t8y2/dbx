@@ -52,6 +52,7 @@ const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout ==
 const fixedTabs = computed(() => queryStore.tabs.filter((tab) => tab.pinned));
 const regularTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pinned));
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
+const regularSurfaceCount = computed(() => regularTabs.value.length + (props.driverStoreOpen ? 1 : 0) + (props.settingsPageOpen ? 1 : 0));
 const closeConfirmDirtyCount = computed(() => queryStore.closeConfirmDirtyTabIds.length);
 const showCloseConfirmBulkActions = computed(() => closeConfirmDirtyCount.value > 1);
 const closeConfirmDirtyTabs = computed(() => queryStore.closeConfirmDirtyTabIds.map((id) => queryStore.tabs.find((tab) => tab.id === id)).filter((tab): tab is QueryTab => !!tab));
@@ -140,13 +141,63 @@ function cancelRenameTab() {
   editingTabId.value = null;
 }
 
+type SpecialRegularSurface = "driverStore" | "settings";
+
+function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
+  if (keep !== "driverStore" && props.driverStoreOpen) emit("close-driver-store");
+  if (keep !== "settings" && props.settingsPageOpen) emit("close-settings-page");
+}
+
+function closeOtherRegularTabsFromTab(tab: QueryTab) {
+  queryStore.closeOtherRegularTabs(tab.id);
+  closeSpecialRegularSurfaces();
+}
+
+function closeAllRegularSurfaces() {
+  queryStore.closeRegularTabs();
+  closeSpecialRegularSurfaces();
+}
+
+function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextMenuItem[] {
+  const keep = surface;
+  const closeCurrent = surface === "driverStore" ? () => emit("close-driver-store") : () => emit("close-settings-page");
+  const closeOtherDisabled = regularSurfaceCount.value <= 1;
+  const closeOtherLabel = hasFixedTabs.value ? t("contextMenu.closeOtherRegularTabs") : t("contextMenu.closeOtherTabs");
+  const closeAllLabel = hasFixedTabs.value ? t("contextMenu.closeAllRegularTabs") : t("contextMenu.closeAllTabs");
+
+  return [
+    {
+      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
+      action: toggleCompactTabTitle,
+      icon: compactTabTitle.value ? Maximize2 : Minimize2,
+    },
+    { label: "", separator: true },
+    { label: t("contextMenu.closeTab"), action: closeCurrent, icon: X },
+    {
+      label: closeOtherLabel,
+      action: () => {
+        queryStore.closeRegularTabs();
+        closeSpecialRegularSurfaces(keep);
+      },
+      disabled: closeOtherDisabled,
+      icon: X,
+    },
+    {
+      label: closeAllLabel,
+      action: closeAllRegularSurfaces,
+      variant: "destructive" as const,
+      icon: X,
+    },
+  ];
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const closeCurrentLabel = tab.pinned ? t("contextMenu.closeFixedTab") : t("contextMenu.closeTab");
   const closeOtherLabel = tab.pinned ? t("contextMenu.closeOtherFixedTabs") : hasFixedTabs.value ? t("contextMenu.closeOtherRegularTabs") : t("contextMenu.closeOtherTabs");
   const closeAllLabel = tab.pinned ? t("contextMenu.closeAllFixedTabs") : hasFixedTabs.value ? t("contextMenu.closeAllRegularTabs") : t("contextMenu.closeAllTabs");
-  const closeOtherDisabled = tab.pinned ? fixedTabs.value.length <= 1 : regularTabs.value.length <= 1;
-  const closeOtherAction = tab.pinned ? () => queryStore.closeOtherFixedTabs(tab.id) : () => queryStore.closeOtherRegularTabs(tab.id);
-  const closeAllAction = tab.pinned ? () => queryStore.closeFixedTabs() : () => queryStore.closeRegularTabs();
+  const closeOtherDisabled = tab.pinned ? fixedTabs.value.length <= 1 : regularSurfaceCount.value <= 1;
+  const closeOtherAction = tab.pinned ? () => queryStore.closeOtherFixedTabs(tab.id) : () => closeOtherRegularTabsFromTab(tab);
+  const closeAllAction = tab.pinned ? () => queryStore.closeFixedTabs() : closeAllRegularSurfaces;
 
   return [
     {
@@ -526,51 +577,59 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           </CustomContextMenu>
 
           <!-- Settings Page Tab -->
-          <div
-            v-if="settingsPageOpen"
-            data-settings-page-tab
-            class="group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
-            :class="
-              isClassicLayout
-                ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
-                : ['h-7 rounded-md border font-medium', settingsPageActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-            "
-            :style="isClassicLayout && settingsPageActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
-            @click="emit('activate-settings-page')"
-          >
-            <span class="shrink-0 text-sky-600 dark:text-sky-400">
-              <Settings class="h-3.5 w-3.5" />
-            </span>
-            <span class="min-w-0 truncate flex-1">{{ t("settings.title") }}</span>
-            <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-settings-page')">
-              <X class="h-3 w-3" />
-            </button>
-          </div>
+          <CustomContextMenu v-if="settingsPageOpen" :items="getSpecialRegularTabMenuItems('settings')" v-slot="{ onContextMenu }">
+            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+              <div
+                data-settings-page-tab
+                class="group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                :class="
+                  isClassicLayout
+                    ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
+                    : ['h-7 rounded-md border font-medium', settingsPageActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
+                "
+                :style="isClassicLayout && settingsPageActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                @click="emit('activate-settings-page')"
+                @mousedown.middle.prevent="emit('close-settings-page')"
+              >
+                <span class="shrink-0 text-sky-600 dark:text-sky-400">
+                  <Settings class="h-3.5 w-3.5" />
+                </span>
+                <span class="min-w-0 truncate flex-1">{{ t("settings.title") }}</span>
+                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-settings-page')">
+                  <X class="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </CustomContextMenu>
 
           <!-- Driver Store Tab -->
-          <div
-            v-if="driverStoreOpen"
-            data-driver-store-tab
-            class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
-            :class="
-              isClassicLayout
-                ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
-                : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-            "
-            :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
-            @click="emit('activate-driver-store')"
-          >
-            <span class="shrink-0 text-amber-600 dark:text-amber-400">
-              <Package class="h-3.5 w-3.5" />
-            </span>
-            <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
-            <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
-              {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
-            </span>
-            <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
-              <X class="h-3 w-3" />
-            </button>
-          </div>
+          <CustomContextMenu v-if="driverStoreOpen" :items="getSpecialRegularTabMenuItems('driverStore')" v-slot="{ onContextMenu }">
+            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+              <div
+                data-driver-store-tab
+                class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                :class="
+                  isClassicLayout
+                    ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
+                    : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
+                "
+                :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                @click="emit('activate-driver-store')"
+                @mousedown.middle.prevent="emit('close-driver-store')"
+              >
+                <span class="shrink-0 text-amber-600 dark:text-amber-400">
+                  <Package class="h-3.5 w-3.5" />
+                </span>
+                <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
+                <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+                  {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
+                </span>
+                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
+                  <X class="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </CustomContextMenu>
           <div :class="tabTailDragRegionClass" data-tauri-drag-region />
         </div>
       </div>

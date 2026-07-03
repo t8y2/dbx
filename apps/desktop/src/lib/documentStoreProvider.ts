@@ -151,6 +151,11 @@ export function currentDocumentFilterJson(input: string, structured: Record<stri
   return Object.keys(filter).length ? JSON.stringify(filter) : undefined;
 }
 
+export function currentDocumentSortJson(input: string): string | undefined {
+  const sort = parseDocumentFilterInput(input);
+  return Object.keys(sort).length ? JSON.stringify(sort) : undefined;
+}
+
 function parseDocumentFilterValue(raw: string): unknown {
   const trimmed = raw.trim();
   if (!trimmed) return "";

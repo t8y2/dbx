@@ -10,6 +10,7 @@ import * as api from "@/lib/api";
 import type { QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
 import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
+import { applyMongoFindSort } from "@/lib/mongoShellCommand";
 import { uuid } from "@/lib/utils";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 
@@ -235,6 +236,22 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     }
 
     const config = connectionStore.getConfig(tab.connectionId);
+    if (effectiveDatabaseTypeForConnection(config) === "mongodb") {
+      const sortedSql = applyMongoFindSort(baseSql, column, direction);
+      if (!sortedSql) {
+        toast(t("grid.sortUnsupported"), 5000);
+        return;
+      }
+      queryStore.updateSql(tab.id, sortedSql);
+      await queryStore.executeTabSql(tab.id, sortedSql, {
+        resultBaseSql: baseSql,
+        resultSortedSql: sortedSql,
+        preserveResultDuringExecution: true,
+        preserveTotalRowCountDuringExecution: true,
+      });
+      return;
+    }
+
     const built = await api.buildSortedQuerySql({
       originalSql: baseSql,
       databaseType: effectiveDatabaseTypeForConnection(config),

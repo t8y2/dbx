@@ -16,7 +16,18 @@ import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/documentViewerFontStyle";
-import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, defaultDocumentFilterRule, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/documentStoreProvider";
+import {
+  buildDocumentFilterCondition,
+  combineDocumentFilterConditions,
+  currentDocumentFilterJson,
+  currentDocumentSortJson,
+  defaultDocumentFilterRule,
+  documentFilterModeNeedsValue,
+  documentFilterModeOptions,
+  documentStoreProviderFor,
+  type DocumentFilterMode,
+  type DocumentFilterRule,
+} from "@/lib/documentStoreProvider";
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -433,7 +444,7 @@ async function load() {
   const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
     const filter = currentDocumentFilter();
-    const sort = sortInput.value.trim() || undefined;
+    const sort = currentDocumentSortJson(sortInput.value);
     const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     const nextDocuments = result.documents.map(asRecord);

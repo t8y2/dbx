@@ -11,7 +11,9 @@ mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{quote_table_identifier, table_pagination_strategy, TablePaginationStrategy};
+use crate::sql_dialect::{
+    quote_table_identifier, table_pagination_strategy, uses_single_row_insert_statements, TablePaginationStrategy,
+};
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
@@ -356,7 +358,7 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         })
         .collect::<Vec<_>>();
-    if copy_insert_uses_single_row_statements(options.database_type) {
+    if options.database_type.is_some_and(uses_single_row_insert_statements) {
         return Some(
             value_rows
                 .iter()
@@ -370,10 +372,6 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
         if value_rows.len() == 1 { " " } else { "\n" },
         value_rows.join(",\n")
     ))
-}
-
-fn copy_insert_uses_single_row_statements(database_type: Option<DatabaseType>) -> bool {
-    matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {

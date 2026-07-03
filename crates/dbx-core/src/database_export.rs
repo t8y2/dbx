@@ -5,7 +5,7 @@ use std::io::Write;
 use tokio::sync::RwLock;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{qualified_table_name, quote_table_identifier};
+use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra, quote_identifier,
     selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
@@ -388,7 +388,7 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     if insert_columns.is_empty() {
         return Ok(Vec::new());
     }
-    let batch_size = if export_insert_uses_single_row_statements(options.database_type) {
+    let batch_size = if options.database_type.is_some_and(uses_single_row_insert_statements) {
         1
     } else {
         options.batch_size.unwrap_or(DATABASE_EXPORT_INSERT_BATCH_SIZE).max(1)
@@ -433,10 +433,6 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     }
 
     Ok(statements)
-}
-
-fn export_insert_uses_single_row_statements(database_type: Option<DatabaseType>) -> bool {
-    matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
 fn is_postgres_tsvector_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
